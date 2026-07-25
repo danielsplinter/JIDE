@@ -1,0 +1,16 @@
+[package]
+name = "ide-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ui-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-api" }
+ui-components = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-components" }
+ui-editor = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-editor" }
+ui-core = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-core" }
+ui-render-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-api" }
+
+[lints]
+workspace = true

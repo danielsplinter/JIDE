@@ -1,0 +1,27 @@
+[package]
+name = "ide-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ide-core = { path = "../ide-core" }
+ide-commands = { path = "../ide-commands" }
+ide-events = { path = "../ide-events" }
+ide-process = { path = "../ide-process" }
+ide-terminal = { path = "../ide-terminal" }
+ide-text = { path = "../ide-text" }
+ide-ui = { path = "../ide-ui" }
+ide-workspace = { path = "../ide-workspace" }
+pollster.workspace = true
+tracing.workspace = true
+ui-core = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-core" }
+ui-render-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-api" }
+ui-render-wgpu = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-wgpu" }
+ui-window-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-window-api" }
+ui-window-winit = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-window-winit" }
+winit.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ide-app",
+    "crates/ide-core",
+    "crates/ide-commands",
+    "crates/ide-domain",
+    "crates/ide-events",
+    "crates/ide-language-api",
+    "crates/ide-process",
+    "crates/ide-terminal",
+    "crates/ide-text",
+    "crates/ide-toolchain-api",
+    "crates/ide-ui",
+    "crates/ide-workspace",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+async-trait = "0.1"
+bitflags = "2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["process", "rt", "sync", "time"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+pollster = "0.4"
+winit = "0.30.13"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

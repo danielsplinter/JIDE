@@ -1,0 +1,16 @@
+[package]
+name = "ide-language-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bitflags.workspace = true
+ide-domain = { path = "../ide-domain" }
+thiserror.workspace = true
+
+[lints]
+workspace = true
+
