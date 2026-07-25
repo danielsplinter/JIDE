@@ -246,3 +246,27 @@ pub trait DebugAdapter: Send + Sync {
 - operações longas devem informar progresso;
 - implementações devem ser substituíveis;
 - contratos públicos devem possuir versionamento.
+
+## Navegação originada no editor
+
+A camada de apresentação deve emitir uma solicitação neutra ao detectar
+`Ctrl+Click` sobre um token:
+
+```rust
+pub struct NavigationRequest {
+    pub document_id: DocumentId,
+    pub byte_offset: usize,
+    pub token: String,
+}
+```
+
+O editor não resolve símbolos. O Language Host transforma essa solicitação em
+`DefinitionRequest` para o provider ativo. O resultado volta como `Location` e
+é aplicado pela operação genérica:
+
+```rust
+fn open_location(location: Location) -> Result<(), NavigationError>;
+```
+
+Até a Fase 4, a Fase 1 valida somente detecção, emissão da solicitação e abertura
+de localização. Resolução semântica Java não deve entrar na camada de UI.

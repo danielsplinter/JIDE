@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ide-domain = { path = "../ide-domain" }
+ide-terminal = { path = "../ide-terminal" }
+ide-text = { path = "../ide-text" }
+ide-workspace = { path = "../ide-workspace" }
 ui-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-api" }
 ui-components = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-components" }
 ui-editor = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-editor" }

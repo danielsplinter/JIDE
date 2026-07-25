@@ -100,6 +100,12 @@ impl EditorSession {
 
     pub const fn active_id(&self) -> Option<DocumentId> { self.active }
     pub fn active(&self) -> Option<&OpenDocument> { self.active.and_then(|id| self.documents.get(&id)) }
+    pub fn active_mut(&mut self) -> Option<&mut OpenDocument> {
+        self.active.and_then(|id| self.documents.get_mut(&id))
+    }
+    pub fn document(&self, id: DocumentId) -> Option<&OpenDocument> {
+        self.documents.get(&id)
+    }
     pub fn tabs(&self) -> impl Iterator<Item = &OpenDocument> {
         self.tabs.iter().filter_map(|id| self.documents.get(id))
     }
@@ -137,4 +143,3 @@ mod tests {
         assert_eq!(session.active_id(), Some(first));
     }
 }
-

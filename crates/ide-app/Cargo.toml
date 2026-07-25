@@ -15,6 +15,7 @@ ide-text = { path = "../ide-text" }
 ide-ui = { path = "../ide-ui" }
 ide-workspace = { path = "../ide-workspace" }
 pollster.workspace = true
+rfd.workspace = true
 tracing.workspace = true
 ui-core = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-core" }
 ui-render-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-api" }

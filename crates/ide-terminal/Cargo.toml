@@ -6,8 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+portable-pty.workspace = true
 thiserror.workspace = true
 
 [lints]
 workspace = true
-

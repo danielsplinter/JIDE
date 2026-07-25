@@ -59,3 +59,13 @@
 **Decisão:** cada componente terá orçamento e métricas.
 
 **Motivo:** baixo consumo não surge automaticamente por usar Rust.
+
+## ADR-011 — Terminal persistente via PTY
+
+**Decisão:** cada aba de terminal possuirá um shell interativo persistente
+conectado a uma pseudoterminal; no Windows será usado ConPTY por meio de
+`portable-pty`.
+
+**Motivo:** delegar a interpretação integral dos comandos ao shell, preservar
+estado entre comandos e suportar o comportamento esperado de terminais de IDE,
+inclusive programas interativos, redimensionamento e saída assíncrona.

@@ -4,6 +4,46 @@
 
 A IDE será uma plataforma nativa em Rust para desenvolvimento em diversas linguagens.
 
+## Navegação principal
+
+A janela principal deve possuir uma barra de menu. O fluxo mínimo para carregar
+um workspace é:
+
+```text
+Arquivo
+  └─ Projeto...
+       ↓
+seletor nativo de pasta
+       ↓
+árvore do Explorer reconstruída com o conteúdo da pasta selecionada
+```
+
+Ao escolher uma pasta, ela se torna o workspace ativo. O painel esquerdo deve
+mostrar recursivamente seus diretórios e arquivos, respeitando as exclusões
+técnicas da IDE, como `.git` e `target`. O nome do projeto, os terminais e os
+demais serviços associados ao workspace devem passar a usar a nova raiz.
+Cancelar o seletor não altera o workspace atual.
+
+Todo o conteúdo da árvore deve ser recortado pelos limites do painel esquerdo.
+Quando nomes ou níveis de indentação ultrapassarem a largura disponível, o
+Explorer deve mostrar uma barra de rolagem horizontal com clique na trilha e
+arraste do indicador. Texto da árvore nunca pode vazar sobre o editor.
+
+O Explorer também deve possuir barra de rolagem vertical quando a árvore
+ultrapassar a altura disponível. A borda direita do painel deve permitir
+redimensionamento horizontal por clique, retenção e arraste. Editor e painel de
+terminal ocupam sempre a largura restante e acompanham imediatamente essa
+mudança de layout, sem enviar redimensionamentos ao PTY.
+
+Cada aba de editor deve exibir um botão `x` próprio. Clicar nesse botão fecha
+somente o documento correspondente e ativa uma aba remanescente quando
+necessário.
+
+O título de cada aba deve permanecer estritamente dentro de seus limites e
+reservar espaço fixo para o botão `x`. Nomes longos são abreviados com
+reticências e também recortados graficamente; nunca podem invadir a aba vizinha
+ou cobrir seu botão de fechamento.
+
 O suporte a cada linguagem será fornecido por um módulo desacoplado, chamado neste documento de `Language Provider`.
 
 Cada provider poderá oferecer, de forma independente:
