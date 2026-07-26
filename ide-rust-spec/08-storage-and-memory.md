@@ -30,6 +30,15 @@ Controlar memória explicitamente e evitar crescimento ilimitado.
 - resultados de busca antigos;
 - previews.
 
+### Limites do índice Java inicial
+
+- no máximo 600 arquivos candidatos são visitados por ativação;
+- no máximo 500 fontes Java são analisadas;
+- no máximo 64 JARs são abertos;
+- no máximo 20.000 class files são indexados por JAR;
+- uma entrada `.class` maior que 16 MiB é ignorada;
+- diretórios `.git`, `target`, `node_modules` e `.gradle` não são percorridos.
+
 ## Orçamento
 
 ```rust

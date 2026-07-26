@@ -2,11 +2,22 @@
 resolver = "3"
 members = [
     "crates/ide-app",
+    "crates/ide-build-api",
     "crates/ide-core",
+    "crates/ide-debug-api",
     "crates/ide-commands",
     "crates/ide-domain",
     "crates/ide-events",
     "crates/ide-language-api",
+    "crates/ide-language-host",
+    "crates/ide-project-model",
+    "crates/language-java",
+    "crates/java-classfile",
+    "crates/java-toolchain",
+    "crates/java-javac-adapter",
+    "crates/java-maven-adapter",
+    "crates/java-gradle-adapter",
+    "crates/java-debug-adapter",
     "crates/ide-process",
     "crates/ide-terminal",
     "crates/ide-text",
@@ -30,6 +41,9 @@ tokio = { version = "1", features = ["process", "rt", "sync", "time"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tree-sitter = "0.24"
+tree-sitter-java = "0.23.5"
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 pollster = "0.4"
 portable-pty = "=0.8.1"
 rfd = "0.17.2"

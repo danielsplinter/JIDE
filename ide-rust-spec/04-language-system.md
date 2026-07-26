@@ -118,7 +118,7 @@ Exemplo:
 provider = "native-java-analyzer"
 
 [toolchains.java]
-selected = "ibm-java-8-websphere"
+selected = "temurin-17"
 ```
 
 ## Capabilities
@@ -155,7 +155,7 @@ Native Java Provider
 └── sem debugger
 
 Java Debug Adapter
-└── debugger JDWP
+└── conexão JDWP a um processo em execução
 ```
 
 O usuário percebe um único suporte Java, mas internamente as capacidades são compostas.
@@ -175,3 +175,31 @@ pub struct LanguageRuntime {
 ```
 
 Não criar uma classe monolítica que implemente tudo.
+
+## Implementação da Fase 2
+
+O crate `ide-language-host` implementa o registro central. No registro, o host:
+
+- valida a versão principal de `ide-language-api`;
+- rejeita identificadores vazios e providers duplicados;
+- normaliza extensões sem ponto e sem distinção entre maiúsculas e minúsculas;
+- armazena metadata, capabilities, estado e último erro de cada provider.
+
+A ativação é preguiçosa: registrar um provider não cria seu runtime. A primeira
+solicitação para uma extensão compatível muda o estado de `Registered` para
+`Activating` e então para `Active`. Falha de ativação muda o estado para
+`Failed` e faz o host tentar o próximo fallback configurado.
+
+`ProviderSelection` define um provider principal e uma lista ordenada de
+fallbacks por linguagem. O roteamento filtra primeiro por extensão e
+capabilities; um provider sem a capability solicitada nunca recebe a operação.
+Na ausência de configuração explícita, a ordem estável dos identificadores é
+usada.
+
+Cada documento aberto fica associado ao provider que aceitou sua abertura.
+Mudanças, diagnósticos e fechamento são enviados ao mesmo worker até que o
+documento seja fechado ou o provider seja desativado.
+
+`disable` executa `shutdown`, encerra o worker, remove as rotas de documentos e
+termina em `Disabled`. `enable` devolve um provider desativado ou falho para
+`Registered`, permitindo uma nova ativação sob demanda.

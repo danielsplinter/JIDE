@@ -1,0 +1,19 @@
+[package]
+name = "java-gradle-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ide-build-api = { path = "../ide-build-api" }
+ide-process = { path = "../ide-process" }
+ide-project-model = { path = "../ide-project-model" }
+
+[dev-dependencies]
+ide-domain = { path = "../ide-domain" }
+tokio.workspace = true
+
+[lints]
+workspace = true

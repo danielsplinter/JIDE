@@ -1,0 +1,19 @@
+[package]
+name = "ide-language-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ide-domain = { path = "../ide-domain" }
+ide-language-api = { path = "../ide-language-api" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+pollster.workspace = true
+
+[lints]
+workspace = true

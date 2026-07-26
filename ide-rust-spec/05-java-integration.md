@@ -10,7 +10,8 @@ A IDE deverá:
 - ler `.class` e `.jar`;
 - detectar JDKs instalados;
 - permitir selecionar o JDK usado pelo projeto;
-- usar o SDK do WebSphere quando configurado;
+- aceitar JDKs distribuídos junto de servidores, como o SDK do WebSphere;
+- conectar-se por depuração a qualquer processo Java em execução;
 - iniciar `javac`, Maven, Gradle e ferramentas Java apenas sob demanda.
 
 ## Componentes
@@ -28,7 +29,7 @@ JavaLanguageProvider
 JavaToolchainProvider
 ├── OracleJdkDetector
 ├── OpenJdkDetector
-└── WebSphereSdkDetector
+└── BundledSdkDetector      // JDKs distribuídos com servidores
 
 JavaCompilerAdapter
 └── JavacProcessAdapter
@@ -38,8 +39,10 @@ JavaBuildAdapters
 └── GradleAdapter
 
 JavaRuntimeAdapters
-├── JavaProcessAdapter
-└── WebSphereRuntimeAdapter
+└── JavaProcessAdapter
+
+JavaDebugAdapter
+└── JdwpAttachAdapter       // qualquer processo Java com depuração habilitada
 ```
 
 ## Configuração
@@ -54,24 +57,47 @@ home = "C:/IBM/WebSphere/AppServer/java/8.0"
 source = 8
 target = 8
 
-[servers.websphere]
-home = "C:/IBM/WebSphere/AppServer"
-profile = "AppSrv01"
-server = "server1"
+[[debug.targets]]
+name = "app local"
+host = "127.0.0.1"
+port = 8000
 ```
 
-## Detecção do WebSphere
+O caminho do JDK acima é apenas um exemplo de instalação que acompanha um
+servidor; qualquer JDK válido serve. Nenhum servidor específico aparece na
+configuração.
 
-O adapter deve procurar:
+### Interface de configuração
+
+O menu `Configurações` abre uma janela com uma lista de páginas no painel
+esquerdo. A primeira página, `Compilador e VM`, mostra no painel direito uma
+combo com versão e caminho dos JDKs detectados. Essa tela substitui visualmente
+o conteúdo apenas na área de seu painel: a IDE continua visível e escurecida ao
+redor, sem permitir que texto do editor, Explorer ou terminal seja composto
+sobre a janela. A implementação utiliza `ModalHost`, `ComboBox`, `Button` e
+`MenuBar` fornecidos pela ERLibUi; a IDE mantém apenas o estado e as regras
+específicas da toolchain Java.
+
+Ao escolher um item da combo, esse JDK se torna a toolchain ativa. O botão
+`Procurar...`, ao lado da combo, abre o seletor nativo de pastas e permite
+apontar para outro JDK. A pasta só é aceita quando contém `bin/java`,
+`bin/javac` e `bin/jar`; uma pasta inválida produz uma mensagem dentro da
+janela. `Ctrl+Shift+J` abre diretamente essa mesma página de configuração.
+
+## JDKs distribuídos com servidores
+
+Alguns servidores trazem o próprio JDK, e ele deve ser aceito como qualquer
+outro. O WebSphere é o caso mais comum no Windows corporativo, e por isso os
+locais abaixo entram na varredura — como conveniência de detecção, não como
+suporte a um produto:
 
 ```text
-WAS_HOME/bin/managesdk.bat
 WAS_HOME/java
 WAS_HOME/java/8.0
-WAS_HOME/profiles
-WAS_HOME/plugins
-WAS_HOME/dev
 ```
+
+A regra vale para qualquer instalação: o que define um JDK é o conteúdo da pasta,
+não o produto que a instalou.
 
 Validação mínima:
 
@@ -100,6 +126,98 @@ O suporte inicial deverá incluir:
 - default methods;
 - static interface methods.
 
+## Implementação sintática da Fase 3
+
+O crate `language-java` fornece `JavaLanguageProvider` com a gramática oficial
+`tree-sitter-java`. O parser é nativo e não inicia nem incorpora uma JVM.
+
+Cada documento aberto mantém texto, versão e árvore do Tree-sitter. Uma
+`DocumentChange` é aplicada ao texto e à árvore anterior por `InputEdit`; o
+parser recebe a árvore editada para reutilizar as regiões inalteradas.
+
+O snapshot produzido contém:
+
+- árvore sintática neutra com tipos de nó, intervalos, filhos e indicação de
+  erro;
+- outline hierárquico de classes, interfaces, enums, annotations,
+  construtores, métodos e campos;
+- spans de highlighting para keywords, tipos, funções, campos, variáveis,
+  strings, números, comentários, annotations e operadores;
+- imports comuns, estáticos e wildcard;
+- diagnósticos para nós `ERROR` e tokens ausentes produzidos pela gramática.
+
+O provider declara `SYNTAX | DIAGNOSTICS`, é registrado no composition root e
+executa dentro do worker do Language Host. O editor envia abertura e alterações
+incrementais, guarda somente snapshots da mesma versão do buffer e renderiza os
+spans recebidos. A barra de status informa a quantidade atual de erros,
+símbolos de outline e imports.
+
+## Implementação semântica da Fase 4
+
+O provider passa a declarar também `SEMANTICS`, `COMPLETION`, `DEFINITION` e
+`REFERENCES`. Para cada fonte são construídos:
+
+- tabela de classes, interfaces, enums, annotations, construtores, métodos,
+  campos, parâmetros e variáveis locais;
+- escopos aninhados para tipos, métodos, construtores, blocos, lambdas, laços e
+  cláusulas `catch`;
+- tipos declarados, dimensões de array e argumentos genéricos;
+- mapa de referências por identificador.
+
+Ao ativar, o provider cria um índice limitado das fontes Java, class files e
+JARs do workspace. Fontes abertas substituem os resultados estáveis do índice
+na resolução. Definições no mesmo arquivo e no escopo mais profundo têm
+prioridade; depois são consultadas outras fontes do workspace.
+
+`Ctrl+Click` usa `DefinitionRequest` e abre a localização retornada.
+`Ctrl+Space` solicita autocomplete, mostra até oito opções visíveis, permite
+navegar com as setas, confirmar com Enter e cancelar com Escape.
+
+## Implementação da toolchain da Fase 5
+
+O crate `java-toolchain` detecta instalações pelos seguintes locais:
+
+- `JAVA_HOME` e `JDK_HOME`;
+- `.jdk` e `jdk` dentro do workspace;
+- `WAS_HOME/java`;
+- executável `java` encontrado no `PATH`;
+- diretórios usuais de JDK no Windows, macOS e Linux.
+
+Uma instalação só é aceita quando possui `bin/java`, `bin/javac` e `bin/jar`.
+A versão é obtida com `java -version`. A primeira instalação válida é
+selecionada automaticamente e `Ctrl+Shift+J` abre uma janela modal para escolher
+explicitamente entre as instalações detectadas. A janela lista versão e caminho de
+cada JDK, destaca a seleção atual e permite escolher por mouse ou pelas setas,
+confirmar com Enter ou `Selecionar` e cancelar com Escape ou `Cancelar`. A barra
+de status mostra a seleção confirmada.
+
+O `ClasspathBuilder` elimina duplicatas e inclui o diretório de saída
+`.er-ide/classes`, `target/classes`, diretórios `lib` e `libs`, JARs diretamente
+contidos neles e saídas usuais do Gradle. Os caminhos são unidos com o separador
+correto da plataforma.
+
+O crate `java-javac-adapter` implementa os contratos de compilação, execução e
+testes. `Ctrl+B` compila as fontes Java do workspace com `javac`, UTF-8,
+`-source 8`, `-target 8` e o classpath calculado. `F5` compila e depois executa
+com `java` a classe do arquivo Java ativo, incluindo seu package.
+`Ctrl+Shift+T` compila e executa o arquivo Java ativo como classe de teste.
+Cada processo recebe `JAVA_HOME` correspondente ao JDK selecionado.
+
+Compilação e execução acontecem fora da thread da interface. Código de saída,
+`stdout` e `stderr` retornam como dados tipados; a aplicação acrescenta a saída
+ao terminal ativo e atualiza a barra de status. O adapter de testes sempre
+compila antes de executar cada classe de teste solicitada.
+
+## Class files e JARs
+
+O crate `java-classfile` valida o magic number, lê versão, constant pool,
+hierarquia, campos e métodos sem carregar bytecode em uma JVM. Entradas
+desconhecidas ou truncadas retornam erro tipado.
+
+JARs são lidos como ZIP e somente entradas `.class` de até 16 MiB são
+consideradas. A ativação limita a varredura a 500 fontes, 64 JARs e 20.000
+classes por JAR. Classes externas indexadas participam do autocomplete.
+
 ## Bibliotecas padrão
 
 Para Java 8:
@@ -111,15 +229,12 @@ JAVA_HOME/jre/lib/*.jar
 
 O analisador deve indexar APIs públicas e metadados necessários.
 
-## Bibliotecas WebSphere
+## Bibliotecas fornecidas pelo servidor
 
-O classpath do projeto poderá incluir bibliotecas fornecidas pelo servidor:
-
-```text
-WAS_HOME/plugins
-WAS_HOME/dev
-WAS_HOME/lib
-```
+O classpath do projeto poderá incluir bibliotecas do servidor usado em produção,
+qualquer que seja ele — `lib` do Tomcat, módulos do WildFly, `plugins`, `dev` e
+`lib` do WebSphere. Esses diretórios são configuração do usuário, não
+conhecimento embutido na IDE.
 
 Não indexar indiscriminadamente todos os JARs. O adapter de projeto deve determinar quais bibliotecas realmente pertencem ao classpath.
 
@@ -139,27 +254,177 @@ Gradle deve ser tratado como ferramenta externa.
 
 A IDE não deve tentar interpretar toda lógica Groovy ou Kotlin.
 
-## WebSphere
+## Implementação de Maven e Gradle da Fase 6
 
-Operações iniciais:
+O modelo de projeto é neutro e vive em `ide-project-model`: módulos,
+coordenadas, escopos de dependência, raízes de código — inclusive geradas — e
+diretórios de saída. `ide-build-api` define `BuildSystemAdapter` e o registro
+que escolhe o primeiro adapter capaz de reconhecer a raiz do workspace. Nenhum
+dos dois conhece Java, Maven ou Gradle.
 
-- detectar instalação;
-- listar perfis;
-- listar servidores;
-- iniciar;
-- parar;
-- reiniciar;
-- acompanhar logs;
-- publicar artefato;
-- remover artefato;
-- conectar depurador remoto;
-- executar scripts `wsadmin`.
+### Maven
+
+`java-maven-adapter` detecta o projeto pelo `pom.xml` da raiz e interpreta o
+modelo nativamente, sem iniciar processo algum:
+
+- coordenadas próprias ou herdadas do `<parent>`;
+- propriedades do POM e do pai, com interpolação `${...}` e as implícitas
+  `project.groupId`, `project.artifactId` e `project.version`;
+- `<modules>`, percorridos recursivamente com limites de profundidade e
+  quantidade; módulos declarados que não existem no disco são ignorados;
+- `<dependencyManagement>` do POM e da cadeia de pais, usado para completar
+  dependências declaradas sem versão;
+- dependências com escopo, `optional` e `systemPath`;
+- `<build>`: `sourceDirectory`, `testSourceDirectory`, `directory`,
+  `outputDirectory` e `testOutputDirectory`.
+
+Cada artefato é procurado no repositório local, no layout
+`grupo/artefato/versão/artefato-versão.jar`. O repositório vem de `M2_REPO` ou
+de `~/.m2/repository`. Artefatos ausentes não impedem a importação: a
+dependência entra no modelo sem caminho resolvido.
+
+Perfis ativos, heranças fora do workspace e plugins que alteram o build ficam
+fora da interpretação nativa e continuam acessíveis executando o Maven externo.
+
+### Gradle
+
+`java-gradle-adapter` detecta o projeto por `settings.gradle(.kts)` ou
+`build.gradle(.kts)`. A IDE não interpreta Groovy nem Kotlin: são extraídas
+apenas as declarações literais que qualquer script expõe — `rootProject.name`,
+`include` e dependências cuja coordenada é uma string. Declarações calculadas em
+tempo de execução são ignoradas de propósito. Os artefatos são procurados no
+cache de módulos do Gradle, cujo diretório de versão contém um nível de hash.
+
+### Código gerado
+
+`target/generated-sources`, `target/generated-test-sources` e
+`build/generated/**/{main,test}` entram no modelo como raízes de código. Elas
+participam da compilação e da análise como qualquer outra fonte, mas não são
+escritas pelo usuário.
+
+### Build e integração
+
+O menu `Projeto` oferece `Compilar projeto` e `Reimportar projeto`;
+`Ctrl+Shift+B` executa o build do sistema detectado — `compile` no Maven e
+`classes` no Gradle. O wrapper versionado no projeto tem prioridade sobre o
+executável do `PATH` e sobre `MAVEN_HOME`/`GRADLE_HOME`, e todo processo recebe
+o `JAVA_HOME` do JDK selecionado na Fase 5. A execução acontece fora da thread
+da interface e a saída tipada vai para o terminal ativo.
+
+O classpath de `Ctrl+B`, `F5` e `Ctrl+Shift+T` passa a incluir as saídas dos
+módulos e os artefatos das dependências importadas, e a compilação considera
+apenas as fontes sob as raízes do projeto. Sem projeto importado, permanece a
+varredura completa do workspace da Fase 5.
+
+Alterações do manifesto feitas fora da IDE são percebidas e disparam
+reimportação. Uma importação que falha — por exemplo, um POM salvo pela metade —
+preserva o último modelo válido e informa o erro na barra de status.
+
+## Servidores e containers Java
+
+A IDE não é uma ferramenta de um servidor específico. Tomcat, Jetty, WildFly,
+JBoss EAP, WebSphere, Liberty, Quarkus, Spring Boot e qualquer outro processo
+Java — inclusive ferramentas como Flyway ou um job em lote — devem ser
+igualmente suportados, sem que nenhum deles apareça no núcleo, nos contratos ou
+no modelo de projeto.
+
+### Depuração como integração primária
+
+Por enquanto, a integração acontece **exclusivamente pela porta de depuração**.
+Quem controla o servidor é o usuário, com as ferramentas dele: a IDE não inicia,
+não para, não publica artefato e não instala nada.
+
+O requisito é apenas que o processo tenha sido iniciado com depuração
+habilitada, o que na JVM significa um agente JDWP escutando em uma porta:
+
+```text
+-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8000
+```
+
+A partir daí a IDE:
+
+- conecta-se ao host e à porta informados;
+- registra os breakpoints dos arquivos abertos;
+- recebe a parada quando a execução atinge um breakpoint;
+- posiciona o editor na linha correspondente;
+- executa o código linha a linha, entrando, passando por cima ou saindo do
+  método;
+- apresenta pilha de chamadas, quadros, variáveis locais e campos visíveis;
+- avalia expressões no contexto do quadro selecionado;
+- retoma a execução ou desconecta sem afetar o processo depurado.
+
+Isso vale identicamente para um servidor de aplicação, um container, um serviço
+em contêiner Docker com a porta exposta ou uma máquina remota — a diferença é só
+o host e a porta.
+
+### Configuração
+
+Alvos de depuração são configurados de forma neutra, sem tipo de servidor:
+
+```toml
+[[debug.targets]]
+name = "app local"
+host = "127.0.0.1"
+port = 8000
+
+[[debug.targets]]
+name = "homologação"
+host = "10.0.0.20"
+port = 8787
+```
+
+O mapeamento entre as posições recebidas do alvo e os arquivos do workspace usa
+as raízes de código do projeto importado na Fase 6, incluindo o código gerado.
+
+### Implementação da Fase 7
+
+`java-debug-adapter` é o único crate que conhece o protocolo. Ele cumprimenta o
+alvo, negocia as larguras de identificador declaradas por ele e mantém um leitor
+dedicado: respostas voltam a quem as pediu e eventos são entregues à sessão.
+Respostas truncadas viram erro tipado, e perder a conexão falha o que estava
+pendente em vez de deixar a interface esperando.
+
+Para instalar um breakpoint, o arquivo é convertido no nome qualificado da
+classe pela raiz de código que o contém, e o adapter observa também as classes
+internas e anônimas do mesmo arquivo. As classes já carregadas recebem o
+breakpoint na hora; as demais são instaladas quando o alvo as carrega. Se a
+linha pedida não tem código executável — linha em branco, comentário, chave — o
+breakpoint desce para a próxima linha executável e o usuário é avisado da linha
+efetiva.
+
+Ao parar, o adapter traduz a posição recebida em `Location` do domínio usando as
+mesmas raízes de código do projeto importado na Fase 6, inclusive as geradas. A
+pilha traz classe, método e linha de cada quadro; as variáveis vêm da tabela de
+variáveis locais válida no ponto de execução, mais o `this` quando existe.
+
+A inspeção aceita `this`, variáveis locais e cadeias de campos. Chamadas de
+método e operadores são recusados de propósito: executar código no alvo altera o
+estado do programa depurado, e isso precisa ser uma decisão explícita do
+usuário.
+
+Na interface, a página `Depuração` das configurações pede host e porta. O clique
+na calha e `F9` alternam breakpoints; `F8`, `F10`, `F11` e `Shift+F11` controlam
+a execução. Um painel à direita do editor mostra estado, pilha e variáveis, e
+escolher um quadro navega até sua linha. A sessão vive em thread própria: nem a
+parada, nem o passo, nem a queda da conexão bloqueiam a janela.
+
+### Adapters específicos de servidor
+
+Detecção de instalação, perfis, deploy, leitura de logs e scripts próprios —
+`wsadmin` no WebSphere, `catalina` no Tomcat, CLI do WildFly — são convenientes,
+mas **não** fazem parte do caminho principal. Quando existirem, serão adapters
+opcionais, ativados sob demanda, atrás dos mesmos contratos genéricos, e nenhuma
+funcionalidade essencial pode depender deles.
 
 ## Segurança
 
-- nunca compartilhar memória com a JVM do servidor;
-- nunca carregar bibliotecas do WebSphere no processo principal;
+- nunca compartilhar memória com a JVM do alvo depurado;
+- nunca carregar bibliotecas do servidor no processo principal;
+- a sessão de depuração roda em worker isolado e a queda da conexão não derruba
+  a IDE;
 - executar comandos por adapter;
 - validar caminhos;
 - escapar argumentos;
+- tratar host, porta e credenciais de depuração como configuração do usuário,
+  nunca embutidos no produto;
 - registrar comandos executados sem expor segredos.

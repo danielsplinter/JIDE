@@ -13,7 +13,10 @@ pub enum IdeEvent {
     WorkspaceClosed(WorkspaceId),
     ProjectImported(ProjectId),
     DocumentOpened(DocumentId),
-    DocumentChanged { document_id: DocumentId, version: u64 },
+    DocumentChanged {
+        document_id: DocumentId,
+        version: u64,
+    },
     DocumentClosed(DocumentId),
 }
 
@@ -60,11 +63,13 @@ mod tests {
     #[test]
     fn bounded_bus_applies_backpressure() {
         let bus = EventBus::bounded(1);
-        assert_eq!(bus.publish(IdeEvent::WorkspaceOpened(WorkspaceId(1))), Ok(()));
+        assert_eq!(
+            bus.publish(IdeEvent::WorkspaceOpened(WorkspaceId(1))),
+            Ok(())
+        );
         assert_eq!(
             bus.publish(IdeEvent::WorkspaceClosed(WorkspaceId(1))),
             Err(PublishError::Full)
         );
     }
 }
-

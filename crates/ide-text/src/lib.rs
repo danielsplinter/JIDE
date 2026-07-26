@@ -1,6 +1,10 @@
 #![doc = "Buffers, documentos abertos e abas do editor."]
 
-use std::{collections::HashMap, fs, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use ide_domain::DocumentId;
 use thiserror::Error;
@@ -14,14 +18,28 @@ pub struct TextBuffer {
 
 impl TextBuffer {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), revision: 0, dirty: false }
+        Self {
+            text: text.into(),
+            revision: 0,
+            dirty: false,
+        }
     }
 
-    pub fn text(&self) -> &str { &self.text }
-    pub const fn revision(&self) -> u64 { self.revision }
-    pub const fn is_dirty(&self) -> bool { self.dirty }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub const fn is_dirty(&self) -> bool {
+        self.dirty
+    }
 
-    pub fn replace(&mut self, range: std::ops::Range<usize>, replacement: &str) -> Result<(), BufferError> {
+    pub fn replace(
+        &mut self,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+    ) -> Result<(), BufferError> {
         if range.start > range.end
             || range.end > self.text.len()
             || !self.text.is_char_boundary(range.start)
@@ -35,7 +53,9 @@ impl TextBuffer {
         Ok(())
     }
 
-    pub fn mark_saved(&mut self) { self.dirty = false; }
+    pub fn mark_saved(&mut self) {
+        self.dirty = false;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -55,18 +75,25 @@ pub struct EditorSession {
 
 impl EditorSession {
     pub fn open(&mut self, path: &Path) -> Result<DocumentId, BufferError> {
-        if let Some(document) = self.documents.values().find(|document| document.path == path) {
+        if let Some(document) = self
+            .documents
+            .values()
+            .find(|document| document.path == path)
+        {
             self.active = Some(document.id);
             return Ok(document.id);
         }
         let text = fs::read_to_string(path)?;
         self.next_id += 1;
         let id = DocumentId(self.next_id);
-        self.documents.insert(id, OpenDocument {
+        self.documents.insert(
             id,
-            path: path.to_path_buf(),
-            buffer: TextBuffer::new(text),
-        });
+            OpenDocument {
+                id,
+                path: path.to_path_buf(),
+                buffer: TextBuffer::new(text),
+            },
+        );
         self.tabs.push(id);
         self.active = Some(id);
         Ok(id)
@@ -75,31 +102,45 @@ impl EditorSession {
     pub fn open_memory(&mut self, name: impl Into<PathBuf>, text: impl Into<String>) -> DocumentId {
         self.next_id += 1;
         let id = DocumentId(self.next_id);
-        self.documents.insert(id, OpenDocument {
+        self.documents.insert(
             id,
-            path: name.into(),
-            buffer: TextBuffer::new(text),
-        });
+            OpenDocument {
+                id,
+                path: name.into(),
+                buffer: TextBuffer::new(text),
+            },
+        );
         self.tabs.push(id);
         self.active = Some(id);
         id
     }
 
     pub fn activate(&mut self, id: DocumentId) -> Result<(), BufferError> {
-        if !self.documents.contains_key(&id) { return Err(BufferError::UnknownDocument(id)); }
+        if !self.documents.contains_key(&id) {
+            return Err(BufferError::UnknownDocument(id));
+        }
         self.active = Some(id);
         Ok(())
     }
 
     pub fn close(&mut self, id: DocumentId) -> Result<OpenDocument, BufferError> {
-        let document = self.documents.remove(&id).ok_or(BufferError::UnknownDocument(id))?;
+        let document = self
+            .documents
+            .remove(&id)
+            .ok_or(BufferError::UnknownDocument(id))?;
         self.tabs.retain(|tab| *tab != id);
-        if self.active == Some(id) { self.active = self.tabs.last().copied(); }
+        if self.active == Some(id) {
+            self.active = self.tabs.last().copied();
+        }
         Ok(document)
     }
 
-    pub const fn active_id(&self) -> Option<DocumentId> { self.active }
-    pub fn active(&self) -> Option<&OpenDocument> { self.active.and_then(|id| self.documents.get(&id)) }
+    pub const fn active_id(&self) -> Option<DocumentId> {
+        self.active
+    }
+    pub fn active(&self) -> Option<&OpenDocument> {
+        self.active.and_then(|id| self.documents.get(&id))
+    }
     pub fn active_mut(&mut self) -> Option<&mut OpenDocument> {
         self.active.and_then(|id| self.documents.get_mut(&id))
     }

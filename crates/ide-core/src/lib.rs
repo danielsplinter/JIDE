@@ -1,6 +1,9 @@
 #![doc = "Configuração, logging e ciclo de vida do núcleo da IDE."]
 
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -98,4 +101,3 @@ mod tests {
         assert!(matches!(config, Ok(value) if value.event_capacity == 1_024));
     }
 }
-

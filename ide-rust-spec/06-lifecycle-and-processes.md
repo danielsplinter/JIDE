@@ -50,8 +50,23 @@ pub trait ProcessSupervisor: Send + Sync {
         &self,
         process_id: ProcessId,
     ) -> Result<ProcessStatus, ProcessError>;
+
+    async fn execute(
+        &self,
+        request: ProcessRequest,
+    ) -> Result<ProcessOutput, ProcessError>;
 }
 ```
+
+`ProcessRequest` inclui programa, argumentos, diretório de trabalho, timeout e
+variáveis de ambiente. `execute` aguarda um processo finito e captura uma única
+vez código de saída, `stdout` e `stderr`. A implementação nativa encerra a
+espera ao exceder o timeout e nunca usa a área de renderização como fonte do
+estado do processo.
+
+Na Fase 5, `javac` e `java` são chamados em um worker assíncrono criado fora da
+thread da UI. O resultado chega à aplicação por canal tipado e só então é
+anexado ao terminal, evitando bloquear eventos de teclado, mouse ou pintura.
 
 ## Isolamento recomendado
 
@@ -73,6 +88,11 @@ Plugin Host
 Build Worker
 Debug Worker
 ```
+
+O `Debug Worker` mantém a conexão com o alvo depurado e traduz suas mensagens em
+eventos tipados. Ele só existe enquanto houver sessão ativa: conectar é
+explícito, e desconectar — por pedido do usuário, por término do processo ou por
+queda da rede — encerra o worker sem afetar a IDE nem o processo depurado.
 
 ## Comunicação
 
@@ -115,6 +135,23 @@ Usuário digita 20 caracteres rapidamente
     ↓
 somente o snapshot mais recente é analisado
 ```
+
+## Worker de linguagem da Fase 2
+
+Cada provider ativo executa em uma thread dedicada, com runtime assíncrono
+próprio, separado da thread da interface. A comunicação usa mensagens tipadas
+para abrir, alterar e fechar documentos, consultar diagnósticos e encerrar.
+Esse isolamento de execução é o limite da Fase 2; a migração para processo
+auxiliar poderá manter os mesmos contratos de mensagens.
+
+A fila entre o host e cada worker é limitada. Quando estiver cheia, o host
+retorna erro de backpressure em vez de acumular memória sem limite. O número
+de providers simultaneamente ativos também possui limite configurável.
+
+Toda solicitação recebe `LanguageRequestContext`, com `RequestId` monotônico e
+`CancellationToken` compartilhável. O cancelamento é verificado antes de
+enfileirar e novamente no worker antes de iniciar a operação. Uma solicitação
+cancelada não deve alcançar o provider.
 
 ## Terminal integrado
 

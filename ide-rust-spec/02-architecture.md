@@ -28,7 +28,7 @@ A arquitetura deverá combinar:
 │ contratos para linguagens e ferramentas    │
 ├─────────────────────────────────────────────┤
 │ Adapters                                   │
-│ Java, Git, Maven, WebSphere, filesystem     │
+│ Java, Git, Maven, depuração, filesystem     │
 ├─────────────────────────────────────────────┤
 │ Infrastructure                             │
 │ processos, persistência, IPC, renderização  │
@@ -51,7 +51,8 @@ O domínio não deve depender de:
 - Maven;
 - Gradle;
 - Java;
-- WebSphere;
+- servidores de aplicação e containers;
+- protocolos de depuração;
 - banco de dados;
 - sistema operacional.
 

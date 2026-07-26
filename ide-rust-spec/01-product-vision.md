@@ -24,6 +24,15 @@ técnicas da IDE, como `.git` e `target`. O nome do projeto, os terminais e os
 demais serviços associados ao workspace devem passar a usar a nova raiz.
 Cancelar o seletor não altera o workspace atual.
 
+O menu `Configurações` abre uma janela modal com navegação em um painel
+esquerdo e o conteúdo da opção selecionada no painel direito. A primeira opção
+é `Compilador e VM`. A janela fica suspensa sobre a IDE: workspace, editor,
+Explorer e terminais permanecem visíveis e levemente escurecidos ao redor, mas
+seus textos nunca podem atravessar ou ser desenhados sobre o painel modal. O
+conteúdo inferior permanece inativo até o fechamento. Barra principal, combo e
+isolamento modal devem reutilizar respectivamente `MenuBar`, `ComboBox` e
+`ModalHost` da ERLibUi, sem duplicar desenho ou hit testing na IDE.
+
 Todo o conteúdo da árvore deve ser recortado pelos limites do painel esquerdo.
 Quando nomes ou níveis de indentação ultrapassarem a largura disponível, o
 Explorer deve mostrar uma barra de rolagem horizontal com clique na trilha e
@@ -127,3 +136,19 @@ Somente serviços Java necessários são inicializados
 - novos sistemas de build;
 - novos formatos de projeto;
 - novas integrações com servidores.
+
+## Neutralidade em relação a servidores
+
+A IDE não é feita para um servidor de aplicação específico. Tomcat, Jetty,
+WildFly, JBoss EAP, WebSphere, Liberty, Quarkus, Spring Boot e qualquer outro
+processo Java — inclusive ferramentas como Flyway e jobs em lote — precisam
+receber o mesmo tratamento.
+
+A forma de integração escolhida é a **depuração**: o usuário inicia o processo
+com depuração habilitada e informa host e porta; a IDE se conecta, para nos
+breakpoints e executa o código linha a linha a partir dali. Como todo servidor
+Java oferece esse mecanismo, suportar mais um não exige código novo.
+
+Iniciar, parar e publicar artefatos continua sendo responsabilidade do usuário e
+de suas ferramentas. Operações específicas de um produto, se existirem um dia,
+serão adapters opcionais — nunca requisito para usar a IDE.

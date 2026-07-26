@@ -48,11 +48,15 @@
 
 **Motivo:** evolução sem quebra silenciosa.
 
-## ADR-009 — Ferramentas WebSphere externas
+## ADR-009 — Servidores externos e neutros
 
-**Decisão:** integração com WebSphere ocorrerá por processos, arquivos, protocolos e APIs.
+**Decisão:** a integração com servidores e containers ocorrerá por processos,
+arquivos, protocolos e APIs, e nenhum produto terá posição privilegiada. Tomcat,
+Jetty, WildFly, WebSphere, Liberty, Quarkus, Spring Boot e qualquer outro
+processo Java são alvos equivalentes.
 
-**Motivo:** não acoplar o processo da IDE à JVM do servidor.
+**Motivo:** não acoplar o processo da IDE à JVM do servidor nem a arquitetura a
+um fornecedor.
 
 ## ADR-010 — Memória como requisito arquitetural
 
@@ -69,3 +73,20 @@ conectado a uma pseudoterminal; no Windows será usado ConPTY por meio de
 **Motivo:** delegar a interpretação integral dos comandos ao shell, preservar
 estado entre comandos e suportar o comportamento esperado de terminais de IDE,
 inclusive programas interativos, redimensionamento e saída assíncrona.
+
+## ADR-012 — Depuração como forma de integração com servidores
+
+**Decisão:** a integração com um processo em execução se dá conectando-se à sua
+porta de depuração. O usuário inicia o servidor com depuração habilitada e
+informa host e porta; a IDE registra breakpoints, para na linha, executa passo a
+passo e inspeciona a pilha e as variáveis. Iniciar, parar, publicar artefato e
+ler logs do produto não fazem parte desse caminho.
+
+**Motivo:** é o único mecanismo que todo servidor, container e ferramenta Java
+oferece do mesmo jeito. Suportar mais um servidor passa a custar zero linhas de
+código — apenas host e porta —, enquanto integrações por produto exigiriam um
+adapter, um formato de configuração e um ciclo de vida para cada um.
+
+**Consequência:** operações específicas de produto ficam disponíveis apenas como
+adapters opcionais posteriores, e nenhuma funcionalidade essencial pode depender
+delas.

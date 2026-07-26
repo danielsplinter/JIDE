@@ -32,7 +32,7 @@ ide/
 │   ├── java-javac-adapter/
 │   ├── java-maven-adapter/
 │   ├── java-gradle-adapter/
-│   └── websphere-adapter/
+│   └── java-debug-adapter/
 ├── specs/
 └── tests/
 ```
@@ -46,14 +46,42 @@ ide-domain
 ide-language-api
     depende de ide-domain
 
+ide-language-host
+    depende de ide-language-api e ide-domain
+
 language-java
-    depende de ide-language-api
+    depende de ide-language-api, ide-domain, java-classfile e da gramática
+    tree-sitter-java
+
+java-classfile
+    depende somente de contratos próprios e do leitor ZIP
+
+java-toolchain
+    depende de ide-toolchain-api e ide-domain
 
 java-javac-adapter
-    depende de ide-toolchain-api e ide-process
+    depende de ide-toolchain-api, ide-process e java-toolchain
+
+ide-project-model
+    não depende de infraestrutura nem de nenhuma linguagem
+
+ide-build-api
+    depende de ide-project-model
+
+java-maven-adapter
+java-gradle-adapter
+    dependem de ide-build-api, ide-project-model e ide-process
+
+ide-debug-api
+    depende de ide-domain; não conhece servidor, container nem protocolo
+
+java-debug-adapter
+    depende de ide-debug-api e ide-domain; é o único crate que conhece o
+    protocolo de depuração da JVM
 
 ide-app
-    compõe implementações
+    compõe Language Host, supervisor de processos, detecção de JDK, adapter
+    javac e os adapters de build
 ```
 
 ## Composition Root

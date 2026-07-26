@@ -41,7 +41,9 @@ Isso inclui:
 
 Não serão aceitas implementações do núcleo da IDE em outras linguagens.
 
-Ferramentas externas (como JDK, Maven, Gradle, WebSphere, Python, Node.js etc.) poderão ser utilizadas apenas como dependências de execução para compilar, executar ou depurar projetos do usuário, nunca para implementar a IDE.
+Ferramentas externas (como JDK, Maven, Gradle, servidores de aplicação, containers, Python, Node.js etc.) poderão ser utilizadas apenas como dependências de execução para compilar, executar ou depurar projetos do usuário, nunca para implementar a IDE.
+
+Nenhum servidor, container ou fornecedor deve ocupar posição privilegiada na arquitetura. A integração com processos em execução se dá pela porta de depuração, o que torna qualquer servidor Java um alvo equivalente.
 
 Este é um requisito arquitetural obrigatório.
 
@@ -79,7 +81,8 @@ A primeira versão deve oferecer:
 - autocomplete inicial;
 - execução de `javac`, Maven e Gradle como processos externos;
 - configuração de um JDK externo;
-- integração inicial com WebSphere;
+- depuração remota de qualquer processo Java com depuração habilitada,
+  independentemente do servidor ou container;
 - logs e diagnósticos;
 - arquitetura de plugins.
 

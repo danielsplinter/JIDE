@@ -1,0 +1,21 @@
+[package]
+name = "language-java"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ide-domain = { path = "../ide-domain" }
+ide-language-api = { path = "../ide-language-api" }
+java-classfile = { path = "../java-classfile" }
+tree-sitter.workspace = true
+tree-sitter-java.workspace = true
+
+[dev-dependencies]
+ide-language-host = { path = "../ide-language-host" }
+pollster.workspace = true
+
+[lints]
+workspace = true

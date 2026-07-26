@@ -1,0 +1,345 @@
+//! Validação contra uma JVM real, quando houver JDK na máquina.
+//!
+//! Compila um programa, sobe a JVM com o agente de depuração e percorre o fluxo
+//! completo: conexão, breakpoint instalado só quando a classe é carregada,
+//! parada, pilha, variáveis, passo e desconexão.
+//!
+//! Marcado como `ignored` porque depende de um JDK instalado:
+//!
+//! ```text
+//! cargo test -p java-debug-adapter -- --ignored --nocapture
+//! ```
+
+use std::{
+    fs,
+    path::PathBuf,
+    process::{Child, Command},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use ide_debug_api::{
+    DebugAdapter, DebugEvent, DebugEventSink, DebugSessionRequest, DebugTarget, SourceBreakpoint,
+    StepKind, StopReason,
+};
+use java_debug_adapter::JavaDebugAdapter;
+use tokio::{net::TcpListener, sync::Notify};
+
+const PROGRAM: &str = r#"package com.example;
+
+public class Loop {
+    public static void main(String[] args) throws Exception {
+        int total = 0;
+        for (int index = 0; index < 200; index++) {
+            total = total + index;
+            Thread.sleep(50);
+        }
+        System.out.println(total);
+    }
+}
+"#;
+
+/// Linha 7 do arquivo, 0-based: `total = total + index;`
+const BREAKPOINT_LINE: u32 = 6;
+
+#[derive(Default)]
+struct RecordingSink {
+    events: Mutex<Vec<DebugEvent>>,
+    notify: Notify,
+}
+
+impl RecordingSink {
+    fn events(&self) -> Vec<DebugEvent> {
+        self.events
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default()
+    }
+
+    async fn wait_for(&self, predicate: impl Fn(&DebugEvent) -> bool) -> Option<DebugEvent> {
+        for _ in 0..100 {
+            if let Some(event) = self.events().into_iter().find(|event| predicate(event)) {
+                return Some(event);
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(200), self.notify.notified()).await;
+        }
+        None
+    }
+}
+
+impl DebugEventSink for RecordingSink {
+    fn emit(&self, event: DebugEvent) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push(event);
+        }
+        self.notify.notify_waiters();
+    }
+}
+
+struct Jvm {
+    process: Child,
+}
+
+impl Drop for Jvm {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
+fn jdk_executable(name: &str) -> Option<PathBuf> {
+    let executable = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    if let Some(home) = std::env::var_os("JAVA_HOME") {
+        let candidate = PathBuf::from(home).join("bin").join(&executable);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(&executable))
+        .find(|candidate| candidate.is_file())
+}
+
+async fn free_port() -> u16 {
+    match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener
+            .local_addr()
+            .map(|address| address.port())
+            .unwrap_or(5005),
+        Err(_) => 5005,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a JDK"]
+async fn debugs_a_real_jvm_end_to_end() {
+    let (Some(javac), Some(java)) = (jdk_executable("javac"), jdk_executable("java")) else {
+        eprintln!("nenhum JDK encontrado; teste ignorado");
+        return;
+    };
+
+    let root = std::env::temp_dir().join(format!("er-ide-real-jvm-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let source_root = root.join("src/main/java");
+    let package = source_root.join("com/example");
+    assert!(fs::create_dir_all(&package).is_ok());
+    let source = package.join("Loop.java");
+    assert!(fs::write(&source, PROGRAM).is_ok());
+    let classes = root.join("classes");
+
+    let compiled = Command::new(&javac)
+        .arg("-g")
+        .arg("-d")
+        .arg(&classes)
+        .arg(&source)
+        .output();
+    match compiled {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => panic!("javac falhou: {}", String::from_utf8_lossy(&output.stderr)),
+        Err(error) => panic!("javac não pôde ser executado: {error}"),
+    }
+
+    let port = free_port().await;
+    let process = Command::new(&java)
+        .arg(format!(
+            "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:{port}"
+        ))
+        .arg("-cp")
+        .arg(&classes)
+        .arg("com.example.Loop")
+        .spawn();
+    let _jvm = match process {
+        Ok(process) => Jvm { process },
+        Err(error) => panic!("a JVM não pôde ser iniciada: {error}"),
+    };
+
+    let sink = Arc::new(RecordingSink::default());
+    let adapter = JavaDebugAdapter::new();
+    // A JVM leva um instante para abrir a porta de depuração.
+    let mut attached = None;
+    for _ in 0..40 {
+        let request = DebugSessionRequest::new(DebugTarget::new("127.0.0.1", port))
+            .with_source_roots(vec![source_root.clone()]);
+        match adapter
+            .attach(request, Arc::clone(&sink) as Arc<dyn DebugEventSink>)
+            .await
+        {
+            Ok(session) => {
+                attached = Some(session);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    }
+    let session = match attached {
+        Some(session) => session,
+        None => panic!("não foi possível conectar à JVM em 127.0.0.1:{port}"),
+    };
+
+    let resolved = match session
+        .set_breakpoints(&source, &[SourceBreakpoint::new(&source, BREAKPOINT_LINE)])
+        .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => panic!("set_breakpoints falhou: {error}"),
+    };
+    assert_eq!(resolved.len(), 1);
+    assert!(
+        !resolved[0].is_verified(),
+        "com suspend=y a classe da aplicação ainda não foi carregada"
+    );
+
+    // Libera a JVM suspensa na inicialização.
+    assert!(session.resume(None).await.is_ok());
+
+    let stopped = sink
+        .wait_for(|event| matches!(event, DebugEvent::Stopped { .. }))
+        .await;
+    let Some(DebugEvent::Stopped { thread, reason }) = stopped else {
+        panic!("a JVM não parou no breakpoint: {:?}", sink.events());
+    };
+    assert!(matches!(reason, StopReason::Breakpoint(_)));
+
+    let frames = match session.stack_trace(thread).await {
+        Ok(frames) => frames,
+        Err(error) => panic!("stack_trace falhou: {error}"),
+    };
+    let top = match frames.first() {
+        Some(frame) => frame,
+        None => panic!("pilha vazia"),
+    };
+    assert_eq!(top.name, "Loop.main");
+    let location = match top.location.as_ref() {
+        Some(location) => location,
+        None => panic!("quadro sem fonte"),
+    };
+    assert_eq!(location.path, source);
+    assert_eq!(location.range.start.line, BREAKPOINT_LINE);
+
+    let variables = match session.variables(thread, top.id).await {
+        Ok(variables) => variables,
+        Err(error) => panic!("variables falhou: {error}"),
+    };
+    let names: Vec<&str> = variables
+        .iter()
+        .map(|variable| variable.name.as_str())
+        .collect();
+    assert!(names.contains(&"total"), "variáveis lidas: {names:?}");
+    assert!(names.contains(&"index"), "variáveis lidas: {names:?}");
+    assert!(names.contains(&"args"), "variáveis lidas: {names:?}");
+
+    let evaluated = match session.evaluate(thread, top.id, "index").await {
+        Ok(evaluated) => evaluated,
+        Err(error) => panic!("evaluate falhou: {error}"),
+    };
+    assert!(
+        evaluated.value.parse::<i64>().is_ok(),
+        "index deveria ser numérico, veio `{}`",
+        evaluated.value
+    );
+
+    // Passo sobre: a próxima parada é a linha seguinte do laço.
+    assert!(session.step(thread, StepKind::Over).await.is_ok());
+    let stepped = sink
+        .wait_for(|event| {
+            matches!(
+                event,
+                DebugEvent::Stopped {
+                    reason: StopReason::Step,
+                    ..
+                }
+            )
+        })
+        .await;
+    let Some(DebugEvent::Stopped { thread, .. }) = stepped else {
+        panic!("o passo não produziu parada: {:?}", sink.events());
+    };
+    let after_step = match session.stack_trace(thread).await {
+        Ok(frames) => frames,
+        Err(error) => panic!("stack_trace após o passo falhou: {error}"),
+    };
+    let line = after_step
+        .first()
+        .and_then(|frame| frame.location.as_ref())
+        .map(|location| location.range.start.line);
+    assert_eq!(
+        line,
+        Some(BREAKPOINT_LINE + 1),
+        "o passo deveria avançar para `Thread.sleep`"
+    );
+
+    assert!(session.detach().await.is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+#[ignore = "requires a JDK"]
+async fn a_thread_that_is_not_suspended_keeps_running_after_detach() {
+    let Some(java) = jdk_executable("java") else {
+        eprintln!("nenhum JDK encontrado; teste ignorado");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("er-ide-detach-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let package = root.join("src/main/java/com/example");
+    assert!(fs::create_dir_all(&package).is_ok());
+    let source = package.join("Loop.java");
+    assert!(fs::write(&source, PROGRAM).is_ok());
+    let classes = root.join("classes");
+    let Some(javac) = jdk_executable("javac") else {
+        return;
+    };
+    let _ = Command::new(javac)
+        .arg("-g")
+        .arg("-d")
+        .arg(&classes)
+        .arg(&source)
+        .output();
+
+    let port = free_port().await;
+    let Ok(process) = Command::new(&java)
+        .arg(format!(
+            "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:{port}"
+        ))
+        .arg("-cp")
+        .arg(&classes)
+        .arg("com.example.Loop")
+        .spawn()
+    else {
+        return;
+    };
+    let mut jvm = Jvm { process };
+
+    let sink = Arc::new(RecordingSink::default());
+    let adapter = JavaDebugAdapter::new();
+    let mut attached = None;
+    for _ in 0..40 {
+        let request = DebugSessionRequest::new(DebugTarget::new("127.0.0.1", port))
+            .with_source_roots(vec![root.join("src/main/java")]);
+        match adapter
+            .attach(request, Arc::clone(&sink) as Arc<dyn DebugEventSink>)
+            .await
+        {
+            Ok(session) => {
+                attached = Some(session);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    }
+    let Some(session) = attached else {
+        panic!("não foi possível conectar à JVM em 127.0.0.1:{port}");
+    };
+
+    assert!(session.detach().await.is_ok());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        matches!(jvm.process.try_wait(), Ok(None)),
+        "o processo depurado deve continuar executando após a desconexão"
+    );
+    let _ = fs::remove_dir_all(root);
+}

@@ -21,7 +21,9 @@ pub struct CommandRegistry {
 
 impl CommandRegistry {
     pub fn register(&mut self, command: Command) -> Result<(), CommandError> {
-        if self.commands.contains_key(&command.id) { return Err(CommandError::Duplicate(command.id)); }
+        if self.commands.contains_key(&command.id) {
+            return Err(CommandError::Duplicate(command.id));
+        }
         if let Some(shortcut) = &command.shortcut {
             let normalized = normalize_shortcut(shortcut);
             if self.shortcuts.contains_key(&normalized) {
@@ -34,12 +36,17 @@ impl CommandRegistry {
     }
 
     pub fn execute(&self, id: &str) -> Result<(), CommandError> {
-        let command = self.commands.get(id).ok_or_else(|| CommandError::Unknown(id.to_owned()))?;
+        let command = self
+            .commands
+            .get(id)
+            .ok_or_else(|| CommandError::Unknown(id.to_owned()))?;
         (command.handler)()
     }
 
     pub fn execute_shortcut(&self, shortcut: &str) -> Result<bool, CommandError> {
-        let Some(id) = self.shortcuts.get(&normalize_shortcut(shortcut)) else { return Ok(false) };
+        let Some(id) = self.shortcuts.get(&normalize_shortcut(shortcut)) else {
+            return Ok(false);
+        };
         self.execute(id)?;
         Ok(true)
     }
@@ -62,7 +69,12 @@ impl Command {
 }
 
 fn normalize_shortcut(value: &str) -> String {
-    value.split('+').map(str::trim).map(str::to_ascii_lowercase).collect::<Vec<_>>().join("+")
+    value
+        .split('+')
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 #[derive(Debug, Error)]
@@ -87,10 +99,19 @@ mod tests {
         let called = Arc::new(AtomicBool::new(false));
         let marker = called.clone();
         let mut commands = CommandRegistry::default();
-        assert!(commands.register(Command::new("file.save", "Save", Some("Ctrl+S"), move || {
-            marker.store(true, Ordering::Relaxed);
-            Ok(())
-        })).is_ok());
+        assert!(
+            commands
+                .register(Command::new(
+                    "file.save",
+                    "Save",
+                    Some("Ctrl+S"),
+                    move || {
+                        marker.store(true, Ordering::Relaxed);
+                        Ok(())
+                    }
+                ))
+                .is_ok()
+        );
         assert!(matches!(commands.execute_shortcut("ctrl+s"), Ok(true)));
         assert!(called.load(Ordering::Relaxed));
     }

@@ -6,9 +6,21 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ide-build-api = { path = "../ide-build-api" }
 ide-core = { path = "../ide-core" }
 ide-commands = { path = "../ide-commands" }
+ide-debug-api = { path = "../ide-debug-api" }
+ide-project-model = { path = "../ide-project-model" }
+ide-domain = { path = "../ide-domain" }
 ide-events = { path = "../ide-events" }
+ide-language-host = { path = "../ide-language-host" }
+ide-toolchain-api = { path = "../ide-toolchain-api" }
+java-debug-adapter = { path = "../java-debug-adapter" }
+java-gradle-adapter = { path = "../java-gradle-adapter" }
+java-javac-adapter = { path = "../java-javac-adapter" }
+java-maven-adapter = { path = "../java-maven-adapter" }
+java-toolchain = { path = "../java-toolchain" }
+language-java = { path = "../language-java" }
 ide-process = { path = "../ide-process" }
 ide-terminal = { path = "../ide-terminal" }
 ide-text = { path = "../ide-text" }
@@ -17,6 +29,7 @@ ide-workspace = { path = "../ide-workspace" }
 pollster.workspace = true
 rfd.workspace = true
 tracing.workspace = true
+tokio.workspace = true
 ui-core = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-core" }
 ui-render-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-api" }
 ui-render-wgpu = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-wgpu" }

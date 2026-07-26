@@ -218,6 +218,14 @@ impl TerminalSession {
         self.lines.len()
     }
 
+    pub fn append_external_output(&mut self, text: &str, is_error: bool) {
+        for line in text.replace("\r\n", "\n").split('\n') {
+            if !line.is_empty() {
+                self.push_line_with_kind(line.to_owned(), is_error);
+            }
+        }
+    }
+
     pub fn submit(&mut self) -> Result<(), TerminalError> {
         if self.input.trim().is_empty() {
             return Ok(());
@@ -270,10 +278,11 @@ impl TerminalSession {
     }
 
     fn push_line(&mut self, text: String) {
-        self.lines.push_back(TerminalLine {
-            text,
-            is_error: false,
-        });
+        self.push_line_with_kind(text, false);
+    }
+
+    fn push_line_with_kind(&mut self, text: String, is_error: bool) {
+        self.lines.push_back(TerminalLine { text, is_error });
         while self.lines.len() > self.max_lines {
             self.lines.pop_front();
         }
