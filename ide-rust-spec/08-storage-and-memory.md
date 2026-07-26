@@ -39,6 +39,66 @@ Controlar memória explicitamente e evitar crescimento ilimitado.
 - uma entrada `.class` maior que 16 MiB é ignorada;
 - diretórios `.git`, `target`, `node_modules` e `.gradle` não são percorridos.
 
+## Configuração do usuário
+
+A IDE mantém um arquivo de configuração por usuário, fora de qualquer projeto:
+
+```text
+Windows   %APPDATA%\er-ide\config.toml
+Linux     $XDG_CONFIG_HOME/er-ide/config.toml, ou ~/.config/er-ide/config.toml
+macOS     ~/.config/er-ide/config.toml
+```
+
+A variável `ER_IDE_CONFIG` aponta diretamente para outro arquivo e tem
+prioridade sobre o local padrão.
+
+```toml
+event_capacity = 1024
+
+[workspace]
+last_path = "C:/Users/exemplo/projetos/minha-app"
+
+[run]
+# Opcional: como subir a aplicação. Vazio significa deduzir do projeto.
+# `{agent}` recebe o agente de depuração quando a execução é com depuração e
+# desaparece quando é sem; `{host}` e `{port}` seguem a mesma regra.
+command = "./gradlew bootRun \"-Dorg.gradle.jvmargs={agent}\""
+
+[debug]
+host = "127.0.0.1"
+port = 8000
+```
+
+### Último projeto
+
+Abrir um projeto por `Arquivo → Projeto...` grava o caminho em
+`workspace.last_path`. Na inicialização seguinte, esse projeto é reaberto
+automaticamente, com árvore, terminais, toolchain e importação do build system
+apontando para ele.
+
+Regras:
+
+- o último projeto tem prioridade sobre o diretório em que a IDE foi executada;
+- um caminho que não existe mais — pasta renomeada, removida ou em um disco
+  desconectado — é ignorado, e a IDE abre o diretório atual sem falhar;
+- o registro é preservado mesmo quando o caminho está indisponível, para que a
+  reabertura volte a funcionar quando o disco for reconectado;
+- configuração ilegível não impede a inicialização: vale o padrão, e o motivo é
+  registrado no log;
+- falha ao gravar não interrompe o trabalho; o projeto continua aberto e o
+  usuário é avisado na barra de status;
+- a IDE nunca grava configuração do usuário dentro do projeto.
+
+### Execução e depuração
+
+`run.command` descreve como a aplicação do projeto sobe. É opcional e tem
+prioridade sobre qualquer dedução feita a partir do projeto importado. O mesmo
+comando serve às duas execuções: com depuração, `{agent}` recebe o argumento do
+agente; sem depuração, o marcador simplesmente desaparece.
+
+`debug.host` e `debug.port` guardam o último alvo usado, para que o botão de
+depurar funcione com um clique nas execuções seguintes.
+
 ## Orçamento
 
 ```rust

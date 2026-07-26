@@ -276,6 +276,141 @@ async fn debugs_a_real_jvm_end_to_end() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Cenário relatado: subir um Spring Boot em depuração, marcar breakpoint num
+/// controller e chamar o endpoint.
+///
+/// A ordem é a mesma da IDE: conecta assim que a porta abre — com a aplicação
+/// ainda subindo —, registra o breakpoint numa classe que só será carregada
+/// depois, e espera a parada quando a requisição chega.
+#[tokio::test]
+#[ignore = "requires Maven and the example Spring Boot project"]
+async fn stops_on_a_controller_breakpoint_of_a_running_spring_boot_application() {
+    let project =
+        PathBuf::from("C:/Users/jdani/Documents/projetos/java/spring-boot-four-endpoints");
+    if !project.join("pom.xml").is_file() {
+        eprintln!("projeto de exemplo ausente; teste ignorado");
+        return;
+    }
+    let source_root = project.join("src/main/java");
+    let controller = source_root.join("br/com/exemplo/endpoints/controller/ItemController.java");
+    assert!(
+        controller.is_file(),
+        "controller ausente: {}",
+        controller.display()
+    );
+
+    let debug_port = free_port().await;
+    let agent = format!(
+        "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:{debug_port}"
+    );
+    let process = Command::new("cmd")
+        .arg("/C")
+        .arg("mvn")
+        .arg("-B")
+        .arg("-Dmaven.test.skip=true")
+        .arg("spring-boot:run")
+        .arg(format!("-Dspring-boot.run.jvmArguments={agent}"))
+        .current_dir(&project)
+        .spawn();
+    let _jvm = match process {
+        Ok(process) => Jvm { process },
+        Err(error) => panic!("Maven não pôde ser iniciado: {error}"),
+    };
+
+    let sink = Arc::new(RecordingSink::default());
+    let adapter = JavaDebugAdapter::new();
+    let mut attached = None;
+    for _ in 0..180 {
+        let request = DebugSessionRequest::new(DebugTarget::new("127.0.0.1", debug_port))
+            .with_source_roots(vec![source_root.clone()]);
+        match adapter
+            .attach(request, Arc::clone(&sink) as Arc<dyn DebugEventSink>)
+            .await
+        {
+            Ok(session) => {
+                attached = Some(session);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    let session = match attached {
+        Some(session) => session,
+        None => panic!("não foi possível conectar em 127.0.0.1:{debug_port}"),
+    };
+
+    // Linha 63 do arquivo, 0-based 62: o `System.out.printf` de `executarLaco`.
+    let resolved = match session
+        .set_breakpoints(&controller, &[SourceBreakpoint::new(&controller, 62)])
+        .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => panic!("set_breakpoints falhou: {error}"),
+    };
+    eprintln!("breakpoint: {resolved:?}");
+
+    // Espera a aplicação atender antes de chamar o endpoint.
+    let mut serving = false;
+    for _ in 0..240 {
+        if std::net::TcpStream::connect_timeout(
+            &match "127.0.0.1:8080".parse() {
+                Ok(address) => address,
+                Err(error) => panic!("endereço inválido: {error}"),
+            },
+            Duration::from_millis(200),
+        )
+        .is_ok()
+        {
+            serving = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(serving, "a aplicação precisa atender na porta 8080");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // A requisição roda em outra thread: a parada não pode travar o teste.
+    std::thread::spawn(|| {
+        use std::io::Write;
+        if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:8080") {
+            let _ = stream.write_all(
+                b"GET /api/itens HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+
+    let stopped = sink
+        .wait_for(|event| matches!(event, DebugEvent::Stopped { .. }))
+        .await;
+    let Some(DebugEvent::Stopped { thread, reason }) = stopped else {
+        panic!(
+            "a aplicação não parou no breakpoint. eventos: {:?}",
+            sink.events()
+        );
+    };
+    assert!(matches!(reason, StopReason::Breakpoint(_)));
+
+    let frames = match session.stack_trace(thread).await {
+        Ok(frames) => frames,
+        Err(error) => panic!("stack_trace falhou: {error}"),
+    };
+    let top = match frames.first() {
+        Some(frame) => frame,
+        None => panic!("pilha vazia"),
+    };
+    eprintln!("parou em {} {:?}", top.name, top.location);
+    assert!(top.name.contains("ItemController"));
+    assert_eq!(
+        top.location
+            .as_ref()
+            .map(|location| location.range.start.line),
+        Some(62)
+    );
+
+    let _ = session.resume(None).await;
+    let _ = session.detach().await;
+}
+
 #[tokio::test]
 #[ignore = "requires a JDK"]
 async fn a_thread_that_is_not_suspended_keeps_running_after_detach() {

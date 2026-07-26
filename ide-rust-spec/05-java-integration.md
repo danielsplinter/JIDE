@@ -330,9 +330,14 @@ no modelo de projeto.
 
 ### Depuração como integração primária
 
-Por enquanto, a integração acontece **exclusivamente pela porta de depuração**.
-Quem controla o servidor é o usuário, com as ferramentas dele: a IDE não inicia,
-não para, não publica artefato e não instala nada.
+A integração acontece **exclusivamente pela porta de depuração**. A IDE não
+para, não publica artefato e não instala nada; o ciclo de vida do que está
+rodando continua com o usuário.
+
+A única exceção é iniciar: para o projeto aberto, a IDE pode subir a aplicação
+já com o agente ligado, porque isso é executar o código do próprio usuário, e
+não administrar um servidor. Ela sobe pelo terminal integrado, com o comando
+visível, e nunca sobe nada quando já existe algo escutando no alvo.
 
 O requisito é apenas que o processo tenha sido iniciado com depuração
 habilitada, o que na JVM significa um agente JDWP escutando em uma porta:
@@ -402,8 +407,108 @@ método e operadores são recusados de propósito: executar código no alvo alte
 estado do programa depurado, e isso precisa ser uma decisão explícita do
 usuário.
 
-Na interface, a página `Depuração` das configurações pede host e porta. O clique
-na calha e `F9` alternam breakpoints; `F8`, `F10`, `F11` e `Shift+F11` controlam
+### Botões de parar, executar e depurar
+
+O canto direito da barra de menus tem três botões da ERLibUi — `Button::icon`
+com `Icon::Stop`, `Icon::Play` e `Icon::Bug`. A IDE define papel, posição e
+comando; o desenho do ícone, a cor pelo tema e o nome acessível são da
+biblioteca.
+
+O **play** sobe a aplicação do projeto no terminal integrado, sem depuração. A
+mesma ação está em `Projeto → Executar aplicação`.
+
+O **stop** interrompe a aplicação iniciada pela IDE enviando ao terminal a mesma
+interrupção de um `Ctrl+C`, na aba em que ela foi iniciada. A IDE não encerra
+processo por fora: quem decide o que fazer com o sinal é o programa, e um Spring
+Boot faz seu desligamento gracioso normalmente. Uma sessão de depuração aberta é
+desconectada antes. O ícone fica apagado enquanto não há aplicação iniciada pela
+IDE, e a ação também está em `Projeto → Parar aplicação`.
+
+### Parar e executar em seguida
+
+Ferramentas de build no Windows são arquivos de lote — `mvn.cmd`, `gradlew.bat`.
+Interromper um arquivo de lote faz o `cmd` perguntar se deve finalizá-lo e ficar
+esperando a resposta, o que deixa o terminal travado; sem tratar isso, o próximo
+comando viraria a resposta da pergunta em vez de executar.
+
+O terminal resolve os dois lados:
+
+- a pergunta é respondida com uma segunda interrupção, enviada quando ela
+  aparece de fato. O momento não é previsível — a aplicação ainda encerra seus
+  recursos antes, e no Spring Boot isso leva segundos —, então a espera é pela
+  pergunta, não pelo relógio. Ela é reconhecida pela pontuação, um par entre
+  parênteses separado por barra ao fim da linha, o que não depende do idioma do
+  Windows;
+- um comando pedido enquanto o terminal está ocupado é enfileirado e executado
+  quando ele fica livre, em vez de se perder. Há um limite de espera, para que
+  um terminal que não se resolva não engula o pedido em silêncio.
+
+Com isso, clicar em parar e em executar em seguida reinicia a aplicação.
+
+O **inseto** executa a ação completa com um clique, usando o alvo já
+configurado:
+
+1. se algo já escuta em host e porta, apenas conecta;
+2. senão, monta o comando que sobe a aplicação com o agente de depuração,
+   executa esse comando no terminal integrado e espera a porta abrir, tentando
+   conectar por até dois minutos;
+3. se não houver comando confiável para o projeto, não inventa nenhum: informa
+   na barra de status e deixa a decisão com o usuário.
+
+Os dois botões montam o comando da mesma forma, nesta ordem: `run.command` na
+configuração do usuário, onde `{agent}`, `{host}` e `{port}` são substituídos —
+`{agent}` desaparece na execução sem depuração —; ou a dedução a partir do
+projeto importado. A dedução cobre o que a IDE consegue afirmar com segurança —
+hoje, Maven com o plugin do Spring Boot, usando o wrapper quando existir. Para os
+demais casos vale a configuração explícita, porque só o usuário sabe como sua
+aplicação sobe.
+
+### Executar não é testar
+
+Executar a aplicação não compila as fontes de teste. O `spring-boot:run` encadeia
+a fase `test-compile`, então um teste que não compila — por uma dependência que
+mudou de módulo, por exemplo — impediria de subir a aplicação, o que não é o que
+se espera de um botão de executar. Por isso o comando deduzido desliga a
+compilação de testes.
+
+Rodar os testes continua sendo uma ação própria, com `Ctrl+Shift+T`.
+
+### Argumentos no terminal
+
+O comando é executado no terminal integrado, então precisa ser válido para o
+shell da aba. No Windows isso tem uma consequência concreta: o PowerShell parte
+um argumento `-Dchave.com.pontos=valor` no primeiro ponto e a ferramenta receberia
+dois argumentos sem sentido. Todo argumento `-D` produzido pela IDE vai entre
+aspas.
+
+O ícone fica com a cor de destaque enquanto há sessão conectada.
+
+### Configuração
+
+### Estado visível do breakpoint
+
+A calha tem fundo próprio e uma borda que a separa do código, porque é ela — e
+só ela — que alterna breakpoints ao clique; sem contraste não há como saber onde
+clicar. `F9` alterna o breakpoint da linha do cursor.
+
+O marcador mostra o estado real:
+
+- **contorno** — a linha está marcada, mas o alvo ainda não confirmou: não há
+  sessão, ou a classe ainda não foi carregada;
+- **cheio** — o alvo instalou o breakpoint e a execução vai parar ali.
+
+A barra de status acompanha, informando quantos breakpoints estão ativos e
+quantos aguardam a classe carregar.
+
+Breakpoints marcados antes de existir sessão não se perdem: eles são guardados e
+registrados quando a conexão acontece. Marcar antes de conectar é o fluxo normal,
+já que a aplicação leva tempo para subir.
+
+### Configuração
+
+Na interface, a página `Depuração` das configurações pede host e porta, que são
+gravados na configuração do usuário e reaproveitados pelo botão nas próximas
+execuções. O clique na calha e `F9` alternam breakpoints; `F8`, `F10`, `F11` e `Shift+F11` controlam
 a execução. Um painel à direita do editor mostra estado, pilha e variáveis, e
 escolher um quadro navega até sua linha. A sessão vive em thread própria: nem a
 parada, nem o passo, nem a queda da conexão bloqueiam a janela.

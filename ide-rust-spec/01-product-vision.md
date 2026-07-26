@@ -24,6 +24,12 @@ técnicas da IDE, como `.git` e `target`. O nome do projeto, os terminais e os
 demais serviços associados ao workspace devem passar a usar a nova raiz.
 Cancelar o seletor não altera o workspace atual.
 
+O projeto escolhido é registrado na configuração do usuário e reaberto
+automaticamente na próxima inicialização: quem abre a IDE pela segunda vez
+espera continuar de onde parou, sem repetir a seleção de pasta. Um caminho que
+não existe mais é ignorado em silêncio e a IDE abre normalmente. Os detalhes do
+arquivo e das regras estão em [08 — Persistência](08-storage-and-memory.md).
+
 O menu `Configurações` abre uma janela modal com navegação em um painel
 esquerdo e o conteúdo da opção selecionada no painel direito. A primeira opção
 é `Compilador e VM`. A janela fica suspensa sobre a IDE: workspace, editor,
@@ -136,6 +142,37 @@ Somente serviços Java necessários são inicializados
 - novos sistemas de build;
 - novos formatos de projeto;
 - novas integrações com servidores.
+
+## Aparência
+
+A IDE não define cores próprias. O tema vem da ERLibUi — `Theme::dark()`,
+`Theme::light()` e `Theme::high_contrast()` — e é entregue aos componentes da
+biblioteca pelo contexto de pintura, de modo que barra de menus, combos, campos e
+modais acompanham o mesmo tema que o resto da janela.
+
+Reimplementar aparência na IDE é o caminho errado: cada cor duplicada aqui é uma
+cor que deixa de acompanhar o tema. Quando um componente da biblioteca não
+atende, a correção pertence à biblioteca.
+
+## Executar a aplicação
+
+A barra de menus tem, no canto direito, três botões que resolvem o trabalho do
+dia a dia com um clique: um quadrado que **para** a aplicação, um triângulo que
+a **executa** e um inseto que a **executa com depuração** e conecta o depurador.
+Executar e depurar usam o mesmo comando, deduzido do projeto importado ou
+declarado pelo usuário na configuração; a diferença é apenas o agente de
+depuração.
+
+A aplicação sobe no terminal integrado, com o comando visível, para que o
+usuário acompanhe a saída e a interrompa como faria em qualquer terminal. Parar
+envia a mesma interrupção de um `Ctrl+C`: a IDE não mata processo por fora, e o
+programa encerra como encerraria no terminal. Interromper com uma sessão de
+depuração aberta a desconecta antes, para o depurador não apontar para um
+processo que está terminando.
+
+A IDE não esconde o que executou nem gerencia o processo por trás do usuário. As
+mesmas ações estão no menu `Projeto`, porque atalho de barra não pode ser o
+único caminho para uma função.
 
 ## Neutralidade em relação a servidores
 

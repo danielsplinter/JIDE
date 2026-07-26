@@ -42,6 +42,7 @@ pub(crate) struct EffectivePom {
     pub(crate) managed_versions: BTreeMap<String, String>,
     pub(crate) modules: Vec<String>,
     pub(crate) dependencies: Vec<RawDependency>,
+    pub(crate) plugins: Vec<String>,
     pub(crate) source_directory: Option<String>,
     pub(crate) test_source_directory: Option<String>,
     pub(crate) build_directory: Option<String>,
@@ -135,6 +136,15 @@ pub(crate) fn parse(
         .unwrap_or_default();
 
     let build = root.child("build");
+    let plugins = build
+        .and_then(|build| build.child("plugins"))
+        .map(|plugins| {
+            plugins
+                .children_named("plugin")
+                .filter_map(|plugin| plugin.child_text("artifactId").map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     let build_text = |name: &str| {
         build
             .and_then(|build| build.child_text(name))
@@ -159,6 +169,7 @@ pub(crate) fn parse(
         managed_versions,
         modules,
         dependencies,
+        plugins,
         source_directory,
         test_source_directory,
         build_directory,

@@ -19,7 +19,14 @@ Gradle e a depuração remota de processos em execução.
 cargo run -p ide-app
 ```
 
-O Explorer carrega o diretório no qual a IDE foi iniciada. Clique em diretórios
+Na primeira execução, o Explorer carrega o diretório no qual a IDE foi iniciada.
+Depois disso vale o último projeto aberto por `Arquivo → Projeto...`, gravado em
+`%APPDATA%\er-ide\config.toml` no Windows e em `~/.config/er-ide/config.toml`
+nas demais plataformas — `ER_IDE_CONFIG` aponta para outro arquivo quando
+necessário. Se a pasta registrada não existir mais, a IDE abre o diretório atual
+sem reclamar.
+
+Clique em diretórios
 para expandir ou recolher e em arquivos de texto para abri-los. Clique nas abas
 para alternar documentos. Clique no editor para posicionar o cursor e digite
 normalmente; `Backspace`, `Enter` e as setas esquerda/direita estão disponíveis.
@@ -56,28 +63,53 @@ system, o nome do projeto e a quantidade de módulos e dependências, e o
 classpath usado por `Ctrl+B`, `F5` e `Ctrl+Shift+T` passa a incluir as saídas
 dos módulos e os artefatos resolvidos.
 
-O menu `Projeto` oferece `Compilar projeto` e `Reimportar projeto`.
-`Ctrl+Shift+B` executa o build do sistema detectado — `compile` no Maven,
-`classes` no Gradle — usando o wrapper versionado no projeto quando existir e o
-`JAVA_HOME` do JDK selecionado. A saída aparece no terminal ativo. Alterações
-feitas no `pom.xml` ou nos scripts do Gradle fora da IDE disparam reimportação
-automática.
+O menu `Projeto` oferece `Compilar projeto`, `Reimportar projeto` e
+`Executar aplicação`. `Ctrl+Shift+B` executa o build do sistema detectado —
+`compile` no Maven, `classes` no Gradle — usando o wrapper versionado no projeto
+quando existir e o `JAVA_HOME` do JDK selecionado. A saída aparece no terminal
+ativo. Alterações feitas no `pom.xml` ou nos scripts do Gradle fora da IDE
+disparam reimportação automática.
 
-## Depuração
+## Executar e depurar
 
-A IDE se conecta a qualquer processo Java em execução com depuração habilitada —
-Tomcat, Jetty, WildFly, WebSphere, Quarkus, Spring Boot, um contêiner com a
-porta exposta ou uma ferramenta em lote. Ela não inicia nem para o servidor:
-quem faz isso é você.
+O canto direito da barra de menus tem três botões:
 
-Suba o processo com o agente de depuração escutando:
+- **quadrado de stop** — interrompe a aplicação iniciada pela IDE, com a mesma
+  interrupção de um `Ctrl+C` na aba de terminal em que ela subiu; fica apagado
+  quando não há nada em execução. O mesmo que `Projeto → Parar aplicação`;
+- **triângulo de play** — sobe a aplicação do projeto no terminal integrado, sem
+  depuração; o mesmo que `Projeto → Executar aplicação`;
+- **inseto** — sobe a aplicação já com o agente de depuração e conecta o
+  depurador assim que a porta abre. Se já existe algo escutando no alvo
+  configurado, ele apenas conecta, sem subir uma segunda instância.
+
+Os dois usam o mesmo comando. Hoje a IDE deduz sozinha projetos Maven com o
+plugin do Spring Boot; para os demais, defina `command` na seção `[run]` do
+`config.toml`, onde `{agent}` recebe o agente de depuração quando a execução é
+com depuração e desaparece quando é sem:
+
+```toml
+[run]
+command = "./gradlew bootRun \"-Dorg.gradle.jvmargs={agent}\""
+```
+
+A aplicação roda no terminal integrado, com o comando visível — `Ctrl+C` encerra,
+como em qualquer terminal.
+
+Também dá para conectar a um processo que você mesmo subiu, em qualquer lugar:
+Tomcat, Jetty, WildFly, WebSphere, Quarkus, um contêiner com a porta exposta ou
+uma ferramenta em lote. Basta que ele tenha o agente escutando:
 
 ```text
 -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8000
 ```
 
-Em `Depurar → Conectar...` informe host e porta e conecte. Clique na calha do
-editor ou pressione `F9` para marcar um breakpoint. Quando a execução parar, o
+Em `Depurar → Conectar...` informe host e porta e conecte; o alvo fica gravado e
+passa a ser o que o botão usa. Para marcar um breakpoint, clique na **calha** — a faixa escura à esquerda do
+código, onde ficam os números de linha — ou ponha o cursor na linha e pressione
+`F9`. O marcador aparece como contorno enquanto o alvo não confirmou, e fica
+cheio quando o breakpoint está instalado e vai parar a execução; a barra de
+status informa quantos estão ativos. Quando a execução parar, o
 arquivo é aberto, a linha fica destacada e o painel à direita mostra a pilha de
 chamadas e as variáveis do quadro selecionado; clicar em um quadro navega até
 sua linha.

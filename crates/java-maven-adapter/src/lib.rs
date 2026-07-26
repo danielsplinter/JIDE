@@ -219,6 +219,7 @@ fn import_module(
         output_directory: output_directory(directory, &effective, false),
         test_output_directory: output_directory(directory, &effective, true),
         children: Vec::new(),
+        plugins: effective.plugins.clone(),
     });
 
     let mut children = Vec::new();
@@ -525,6 +526,14 @@ mod tests {
       <scope>test</scope>
     </dependency>
   </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
 </project>"#,
         );
         write(&root.join("app/src/main/java/Main.java"), "class Main {}");
@@ -612,6 +621,10 @@ mod tests {
             app.dependencies
                 .iter()
                 .any(|dependency| dependency.scope == DependencyScope::Test)
+        );
+        assert!(
+            model.declares_plugin("spring-boot-maven-plugin"),
+            "os plugins do build identificam como a aplicação é executada"
         );
         assert!(
             model

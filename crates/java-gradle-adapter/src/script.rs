@@ -51,6 +51,32 @@ pub(crate) fn root_project_name(settings: &str) -> Option<String> {
         .find_map(|line| string_literals(line).into_iter().next())
 }
 
+/// Plugins declarados literalmente, nas duas formas usuais do bloco `plugins`.
+///
+/// `id 'org.springframework.boot'`, `id("java")` e a forma antiga
+/// `apply plugin: 'war'` são reconhecidas; o que for calculado em tempo de
+/// execução é ignorado, como no resto da leitura de scripts.
+#[must_use]
+pub(crate) fn declared_plugins(script: &str) -> Vec<String> {
+    let mut plugins = Vec::new();
+    for line in meaningful_lines(script) {
+        let declares =
+            line.starts_with("id ") || line.starts_with("id(") || line.starts_with("apply plugin");
+        if !declares {
+            continue;
+        }
+        if let Some(plugin) = string_literals(line)
+            .into_iter()
+            .next()
+            .filter(|plugin| !plugin.is_empty())
+            && !plugins.contains(&plugin)
+        {
+            plugins.push(plugin);
+        }
+    }
+    plugins
+}
+
 /// Dependências declaradas com coordenada literal, com o escopo da configuração.
 #[must_use]
 pub(crate) fn declared_dependencies(script: &str) -> Vec<(ProjectCoordinates, DependencyScope)> {
@@ -166,6 +192,20 @@ mod tests {
         let kotlin = "rootProject.name = \"demo\"\ninclude(\":app\")";
         assert_eq!(root_project_name(kotlin).as_deref(), Some("demo"));
         assert_eq!(included_modules(kotlin), vec!["app".to_owned()]);
+    }
+
+    #[test]
+    fn reads_declared_plugins_in_both_forms() {
+        let script = "plugins {\n  id 'java'\n  id(\"org.springframework.boot\") version \"3.2.0\"\n}\napply plugin: 'war'\n";
+        assert_eq!(
+            declared_plugins(script),
+            vec![
+                "java".to_owned(),
+                "org.springframework.boot".to_owned(),
+                "war".to_owned()
+            ]
+        );
+        assert!(declared_plugins("dependencies { implementation 'a:b:1' }").is_empty());
     }
 
     #[test]

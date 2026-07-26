@@ -14,14 +14,16 @@ use ide_text::EditorSession;
 use ide_workspace::{FileNode, WorkspaceError};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
-    Button, ComboBox, ComboBoxItem, MenuBar, MenuBarItem, MenuItem, ModalHost, TextInput,
+    Button, ComboBox, ComboBoxItem, Icon, IconTint, MenuBar, MenuBarItem, MenuItem, ModalHost,
+    TextInput,
 };
 use ui_core::{
-    Color, EventResult, FontId, KeyEvent, Modifiers, Point, PointerButton, PointerEvent, Rect,
-    Size, UiEvent, WidgetAction, WidgetId,
+    Color, ColorTokens, EventResult, FontId, KeyEvent, Modifiers, Point, PointerButton,
+    PointerEvent, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_render_api::{
-    DrawTextCommand, FillCircleCommand, FillRectCommand, PaintCommand, StrokeRectCommand,
+    DrawTextCommand, FillCircleCommand, FillRectCommand, PaintCommand, StrokeCircleCommand,
+    StrokeRectCommand,
 };
 
 const ACTIVITY_WIDTH: f32 = 48.0;
@@ -51,6 +53,9 @@ const SETTINGS_CLOSE_ID: WidgetId = WidgetId(10_005);
 const DEBUG_HOST_ID: WidgetId = WidgetId(10_006);
 const DEBUG_PORT_ID: WidgetId = WidgetId(10_007);
 const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
+const STOP_BUTTON_ID: WidgetId = WidgetId(10_009);
+const RUN_BUTTON_ID: WidgetId = WidgetId(10_010);
+const DEBUG_BUTTON_ID: WidgetId = WidgetId(10_011);
 
 /// Página ativa da janela de configurações.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -66,7 +71,15 @@ pub enum SettingsPage {
 /// usuário pediu, e a aplicação traduz para a sessão ativa.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DebugRequest {
-    Attach { host: String, port: u16 },
+    Attach {
+        host: String,
+        port: u16,
+    },
+    /// Sobe a aplicação do projeto com depuração e conecta nela.
+    RunAndAttach {
+        host: String,
+        port: u16,
+    },
     Continue,
     Pause,
     StepOver,
@@ -191,6 +204,10 @@ pub struct IdeShell {
     open_settings_requested: bool,
     build_project_requested: bool,
     reimport_project_requested: bool,
+    run_requested: bool,
+    stop_requested: bool,
+    /// Aba de terminal em que a aplicação foi iniciada pela IDE.
+    running_terminal: Option<usize>,
     project_summary: Option<String>,
     browse_jdk_requested: bool,
     pending_navigation: Option<NavigationRequest>,
@@ -204,10 +221,16 @@ pub struct IdeShell {
     settings_jdk_result: Option<usize>,
     settings_page: SettingsPage,
     settings_focus: Option<WidgetId>,
+    stop_button: Button,
+    run_button: Button,
+    debug_button: Button,
     debug_host: TextInput,
     debug_port: TextInput,
     debug_attach_button: Button,
+    theme: Theme,
     breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
+    /// Linhas que o alvo confirmou, por arquivo.
+    verified_breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
     breakpoints_dirty: Option<PathBuf>,
     debug: DebugView,
     debug_requests: Vec<DebugRequest>,
@@ -276,6 +299,8 @@ impl IdeShell {
                         vec![
                             MenuItem::new("Compilar projeto", "project.build"),
                             MenuItem::new("Reimportar projeto", "project.reimport"),
+                            MenuItem::new("Executar aplicação", "project.run"),
+                            MenuItem::new("Parar aplicação", "project.stop"),
                         ],
                     ),
                     MenuBarItem::menu(
@@ -306,6 +331,9 @@ impl IdeShell {
             open_settings_requested: false,
             build_project_requested: false,
             reimport_project_requested: false,
+            run_requested: false,
+            stop_requested: false,
+            running_terminal: None,
             project_summary: None,
             browse_jdk_requested: false,
             pending_navigation: None,
@@ -319,11 +347,22 @@ impl IdeShell {
             settings_jdk_result: None,
             settings_page: SettingsPage::default(),
             settings_focus: None,
+            stop_button: Button::icon(STOP_BUTTON_ID, Icon::Stop, "Parar aplicação")
+                .with_tint(IconTint::Muted)
+                .with_command("project.stop"),
+            run_button: Button::icon(RUN_BUTTON_ID, Icon::Play, "Executar aplicação")
+                .with_tint(IconTint::Success)
+                .with_command("project.run"),
+            debug_button: Button::icon(DEBUG_BUTTON_ID, Icon::Bug, "Executar com depuração")
+                .with_tint(IconTint::Muted)
+                .with_command("debug.run"),
             debug_host: TextInput::new(DEBUG_HOST_ID, "127.0.0.1").with_placeholder("host"),
             debug_port: TextInput::new(DEBUG_PORT_ID, "8000").with_placeholder("porta"),
             debug_attach_button: Button::new(DEBUG_ATTACH_ID, "Conectar")
                 .with_command("debug.attach"),
+            theme: Theme::default(),
             breakpoints: BTreeMap::new(),
+            verified_breakpoints: BTreeMap::new(),
             breakpoints_dirty: None,
             debug: DebugView::default(),
             debug_requests: Vec::new(),
@@ -432,6 +471,83 @@ impl IdeShell {
     }
     pub const fn settings_dialog_open(&self) -> bool {
         self.settings_modal.is_open()
+    }
+    /// Troca o tema da interface.
+    ///
+    /// O tema vem da ERLibUi e vale para tudo — inclusive para os componentes da
+    /// biblioteca, que o recebem pelo contexto de pintura. A IDE não guarda cor
+    /// própria.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    #[must_use]
+    pub const fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Alvo de depuração apresentado na janela e usado pelo botão de depurar.
+    pub fn set_debug_target(&mut self, host: &str, port: u16) {
+        self.debug_host.set_value(host);
+        self.debug_port.set_value(port.to_string());
+    }
+
+    #[must_use]
+    pub fn debug_target(&self) -> Option<(String, u16)> {
+        let host = self.debug_host.value().trim().to_owned();
+        let port = self.debug_port.value().trim().parse::<u16>().ok()?;
+        (!host.is_empty() && port > 0).then_some((host, port))
+    }
+
+    /// Executa um comando na aba de terminal ativa, como se o usuário digitasse.
+    pub fn run_in_terminal(&mut self, command: &str) -> Result<(), String> {
+        let active = self.active_terminal;
+        let Some(tab) = self.terminals.get_mut(active) else {
+            return Err("Nenhum terminal disponível".to_owned());
+        };
+        tab.session
+            .run(command)
+            .map_err(|error| error.to_string())?;
+        tab.follow_output = true;
+        self.terminal_minimized = false;
+        self.running_terminal = Some(active);
+        Ok(())
+    }
+
+    /// Interrompe a aplicação iniciada pela IDE, como um `Ctrl+C` do usuário.
+    pub fn stop_application(&mut self) -> Result<(), String> {
+        let Some(index) = self.running_terminal else {
+            return Err("Nenhuma aplicação iniciada pela IDE".to_owned());
+        };
+        let Some(tab) = self.terminals.get_mut(index) else {
+            self.running_terminal = None;
+            return Err("O terminal da aplicação não existe mais".to_owned());
+        };
+        tab.session.interrupt().map_err(|error| error.to_string())?;
+        tab.follow_output = true;
+        self.active_terminal = index;
+        self.running_terminal = None;
+        self.status_message = "Aplicação interrompida".to_owned();
+        Ok(())
+    }
+
+    /// Indica que a IDE iniciou uma aplicação e ainda não a interrompeu.
+    #[must_use]
+    pub const fn application_running(&self) -> bool {
+        self.running_terminal.is_some()
+    }
+
+    /// Escolhe a página apresentada pela janela de configurações.
+    ///
+    /// Abrir a janela pelo menu mantém a última página usada; atalhos que
+    /// prometem uma página específica precisam declará-la.
+    pub fn set_settings_page(&mut self, page: SettingsPage) {
+        self.settings_page = page;
+        self.settings_focus = None;
+    }
+    #[must_use]
+    pub const fn settings_page(&self) -> SettingsPage {
+        self.settings_page
     }
     pub fn take_settings_jdk_result(&mut self) -> Option<usize> {
         self.settings_jdk_result.take()
@@ -578,6 +694,23 @@ impl IdeShell {
         self.breakpoints.values().map(BTreeSet::len).sum()
     }
 
+    /// Registra quais linhas o alvo confirmou, para diferenciá-las na calha.
+    pub fn set_verified_breakpoints(&mut self, path: &Path, lines: &[u32]) {
+        if lines.is_empty() {
+            self.verified_breakpoints.remove(path);
+        } else {
+            self.verified_breakpoints
+                .insert(path.to_path_buf(), lines.iter().copied().collect());
+        }
+    }
+
+    #[must_use]
+    pub fn breakpoint_is_verified(&self, path: &Path, line: u32) -> bool {
+        self.verified_breakpoints
+            .get(path)
+            .is_some_and(|lines| lines.contains(&line))
+    }
+
     /// Arquivo cujos breakpoints mudaram desde a última consulta.
     pub fn take_breakpoints_dirty(&mut self) -> Option<PathBuf> {
         self.breakpoints_dirty.take()
@@ -616,6 +749,14 @@ impl IdeShell {
     }
     pub fn take_reimport_project_request(&mut self) -> bool {
         std::mem::take(&mut self.reimport_project_requested)
+    }
+    /// Pedido de executar a aplicação, sem depuração.
+    pub fn take_run_request(&mut self) -> bool {
+        std::mem::take(&mut self.run_requested)
+    }
+    /// Pedido de interromper a aplicação iniciada pela IDE.
+    pub fn take_stop_request(&mut self) -> bool {
+        std::mem::take(&mut self.stop_requested)
     }
     /// Resumo do projeto importado, apresentado na barra de status.
     pub fn set_project_summary(&mut self, summary: Option<String>) {
@@ -686,7 +827,7 @@ impl IdeShell {
         )
     }
 
-    fn paint_debug_panel(&self, size: Size, colors: Colors) -> Vec<PaintCommand> {
+    fn paint_debug_panel(&self, size: Size, colors: ColorTokens) -> Vec<PaintCommand> {
         let geometry = debug_panel_geometry(self.debug_panel_rect(size), self.debug.frames.len());
         let panel = geometry.panel;
         let mut commands = vec![
@@ -717,7 +858,7 @@ impl IdeShell {
                 if self.debug.is_stopped() {
                     colors.text
                 } else {
-                    colors.muted
+                    colors.muted_text
                 },
                 12.0,
             ));
@@ -726,7 +867,7 @@ impl IdeShell {
         commands.push(label(
             "Pilha de chamadas",
             Point::new(panel.origin.x + 12.0, geometry.frames_top - 20.0),
-            colors.muted,
+            colors.muted_text,
             12.0,
         ));
         for (index, frame) in self.debug.frames.iter().take(8).enumerate() {
@@ -758,7 +899,7 @@ impl IdeShell {
         commands.push(label(
             "Variáveis",
             Point::new(panel.origin.x + 12.0, geometry.variables_top - 20.0),
-            colors.muted,
+            colors.muted_text,
             12.0,
         ));
         let rows = ((panel.origin.y + panel.size.height - geometry.variables_top)
@@ -854,6 +995,9 @@ impl IdeShell {
             self.selection_dialog_pointer_down(point, size);
             return;
         }
+        if point.y < TITLE_HEIGHT && self.action_buttons_pointer_down(point, size) {
+            return;
+        }
         self.menu_bar.layout(
             &LayoutContext,
             Rect::new(82.0, 0.0, (size.width - 82.0).max(0.0), TITLE_HEIGHT),
@@ -881,6 +1025,15 @@ impl IdeShell {
                 if command.0 == "project.reimport" =>
             {
                 self.reimport_project_requested = true;
+                return;
+            }
+            EventResult::Action(WidgetAction::Command(command)) if command.0 == "project.run" => {
+                self.run_requested = true;
+                self.status_message = "Executando a aplicação".to_owned();
+                return;
+            }
+            EventResult::Action(WidgetAction::Command(command)) if command.0 == "project.stop" => {
+                self.stop_requested = true;
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "debug.connect" => {
@@ -1597,7 +1750,7 @@ impl IdeShell {
         let sidebar = self.sidebar_width(size);
         let editor_x = ACTIVITY_WIDTH + sidebar;
         let geo = self.geometry(size);
-        let colors = Colors::default();
+        let colors = self.theme.colors;
         let mut commands = vec![
             fill(
                 Rect::new(0.0, 0.0, size.width, size.height),
@@ -1638,9 +1791,16 @@ impl IdeShell {
                 ),
                 colors.surface,
             ),
+            // A barra de status usa a mesma superfície dos demais painéis,
+            // separada por uma linha de borda. Em destaque, ela competia com o
+            // conteúdo e deixava o texto com contraste baixo demais para ler.
             fill(
                 Rect::new(0.0, geo.content_bottom, size.width, 24.0),
-                colors.accent,
+                colors.surface,
+            ),
+            fill(
+                Rect::new(0.0, geo.content_bottom, size.width, 1.0),
+                colors.border,
             ),
             stroke(
                 Rect::new(
@@ -1655,7 +1815,7 @@ impl IdeShell {
             label(
                 "EXPLORER",
                 Point::new(ACTIVITY_WIDTH + 14.0, TITLE_HEIGHT + 14.0),
-                colors.muted,
+                colors.muted_text,
                 12.0,
             ),
             label(
@@ -1801,7 +1961,7 @@ impl IdeShell {
             commands.push(label(
                 "x",
                 Point::new(x + TAB_WIDTH - 22.0, TITLE_HEIGHT + 10.0),
-                colors.muted,
+                colors.muted_text,
                 14.0,
             ));
         }
@@ -1812,6 +1972,21 @@ impl IdeShell {
             geo.editor_width,
             geo.editor_height,
         )));
+        // A calha é a faixa de breakpoints e precisa ser visível: sem contraste,
+        // não há como saber onde clicar para marcar uma linha.
+        commands.push(fill(
+            Rect::new(editor_x, geo.content_top, EDITOR_GUTTER, geo.editor_height),
+            colors.background,
+        ));
+        commands.push(fill(
+            Rect::new(
+                editor_x + EDITOR_GUTTER - 1.0,
+                geo.content_top,
+                1.0,
+                geo.editor_height,
+            ),
+            colors.border,
+        ));
         if let Some(text) = self.active_text() {
             let visible = (geo.editor_height / EDITOR_LINE_HEIGHT).ceil() as usize;
             let active_path = self
@@ -1841,16 +2016,28 @@ impl IdeShell {
                     ));
                 }
                 if breakpoints.is_some_and(|lines| lines.contains(&document_line)) {
-                    commands.push(PaintCommand::FillCircle(FillCircleCommand {
-                        center: Point::new(editor_x + 42.0, y + 5.0),
-                        radius: 5.0,
-                        color: Color::rgba(0.85, 0.28, 0.28, 1.0),
-                    }));
+                    let center = Point::new(editor_x + 42.0, y + 5.0);
+                    // Confirmado pelo alvo: círculo cheio. Ainda não registrado
+                    // — sem sessão, ou classe não carregada — apenas o contorno.
+                    if self.breakpoint_is_verified(&active_path, document_line) {
+                        commands.push(PaintCommand::FillCircle(FillCircleCommand {
+                            center,
+                            radius: 5.0,
+                            color: colors.danger,
+                        }));
+                    } else {
+                        commands.push(PaintCommand::StrokeCircle(StrokeCircleCommand {
+                            center,
+                            radius: 4.5,
+                            color: colors.danger,
+                            width: 1.6,
+                        }));
+                    }
                 }
                 commands.push(label(
                     &(index + self.editor_scroll_line + 1).to_string(),
                     Point::new(editor_x + 12.0, y),
-                    colors.muted,
+                    colors.muted_text,
                     13.0,
                 ));
                 if let Some(snapshot) = self
@@ -1873,7 +2060,7 @@ impl IdeShell {
                     commands.push(label(
                         line,
                         Point::new(editor_x + EDITOR_GUTTER, y),
-                        syntax_color(line, colors.text, colors.accent, colors.muted),
+                        syntax_color(line, colors.text, colors.accent, colors.muted_text),
                         15.0,
                     ));
                 }
@@ -1910,7 +2097,7 @@ impl IdeShell {
             commands.push(label(
                 "Select a file in Explorer",
                 Point::new(editor_x + 55.0, geo.content_top + 30.0),
-                colors.muted,
+                colors.muted_text,
                 16.0,
             ));
         }
@@ -1993,7 +2180,7 @@ impl IdeShell {
                     if line.is_error {
                         Color::rgba(0.95, 0.40, 0.42, 1.0)
                     } else {
-                        colors.muted
+                        colors.muted_text
                     },
                     14.0,
                 ));
@@ -2101,7 +2288,7 @@ impl IdeShell {
                     .unwrap_or_default()
             ),
             Point::new(12.0, geo.content_bottom + 5.0),
-            Color::rgba(1.0, 1.0, 1.0, 1.0),
+            colors.text,
             12.0,
         ));
         let mut menu_bar = self.menu_bar.clone();
@@ -2109,14 +2296,41 @@ impl IdeShell {
             &LayoutContext,
             Rect::new(82.0, 0.0, (size.width - 82.0).max(0.0), TITLE_HEIGHT),
         );
-        let mut menu_paint = PaintContext::default();
+        let mut menu_paint = PaintContext::with_theme(self.theme);
         menu_bar.paint(&mut menu_paint);
         commands.extend(menu_paint.into_commands());
+        // Os botões de ação são widgets da biblioteca: a IDE define papel e
+        // posição, e o desenho do ícone e o tema vêm de lá.
+        let rects = action_button_rects(size);
+        let mut stop = self.stop_button.clone();
+        stop.set_tint(if self.application_running() {
+            IconTint::Danger
+        } else {
+            IconTint::Muted
+        });
+        stop.set_disabled(!self.application_running());
+        let mut debug = self.debug_button.clone();
+        debug.set_tint(if self.debug.attached {
+            IconTint::Accent
+        } else {
+            IconTint::Muted
+        });
+        let mut run = self.run_button.clone();
+        let mut actions = PaintContext::with_theme(self.theme);
+        for (button, rect) in [
+            (&mut stop, rects[0]),
+            (&mut run, rects[1]),
+            (&mut debug, rects[2]),
+        ] {
+            button.layout(&LayoutContext, rect);
+            button.paint(&mut actions);
+        }
+        commands.extend(actions.into_commands());
         if self.settings_modal.is_open() {
             let mut modal = self.settings_modal.clone();
             modal.layout(&LayoutContext, Rect::new(0.0, 0.0, size.width, size.height));
             let geometry = settings_dialog_geometry(modal.panel_bounds());
-            let mut modal_paint = PaintContext::default();
+            let mut modal_paint = PaintContext::with_theme(self.theme);
             modal.paint(&mut modal_paint);
             commands.extend(modal_paint.into_commands());
             commands.push(fill(geometry.sidebar, colors.surface));
@@ -2142,11 +2356,15 @@ impl IdeShell {
                 commands.push(label(
                     title,
                     Point::new(option.origin.x + 14.0, option.origin.y + 11.0),
-                    if active { colors.text } else { colors.muted },
+                    if active {
+                        colors.text
+                    } else {
+                        colors.muted_text
+                    },
                     14.0,
                 ));
             }
-            let mut component_paint = PaintContext::default();
+            let mut component_paint = PaintContext::with_theme(self.theme);
             match self.settings_page {
                 SettingsPage::Compiler => {
                     commands.push(label(
@@ -2158,7 +2376,7 @@ impl IdeShell {
                     commands.push(label(
                         "JDK",
                         Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 16.0),
-                        colors.muted,
+                        colors.muted_text,
                         13.0,
                     ));
                     let mut combo = self.jdk_combo.clone();
@@ -2217,7 +2435,7 @@ impl IdeShell {
                 commands.push(label(
                     "Nenhum JDK detectado. Configure JAVA_HOME.",
                     Point::new(dialog_rect.origin.x + 20.0, rows_top + 8.0),
-                    colors.muted,
+                    colors.muted_text,
                     14.0,
                 ));
             }
@@ -2342,7 +2560,7 @@ impl IdeShell {
     fn paint_debug_settings(
         &self,
         geometry: &SettingsDialogGeometry,
-        colors: Colors,
+        colors: ColorTokens,
     ) -> Vec<PaintCommand> {
         let origin = geometry.debug_host.origin;
         let mut commands = vec![
@@ -2355,19 +2573,19 @@ impl IdeShell {
             label(
                 "Host e porta de depuração do processo em execução",
                 Point::new(origin.x, origin.y - 16.0),
-                colors.muted,
+                colors.muted_text,
                 13.0,
             ),
             label(
                 "Inicie o servidor com -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8000",
                 Point::new(origin.x, geometry.debug_attach.origin.y + 48.0),
-                colors.muted,
+                colors.muted_text,
                 12.0,
             ),
             label(
                 "Vale para qualquer processo Java: servidor, container ou ferramenta.",
                 Point::new(origin.x, geometry.debug_attach.origin.y + 66.0),
-                colors.muted,
+                colors.muted_text,
                 12.0,
             ),
         ];
@@ -2401,6 +2619,59 @@ impl IdeShell {
             .layout(&LayoutContext, geometry.close);
         let close_result = click_widget(&mut self.settings_close_button, point);
         let _ = self.handle_settings_action(close_result);
+    }
+
+    /// Botões de ação da barra, na ordem em que aparecem.
+    #[must_use]
+    pub fn action_buttons(&self) -> [&Button; 3] {
+        [&self.stop_button, &self.run_button, &self.debug_button]
+    }
+
+    /// Roteia o clique para os botões de ação, que são widgets da biblioteca.
+    fn action_buttons_pointer_down(&mut self, point: Point, size: Size) -> bool {
+        let rects = action_button_rects(size);
+        self.stop_button.layout(&LayoutContext, rects[0]);
+        self.run_button.layout(&LayoutContext, rects[1]);
+        self.debug_button.layout(&LayoutContext, rects[2]);
+        let commands = [
+            click_widget(&mut self.stop_button, point),
+            click_widget(&mut self.run_button, point),
+            click_widget(&mut self.debug_button, point),
+        ];
+        for result in commands {
+            if let EventResult::Action(WidgetAction::Command(command)) = result {
+                match command.0.as_str() {
+                    "project.stop" => self.stop_requested = true,
+                    "project.run" => {
+                        self.run_requested = true;
+                        self.status_message = "Executando a aplicação".to_owned();
+                    }
+                    "debug.run" => self.request_run_and_attach(),
+                    _ => continue,
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Botão de depurar: sobe a aplicação e conecta, com o alvo configurado.
+    fn request_run_and_attach(&mut self) {
+        if self.debug.attached {
+            self.status_message = "Depuração já conectada".to_owned();
+            return;
+        }
+        match self.debug_target() {
+            Some((host, port)) => {
+                self.debug_requests
+                    .push(DebugRequest::RunAndAttach { host, port });
+            }
+            None => {
+                self.settings_page = SettingsPage::Debug;
+                self.open_settings_requested = true;
+                self.status_message = "Informe um host e uma porta de depuração válidos".to_owned();
+            }
+        }
     }
 
     /// Valida host e porta antes de pedir a conexão à aplicação.
@@ -2617,6 +2888,18 @@ struct Geometry {
     terminal_height: f32,
 }
 
+/// Barra de ações no canto direito da barra de menus: parar, executar, depurar.
+///
+/// A ordem e o desenho dos ícones pertencem à ERLibUi; aqui só existe a posição
+/// dos botões na janela.
+fn action_button_rects(size: Size) -> [Rect; 3] {
+    const SIDE: f32 = 28.0;
+    const GAP: f32 = 2.0;
+    let top = (TITLE_HEIGHT - SIDE) / 2.0;
+    let first = (size.width - 10.0 - SIDE * 3.0 - GAP * 2.0).max(0.0);
+    [0.0, 1.0, 2.0].map(|index| Rect::new(first + index * (SIDE + GAP), top, SIDE, SIDE))
+}
+
 /// Comandos do menu `Depurar` que viram pedidos diretos à sessão.
 fn debug_request_for(command: &str) -> Option<DebugRequest> {
     Some(match command {
@@ -2778,39 +3061,6 @@ fn is_identifier_character(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
 }
 
-#[derive(Clone, Copy)]
-struct Colors {
-    background: Color,
-    surface: Color,
-    elevated: Color,
-    border: Color,
-    text: Color,
-    muted: Color,
-    accent: Color,
-    syntax_type: Color,
-    syntax_function: Color,
-    syntax_string: Color,
-    syntax_number: Color,
-    syntax_annotation: Color,
-}
-impl Default for Colors {
-    fn default() -> Self {
-        Self {
-            background: Color::rgba(0.055, 0.067, 0.09, 1.0),
-            surface: Color::rgba(0.075, 0.09, 0.12, 1.0),
-            elevated: Color::rgba(0.10, 0.12, 0.16, 1.0),
-            border: Color::rgba(0.18, 0.21, 0.28, 1.0),
-            text: Color::rgba(0.86, 0.89, 0.95, 1.0),
-            muted: Color::rgba(0.55, 0.60, 0.70, 1.0),
-            accent: Color::rgba(0.30, 0.55, 0.96, 1.0),
-            syntax_type: Color::rgba(0.35, 0.78, 0.82, 1.0),
-            syntax_function: Color::rgba(0.86, 0.76, 0.45, 1.0),
-            syntax_string: Color::rgba(0.62, 0.78, 0.48, 1.0),
-            syntax_number: Color::rgba(0.82, 0.62, 0.44, 1.0),
-            syntax_annotation: Color::rgba(0.76, 0.52, 0.88, 1.0),
-        }
-    }
-}
 fn fill(rect: Rect, color: Color) -> PaintCommand {
     PaintCommand::FillRect(FillRectCommand { rect, color })
 }
@@ -2846,7 +3096,7 @@ fn scrollbar(
     total: usize,
     visible: usize,
     offset: usize,
-    colors: Colors,
+    colors: ColorTokens,
 ) -> Vec<PaintCommand> {
     let mut commands = vec![fill(track, colors.elevated)];
     let Some(metrics) = scrollbar_metrics(track, total, visible, offset) else {
@@ -2859,7 +3109,7 @@ fn scrollbar(
             track.size.width - 4.0,
             metrics.thumb.size.height,
         ),
-        colors.muted,
+        colors.muted_text,
     ));
     commands
 }
@@ -2944,7 +3194,7 @@ fn horizontal_scrollbar(
     total_width: f32,
     visible_width: f32,
     offset: f32,
-    colors: Colors,
+    colors: ColorTokens,
 ) -> Vec<PaintCommand> {
     let mut commands = vec![fill(track, colors.elevated)];
     let Some(metrics) = horizontal_scrollbar_metrics(track, total_width, visible_width, offset)
@@ -2958,7 +3208,7 @@ fn horizontal_scrollbar(
             metrics.thumb.size.width,
             (metrics.thumb.size.height - 4.0).max(2.0),
         ),
-        colors.muted,
+        colors.muted_text,
     ));
     commands
 }
@@ -3014,7 +3264,7 @@ fn highlighted_line(
     line_index: usize,
     origin: Point,
     snapshot: &SyntaxSnapshot,
-    colors: Colors,
+    colors: ColorTokens,
 ) -> Vec<PaintCommand> {
     let line_length = line.chars().count();
     let mut spans = snapshot
@@ -3099,14 +3349,14 @@ fn push_line_segment(
     }
 }
 
-fn syntax_highlight_color(kind: SyntaxHighlightKind, colors: Colors) -> Color {
+fn syntax_highlight_color(kind: SyntaxHighlightKind, colors: ColorTokens) -> Color {
     match kind {
         SyntaxHighlightKind::Keyword | SyntaxHighlightKind::Operator => colors.accent,
         SyntaxHighlightKind::Type => colors.syntax_type,
         SyntaxHighlightKind::Function => colors.syntax_function,
         SyntaxHighlightKind::String => colors.syntax_string,
         SyntaxHighlightKind::Number => colors.syntax_number,
-        SyntaxHighlightKind::Comment => colors.muted,
+        SyntaxHighlightKind::Comment => colors.muted_text,
         SyntaxHighlightKind::Annotation => colors.syntax_annotation,
         SyntaxHighlightKind::Field | SyntaxHighlightKind::Variable => colors.text,
     }
@@ -3182,8 +3432,18 @@ mod tests {
             shell
                 .paint(size)
                 .iter()
+                .any(|command| matches!(command, PaintCommand::StrokeCircle(_))),
+            "sem confirmação do alvo, o marcador aparece apenas como contorno"
+        );
+
+        shell.set_verified_breakpoints(&path, &[2]);
+        assert!(shell.breakpoint_is_verified(&path, 2));
+        assert!(
+            shell
+                .paint(size)
+                .iter()
                 .any(|command| matches!(command, PaintCommand::FillCircle(_))),
-            "a linha com breakpoint mostra o marcador na calha"
+            "confirmado pelo alvo, o marcador fica cheio"
         );
 
         shell.pointer_down(point, size);
@@ -3275,6 +3535,206 @@ mod tests {
         shell.pointer_down(Point::new(280.0, 10.0), size);
         shell.pointer_down(Point::new(280.0, TITLE_HEIGHT + 38.0), size);
         assert_eq!(shell.take_debug_requests(), vec![DebugRequest::Continue]);
+    }
+
+    #[test]
+    fn the_action_buttons_are_library_widgets_with_accessible_names() {
+        let shell = test_shell();
+        let mut context = PaintContext::with_theme(*shell.theme());
+        let mut accessibility = ui_api::AccessibilityContext::default();
+        for (button, rect) in shell
+            .action_buttons()
+            .into_iter()
+            .zip(action_button_rects(Size::new(1_280.0, 800.0)))
+        {
+            let mut button = button.clone();
+            button.layout(&LayoutContext, rect);
+            button.paint(&mut context);
+            button.accessibility(&mut accessibility);
+        }
+        let names: Vec<&str> = accessibility
+            .nodes()
+            .iter()
+            .map(|node| node.label.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Parar aplicação",
+                "Executar aplicação",
+                "Executar com depuração"
+            ],
+            "um ícone não é legível: quem o expõe é a biblioteca"
+        );
+    }
+
+    #[test]
+    fn the_play_button_requests_a_plain_run() {
+        let mut shell = test_shell();
+        let size = Size::new(1_280.0, 800.0);
+        let [_, run, debug] = action_button_rects(size);
+        assert!(
+            run.origin.x + run.size.width <= debug.origin.x,
+            "o play fica à esquerda do inseto, sem sobrepor"
+        );
+        let colors = Theme::default().colors;
+        assert!(
+            shell
+                .paint(size)
+                .iter()
+                .filter(|command| matches!(command, PaintCommand::FillRect(rect)
+                    if rect.color == colors.success && run.contains(rect.rect.origin)))
+                .count()
+                >= 5,
+            "o triângulo de play é desenhado com a cor de ação da paleta"
+        );
+
+        shell.pointer_down(Point::new(run.origin.x + 6.0, run.origin.y + 6.0), size);
+        assert!(shell.take_run_request());
+        assert!(!shell.take_run_request(), "o pedido é consumido uma vez");
+        assert!(
+            shell.take_debug_requests().is_empty(),
+            "executar sem depuração não abre sessão"
+        );
+    }
+
+    #[test]
+    fn the_stop_button_sits_left_of_play_and_only_acts_after_a_run() {
+        let mut shell = test_shell();
+        let size = Size::new(1_280.0, 800.0);
+        let [stop, run, _] = action_button_rects(size);
+        assert!(
+            stop.origin.x + stop.size.width <= run.origin.x,
+            "a ordem é parar, executar, depurar"
+        );
+
+        let colors = Theme::default().colors;
+        let icon_color = |shell: &IdeShell| {
+            shell.paint(size).iter().find_map(|command| match command {
+                PaintCommand::FillRect(rect)
+                    if stop.contains(rect.rect.origin) && rect.rect.size.width < 20.0 =>
+                {
+                    Some(rect.color)
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(
+            icon_color(&shell),
+            Some(colors.muted_text),
+            "sem aplicação iniciada, o ícone fica apagado"
+        );
+        assert!(!shell.application_running());
+
+        shell.pointer_down(Point::new(stop.origin.x + 6.0, stop.origin.y + 6.0), size);
+        assert!(shell.take_stop_request());
+        assert!(
+            shell.stop_application().is_err(),
+            "sem aplicação iniciada não há o que interromper"
+        );
+    }
+
+    #[test]
+    fn the_project_menu_also_runs_the_application() {
+        let mut shell = test_shell();
+        let size = Size::new(1_000.0, 700.0);
+        shell.pointer_down(Point::new(200.0, 10.0), size);
+        shell.pointer_down(Point::new(200.0, TITLE_HEIGHT + 66.0), size);
+        assert!(shell.take_run_request());
+        assert!(!shell.take_build_project_request());
+        assert!(!shell.take_reimport_project_request());
+    }
+
+    #[test]
+    fn the_bug_button_runs_and_attaches_with_the_configured_target() {
+        let mut shell = test_shell();
+        let size = Size::new(1_280.0, 800.0);
+        shell.set_debug_target("10.0.0.20", 8787);
+
+        let button = action_button_rects(size)[2];
+        assert!(
+            button.origin.x + button.size.width < size.width && button.origin.x > size.width - 60.0,
+            "o botão fica no canto direito da barra de menus"
+        );
+        assert!(
+            shell
+                .paint(size)
+                .iter()
+                .filter(|command| matches!(command, PaintCommand::FillCircle(circle)
+                    if button.contains(circle.center)))
+                .count()
+                >= 2,
+            "o ícone desenha corpo e cabeça do inseto dentro do botão"
+        );
+
+        shell.pointer_down(
+            Point::new(button.origin.x + 6.0, button.origin.y + 6.0),
+            size,
+        );
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::RunAndAttach {
+                host: "10.0.0.20".to_owned(),
+                port: 8787,
+            }]
+        );
+    }
+
+    #[test]
+    fn the_bug_button_asks_for_a_target_when_it_is_invalid() {
+        let mut shell = test_shell();
+        let size = Size::new(1_280.0, 800.0);
+        shell.set_debug_target("", 0);
+
+        let button = action_button_rects(size)[2];
+        shell.pointer_down(
+            Point::new(button.origin.x + 6.0, button.origin.y + 6.0),
+            size,
+        );
+
+        assert!(shell.take_debug_requests().is_empty());
+        assert!(
+            shell.take_open_settings_request(),
+            "sem alvo válido, o botão abre a página de depuração"
+        );
+        assert_eq!(shell.settings_page(), SettingsPage::Debug);
+    }
+
+    #[test]
+    fn the_debug_menu_opens_the_settings_window_on_the_debug_page() {
+        let mut shell = test_shell();
+        let size = Size::new(1_000.0, 700.0);
+        assert_eq!(shell.settings_page(), SettingsPage::Compiler);
+
+        // Menu `Depurar` → `Conectar...`.
+        shell.pointer_down(Point::new(280.0, 10.0), size);
+        shell.pointer_down(Point::new(280.0, TITLE_HEIGHT + 10.0), size);
+        assert!(shell.take_open_settings_request());
+        assert_eq!(shell.settings_page(), SettingsPage::Debug);
+
+        shell.open_settings_dialog(vec!["JDK 17".to_owned()], 0);
+        let texts: Vec<String> = shell
+            .paint(size)
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|text| text.contains("Host e porta")));
+        assert!(!texts.iter().any(|text| text == "JDK"));
+
+        // O atalho do compilador troca a página de volta.
+        shell.set_settings_page(SettingsPage::Compiler);
+        let texts: Vec<String> = shell
+            .paint(size)
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|text| text == "JDK"));
     }
 
     #[test]
@@ -3380,7 +3840,7 @@ mod tests {
         });
 
         assert_eq!(shell.active_outline()[0].name, "Example");
-        let colors = Colors::default();
+        let colors = Theme::default().colors;
         assert!(shell.paint(Size::new(1280.0, 800.0)).iter().any(|command| {
             matches!(
                 command,
@@ -3945,6 +4405,106 @@ mod tests {
         shell.pointer_down(Point::new(200.0, TITLE_HEIGHT + 38.0), size);
         assert!(shell.take_reimport_project_request());
         assert!(!shell.take_build_project_request());
+    }
+
+    #[test]
+    fn the_theme_comes_from_the_library_and_reaches_its_components() {
+        let mut shell = test_shell();
+        let size = Size::new(1_000.0, 700.0);
+        assert_eq!(shell.theme(), &Theme::dark(), "o tema padrão é o da lib");
+
+        let dark: Vec<Color> = shell
+            .paint(size)
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) => Some(text.color),
+                _ => None,
+            })
+            .collect();
+
+        shell.set_theme(Theme::high_contrast());
+        let contrast: Vec<Color> = shell
+            .paint(size)
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) => Some(text.color),
+                _ => None,
+            })
+            .collect();
+
+        assert_ne!(dark, contrast, "trocar o tema muda o que é pintado");
+        assert!(
+            contrast.contains(&Theme::high_contrast().colors.text),
+            "o texto usa o token do tema ativo"
+        );
+        // A barra de menus é um componente da lib: ela recebe o tema pelo
+        // contexto de pintura, sem a IDE redesenhá-la.
+        assert!(
+            shell.paint(size).iter().any(|command| matches!(
+                command,
+                PaintCommand::DrawText(text)
+                    if text.text == "Arquivo"
+                        && text.color == Theme::high_contrast().colors.text
+            )),
+            "os componentes da biblioteca seguem o tema da aplicação"
+        );
+    }
+
+    #[test]
+    fn status_bar_uses_palette_colors_with_readable_contrast() {
+        let mut shell = test_shell();
+        shell.set_status_message("Pronto");
+        let size = Size::new(1_000.0, 700.0);
+        let colors = Theme::default().colors;
+        let geometry = shell.geometry(size);
+        let commands = shell.paint(size);
+
+        let background = commands.iter().find_map(|command| match command {
+            PaintCommand::FillRect(rect)
+                if rect.rect.origin.y == geometry.content_bottom && rect.rect.size.height > 1.0 =>
+            {
+                Some(rect.color)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            background,
+            Some(colors.surface),
+            "a barra usa a superfície da paleta, não a cor de destaque"
+        );
+
+        let text_color = commands.iter().find_map(|command| match command {
+            PaintCommand::DrawText(text) if text.text.starts_with("Pronto") => Some(text.color),
+            _ => None,
+        });
+        assert_eq!(
+            text_color,
+            Some(colors.text),
+            "o texto usa a cor de texto da paleta, não branco puro"
+        );
+        assert!(
+            contrast_ratio(colors.text, colors.surface) >= 7.0,
+            "texto e fundo da barra precisam de contraste confortável"
+        );
+    }
+
+    /// Razão de contraste WCAG entre duas cores opacas.
+    fn contrast_ratio(first: Color, second: Color) -> f32 {
+        fn luminance(color: Color) -> f32 {
+            fn channel(value: f32) -> f32 {
+                if value <= 0.03928 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            0.2126 * channel(color.red)
+                + 0.7152 * channel(color.green)
+                + 0.0722 * channel(color.blue)
+        }
+        let first = luminance(first);
+        let second = luminance(second);
+        (first.max(second) + 0.05) / (first.min(second) + 0.05)
     }
 
     #[test]

@@ -5,12 +5,15 @@
 //! da conexão não travam o desenho nem a digitação.
 
 use std::{
+    collections::HashMap,
+    net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
     sync::{
         Arc, Mutex,
         mpsc::{Receiver, Sender, TryRecvError, channel},
     },
     thread,
+    time::Duration,
 };
 
 use ide_debug_api::{
@@ -26,6 +29,9 @@ pub(crate) enum DebugCommand {
         host: String,
         port: u16,
         source_roots: Vec<PathBuf>,
+        /// Tentativas de conexão, uma por segundo. Subir uma aplicação leva
+        /// tempo, e a porta só abre quando a JVM já está de pé.
+        attempts: u32,
     },
     SetBreakpoints {
         path: PathBuf,
@@ -44,6 +50,11 @@ pub(crate) enum DebugCommand {
 
 pub(crate) enum DebugUiEvent {
     Session(DebugEvent),
+    /// Linhas que o alvo confirmou para um arquivo, na ordem pedida.
+    Breakpoints {
+        path: PathBuf,
+        verified: Vec<u32>,
+    },
     View {
         thread: ThreadId,
         frames: Vec<DebugFrameView>,
@@ -114,6 +125,10 @@ async fn worker(mut commands: UnboundedReceiver<DebugCommand>, ui: Sender<DebugU
         events: Mutex::new(ui.clone()),
     });
     let mut session: Option<Box<dyn DebugSession>> = None;
+    // O worker guarda os breakpoints marcados, com ou sem sessão. Marcar antes
+    // de conectar é o fluxo normal — a aplicação ainda está subindo — e o pedido
+    // não pode se perder por chegar cedo.
+    let mut breakpoints: HashMap<PathBuf, Vec<u32>> = HashMap::new();
 
     while let Some(command) = commands.recv().await {
         match command {
@@ -121,41 +136,57 @@ async fn worker(mut commands: UnboundedReceiver<DebugCommand>, ui: Sender<DebugU
                 host,
                 port,
                 source_roots,
+                attempts,
             } => {
                 if let Some(previous) = session.take() {
                     let _ = previous.detach().await;
                 }
-                let request = DebugSessionRequest::new(DebugTarget::new(host.clone(), port))
-                    .with_source_roots(source_roots);
-                match adapter.attach(request, Arc::clone(&sink)).await {
-                    Ok(attached) => session = Some(attached),
-                    Err(error) => {
+                let attempts = attempts.max(1);
+                let mut last_error = None;
+                for attempt in 0..attempts {
+                    let request = DebugSessionRequest::new(DebugTarget::new(host.clone(), port))
+                        .with_source_roots(source_roots.clone());
+                    match adapter.attach(request, Arc::clone(&sink)).await {
+                        Ok(attached) => {
+                            session = Some(attached);
+                            break;
+                        }
+                        Err(error) => {
+                            last_error = Some(error);
+                            if attempt + 1 < attempts {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
+                        }
+                    }
+                }
+                match (&session, last_error) {
+                    (Some(active), _) => {
+                        // Tudo que já estava marcado entra na sessão nova.
+                        for (path, lines) in &breakpoints {
+                            apply_breakpoints(active.as_ref(), path, lines, &ui).await;
+                        }
+                    }
+                    (None, Some(error)) => {
                         let _ = ui.send(DebugUiEvent::Status(format!(
                             "Falha ao conectar em {host}:{port}: {error}"
                         )));
                     }
+                    (None, None) => {}
                 }
             }
             DebugCommand::SetBreakpoints { path, lines } => {
-                let Some(active) = session.as_ref() else {
-                    continue;
-                };
-                let breakpoints: Vec<SourceBreakpoint> = lines
-                    .iter()
-                    .map(|line| SourceBreakpoint::new(&path, *line))
-                    .collect();
-                match active.set_breakpoints(&path, &breakpoints).await {
-                    Ok(resolved) => {
-                        let verified = resolved.iter().filter(|bp| bp.is_verified()).count();
-                        let pending = resolved.len() - verified;
-                        let mut status = format!("Breakpoints: {verified} ativos");
-                        if pending > 0 {
-                            status.push_str(&format!(", {pending} aguardando a classe"));
-                        }
-                        let _ = ui.send(DebugUiEvent::Status(status));
-                    }
-                    Err(error) => {
-                        let _ = ui.send(DebugUiEvent::Status(error.to_string()));
+                if lines.is_empty() {
+                    breakpoints.remove(&path);
+                } else {
+                    breakpoints.insert(path.clone(), lines.clone());
+                }
+                match session.as_ref() {
+                    Some(active) => apply_breakpoints(active.as_ref(), &path, &lines, &ui).await,
+                    None => {
+                        let total: usize = breakpoints.values().map(Vec::len).sum();
+                        let _ = ui.send(DebugUiEvent::Status(format!(
+                            "{total} breakpoint(s) marcados; serão registrados ao conectar"
+                        )));
                     }
                 }
             }
@@ -212,6 +243,40 @@ async fn worker(mut commands: UnboundedReceiver<DebugCommand>, ui: Sender<DebugU
     }
     if let Some(active) = session.take() {
         let _ = active.detach().await;
+    }
+}
+
+/// Registra os breakpoints de um arquivo e informa o resultado à interface.
+async fn apply_breakpoints(
+    session: &dyn DebugSession,
+    path: &std::path::Path,
+    lines: &[u32],
+    ui: &Sender<DebugUiEvent>,
+) {
+    let requested: Vec<SourceBreakpoint> = lines
+        .iter()
+        .map(|line| SourceBreakpoint::new(path, *line))
+        .collect();
+    match session.set_breakpoints(path, &requested).await {
+        Ok(resolved) => {
+            let verified: Vec<u32> = resolved
+                .iter()
+                .filter_map(|breakpoint| breakpoint.verified_line)
+                .collect();
+            let pending = resolved.len() - verified.len();
+            let mut status = format!("Breakpoints: {} ativos", verified.len());
+            if pending > 0 {
+                status.push_str(&format!(", {pending} aguardando a classe carregar"));
+            }
+            let _ = ui.send(DebugUiEvent::Breakpoints {
+                path: path.to_path_buf(),
+                verified,
+            });
+            let _ = ui.send(DebugUiEvent::Status(status));
+        }
+        Err(error) => {
+            let _ = ui.send(DebugUiEvent::Status(error.to_string()));
+        }
     }
 }
 
@@ -283,6 +348,20 @@ async fn collect_view(
             .collect(),
         selected,
     })
+}
+
+/// Verifica rapidamente se já existe algo escutando no alvo.
+///
+/// Serve para não subir uma segunda instância quando o servidor já está de pé —
+/// o caso de um contêiner, de uma máquina remota ou de uma aplicação que o
+/// usuário mesmo iniciou.
+pub(crate) fn port_is_open(host: &str, port: u16) -> bool {
+    let Ok(addresses) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    addresses
+        .into_iter()
+        .any(|address| TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok())
 }
 
 /// Texto curto para a barra de status a partir do motivo da parada.

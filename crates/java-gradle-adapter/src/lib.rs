@@ -153,6 +153,7 @@ impl BuildSystemAdapter for GradleAdapter {
                 output_directory: directory.join("build/classes/java/main"),
                 test_output_directory: directory.join("build/classes/java/test"),
                 children: Vec::new(),
+                plugins: script::declared_plugins(&script),
             });
         }
         let children: Vec<ModuleId> = model

@@ -183,6 +183,9 @@ pub struct ProjectModule {
     pub output_directory: PathBuf,
     pub test_output_directory: PathBuf,
     pub children: Vec<ModuleId>,
+    /// Plugins declarados pelo módulo, como `spring-boot-maven-plugin` ou
+    /// `org.springframework.boot`. Identificam como a aplicação é executada.
+    pub plugins: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -295,6 +298,14 @@ impl ProjectModel {
             .any(|root| path.starts_with(root))
     }
 
+    /// Indica que algum módulo declara o plugin informado.
+    #[must_use]
+    pub fn declares_plugin(&self, plugin: &str) -> bool {
+        self.modules
+            .iter()
+            .any(|module| module.plugins.iter().any(|declared| declared == plugin))
+    }
+
     #[must_use]
     pub fn summary(&self) -> String {
         format!(
@@ -357,6 +368,7 @@ mod tests {
             output_directory: root.join("target/classes"),
             test_output_directory: root.join("target/test-classes"),
             children: Vec::new(),
+            plugins: vec!["spring-boot-maven-plugin".to_owned()],
         }
     }
 
@@ -396,6 +408,8 @@ mod tests {
             model.summary(),
             "Maven • demo • 1 módulo(s) • 1 dependência(s)"
         );
+        assert!(model.declares_plugin("spring-boot-maven-plugin"));
+        assert!(!model.declares_plugin("maven-war-plugin"));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod debug;
+mod run;
 
 use std::{
     collections::HashMap,
@@ -14,7 +15,7 @@ use std::{
 use ide_build_api::{
     BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry, ProjectImportRequest,
 };
-use ide_core::init_logging;
+use ide_core::{AppConfig, config_path, init_logging};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
     DefinitionRequest, DocumentChange, DocumentId, DocumentSnapshot, ProviderId, TextPosition,
@@ -27,7 +28,7 @@ use ide_toolchain_api::{
     CompilationRequest, CompilerAdapter, DetectionContext, ExecutionRequest, RuntimeAdapter,
     TestAdapter, TestRequest, ToolchainProvider,
 };
-use ide_ui::{DebugRequest, DebugView, IdeShell, NavigationRequest};
+use ide_ui::{DebugRequest, DebugView, IdeShell, NavigationRequest, SettingsPage};
 use java_gradle_adapter::{GRADLE_BUILD_SYSTEM_ID, GradleAdapter};
 use java_javac_adapter::JavaJavacAdapter;
 use java_maven_adapter::{MAVEN_BUILD_SYSTEM_ID, MavenAdapter};
@@ -66,6 +67,8 @@ struct NativeIde {
     debugger: Option<debug::DebugController>,
     debug_view: DebugView,
     debug_thread: Option<ide_debug_api::ThreadId>,
+    config: AppConfig,
+    config_path: Option<PathBuf>,
     tool_events: Option<Receiver<ToolEvent>>,
     tool_sender: Option<Sender<ToolEvent>>,
 }
@@ -101,7 +104,17 @@ impl NativeIde {
             .map_err(|error| error.to_string())?;
         let renderer = pollster::block_on(WgpuRenderer::new(window.inner().clone()))
             .map_err(|error| error.to_string())?;
-        let root = std::env::current_dir().map_err(|error| error.to_string())?;
+        self.config_path = config_path();
+        if let Some(path) = self.config_path.as_ref() {
+            match AppConfig::load(path) {
+                Ok(config) => self.config = config,
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "configuração ignorada");
+                }
+            }
+        }
+        let root = startup_root(&self.config, std::env::current_dir().ok())
+            .ok_or_else(|| "não foi possível determinar o diretório do projeto".to_owned())?;
         let language_host = LanguageHost::new(&root);
         language_host
             .register(Arc::new(JavaLanguageProvider::new()))
@@ -119,8 +132,14 @@ impl NativeIde {
         self.tool_events = Some(tool_events);
         self.detect_java_toolchains(&root);
         self.import_project(&root);
+        if let Some(shell) = self.shell.as_mut() {
+            shell.set_debug_target(&self.config.debug.host, self.config.debug.port);
+        }
         self.debugger = debug::DebugController::start();
         self.renderer = Some(renderer);
+        window
+            .inner()
+            .set_title(&format!("ER IDE — {}", root.display()));
         window.show();
         self.window = Some(window);
         Ok(())
@@ -184,6 +203,7 @@ impl NativeIde {
                 }
                 self.language_documents.clear();
                 self.shell = Some(shell);
+                self.remember_project(&folder);
                 self.detect_java_toolchains(&folder);
                 self.import_project(&folder);
                 if let Some(window) = self.window.as_ref() {
@@ -545,6 +565,22 @@ impl NativeIde {
         true
     }
 
+    /// Guarda o projeto aberto para que a próxima inicialização o reabra.
+    ///
+    /// Falhar ao gravar não pode impedir o trabalho: o projeto continua aberto e
+    /// o usuário só perde a reabertura automática, avisado na barra de status.
+    fn remember_project(&mut self, root: &Path) {
+        let Some(path) = self.config_path.clone() else {
+            return;
+        };
+        if let Err(error) = self.config.remember_workspace(root, &path) {
+            tracing::warn!(%error, path = %path.display(), "configuração não pôde ser gravada");
+            if let Some(shell) = self.shell.as_mut() {
+                shell.set_status_message(format!("Configuração não pôde ser gravada: {error}"));
+            }
+        }
+    }
+
     /// Raízes de código enviadas ao depurador para mapear posições em arquivos.
     ///
     /// Com projeto importado valem as raízes declaradas — inclusive as geradas.
@@ -571,6 +607,127 @@ impl NativeIde {
         ]
     }
 
+    /// Botão de executar: sobe a aplicação do projeto, sem depuração.
+    fn run_application(&mut self) {
+        let target = self.run_target();
+        let command = run::run_command(
+            self.config.run.command.as_deref(),
+            target.as_ref(),
+            run::RunMode::Plain,
+        );
+        let Some(command) = command else {
+            if let Some(shell) = self.shell.as_mut() {
+                shell.set_status_message(
+                    "A IDE não sabe executar este projeto; defina `run.command` na configuração",
+                );
+            }
+            return;
+        };
+        let result = self
+            .shell
+            .as_mut()
+            .map(|shell| shell.run_in_terminal(&command));
+        if let (Some(Err(error)), Some(shell)) = (result, self.shell.as_mut()) {
+            shell.set_status_message(error);
+        }
+    }
+
+    /// Botão de parar: interrompe a aplicação iniciada pela IDE.
+    ///
+    /// Uma sessão de depuração aberta é desconectada antes, para o depurador
+    /// não ficar apontando para um processo que está terminando.
+    fn stop_application(&mut self) {
+        if self.debug_view.attached {
+            self.send_debug(debug::DebugCommand::Detach);
+        }
+        let result = self.shell.as_mut().map(IdeShell::stop_application);
+        if let (Some(Err(error)), Some(shell)) = (result, self.shell.as_mut()) {
+            shell.set_status_message(error);
+        }
+    }
+
+    /// Botão de depurar: sobe a aplicação, quando necessário, e conecta.
+    ///
+    /// Se já existe algo escutando no alvo — servidor externo, contêiner,
+    /// máquina remota — nada é iniciado e a IDE apenas conecta.
+    fn run_and_attach(&mut self, host: &str, port: u16) {
+        self.remember_debug_target(host, port);
+        let source_roots = self.debug_source_roots();
+        let already_running = debug::port_is_open(host, port);
+        let mut attempts = 1;
+        if !already_running {
+            let target = self.run_target();
+            let command = run::run_command(
+                self.config.run.command.as_deref(),
+                target.as_ref(),
+                run::RunMode::Debug { host, port },
+            );
+            let Some(command) = command else {
+                if let Some(shell) = self.shell.as_mut() {
+                    shell.set_status_message(
+                        "Nada escutando no alvo e a IDE não sabe subir este projeto; \
+                         defina `debug.command` na configuração ou inicie a aplicação",
+                    );
+                }
+                return;
+            };
+            let started = self
+                .shell
+                .as_mut()
+                .map(|shell| shell.run_in_terminal(&command));
+            match started {
+                Some(Ok(())) => {
+                    attempts = 120;
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.set_status_message(format!(
+                            "Subindo a aplicação e aguardando {host}:{port}"
+                        ));
+                    }
+                }
+                Some(Err(error)) => {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.set_status_message(error);
+                    }
+                    return;
+                }
+                None => return,
+            }
+        }
+        self.send_debug(debug::DebugCommand::Attach {
+            host: host.to_owned(),
+            port,
+            source_roots,
+            attempts,
+        });
+    }
+
+    /// Descreve o projeto importado para a montagem do comando de execução.
+    fn run_target(&self) -> Option<run::RunTarget<'_>> {
+        let project = self.project.as_ref()?;
+        Some(run::RunTarget {
+            build_system: project.descriptor.build_system.0.as_str(),
+            wrapper: project
+                .descriptor
+                .wrapper
+                .as_ref()
+                .map(|wrapper| wrapper.to_string_lossy().into_owned()),
+            spring_boot: project.model.declares_plugin("spring-boot-maven-plugin")
+                || project.model.declares_plugin("org.springframework.boot"),
+        })
+    }
+
+    fn remember_debug_target(&mut self, host: &str, port: u16) {
+        if self.config.debug.host == host && self.config.debug.port == port {
+            return;
+        }
+        let Some(path) = self.config_path.clone() else {
+            return;
+        };
+        if let Err(error) = self.config.remember_debug_target(host, port, &path) {
+            tracing::warn!(%error, "alvo de depuração não pôde ser gravado");
+        }
+    }
+
     fn handle_debug_requests(&mut self) {
         let requests = self
             .shell
@@ -580,13 +737,16 @@ impl NativeIde {
         for request in requests {
             match request {
                 DebugRequest::Attach { host, port } => {
+                    self.remember_debug_target(&host, port);
                     let source_roots = self.debug_source_roots();
                     self.send_debug(debug::DebugCommand::Attach {
                         host,
                         port,
                         source_roots,
+                        attempts: 1,
                     });
                 }
+                DebugRequest::RunAndAttach { host, port } => self.run_and_attach(&host, port),
                 DebugRequest::Continue => self.send_debug(debug::DebugCommand::Continue),
                 DebugRequest::Pause => self.send_debug(debug::DebugCommand::Pause),
                 DebugRequest::StepOver => {
@@ -608,6 +768,12 @@ impl NativeIde {
                     }
                 }
             }
+        }
+        if self.shell.as_mut().is_some_and(IdeShell::take_run_request) {
+            self.run_application();
+        }
+        if self.shell.as_mut().is_some_and(IdeShell::take_stop_request) {
+            self.stop_application();
         }
         if let Some(path) = self
             .shell
@@ -647,7 +813,6 @@ impl NativeIde {
                         status: format!("Conectado a {description}"),
                         ..DebugView::default()
                     };
-                    self.push_all_breakpoints();
                 }
                 debug::DebugUiEvent::Session(DebugEvent::Stopped { thread, reason }) => {
                     self.debug_thread = Some(thread);
@@ -688,6 +853,11 @@ impl NativeIde {
                     self.debug_view.variables = variables;
                     self.debug_view.selected_frame = selected;
                 }
+                debug::DebugUiEvent::Breakpoints { path, verified } => {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.set_verified_breakpoints(&path, &verified);
+                    }
+                }
                 debug::DebugUiEvent::Status(status) => {
                     if let Some(shell) = self.shell.as_mut() {
                         shell.set_status_message(status);
@@ -699,28 +869,6 @@ impl NativeIde {
             shell.set_debug_view(self.debug_view.clone());
         }
         true
-    }
-
-    /// Reenvia os breakpoints já marcados quando uma sessão começa.
-    fn push_all_breakpoints(&mut self) {
-        let files: Vec<(PathBuf, Vec<u32>)> = self
-            .shell
-            .as_ref()
-            .map(|shell| {
-                shell
-                    .document_snapshots()
-                    .into_iter()
-                    .map(|snapshot| {
-                        let lines = shell.breakpoints_for(&snapshot.path);
-                        (snapshot.path, lines)
-                    })
-                    .filter(|(_, lines)| !lines.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (path, lines) in files {
-            self.send_debug(debug::DebugCommand::SetBreakpoints { path, lines });
-        }
     }
 
     /// Executa o build do sistema detectado, fora da thread da interface.
@@ -946,6 +1094,15 @@ impl NativeIde {
             shell.set_status_message(error.to_string());
         }
     }
+}
+
+/// Projeto a abrir na inicialização.
+///
+/// O último projeto usado tem prioridade sobre o diretório atual: quem abriu a
+/// IDE pela segunda vez espera continuar de onde parou. Sem registro válido —
+/// primeira execução, ou pasta que sumiu — vale o diretório atual.
+fn startup_root(config: &AppConfig, current_directory: Option<PathBuf>) -> Option<PathBuf> {
+    config.resolved_project().or(current_directory)
 }
 
 /// Metas equivalentes a "compilar o projeto" em cada build system.
@@ -1317,6 +1474,11 @@ impl ApplicationHandler for NativeIde {
             self.request_completion();
         }
         if select_jdk_requested {
+            // `Ctrl+Shift+J` promete a página do compilador, qualquer que tenha
+            // sido a última página aberta.
+            if let Some(shell) = self.shell.as_mut() {
+                shell.set_settings_page(SettingsPage::Compiler);
+            }
             self.open_jdk_selector();
         }
         let open_settings = self
@@ -1473,6 +1635,7 @@ mod tests {
             output_directory: PathBuf::from("/w/app/target/classes"),
             test_output_directory: PathBuf::from("/w/app/target/test-classes"),
             children: Vec::new(),
+            plugins: Vec::new(),
         });
         model
     }
@@ -1503,6 +1666,38 @@ mod tests {
             files,
             "um projeto sem fontes sob suas raízes não deve zerar a compilação"
         );
+    }
+
+    #[test]
+    fn startup_reopens_the_last_project_and_falls_back_to_the_current_directory() {
+        let root = std::env::temp_dir().join(format!("er-ide-startup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("projeto");
+        assert!(std::fs::create_dir_all(&project).is_ok());
+        let current = PathBuf::from("/w/atual");
+
+        let mut config = AppConfig::default();
+        config.workspace.last_path = Some(project.clone());
+        assert_eq!(
+            startup_root(&config, Some(current.clone())),
+            Some(project.clone()),
+            "o último projeto tem prioridade sobre o diretório atual"
+        );
+
+        config.workspace.last_path = Some(root.join("removido"));
+        assert_eq!(
+            startup_root(&config, Some(current.clone())),
+            Some(current.clone()),
+            "uma pasta que sumiu não impede a IDE de abrir"
+        );
+
+        assert_eq!(
+            startup_root(&AppConfig::default(), Some(current)),
+            Some(PathBuf::from("/w/atual")),
+            "sem registro, vale o diretório atual"
+        );
+        assert!(startup_root(&AppConfig::default(), None).is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

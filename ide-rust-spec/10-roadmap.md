@@ -41,6 +41,9 @@ com o renderer WGPU do ERLibUi.
   pasta e carrega todo o conteúdo permitido da pasta na árvore do Explorer;
 - cancelar a seleção preserva o workspace atual; selecionar outra pasta
   substitui a raiz, o nome do projeto e as sessões de terminal;
+- o projeto aberto é gravado na configuração do usuário e reaberto na próxima
+  inicialização; um caminho que não existe mais é ignorado e a IDE abre o
+  diretório atual, sem falhar;
 - o Explorer recorta a árvore dentro do painel esquerdo e oferece rolagem
   horizontal interativa quando nomes ou níveis de indentação excedem a largura;
 - o Explorer oferece rolagem vertical e sua borda direita pode ser arrastada
@@ -320,7 +323,37 @@ usuário.
   executável e informa isso ao usuário;
 - arquivos fora das raízes de código do projeto produzem breakpoint não
   verificado com motivo, em vez de falha;
-- clique na calha e `F9` alternam o breakpoint da linha;
+- o botão de executar, no canto direito da barra de menus, sobe a aplicação do
+  projeto sem depuração, no terminal integrado, e também está em
+  `Projeto → Executar aplicação`;
+- o botão de parar interrompe a aplicação iniciada pela IDE com a mesma
+  interrupção de um `Ctrl+C`, na aba em que ela subiu, desconectando antes uma
+  sessão de depuração aberta; nenhum processo é encerrado por fora do terminal;
+- interromper um arquivo de lote faz o `cmd` perguntar se deve finalizá-lo; a
+  pergunta é respondida quando aparece, reconhecida pela pontuação e não pelo
+  idioma, e o comando seguinte espera o terminal ficar livre em vez de virar a
+  resposta da pergunta — parar e executar em seguida reinicia a aplicação;
+- o botão de depurar, ao lado dele, sobe a aplicação com o agente de depuração e
+  conecta; quando já existe algo escutando no alvo, apenas conecta, sem subir
+  uma segunda instância;
+- os dois usam o mesmo comando, vindo da configuração do usuário ou deduzido do
+  projeto importado; `{agent}` recebe o agente na execução com depuração e
+  desaparece na execução comum; sem receita confiável, a IDE informa em vez de
+  inventar um comando;
+- executar a aplicação não compila as fontes de teste: um teste que não compila
+  não pode impedir de subir a aplicação;
+- argumentos `-D` produzidos pela IDE vão entre aspas, porque o PowerShell parte
+  o token no primeiro ponto e a ferramenta receberia argumentos inválidos;
+- host e porta usados ficam gravados na configuração do usuário;
+- clique na calha e `F9` alternam o breakpoint da linha; a calha tem fundo e
+  borda próprios, porque é ela que responde ao clique e sem contraste não há como
+  saber onde clicar;
+- o marcador distingue o breakpoint marcado mas não confirmado, em contorno, do
+  instalado no alvo, cheio; a barra de status informa quantos estão ativos e
+  quantos aguardam a classe carregar;
+- breakpoints marcados antes de existir sessão são guardados e registrados quando
+  a conexão acontece — marcar antes de conectar é o fluxo normal, já que a
+  aplicação leva tempo para subir;
 - `F8` continua, `F10` passa sobre, `F11` entra e `Shift+F11` sai do método;
 - ao parar, o editor abre o arquivo, posiciona o cursor e destaca a linha;
 - o painel lateral mostra estado, pilha de chamadas e variáveis do quadro
