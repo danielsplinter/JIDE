@@ -130,17 +130,30 @@ impl JavaToolchainSelection {
         Ok(())
     }
 
-    pub fn add_and_select(&mut self, installation: ToolchainInstallation) {
-        if let Some(existing) = self
+    /// Registra a instalação sem escolhê-la, devolvendo o índice dela na lista.
+    ///
+    /// Uma janela de configurações que só aplica ao salvar precisa poder apontar
+    /// uma pasta e ainda assim deixar a escolha pendente: registrar e escolher no
+    /// mesmo passo tornaria o cancelamento impossível de honrar.
+    pub fn add(&mut self, installation: ToolchainInstallation) -> usize {
+        if let Some(index) = self
             .installations
-            .iter_mut()
-            .find(|existing| existing.id == installation.id)
+            .iter()
+            .position(|existing| existing.id == installation.id)
         {
-            *existing = installation.clone();
-        } else {
-            self.installations.push(installation.clone());
+            self.installations[index] = installation;
+            return index;
         }
-        self.selected = Some(installation.id);
+        self.installations.push(installation);
+        self.installations.len().saturating_sub(1)
+    }
+
+    pub fn add_and_select(&mut self, installation: ToolchainInstallation) {
+        let index = self.add(installation);
+        self.selected = self
+            .installations
+            .get(index)
+            .map(|installation| installation.id.clone());
     }
 
     #[must_use]

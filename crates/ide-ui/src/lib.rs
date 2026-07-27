@@ -19,13 +19,16 @@ use ui_editor::{
 use ide_workspace::{FileNode, WorkspaceError};
 use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 use ui_components::{
-    Button, ComboBox, ComboBoxItem, Icon, IconTint, ListView, MenuBar, MenuBarItem, MenuItem,
-    ModalHost, Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter, StatusBar, TabItem,
-    Tabs, TextInput, TreeItem, TreeView,
+    Button, ComboBox, ComboBoxItem, ContextMenu, Icon, IconTint, Label, ListSelection,
+    ListView, MenuBar,
+    MenuBarItem,
+    Popup,
+    MenuEntry, MenuItem, ModalHost, Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter,
+    StatusBar, TabItem, Tabs, TextInput, TreeItem, TreeView,
 };
 use ui_core::{
     Color, ColorTokens, CommandId, EventResult, FontId, KeyEvent, Modifiers, Point, PointerButton,
-    PointerEvent, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
+    PointerEvent, Rect, Size, TextInputEvent, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_render_api::{DrawTextCommand, FillRectCommand, PaintCommand, StrokeRectCommand};
 
@@ -39,6 +42,8 @@ const EXPLORER_TOP: f32 = 106.0;
 /// Métricas do editor: elas são do componente que desenha o código, e a IDE
 /// as consulta para posicionar cursor, popup e cliques no mesmo lugar.
 const EDITOR_LINE_HEIGHT: f32 = CodeEditor::line_height();
+/// Largura de uma parada de tabulação, em colunas.
+const EDITOR_INDENT: usize = 4;
 const EDITOR_GUTTER: f32 = CodeEditor::gutter_width();
 /// Largura do caractere na fonte de código, definida pelo editor que a desenha.
 const EDITOR_CHAR_WIDTH: f32 = CodeEditor::default_char_width();
@@ -56,6 +61,24 @@ const SETTINGS_MODAL_ID: WidgetId = WidgetId(10_002);
 const JDK_COMBO_ID: WidgetId = WidgetId(10_003);
 const JDK_BROWSE_ID: WidgetId = WidgetId(10_004);
 const SETTINGS_CLOSE_ID: WidgetId = WidgetId(10_005);
+const SETTINGS_SAVE_ID: WidgetId = WidgetId(10_030);
+const SETTINGS_TITLE_ID: WidgetId = WidgetId(10_031);
+const SETTINGS_CAPTION_ID: WidgetId = WidgetId(10_032);
+const SETTINGS_MESSAGE_ID: WidgetId = WidgetId(10_033);
+const SETTINGS_PAGES_ID: WidgetId = WidgetId(10_034);
+/// Páginas da janela de configurações, na ordem em que aparecem.
+const SETTINGS_PAGE_TITLES: [&str; 2] = ["Compilador e VM", "Depuração"];
+const SETTINGS_PAGE_ROW_HEIGHT: f32 = 42.0;
+const NEW_ITEM_MODAL_ID: WidgetId = WidgetId(10_035);
+const NEW_ITEM_PACKAGE_ID: WidgetId = WidgetId(10_036);
+const NEW_ITEM_NAME_ID: WidgetId = WidgetId(10_037);
+const NEW_ITEM_CREATE_ID: WidgetId = WidgetId(10_038);
+const NEW_ITEM_CANCEL_ID: WidgetId = WidgetId(10_039);
+const NEW_ITEM_PACKAGE_CAPTION_ID: WidgetId = WidgetId(10_041);
+const NEW_ITEM_NAME_CAPTION_ID: WidgetId = WidgetId(10_042);
+const NEW_ITEM_MESSAGE_ID: WidgetId = WidgetId(10_043);
+/// A janela é pequena de propósito: dois campos e duas ações.
+const NEW_ITEM_PANEL_SIZE: Size = Size::new(460.0, 230.0);
 const DEBUG_HOST_ID: WidgetId = WidgetId(10_006);
 const DEBUG_PORT_ID: WidgetId = WidgetId(10_007);
 const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
@@ -75,6 +98,17 @@ const EXPLORER_TREE_ID: WidgetId = WidgetId(10_020);
 const SIDEBAR_SPLITTER_ID: WidgetId = WidgetId(10_022);
 const TERMINAL_SPLITTER_ID: WidgetId = WidgetId(10_023);
 const EDITOR_VIEW_ID: WidgetId = WidgetId(10_024);
+const EXPLORER_CONTEXT_MENU_ID: WidgetId = WidgetId(10_025);
+const COMPLETION_POPUP_ID: WidgetId = WidgetId(10_026);
+const COMPLETION_LIST_ID: WidgetId = WidgetId(10_027);
+const SEARCH_POPUP_ID: WidgetId = WidgetId(10_028);
+const SEARCH_INPUT_ID: WidgetId = WidgetId(10_029);
+/// Linhas visíveis da lista de completação antes de precisar rolar.
+const COMPLETION_VISIBLE_ROWS: usize = 8;
+const COMPLETION_ROW_HEIGHT: f32 = 24.0;
+const COMPLETION_POPUP_WIDTH: f32 = 260.0;
+const SEARCH_BOX_WIDTH: f32 = 380.0;
+const SEARCH_BOX_HEIGHT: f32 = 42.0;
 
 /// Página ativa da janela de configurações.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -186,8 +220,71 @@ struct TerminalTab {
     follow_output: bool,
 }
 
+/// O que o menu do Explorer pediu para criar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NewItemKind {
+    Package,
+    Class,
+    Interface,
+}
+
+impl NewItemKind {
+    /// Título da janela.
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Package => "Novo pacote",
+            Self::Class => "Nova classe",
+            Self::Interface => "Nova interface",
+        }
+    }
+
+    /// Legenda do campo de nome.
+    ///
+    /// Criando um pacote, o nome do tipo é opcional: é o que permite criar
+    /// pacote e primeira classe num gesto só.
+    const fn name_caption(self) -> &'static str {
+        match self {
+            Self::Package => "Classe (opcional)",
+            Self::Class => "Nome da classe",
+            Self::Interface => "Nome da interface",
+        }
+    }
+}
+
+/// Pedido de criação, já validado, que o app executa.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewItemRequest {
+    pub kind: NewItemKind,
+    /// Pacote em notação de ponto, como foi digitado.
+    pub package: String,
+    /// Nome do tipo; vazio quando só o pacote foi pedido.
+    pub name: String,
+    /// Raiz de fontes sob a qual o pacote vive.
+    pub source_root: PathBuf,
+}
+
+/// Janela de criação enquanto está aberta.
+struct NewItemDialog {
+    kind: NewItemKind,
+    source_root: PathBuf,
+    message: Option<String>,
+    /// Campo com o foco: `false` é o pacote, `true` é o nome.
+    naming: bool,
+}
+
+/// Estado da janela de configurações enquanto ela está aberta.
+///
+/// A janela é uma transação: o que se mexe ali só vale quando o usuário salva.
+/// Por isso guarda o que estava valendo na abertura — é para lá que o
+/// cancelamento volta — e a escolha pendente, que ainda não saiu daqui.
 struct SettingsDialog {
     message: Option<String>,
+    /// JDK escolhido na janela, ainda não aplicado.
+    pending_jdk: Option<usize>,
+    /// Estado no momento da abertura, para o cancelamento restaurar.
+    original_jdk: Option<usize>,
+    original_debug_host: String,
+    original_debug_port: String,
 }
 
 pub struct IdeShell {
@@ -197,6 +294,13 @@ pub struct IdeShell {
     /// árvore ou a expansão mudam — o caminho oposto ao das abas, porque
     /// remontar milhares de nós a cada quadro custaria caro.
     explorer_tree: TreeView,
+    /// Menu do clique secundário no Explorer.
+    context_menu: ContextMenu,
+    /// Diretório sobre o qual o menu aberto age.
+    ///
+    /// Clicando em um arquivo, o alvo é a pasta dele: criar dentro de um
+    /// arquivo não quer dizer nada, e é onde o usuário apontou que importa.
+    context_menu_target: Option<PathBuf>,
     expanded: HashSet<PathBuf>,
     editor: EditorSession,
     cursor_offset: usize,
@@ -256,6 +360,17 @@ pub struct IdeShell {
     jdk_combo: ComboBox,
     jdk_browse_button: Button,
     settings_close_button: Button,
+    settings_save_button: Button,
+    /// Navegação entre as páginas da janela de configurações.
+    settings_pages: ListView,
+    /// Janela de criação de pacote, classe ou interface.
+    new_item_modal: ModalHost,
+    new_item_dialog: Option<NewItemDialog>,
+    new_item_package: TextInput,
+    new_item_name: TextInput,
+    new_item_create_button: Button,
+    new_item_cancel_button: Button,
+    new_item_request: Option<NewItemRequest>,
     open_project_requested: bool,
     open_settings_requested: bool,
     build_project_requested: bool,
@@ -303,6 +418,65 @@ impl IdeShell {
         Ok(Self::from_tree(workspace))
     }
 
+    /// Relê a árvore do disco preservando o que está expandido.
+    ///
+    /// O que nasceu depois da última varredura não existe para o Explorer até ele
+    /// reler. A expansão é mantida porque ela é a posição do usuário na árvore:
+    /// recolher tudo depois de criar um arquivo esconderia justamente o que ele
+    /// acabou de criar.
+    pub fn reload_workspace(&mut self) -> Result<(), WorkspaceError> {
+        let root = self.workspace.path.clone();
+        self.workspace = FileNode::scan(&root)?;
+        // A `TreeView` guarda os itens dela: reler o disco sem repô-los deixava a
+        // árvore desenhando a varredura anterior. `set_roots` preserva expansão e
+        // seleção por identidade, então a posição do usuário não se perde.
+        self.explorer_tree.set_roots(explorer_items(&self.workspace));
+        self.sync_explorer_tree();
+        Ok(())
+    }
+
+    /// A aba ativa tem alteração ainda não gravada.
+    ///
+    /// É o que a marca na aba anuncia, e o que decide se fechar sem salvar
+    /// perderia trabalho.
+    #[must_use]
+    pub fn active_document_modified(&self) -> bool {
+        self.editor
+            .active()
+            .is_some_and(|document| document.buffer.is_dirty())
+    }
+
+    /// Grava a aba ativa no disco.
+    ///
+    /// Devolve `true` quando gravou. A barra de estado relata as duas saídas: um
+    /// salvamento silencioso não se distingue de um que falhou, e a aba continua
+    /// marcada como modificada quando a escrita não deu certo.
+    pub fn save_active_document(&mut self) -> bool {
+        match self.editor.save_active() {
+            Ok(path) => {
+                self.status_message = format!("Salvo {}", path.display());
+                true
+            }
+            Err(error) => {
+                self.status_message = error.to_string();
+                false
+            }
+        }
+    }
+
+    /// Abre a pasta e todas as que levam até ela.
+    ///
+    /// Criar algo dentro de uma pasta fechada esconde o que acabou de nascer;
+    /// revelar o caminho é o que faz o resultado aparecer.
+    pub fn reveal_in_explorer(&mut self, path: &Path) {
+        for ancestor in path.ancestors() {
+            if ancestor.starts_with(&self.workspace.path) && ancestor.is_dir() {
+                self.expanded.insert(ancestor.to_path_buf());
+            }
+        }
+        self.sync_explorer_tree();
+    }
+
     pub fn from_tree(workspace: FileNode) -> Self {
         let workspace_name = workspace
             .path
@@ -335,6 +509,8 @@ impl IdeShell {
             workspace_name,
             workspace,
             explorer_tree,
+            context_menu: ContextMenu::new(EXPLORER_CONTEXT_MENU_ID, Vec::new()),
+            context_menu_target: None,
             expanded,
             editor: EditorSession::default(),
             cursor_offset: 0,
@@ -374,7 +550,13 @@ impl IdeShell {
             menu_bar: MenuBar::new(
                 MENU_BAR_ID,
                 vec![
-                    MenuBarItem::menu("Arquivo", vec![MenuItem::new("Projeto...", "file.project")]),
+                    MenuBarItem::menu(
+                        "Arquivo",
+                        vec![
+                            MenuItem::new("Projeto...", "file.project"),
+                            MenuItem::new("Salvar", "file.save"),
+                        ],
+                    ),
                     MenuBarItem::menu(
                         "Projeto",
                         vec![
@@ -406,8 +588,23 @@ impl IdeShell {
             ),
             jdk_combo: ComboBox::new(JDK_COMBO_ID, Vec::new()).with_command_prefix("jdk.select."),
             jdk_browse_button: Button::new(JDK_BROWSE_ID, "Procurar...").with_command("jdk.browse"),
-            settings_close_button: Button::new(SETTINGS_CLOSE_ID, "Fechar")
-                .with_command("settings.close"),
+            settings_close_button: Button::new(SETTINGS_CLOSE_ID, "Cancelar")
+                .with_command("settings.cancel"),
+            settings_save_button: Button::new(SETTINGS_SAVE_ID, "Salvar")
+                .with_command("settings.save"),
+            settings_pages: ListView::new(SETTINGS_PAGES_ID, SETTINGS_PAGE_TITLES)
+                .with_row_height(SETTINGS_PAGE_ROW_HEIGHT)
+                .with_selection(ListSelection::Marker),
+            new_item_modal: ModalHost::new(NEW_ITEM_MODAL_ID, "", NEW_ITEM_PANEL_SIZE),
+            new_item_dialog: None,
+            new_item_package: TextInput::new(NEW_ITEM_PACKAGE_ID, String::new())
+                .with_placeholder("br.com.exemplo"),
+            new_item_name: TextInput::new(NEW_ITEM_NAME_ID, String::new()),
+            new_item_create_button: Button::new(NEW_ITEM_CREATE_ID, "Criar")
+                .with_command("new.create"),
+            new_item_cancel_button: Button::new(NEW_ITEM_CANCEL_ID, "Cancelar")
+                .with_command("new.cancel"),
+            new_item_request: None,
             open_project_requested: false,
             open_settings_requested: false,
             build_project_requested: false,
@@ -560,10 +757,39 @@ impl IdeShell {
         );
         self.jdk_combo.set_selected(selected_jdk);
         self.settings_modal.open();
-        self.settings_dialog = Some(SettingsDialog { message: None });
+        // Reabrir a janela recomeça a transação: o que ficou pendente de uma
+        // abertura anterior foi descartado com ela.
+        self.settings_dialog = Some(SettingsDialog {
+            message: None,
+            pending_jdk: None,
+            original_jdk: Some(selected_jdk),
+            original_debug_host: self.debug_host.value().to_owned(),
+            original_debug_port: self.debug_port.value().to_owned(),
+        });
         self.settings_jdk_result = None;
         self.browse_jdk_requested = false;
     }
+
+    /// Repõe a lista de JDKs e deixa um deles escolhido, sem sair da transação.
+    ///
+    /// É o que o `Procurar...` precisa: a instalação apontada entra na lista e
+    /// fica pendente como qualquer escolha feita no combo. Reabrir a janela
+    /// recomeçaria a transação e apagaria o que já estava pendente.
+    pub fn set_jdk_options(&mut self, jdk_items: Vec<String>, pending: usize) {
+        self.jdk_combo.set_items(
+            jdk_items
+                .into_iter()
+                .enumerate()
+                .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
+                .collect(),
+        );
+        self.jdk_combo.set_selected(pending);
+        if let Some(dialog) = self.settings_dialog.as_mut() {
+            dialog.pending_jdk = Some(pending);
+            dialog.message = None;
+        }
+    }
+
     pub const fn settings_dialog_open(&self) -> bool {
         self.settings_modal.is_open()
     }
@@ -1533,9 +1759,19 @@ impl IdeShell {
     }
 
     pub fn escape(&mut self) {
+        // O menu de contexto é o que está por cima de tudo: é ele que Esc
+        // dispensa primeiro.
+        if self.context_menu_key("Escape", Modifiers::default()) {
+            return;
+        }
+        if self.new_item_modal.is_open() {
+            self.close_new_item_dialog();
+            return;
+        }
+        // Esc na janela de configurações é cancelar: fechar sem descartar o que
+        // foi mexido salvaria pela porta dos fundos.
         if self.settings_modal.is_open() {
-            self.settings_modal.close();
-            self.settings_dialog = None;
+            self.cancel_settings();
             return;
         }
         if !self.completion_items.is_empty() {
@@ -1552,7 +1788,221 @@ impl IdeShell {
         self.pointer_down_with_modifiers(point, size, false);
     }
 
+    /// Clique secundário: abre o menu de contexto sobre o item do Explorer.
+    ///
+    /// Fora do Explorer o clique só dispensa um menu aberto. Enquanto não
+    /// houver menu para as outras áreas, abrir um vazio prometeria ações que
+    /// não existem.
+    pub fn secondary_pointer_down(&mut self, point: Point, size: Size) {
+        self.context_menu.close();
+        self.context_menu_target = None;
+        if self.settings_modal.is_open() {
+            return;
+        }
+        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        if point.x < ACTIVITY_WIDTH || point.x >= editor_x || point.y < EXPLORER_TOP {
+            return;
+        }
+        // Qual nó está sob o ponteiro é a árvore quem sabe: recuo, deslocamento
+        // horizontal e virtualização são dela.
+        let mut tree = self.explorer_tree_for(size);
+        tree.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        let Some((path, is_directory)) = tree.selected().and_then(|id| self.explorer_path_for(id))
+        else {
+            return;
+        };
+        self.focus = ShellFocus::Explorer;
+        self.explorer_tree.set_selected(Some(explorer_id(&path)));
+        // O alvo é o diretório: clicando em um arquivo, é na pasta dele que a
+        // criação acontece.
+        let target = if is_directory {
+            path
+        } else {
+            path.parent().map(Path::to_path_buf).unwrap_or(path)
+        };
+        self.context_menu.set_entries(explorer_menu_entries(&target));
+        self.context_menu.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        self.context_menu.open_at(point);
+        self.context_menu_target = Some(target);
+    }
+
+    pub fn context_menu_open(&self) -> bool {
+        self.context_menu.is_open()
+    }
+
+    /// Entrega o evento ao menu aberto e trata o comando escolhido.
+    ///
+    /// Devolve `true` quando o menu consumiu o evento — é o sinal de que o
+    /// clique ou a tecla não devem seguir para o que está embaixo dele.
+    fn context_menu_event(&mut self, event: &UiEvent, size: Size) -> bool {
+        if !self.context_menu.is_open() {
+            return false;
+        }
+        self.context_menu.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let mut context = EventContext::default();
+        let result = self.context_menu.event(&mut context, event);
+        if let EventResult::Action(WidgetAction::Command(command)) = &result {
+            self.run_explorer_command(&command.0);
+        }
+        if !self.context_menu.is_open() {
+            self.context_menu_target = None;
+        }
+        result != EventResult::Ignored
+    }
+
+    /// Entrega a tecla ao menu aberto.
+    ///
+    /// Separado do caminho do ponteiro porque navegar por teclado não depende
+    /// de onde o menu foi desenhado, e assim não precisa do tamanho da janela.
+    fn context_menu_key(&mut self, key: &str, modifiers: Modifiers) -> bool {
+        if !self.context_menu.is_open() {
+            return false;
+        }
+        let mut context = EventContext::default();
+        let result = self.context_menu.event(
+            &mut context,
+            &UiEvent::KeyDown(KeyEvent {
+                logical_key: key.to_owned(),
+                repeat: false,
+                modifiers,
+            }),
+        );
+        if let EventResult::Action(WidgetAction::Command(command)) = &result {
+            self.run_explorer_command(&command.0);
+        }
+        if !self.context_menu.is_open() {
+            self.context_menu_target = None;
+        }
+        result != EventResult::Ignored
+    }
+
+    fn run_explorer_command(&mut self, command: &str) {
+        let Some(target) = self.context_menu_target.clone() else {
+            return;
+        };
+        let kind = match command {
+            "explorer.new.package" => NewItemKind::Package,
+            "explorer.new.class" => NewItemKind::Class,
+            "explorer.new.interface" => NewItemKind::Interface,
+            "explorer.new.folder" => {
+                self.status_message = format!("Nova pasta em {}", target.display());
+                return;
+            }
+            _ => return,
+        };
+        self.open_new_item_dialog(kind, &target);
+    }
+
+    /// Abre a janela de criação com o pacote do alvo já preenchido.
+    ///
+    /// O pacote vem do caminho clicado, em notação de ponto: é o que o usuário vê
+    /// no Explorer e o que ele vai editar para criar um pacote abaixo. Sem raiz de
+    /// fontes não há pacote, e a janela não abre — o menu que oferece essas ações
+    /// só aparece dentro dela.
+    fn open_new_item_dialog(&mut self, kind: NewItemKind, target: &Path) {
+        let Some(source_root) = target
+            .ancestors()
+            .find(|ancestor| is_java_source_root(ancestor))
+            .map(Path::to_path_buf)
+        else {
+            self.status_message = "Fora de uma raiz de fontes Java".to_owned();
+            return;
+        };
+        let package = target
+            .strip_prefix(&source_root)
+            .map(|relative| {
+                relative
+                    .components()
+                    .filter_map(|component| component.as_os_str().to_str())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+            .unwrap_or_default();
+        self.new_item_package.set_value(package);
+        self.new_item_name.set_value(String::new());
+        self.new_item_modal.set_title(kind.title());
+        self.new_item_modal.open();
+        self.new_item_dialog = Some(NewItemDialog {
+            kind,
+            source_root,
+            message: None,
+            naming: false,
+        });
+        // O pacote já vem preenchido, então o que falta digitar é o nome —
+        // exceto ao criar pacote, em que o nome é justamente o que se edita.
+        self.focus_new_item_field(kind != NewItemKind::Package);
+        self.new_item_request = None;
+    }
+
+    pub const fn new_item_dialog_open(&self) -> bool {
+        self.new_item_modal.is_open()
+    }
+
+    /// Pedido de criação pronto para o app executar.
+    pub fn take_new_item_request(&mut self) -> Option<NewItemRequest> {
+        self.new_item_request.take()
+    }
+
+    /// Relata o que impediu a criação, mantendo a janela aberta.
+    pub fn set_new_item_message(&mut self, message: impl Into<String>) {
+        if let Some(dialog) = self.new_item_dialog.as_mut() {
+            dialog.message = Some(message.into());
+        }
+    }
+
+    pub fn close_new_item_dialog(&mut self) {
+        self.new_item_modal.close();
+        self.new_item_dialog = None;
+    }
+
+    /// Monta o pedido a partir do que está nos campos.
+    ///
+    /// O pacote é obrigatório: sem ele não há onde criar. O nome é obrigatório
+    /// para classe e interface, e opcional para pacote — é o que permite criar o
+    /// pacote e a primeira classe dele num gesto só.
+    fn submit_new_item(&mut self) {
+        let Some(dialog) = self.new_item_dialog.as_ref() else {
+            return;
+        };
+        let kind = dialog.kind;
+        let source_root = dialog.source_root.clone();
+        let package = self.new_item_package.value().trim().to_owned();
+        let name = self.new_item_name.value().trim().to_owned();
+        if package.is_empty() {
+            self.set_new_item_message("Informe o pacote.");
+            return;
+        }
+        if name.is_empty() && kind != NewItemKind::Package {
+            self.set_new_item_message("Informe o nome.");
+            return;
+        }
+        self.new_item_request = Some(NewItemRequest {
+            kind,
+            package,
+            name,
+            source_root,
+        });
+    }
+
     pub fn pointer_down_with_modifiers(&mut self, point: Point, size: Size, control: bool) {
+        // O menu aberto tem a primeira palavra: escolher uma ação ou dispensá-lo
+        // é o que este clique significa, e não o que está embaixo dele.
+        if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
+            return;
+        }
+        if self.new_item_modal.is_open() {
+            self.new_item_pointer_down(point, size);
+            return;
+        }
         if self.settings_modal.is_open() {
             self.settings_dialog_pointer_down(point, size);
             return;
@@ -1573,6 +2023,12 @@ impl IdeShell {
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "file.project" => {
                 self.open_project_requested = true;
                 self.status_message = "Select a project folder".to_owned();
+                return;
+            }
+            EventResult::Action(WidgetAction::Command(command)) if command.0 == "file.save" => {
+                // Salvar é do shell, que é dono da sessão do editor: não há o que
+                // pedir ao app.
+                self.save_active_document();
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "settings.open" => {
@@ -1764,6 +2220,10 @@ impl IdeShell {
 
     pub fn pointer_move(&mut self, point: Point, size: Size) -> bool {
         self.pointer = point;
+        // Com o menu aberto, o destaque acompanha o ponteiro dentro dele.
+        if self.context_menu.is_open() {
+            return self.context_menu_event(&UiEvent::PointerMove(primary_pointer(point)), size);
+        }
         if self.settings_modal.is_open() {
             return false;
         }
@@ -1991,6 +2451,9 @@ impl IdeShell {
     }
 
     pub fn text_input(&mut self, text: &str) {
+        if self.new_item_text_input(text) {
+            return;
+        }
         if self.settings_modal.is_open() {
             let _ = self.settings_text_input(text);
             return;
@@ -2004,6 +2467,21 @@ impl IdeShell {
     }
 
     pub fn key_down(&mut self, key: &str) {
+        self.key_down_with_modifiers(key, Modifiers::default());
+    }
+
+    /// Tecla com os modificadores que o sistema entregou.
+    ///
+    /// `Tab` e `Shift+Tab` são a mesma tecla lógica com sentidos opostos, então
+    /// o estado das teclas modificadoras precisa chegar aqui — o nome da tecla
+    /// sozinho não diz se é para indentar ou recolher.
+    pub fn key_down_with_modifiers(&mut self, key: &str, modifiers: Modifiers) {
+        if self.context_menu_key(key, modifiers) {
+            return;
+        }
+        if self.new_item_key(key) {
+            return;
+        }
         if self.settings_modal.is_open() {
             if self.settings_key_down(key) {
                 return;
@@ -2011,14 +2489,16 @@ impl IdeShell {
             let event = UiEvent::KeyDown(KeyEvent {
                 logical_key: key.to_owned(),
                 repeat: false,
-                modifiers: Modifiers::default(),
+                modifiers,
             });
             let mut context = EventContext::default();
             let result = self.jdk_combo.event(&mut context, &event);
             if !self.handle_settings_action(result) {
                 let _ = self.settings_modal.event(&mut context, &event);
+                // A janela fechada por dentro do componente — Esc no
+                // `ModalHost` — também é cancelamento.
                 if !self.settings_modal.is_open() {
-                    self.settings_dialog = None;
+                    self.cancel_settings();
                 }
             }
             return;
@@ -2034,7 +2514,7 @@ impl IdeShell {
                     self.completion_selected = self.completion_selected.saturating_sub(1);
                     return;
                 }
-                "enter" => {
+                "enter" | "tab" => {
                     self.accept_completion();
                     return;
                 }
@@ -2065,6 +2545,8 @@ impl IdeShell {
         } else if self.focus == ShellFocus::Editor {
             match key.to_ascii_lowercase().as_str() {
                 "enter" => self.edit_active("\n"),
+                "tab" if modifiers.shift => self.unindent(),
+                "tab" => self.indent(),
                 "arrowleft" => {
                     self.cursor_offset = previous_boundary(
                         self.active_text().unwrap_or_default(),
@@ -2088,6 +2570,44 @@ impl IdeShell {
                 self.cursor_offset = cursor + text.len();
                 self.status_message = "Modified".to_owned();
             }
+        }
+    }
+
+    /// Avança até a próxima parada de tabulação, escrevendo espaços.
+    ///
+    /// O editor desenha e mede o texto por coluna de largura fixa; um `\t`
+    /// contaria como uma coluna e ocuparia várias na tela, e o cursor deixaria
+    /// de cair onde o clique cai.
+    fn indent(&mut self) {
+        let (_, column) = line_column(self.active_text().unwrap_or_default(), self.cursor_offset);
+        let spaces = EDITOR_INDENT - column % EDITOR_INDENT;
+        self.edit_active(&" ".repeat(spaces));
+    }
+
+    /// Recolhe a indentação da linha, e não o que está antes do cursor.
+    fn unindent(&mut self) {
+        self.completion_items.clear();
+        let Some(document) = self.editor.active_mut() else {
+            return;
+        };
+        let text = document.buffer.text();
+        let cursor = self.cursor_offset.min(text.len());
+        let line_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
+        let removable = text[line_start..]
+            .chars()
+            .take(EDITOR_INDENT)
+            .take_while(|value| *value == ' ')
+            .count();
+        if removable == 0 {
+            return;
+        }
+        if document
+            .buffer
+            .replace(line_start..line_start + removable, "")
+            .is_ok()
+        {
+            self.cursor_offset = cursor.saturating_sub(removable).max(line_start);
+            self.status_message = "Modified".to_owned();
         }
     }
 
@@ -2408,60 +2928,62 @@ impl IdeShell {
                 + 36.0
                 + line.saturating_sub(self.editor_scroll_line) as f32 * EDITOR_LINE_HEIGHT)
                 .min(geo.editor_bottom - 190.0);
-            let visible = self.completion_items.len().min(8);
-            let popup = Rect::new(popup_x, popup_y, 260.0, visible as f32 * 24.0 + 8.0);
-            commands.push(fill(popup, colors.elevated));
-            commands.push(stroke(popup, colors.border));
-            for (index, item) in self.completion_items.iter().take(visible).enumerate() {
-                if index == self.completion_selected {
-                    commands.push(fill(
-                        Rect::new(
-                            popup_x + 2.0,
-                            popup_y + 4.0 + index as f32 * 24.0,
-                            256.0,
-                            23.0,
-                        ),
-                        colors.surface,
-                    ));
-                }
-                commands.push(label(
-                    &item.label,
-                    Point::new(popup_x + 10.0, popup_y + 8.0 + index as f32 * 24.0),
-                    if index == self.completion_selected {
-                        colors.accent
-                    } else {
-                        colors.text
-                    },
-                    14.0,
-                ));
+            // Superfície flutuante e lista são da biblioteca: a IDE só diz onde
+            // ancorar, o que listar e o que está selecionado.
+            let visible = self.completion_items.len().min(COMPLETION_VISIBLE_ROWS);
+            let mut surface = Popup::new(COMPLETION_POPUP_ID).with_padding(4.0);
+            surface.set_content_size(Size::new(
+                COMPLETION_POPUP_WIDTH,
+                visible as f32 * COMPLETION_ROW_HEIGHT,
+            ));
+            surface.layout(
+                &self.layout_context(),
+                Rect::new(0.0, 0.0, size.width, size.height),
+            );
+            surface.open_at(Point::new(popup_x, popup_y));
+            let mut popup_paint = self.paint_context();
+            surface.paint(&mut popup_paint);
+            if let Some(content) = surface.content_rect() {
+                let mut list = ListView::new(
+                    COMPLETION_LIST_ID,
+                    self.completion_items
+                        .iter()
+                        .map(|item| item.label.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .with_row_height(COMPLETION_ROW_HEIGHT);
+                list.set_selected(Some(self.completion_selected));
+                list.layout(&self.layout_context(), content);
+                list.paint(&mut popup_paint);
             }
+            commands.extend(popup_paint.into_commands());
         }
         if self.focus == ShellFocus::Search {
-            let width = 380.0_f32.min((geo.editor_width - 24.0).max(100.0));
-            commands.push(fill(
-                Rect::new(
-                    size.width - width - 12.0,
-                    geo.content_top + 12.0,
-                    width,
-                    42.0,
-                ),
-                colors.elevated,
+            // Também da biblioteca: a caixa é um campo de texto sobre uma
+            // superfície flutuante, e a IDE só escolhe o canto e o conteúdo.
+            let width = SEARCH_BOX_WIDTH.min((geo.editor_width - 24.0).max(100.0));
+            let mut surface = Popup::new(SEARCH_POPUP_ID).with_padding(6.0);
+            surface.set_content_size(Size::new(width - 12.0, SEARCH_BOX_HEIGHT - 12.0));
+            surface.layout(
+                &self.layout_context(),
+                Rect::new(0.0, 0.0, size.width, size.height),
+            );
+            surface.open_at(Point::new(
+                size.width - width - 12.0,
+                geo.content_top + 12.0,
             ));
-            commands.push(stroke(
-                Rect::new(
-                    size.width - width - 12.0,
-                    geo.content_top + 12.0,
-                    width,
-                    42.0,
-                ),
-                colors.accent,
-            ));
-            commands.push(label(
-                &format!("Search: {}", self.search_query),
-                Point::new(size.width - width, geo.content_top + 24.0),
-                colors.text,
-                14.0,
-            ));
+            let mut search_paint = self.paint_context();
+            surface.paint(&mut search_paint);
+            if let Some(content) = surface.content_rect() {
+                let mut field = TextInput::new(SEARCH_INPUT_ID, &self.search_query)
+                    .with_placeholder("Buscar no arquivo");
+                // A busca só aparece quando tem o foco do shell, então o campo
+                // é desenhado no estado focado — é ali que o cursor está.
+                field.event(&mut EventContext::default(), &UiEvent::FocusGained);
+                field.layout(&self.layout_context(), content);
+                field.paint(&mut search_paint);
+            }
+            commands.extend(search_paint.into_commands());
         }
         let position = self
             .active_text()
@@ -2535,51 +3057,32 @@ impl IdeShell {
             modal.paint(&mut modal_paint);
             commands.extend(modal_paint.into_commands());
             commands.push(fill(geometry.sidebar, colors.surface));
-            for (option, title, active) in [
-                (
-                    geometry.compiler_option,
-                    "Compilador e VM",
-                    self.settings_page == SettingsPage::Compiler,
-                ),
-                (
-                    geometry.debug_option,
-                    "Depuração",
-                    self.settings_page == SettingsPage::Debug,
-                ),
-            ] {
-                if active {
-                    commands.push(fill(option, colors.elevated));
-                    commands.push(fill(
-                        Rect::new(option.origin.x, option.origin.y, 3.0, option.size.height),
-                        colors.accent,
-                    ));
-                }
-                commands.push(label(
-                    title,
-                    Point::new(option.origin.x + 14.0, option.origin.y + 11.0),
-                    if active {
-                        colors.text
-                    } else {
-                        colors.muted_text
-                    },
-                    14.0,
-                ));
-            }
             let mut component_paint = self.paint_context();
+            // A navegação entre páginas é a `ListView` da biblioteca, no estilo
+            // de marcador: a linha ativa ganha a barra de destaque e continua
+            // sendo um rótulo para ler.
+            let pages = self.settings_pages_for(&geometry);
+            pages.paint(&mut component_paint);
             match self.settings_page {
                 SettingsPage::Compiler => {
-                    commands.push(label(
+                    // Título e legenda são `Label` da biblioteca: tamanho e cor
+                    // vêm do tema, não de números escritos aqui.
+                    self.paint_settings_text(
+                        &mut component_paint,
+                        SETTINGS_TITLE_ID,
                         "Compilador e VM",
                         Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 34.0),
-                        colors.text,
                         17.0,
-                    ));
-                    commands.push(label(
+                        IconTint::Text,
+                    );
+                    self.paint_settings_text(
+                        &mut component_paint,
+                        SETTINGS_CAPTION_ID,
                         "JDK",
                         Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 16.0),
-                        colors.muted_text,
                         13.0,
-                    ));
+                        IconTint::Muted,
+                    );
                     let mut combo = self.jdk_combo.clone();
                     combo.layout(&self.layout_context(), geometry.combo);
                     combo.paint(&mut component_paint);
@@ -2603,21 +3106,258 @@ impl IdeShell {
             let mut close = self.settings_close_button.clone();
             close.layout(&self.layout_context(), geometry.close);
             close.paint(&mut component_paint);
-            commands.extend(component_paint.into_commands());
+            let mut save = self.settings_save_button.clone();
+            save.layout(&self.layout_context(), geometry.save);
+            save.paint(&mut component_paint);
             if let Some(message) = self
                 .settings_dialog
                 .as_ref()
                 .and_then(|dialog| dialog.message.as_ref())
             {
-                commands.push(label(
+                self.paint_settings_text(
+                    &mut component_paint,
+                    SETTINGS_MESSAGE_ID,
                     message,
                     Point::new(geometry.combo.origin.x, geometry.combo.origin.y + 54.0),
-                    colors.danger,
                     13.0,
-                ));
+                    IconTint::Danger,
+                );
             }
+            commands.extend(component_paint.into_commands());
+        }
+        // A janela de criação cobre o conteúdo, e o menu de contexto cobre ela.
+        self.paint_new_item_dialog(&mut commands, size);
+        // O menu de contexto é desenhado por último: ele cobre tudo, inclusive
+        // o painel de onde foi aberto.
+        if self.context_menu.is_open() {
+            let mut menu = self.context_menu.clone();
+            menu.layout(
+                &self.layout_context(),
+                Rect::new(0.0, 0.0, size.width, size.height),
+            );
+            let mut menu_paint = self.paint_context();
+            menu.paint(&mut menu_paint);
+            commands.extend(menu_paint.into_commands());
         }
         commands
+    }
+
+    /// Desenha a janela de criação por cima de tudo.
+    ///
+    /// Moldura, véu e título são do `ModalHost`; os campos, os botões e as
+    /// legendas são componentes da biblioteca. A IDE diz onde e o que.
+    fn paint_new_item_dialog(&self, commands: &mut Vec<PaintCommand>, size: Size) {
+        let Some(dialog) = self.new_item_dialog.as_ref() else {
+            return;
+        };
+        let mut modal = self.new_item_modal.clone();
+        // O painel se centraliza na área que recebe no layout. Sem esse layout a
+        // área é zero, e a janela nasce no canto superior esquerdo.
+        modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let panel = modal.panel_bounds();
+        let geometry = new_item_geometry(panel);
+        let mut paint = self.paint_context();
+        // O título é do `ModalHost`, que já o desenha: escrever outro por cima
+        // era o que aparecia duplicado.
+        modal.paint(&mut paint);
+        self.paint_settings_text(
+            &mut paint,
+            NEW_ITEM_PACKAGE_CAPTION_ID,
+            "Pacote",
+            Point::new(geometry.package.origin.x, geometry.package.origin.y - 18.0),
+            13.0,
+            IconTint::Muted,
+        );
+        self.paint_settings_text(
+            &mut paint,
+            NEW_ITEM_NAME_CAPTION_ID,
+            dialog.kind.name_caption(),
+            Point::new(geometry.name.origin.x, geometry.name.origin.y - 18.0),
+            13.0,
+            IconTint::Muted,
+        );
+        for (field, rect) in [
+            (&self.new_item_package, geometry.package),
+            (&self.new_item_name, geometry.name),
+        ] {
+            // O foco já está no campo de verdade; aqui é só desenhar.
+            let mut field = field.clone();
+            field.layout(&self.layout_context(), rect);
+            field.paint(&mut paint);
+        }
+        for (button, rect) in [
+            (&self.new_item_cancel_button, geometry.cancel),
+            (&self.new_item_create_button, geometry.create),
+        ] {
+            let mut button = button.clone();
+            button.layout(&self.layout_context(), rect);
+            button.paint(&mut paint);
+        }
+        if let Some(message) = dialog.message.as_ref() {
+            self.paint_settings_text(
+                &mut paint,
+                NEW_ITEM_MESSAGE_ID,
+                message,
+                Point::new(geometry.name.origin.x, geometry.name.origin.y + 44.0),
+                13.0,
+                IconTint::Danger,
+            );
+        }
+        commands.extend(paint.into_commands());
+    }
+
+    /// Roteia o clique dentro da janela de criação.
+    fn new_item_pointer_down(&mut self, point: Point, size: Size) {
+        self.new_item_modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = new_item_geometry(self.new_item_modal.panel_bounds());
+        // O clique vai ao campo: onde o cursor fica dentro do texto é ele quem
+        // sabe, porque a medição da fonte é dele.
+        for (naming, rect) in [(false, geometry.package), (true, geometry.name)] {
+            if !rect.contains(point) {
+                continue;
+            }
+            let context = self.layout_context();
+            let field = if naming {
+                &mut self.new_item_name
+            } else {
+                &mut self.new_item_package
+            };
+            field.layout(&context, rect);
+            field.event(
+                &mut EventContext::default(),
+                &UiEvent::PointerDown(primary_pointer(point)),
+            );
+            self.focus_new_item_field(naming);
+            return;
+        }
+        if geometry.create.contains(point) {
+            self.submit_new_item();
+            return;
+        }
+        if geometry.cancel.contains(point) {
+            self.close_new_item_dialog();
+        }
+    }
+
+    /// Move o foco entre os dois campos.
+    ///
+    /// O foco fica nos campos de verdade, e não num clone da pintura: é ele que
+    /// decide onde a digitação entra e onde o cursor aparece.
+    fn focus_new_item_field(&mut self, naming: bool) {
+        if let Some(dialog) = self.new_item_dialog.as_mut() {
+            dialog.naming = naming;
+        }
+        let mut context = EventContext::default();
+        let (focused, blurred) = if naming {
+            (&mut self.new_item_name, &mut self.new_item_package)
+        } else {
+            (&mut self.new_item_package, &mut self.new_item_name)
+        };
+        focused.event(&mut context, &UiEvent::FocusGained);
+        blurred.event(&mut context, &UiEvent::FocusLost);
+    }
+
+    /// O campo que está recebendo o que for digitado.
+    fn new_item_field(&mut self) -> Option<&mut TextInput> {
+        let naming = self.new_item_dialog.as_ref()?.naming;
+        Some(if naming {
+            &mut self.new_item_name
+        } else {
+            &mut self.new_item_package
+        })
+    }
+
+    /// Tecla dentro da janela de criação. Devolve `true` quando a consumiu.
+    fn new_item_key(&mut self, key: &str) -> bool {
+        if !self.new_item_modal.is_open() {
+            return false;
+        }
+        let Some(naming) = self.new_item_dialog.as_ref().map(|dialog| dialog.naming) else {
+            return false;
+        };
+        match key.to_ascii_lowercase().as_str() {
+            "enter" => self.submit_new_item(),
+            "escape" => self.close_new_item_dialog(),
+            "tab" => self.focus_new_item_field(!naming),
+            // Apagar e mover o cursor são do campo: ele conhece as fronteiras de
+            // caractere e a posição atual.
+            _ => {
+                let event = UiEvent::KeyDown(KeyEvent {
+                    logical_key: key.to_owned(),
+                    repeat: false,
+                    modifiers: Modifiers::default(),
+                });
+                if let Some(field) = self.new_item_field() {
+                    field.event(&mut EventContext::default(), &event);
+                }
+            }
+        }
+        true
+    }
+
+    /// Texto digitado na janela de criação. Devolve `true` quando o consumiu.
+    ///
+    /// O texto entra pelo componente, e não por concatenação: é assim que ele
+    /// aparece onde o cursor está, inclusive depois de um clique no meio do
+    /// caminho já digitado.
+    fn new_item_text_input(&mut self, text: &str) -> bool {
+        if !self.new_item_modal.is_open() {
+            return false;
+        }
+        let event = UiEvent::TextInput(TextInputEvent {
+            text: text.to_owned(),
+        });
+        if let Some(field) = self.new_item_field() {
+            field.event(&mut EventContext::default(), &event);
+        }
+        if let Some(dialog) = self.new_item_dialog.as_mut() {
+            // Digitar é corrigir: a mensagem do erro anterior sai de cena.
+            dialog.message = None;
+        }
+        true
+    }
+
+    /// Lista de páginas posicionada, com a página atual selecionada.
+    ///
+    /// A área ocupada é a das duas linhas, não a barra inteira: a lista responde
+    /// pelo que ela desenha, e o resto da barra é fundo do painel.
+    fn settings_pages_for(&self, geometry: &SettingsDialogGeometry) -> ListView {
+        let mut pages = self.settings_pages.clone();
+        pages.set_selected(Some(match self.settings_page {
+            SettingsPage::Compiler => 0,
+            SettingsPage::Debug => 1,
+        }));
+        pages.layout(&self.layout_context(), settings_pages_rect(geometry));
+        pages
+    }
+
+    /// Desenha um texto da janela de configurações com a `Label` da biblioteca.
+    ///
+    /// A IDE escolhe o papel — título, legenda, mensagem de erro — e a posição.
+    /// Cor e desenho vêm do componente, e é assim que o tema alcança este texto.
+    fn paint_settings_text(
+        &self,
+        context: &mut PaintContext,
+        id: WidgetId,
+        text: &str,
+        origin: Point,
+        font_size: f32,
+        tone: IconTint,
+    ) {
+        let mut label = Label::new(id, text)
+            .with_font_size(font_size)
+            .with_tone(tone);
+        label.layout(
+            &self.layout_context(),
+            Rect::new(origin.x, origin.y, 0.0, 0.0),
+        );
+        label.paint(context);
     }
 
     fn settings_dialog_pointer_down(&mut self, point: Point, size: Size) {
@@ -2627,13 +3367,20 @@ impl IdeShell {
         self.settings_modal
             .layout(&self.layout_context(), Rect::new(0.0, 0.0, size.width, size.height));
         let geometry = settings_dialog_geometry(self.settings_modal.panel_bounds());
-        if geometry.compiler_option.contains(point) {
-            self.settings_page = SettingsPage::Compiler;
-            self.settings_focus = None;
-            return;
-        }
-        if geometry.debug_option.contains(point) {
-            self.settings_page = SettingsPage::Debug;
+        // Qual página foi clicada é a lista quem sabe: altura de linha e rolagem
+        // são dela.
+        let mut pages = self.settings_pages_for(&geometry);
+        pages.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        if let Some(page) = pages.selected().and_then(|index| match index {
+            0 => Some(SettingsPage::Compiler),
+            1 => Some(SettingsPage::Debug),
+            _ => None,
+        }) && settings_pages_rect(&geometry).contains(point)
+        {
+            self.settings_page = page;
             self.settings_focus = None;
             return;
         }
@@ -2646,6 +3393,8 @@ impl IdeShell {
             .layout(&self.layout_context(), geometry.browse);
         self.settings_close_button
             .layout(&self.layout_context(), geometry.close);
+        self.settings_save_button
+            .layout(&self.layout_context(), geometry.save);
         let event = UiEvent::PointerDown(primary_pointer(point));
         let mut context = EventContext::default();
         let combo_result = self.jdk_combo.event(&mut context, &event);
@@ -2659,6 +3408,10 @@ impl IdeShell {
         }
         let close_result = click_widget(&mut self.settings_close_button, point);
         if self.handle_settings_action(close_result) {
+            return;
+        }
+        let save_result = click_widget(&mut self.settings_save_button, point);
+        if self.handle_settings_action(save_result) {
             return;
         }
         let _ = self.settings_modal.event(&mut context, &event);
@@ -2725,7 +3478,13 @@ impl IdeShell {
         self.settings_close_button
             .layout(&self.layout_context(), geometry.close);
         let close_result = click_widget(&mut self.settings_close_button, point);
-        let _ = self.handle_settings_action(close_result);
+        if self.handle_settings_action(close_result) {
+            return;
+        }
+        self.settings_save_button
+            .layout(&self.layout_context(), geometry.save);
+        let save_result = click_widget(&mut self.settings_save_button, point);
+        let _ = self.handle_settings_action(save_result);
     }
 
     /// Botões de ação da barra, na ordem em que aparecem.
@@ -2851,7 +3610,10 @@ impl IdeShell {
             .strip_prefix("jdk.select.")
             .and_then(|value| value.parse::<usize>().ok())
         {
-            self.settings_jdk_result = Some(index);
+            // A escolha fica pendente: quem aplica é o Salvar.
+            if let Some(dialog) = self.settings_dialog.as_mut() {
+                dialog.pending_jdk = Some(index);
+            }
             return true;
         }
         match command.0.as_str() {
@@ -2859,23 +3621,56 @@ impl IdeShell {
                 self.browse_jdk_requested = true;
                 true
             }
-            "settings.close" => {
-                self.settings_modal.close();
-                self.settings_dialog = None;
+            "settings.save" => {
+                self.save_settings();
+                true
+            }
+            "settings.cancel" => {
+                self.cancel_settings();
                 true
             }
             _ => false,
         }
     }
+
+    /// Aplica o que foi mexido e fecha.
+    ///
+    /// Só o que mudou sai daqui: sem escolha pendente, salvar não reaplica o JDK
+    /// que já estava valendo — reaplicar derrubaria o provider de linguagem e
+    /// reindexaria a biblioteca padrão por nada.
+    fn save_settings(&mut self) {
+        if let Some(dialog) = self.settings_dialog.as_ref()
+            && let Some(index) = dialog.pending_jdk
+            && dialog.original_jdk != Some(index)
+        {
+            self.settings_jdk_result = Some(index);
+        }
+        self.settings_modal.close();
+        self.settings_dialog = None;
+    }
+
+    /// Descarta tudo o que foi mexido e fecha.
+    fn cancel_settings(&mut self) {
+        if let Some(dialog) = self.settings_dialog.take() {
+            if let Some(original) = dialog.original_jdk {
+                self.jdk_combo.set_selected(original);
+            }
+            self.debug_host.set_value(dialog.original_debug_host);
+            self.debug_port.set_value(dialog.original_debug_port);
+        }
+        self.settings_jdk_result = None;
+        self.settings_modal.close();
+    }
 }
 
 struct SettingsDialogGeometry {
     sidebar: Rect,
+    /// Primeira linha da navegação; as demais seguem por altura de linha.
     compiler_option: Rect,
-    debug_option: Rect,
     combo: Rect,
     browse: Rect,
     close: Rect,
+    save: Rect,
     debug_host: Rect,
     debug_port: Rect,
     debug_attach: Rect,
@@ -2893,6 +3688,54 @@ fn click_widget(widget: &mut dyn Widget, point: Point) -> EventResult {
     let pointer = primary_pointer(point);
     let _ = widget.event(&mut context, &UiEvent::PointerDown(pointer));
     widget.event(&mut context, &UiEvent::PointerUp(pointer))
+}
+
+/// Onde cada peça da janela de criação fica dentro do painel.
+struct NewItemGeometry {
+    package: Rect,
+    name: Rect,
+    create: Rect,
+    cancel: Rect,
+}
+
+fn new_item_geometry(panel: Rect) -> NewItemGeometry {
+    let field_width = (panel.size.width - 48.0).max(120.0);
+    let package = Rect::new(
+        panel.origin.x + 24.0,
+        panel.origin.y + 76.0,
+        field_width,
+        34.0,
+    );
+    let name = Rect::new(
+        package.origin.x,
+        package.origin.y + 64.0,
+        field_width,
+        34.0,
+    );
+    // Criar à direita, encostado na borda, como o Salvar das Configurações.
+    let create = Rect::new(
+        panel.origin.x + panel.size.width - 104.0,
+        panel.origin.y + panel.size.height - 48.0,
+        88.0,
+        34.0,
+    );
+    let cancel = Rect::new(create.origin.x - 98.0, create.origin.y, 88.0, 34.0);
+    NewItemGeometry {
+        package,
+        name,
+        create,
+        cancel,
+    }
+}
+
+/// Área que a lista de páginas ocupa: as linhas, e não a barra inteira.
+fn settings_pages_rect(geometry: &SettingsDialogGeometry) -> Rect {
+    Rect::new(
+        geometry.compiler_option.origin.x,
+        geometry.compiler_option.origin.y,
+        geometry.compiler_option.size.width,
+        SETTINGS_PAGE_ROW_HEIGHT * SETTINGS_PAGE_TITLES.len() as f32,
+    )
 }
 
 fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
@@ -2915,17 +3758,19 @@ fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
         112.0,
         36.0,
     );
-    let close = Rect::new(
+    // Salvar à direita, encostado na borda, e Cancelar à esquerda dele: a ação
+    // que confirma fica no canto que a leitura alcança por último.
+    let save = Rect::new(
         dialog.origin.x + dialog.size.width - 104.0,
         dialog.origin.y + dialog.size.height - 48.0,
         88.0,
         34.0,
     );
-    let debug_option = Rect::new(
-        compiler_option.origin.x,
-        compiler_option.origin.y + compiler_option.size.height + 4.0,
-        compiler_option.size.width,
-        compiler_option.size.height,
+    let close = Rect::new(
+        save.origin.x - 98.0,
+        save.origin.y,
+        88.0,
+        save.size.height,
     );
     let debug_host = Rect::new(combo.origin.x, combo.origin.y, 220.0, 36.0);
     let debug_port = Rect::new(
@@ -2943,10 +3788,10 @@ fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
     SettingsDialogGeometry {
         sidebar,
         compiler_option,
-        debug_option,
         combo,
         browse,
         close,
+        save,
         debug_host,
         debug_port,
         debug_attach,
@@ -3211,20 +4056,105 @@ fn explorer_id(path: &Path) -> u64 {
     hasher.finish()
 }
 
+/// Nome de um nó como aparece na árvore.
+fn explorer_label(node: &FileNode) -> &str {
+    node.path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("?")
+}
+
+/// Raiz de fontes Java pelo layout de Maven e Gradle: `src/<conjunto>/java`.
+///
+/// O modelo de projeto ainda não chega até o shell, então a convenção de
+/// diretório é o que existe para reconhecer uma raiz de fontes. Ela cobre os
+/// dois construtores que a IDE já entende, e enquanto o modelo não chegar é
+/// preferível acertar o caso comum a não comprimir nada.
+fn is_java_source_root(path: &Path) -> bool {
+    if path.file_name().and_then(|name| name.to_str()) != Some("java") {
+        return false;
+    }
+    let mut ancestors = path.ancestors().skip(1);
+    let parent = ancestors.next().and_then(Path::file_name);
+    let grandparent = ancestors.next().and_then(Path::file_name);
+    parent.is_some_and(|name| name == "src") || grandparent.is_some_and(|name| name == "src")
+}
+
+/// O diretório é um pacote, isto é, está dentro de uma raiz de fontes.
+///
+/// A raiz em si não é pacote: `java` continua sendo uma linha própria, e a
+/// compressão começa no primeiro diretório abaixo dela.
+fn is_java_package(path: &Path) -> bool {
+    path.ancestors().skip(1).any(is_java_source_root)
+}
+
+/// Junta uma cadeia de pacotes de filho único em um nó só.
+///
+/// `br` que contém apenas `com`, que contém apenas `exemplo`, não carrega
+/// informação nenhuma: os três existem porque o Java exige que o diretório
+/// espelhe o pacote. Devolve o diretório final da cadeia — é ele que responde
+/// pelo nó, então o identificador segue sendo o de um caminho real e o clique
+/// resolve para o diretório que de fato tem conteúdo.
+///
+/// Um diretório com um arquivo ao lado do subdiretório tem mais de um filho e
+/// interrompe a cadeia, como no IntelliJ.
+fn compact_package_chain(node: &FileNode) -> (&FileNode, String) {
+    let mut label = explorer_label(node).to_owned();
+    let mut current = node;
+    while is_java_package(&current.path) {
+        let [only_child] = current.children.as_slice() else {
+            break;
+        };
+        if !only_child.is_directory {
+            break;
+        }
+        label.push('.');
+        label.push_str(explorer_label(only_child));
+        current = only_child;
+    }
+    (current, label)
+}
+
+/// Ações que fazem sentido no diretório clicado.
+///
+/// Dentro de uma raiz de fontes Java o que se cria é pacote, classe e
+/// interface: ali um diretório *é* um pacote e um arquivo solto *é* um tipo, e
+/// oferecer "nova pasta" faria o usuário criar um pacote sem saber que criou.
+/// Fora dela não há pacote nem classe, então resta a pasta.
+///
+/// A própria pasta `java` conta como dentro: ela é a raiz onde o primeiro
+/// pacote nasce.
+fn explorer_menu_entries(target: &Path) -> Vec<MenuEntry> {
+    if is_java_source_root(target) || is_java_package(target) {
+        return vec![
+            MenuEntry::Item(MenuItem::new(
+                "Novo pacote",
+                CommandId("explorer.new.package".to_owned()),
+            )),
+            MenuEntry::Separator,
+            MenuEntry::Item(MenuItem::new(
+                "Nova classe",
+                CommandId("explorer.new.class".to_owned()),
+            )),
+            MenuEntry::Item(MenuItem::new(
+                "Nova interface",
+                CommandId("explorer.new.interface".to_owned()),
+            )),
+        ];
+    }
+    vec![MenuEntry::Item(MenuItem::new(
+        "Nova pasta",
+        CommandId("explorer.new.folder".to_owned()),
+    ))]
+}
+
 /// Converte a árvore de arquivos em itens da biblioteca.
 fn explorer_items(node: &FileNode) -> Vec<TreeItem> {
     node.children
         .iter()
         .map(|child| {
-            TreeItem::new(
-                explorer_id(&child.path),
-                child
-                    .path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("?"),
-                explorer_items(child),
-            )
+            let (node, label) = compact_package_chain(child);
+            TreeItem::new(explorer_id(&node.path), label, explorer_items(node))
         })
         .collect()
 }
@@ -3350,6 +4280,127 @@ mod tests {
         );
     }
 
+    fn dir(path: &str, children: Vec<FileNode>) -> FileNode {
+        FileNode {
+            path: PathBuf::from(path),
+            is_directory: true,
+            children,
+        }
+    }
+
+    fn file(path: &str) -> FileNode {
+        FileNode {
+            path: PathBuf::from(path),
+            is_directory: false,
+            children: Vec::new(),
+        }
+    }
+
+    fn labels(items: &[TreeItem]) -> Vec<&str> {
+        items.iter().map(|item| item.label.as_str()).collect()
+    }
+
+    /// Projeto Maven com a cadeia de pacote que a captura mostra.
+    fn maven_project() -> FileNode {
+        dir(
+            "demo",
+            vec![dir(
+                "demo/src",
+                vec![dir(
+                    "demo/src/main",
+                    vec![dir(
+                        "demo/src/main/java",
+                        vec![dir(
+                            "demo/src/main/java/br",
+                            vec![dir(
+                                "demo/src/main/java/br/com",
+                                vec![dir(
+                                    "demo/src/main/java/br/com/exemplo",
+                                    vec![dir(
+                                        "demo/src/main/java/br/com/exemplo/endpoints",
+                                        vec![
+                                            dir(
+                                                "demo/src/main/java/br/com/exemplo/endpoints/controller",
+                                                Vec::new(),
+                                            ),
+                                            file(
+                                                "demo/src/main/java/br/com/exemplo/endpoints/App.java",
+                                            ),
+                                        ],
+                                    )],
+                                )],
+                            )],
+                        )],
+                    )],
+                )],
+            )],
+        )
+    }
+
+    /// `br`, `com` e `exemplo` só existem porque o diretório espelha o pacote:
+    /// viram uma linha só, e `src`, `main` e `java` continuam separados porque
+    /// não são pacotes.
+    #[test]
+    fn explorer_joins_single_child_java_packages_into_one_row() {
+        let items = explorer_items(&maven_project());
+        let src = &items[0];
+        assert_eq!(labels(&items), vec!["src"]);
+        let main = &src.children[0];
+        assert_eq!(labels(&src.children), vec!["main"]);
+        let java = &main.children[0];
+        assert_eq!(labels(&main.children), vec!["java"]);
+        assert_eq!(labels(&java.children), vec!["br.com.exemplo.endpoints"]);
+        assert_eq!(
+            labels(&java.children[0].children),
+            vec!["controller", "App.java"]
+        );
+    }
+
+    /// O nó comprimido responde pelo diretório final da cadeia — é assim que o
+    /// clique continua resolvendo para um caminho que existe.
+    #[test]
+    fn a_joined_package_keeps_the_identity_of_the_deepest_directory() {
+        let items = explorer_items(&maven_project());
+        let package = &items[0].children[0].children[0].children[0];
+        assert_eq!(
+            package.id,
+            explorer_id(Path::new("demo/src/main/java/br/com/exemplo/endpoints"))
+        );
+    }
+
+    /// Um arquivo ao lado do subdiretório interrompe a cadeia: `br` passa a ter
+    /// conteúdo próprio e merece a linha dele.
+    #[test]
+    fn a_file_beside_the_subdirectory_stops_the_chain() {
+        let tree = dir(
+            "demo/src/main/java",
+            vec![dir(
+                "demo/src/main/java/br",
+                vec![
+                    dir("demo/src/main/java/br/com", Vec::new()),
+                    file("demo/src/main/java/br/leiame.md"),
+                ],
+            )],
+        );
+        assert_eq!(labels(&explorer_items(&tree)), vec!["br"]);
+    }
+
+    /// Fora de uma raiz de fontes não há pacote, e juntar nomes com ponto diria
+    /// algo que não é verdade sobre aquelas pastas.
+    #[test]
+    fn directories_outside_a_source_root_are_left_alone() {
+        let tree = dir(
+            "demo",
+            vec![dir(
+                "demo/docs",
+                vec![dir("demo/docs/adr", vec![file("demo/docs/adr/0001.md")])],
+            )],
+        );
+        let items = explorer_items(&tree);
+        assert_eq!(labels(&items), vec!["docs"]);
+        assert_eq!(labels(&items[0].children), vec!["adr"]);
+    }
+
     #[test]
     fn explorer_click_toggles_directory() {
         let mut shell = test_shell();
@@ -3370,6 +4421,138 @@ mod tests {
             "class Main {\n  void run() {\n    int total = 1;\n  }\n}",
         );
         (shell, path)
+    }
+
+    /// Tab escreve espaços até a próxima parada de tabulação. A partir da
+    /// coluna 2 são dois espaços, não quatro — o texto alinha com a grade que o
+    /// editor desenha.
+    #[test]
+    fn tab_indents_the_editor_to_the_next_stop() {
+        let mut shell = test_shell();
+        shell.editor.open_memory("Example.java", "ab");
+        shell.focus = ShellFocus::Editor;
+        shell.cursor_offset = 2;
+        shell.key_down("Tab");
+        assert_eq!(shell.active_text(), Some("ab  "));
+        assert_eq!(shell.cursor_offset, 4);
+    }
+
+    /// Shift+Tab recolhe a margem da linha inteira, com o cursor no meio do
+    /// código, e o cursor acompanha o deslocamento.
+    #[test]
+    fn shift_tab_unindents_the_current_line() {
+        let mut shell = test_shell();
+        shell
+            .editor
+            .open_memory("Example.java", "class A {\n    int valor;\n}");
+        shell.focus = ShellFocus::Editor;
+        shell.cursor_offset = 14;
+        shell.key_down_with_modifiers(
+            "Tab",
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(shell.active_text(), Some("class A {\nint valor;\n}"));
+        assert_eq!(shell.cursor_offset, 10);
+    }
+
+    fn entry_labels(entries: &[MenuEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| match entry {
+                MenuEntry::Item(item) => item.label.clone(),
+                MenuEntry::Separator => "—".to_owned(),
+            })
+            .collect()
+    }
+
+    /// Dentro da raiz de fontes o que se cria é pacote e tipo. A própria pasta
+    /// `java` conta como dentro: é a raiz onde o primeiro pacote nasce.
+    #[test]
+    fn inside_the_java_source_root_the_menu_offers_packages_and_types() {
+        for target in [
+            "demo/src/main/java",
+            "demo/src/main/java/br",
+            "demo/src/test/java/br/com/exemplo",
+        ] {
+            assert_eq!(
+                entry_labels(&explorer_menu_entries(Path::new(target))),
+                vec!["Novo pacote", "—", "Nova classe", "Nova interface"],
+                "alvo {target}"
+            );
+        }
+    }
+
+    /// Fora dela não há pacote nem classe: resta a pasta.
+    #[test]
+    fn outside_the_source_root_the_menu_offers_a_folder() {
+        for target in ["demo", "demo/docs", "demo/src/main/resources"] {
+            assert_eq!(
+                entry_labels(&explorer_menu_entries(Path::new(target))),
+                vec!["Nova pasta"],
+                "alvo {target}"
+            );
+        }
+    }
+
+    /// O clique secundário abre o menu sobre a linha apontada, e a escolha
+    /// relata o diretório onde a ação aconteceria.
+    #[test]
+    fn the_secondary_click_on_the_explorer_opens_the_menu_for_that_row() {
+        let mut shell = IdeShell::from_tree(maven_project());
+        let size = Size::new(1280.0, 800.0);
+        let row = Point::new(80.0, EXPLORER_TOP + 2.0);
+        shell.secondary_pointer_down(row, size);
+        assert!(shell.context_menu_open());
+        assert_eq!(shell.context_menu_target, Some(PathBuf::from("demo/src")));
+        assert_eq!(
+            entry_labels(shell.context_menu.entries()),
+            vec!["Nova pasta"]
+        );
+    }
+
+    /// Clicando em um arquivo, o alvo é a pasta dele: criar dentro de um
+    /// arquivo não quer dizer nada.
+    #[test]
+    fn a_file_hands_the_menu_over_to_its_directory() {
+        let tree = dir(
+            "demo",
+            vec![dir(
+                "demo/src/main/java",
+                vec![file("demo/src/main/java/App.java")],
+            )],
+        );
+        let mut shell = IdeShell::from_tree(tree);
+        let size = Size::new(1280.0, 800.0);
+        shell.expanded.insert(PathBuf::from("demo/src/main/java"));
+        shell.sync_explorer_tree();
+        shell.secondary_pointer_down(
+            Point::new(80.0, EXPLORER_TOP + EXPLORER_ROW_HEIGHT + 2.0),
+            size,
+        );
+        assert_eq!(
+            shell.context_menu_target,
+            Some(PathBuf::from("demo/src/main/java"))
+        );
+        assert_eq!(
+            entry_labels(shell.context_menu.entries()),
+            vec!["Novo pacote", "—", "Nova classe", "Nova interface"]
+        );
+    }
+
+    /// Esc dispensa o menu antes de qualquer outra coisa que Esc faria.
+    #[test]
+    fn escape_dismisses_the_context_menu_first() {
+        let mut shell = IdeShell::from_tree(maven_project());
+        let size = Size::new(1280.0, 800.0);
+        shell.focus = ShellFocus::Search;
+        shell.search_query = "consulta".to_owned();
+        shell.secondary_pointer_down(Point::new(80.0, EXPLORER_TOP + 2.0), size);
+        shell.escape();
+        assert!(!shell.context_menu_open());
+        assert_eq!(shell.search_query, "consulta");
     }
 
     /// A calha mostra a diferença entre pedido e confirmado, e a linha parada
@@ -3786,10 +4969,11 @@ mod tests {
             .layout(&LayoutContext::default(), Rect::new(0.0, 0.0, size.width, size.height));
         let geometry = settings_dialog_geometry(shell.settings_modal.panel_bounds());
 
+        // Segunda linha da navegação é a página de Depuração.
         shell.pointer_down(
             Point::new(
-                geometry.debug_option.origin.x + 20.0,
-                geometry.debug_option.origin.y + 10.0,
+                geometry.compiler_option.origin.x + 20.0,
+                geometry.compiler_option.origin.y + SETTINGS_PAGE_ROW_HEIGHT + 10.0,
             ),
             size,
         );
@@ -4784,7 +5968,8 @@ mod tests {
             ),
             size,
         );
-        assert_eq!(shell.take_settings_jdk_result(), Some(1));
+        // A escolha fica pendente: a janela é uma transação.
+        assert_eq!(shell.take_settings_jdk_result(), None);
 
         shell.pointer_down(
             Point::new(
@@ -4794,5 +5979,383 @@ mod tests {
             size,
         );
         assert!(shell.take_browse_jdk_request());
+    }
+
+    /// Salvar aplica o que foi escolhido e fecha.
+    #[test]
+    fn saving_the_settings_applies_the_chosen_jdk() {
+        let mut shell = test_shell();
+        let size = Size::new(1_000.0, 700.0);
+        shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
+        let geometry = open_settings_geometry(&mut shell, size);
+        choose_second_jdk(&mut shell, &geometry, size);
+        shell.pointer_down(
+            Point::new(geometry.save.origin.x + 10.0, geometry.save.origin.y + 10.0),
+            size,
+        );
+        assert_eq!(shell.take_settings_jdk_result(), Some(1));
+        assert!(!shell.settings_dialog_open());
+    }
+
+    /// Cancelar descarta o que foi mexido, e o combo volta ao que estava.
+    #[test]
+    fn cancelling_the_settings_discards_every_change() {
+        let mut shell = test_shell();
+        let size = Size::new(1_000.0, 700.0);
+        shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
+        let geometry = open_settings_geometry(&mut shell, size);
+        choose_second_jdk(&mut shell, &geometry, size);
+        shell.pointer_down(
+            Point::new(
+                geometry.close.origin.x + 10.0,
+                geometry.close.origin.y + 10.0,
+            ),
+            size,
+        );
+        assert_eq!(shell.take_settings_jdk_result(), None);
+        assert!(!shell.settings_dialog_open());
+        assert_eq!(shell.jdk_combo.selected_index(), 0);
+    }
+
+    /// Projeto Maven com um pacote já criado, para o menu agir sobre ele.
+    fn shell_with_package() -> IdeShell {
+        IdeShell::from_tree(dir(
+            "demo",
+            vec![dir(
+                "demo/src/main/java",
+                vec![dir(
+                    "demo/src/main/java/br",
+                    vec![dir("demo/src/main/java/br/com", Vec::new())],
+                )],
+            )],
+        ))
+    }
+
+    /// O menu abre a janela com o pacote do alvo já preenchido.
+    ///
+    /// Quem clicou com o botão direito sobre um pacote não deveria ter que
+    /// digitar de novo onde está.
+    #[test]
+    fn the_new_item_dialog_opens_with_the_clicked_package() {
+        let mut shell = shell_with_package();
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        shell.run_explorer_command("explorer.new.class");
+        assert!(shell.new_item_dialog_open());
+        assert_eq!(shell.new_item_package.value(), "br.com");
+        assert_eq!(shell.new_item_name.value(), "");
+    }
+
+    /// A mesma janela serve as três ações, mudando só o título e a legenda.
+    #[test]
+    fn the_three_menu_actions_share_one_window() {
+        let mut shell = shell_with_package();
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        for (command, title) in [
+            ("explorer.new.package", "Novo pacote"),
+            ("explorer.new.class", "Nova classe"),
+            ("explorer.new.interface", "Nova interface"),
+        ] {
+            shell.run_explorer_command(command);
+            let kind = shell
+                .new_item_dialog
+                .as_ref()
+                .map(|dialog| dialog.kind)
+                .unwrap_or(NewItemKind::Package);
+            assert_eq!(kind.title(), title);
+            assert_eq!(shell.new_item_package.value(), "br.com");
+        }
+    }
+
+    /// Enter com só o pacote pede o pacote; o nome fica vazio.
+    #[test]
+    fn enter_with_only_the_package_asks_for_the_package() {
+        let mut shell = shell_with_package();
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        shell.run_explorer_command("explorer.new.package");
+        // O foco começa no pacote, com o cursor no fim do que veio preenchido.
+        shell.text_input(".exemplo");
+        shell.key_down("Enter");
+        let request = shell.take_new_item_request();
+        assert_eq!(
+            request,
+            Some(NewItemRequest {
+                kind: NewItemKind::Package,
+                package: "br.com.exemplo".to_owned(),
+                name: String::new(),
+                source_root: PathBuf::from("demo/src/main/java"),
+            })
+        );
+    }
+
+    /// Salvar grava o conteúdo da aba e limpa a marca de modificado.
+    #[test]
+    fn saving_writes_the_active_tab_to_disk() {
+        let root = std::env::temp_dir().join(format!("er-ide-save-{}", std::process::id()));
+        assert!(std::fs::create_dir_all(&root).is_ok());
+        let file = root.join("Pedido.java");
+        assert!(std::fs::write(&file, "class Pedido {}").is_ok());
+        let Ok(mut shell) = IdeShell::open(&root) else {
+            panic!("workspace de teste não abriu");
+        };
+        let Ok(_) = shell.open_file(&file) else {
+            panic!("arquivo de teste não abriu");
+        };
+        shell.focus = ShellFocus::Editor;
+        shell.cursor_offset = 0;
+        shell.text_input("// nota\n");
+        assert!(shell.active_document_modified(), "a edição deixa a aba suja");
+
+        assert!(shell.save_active_document());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap_or_default(),
+            "// nota\nclass Pedido {}"
+        );
+        assert!(
+            !shell.active_document_modified(),
+            "depois de gravar a aba deixa de estar suja"
+        );
+        assert!(shell.status_message().starts_with("Salvo "));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// O item "Salvar" do menu Arquivo faz o mesmo que o atalho.
+    #[test]
+    fn the_file_menu_saves_the_active_tab() {
+        let root = std::env::temp_dir().join(format!("er-ide-menu-save-{}", std::process::id()));
+        assert!(std::fs::create_dir_all(&root).is_ok());
+        let file = root.join("Pedido.java");
+        assert!(std::fs::write(&file, "class Pedido {}").is_ok());
+        let Ok(mut shell) = IdeShell::open(&root) else {
+            panic!("workspace de teste não abriu");
+        };
+        let Ok(_) = shell.open_file(&file) else {
+            panic!("arquivo de teste não abriu");
+        };
+        shell.focus = ShellFocus::Editor;
+        shell.cursor_offset = 0;
+        shell.text_input("// pelo menu\n");
+        let size = Size::new(1280.0, 800.0);
+        // Abre o menu Arquivo e escolhe a segunda entrada.
+        shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
+        shell.pointer_down(Point::new(100.0, TITLE_HEIGHT + 42.0), size);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap_or_default(),
+            "// pelo menu\nclass Pedido {}"
+        );
+        assert!(!shell.active_document_modified());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A janela nasce no centro da tela.
+    ///
+    /// O painel se centraliza na área que recebe no layout; sem esse layout a
+    /// área era zero e ele aparecia no canto superior esquerdo.
+    #[test]
+    fn the_new_item_dialog_opens_centered() {
+        let mut shell = shell_with_package();
+        let size = Size::new(1280.0, 800.0);
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        shell.run_explorer_command("explorer.new.class");
+        // O painel do `ModalHost` é o retângulo de superfície desenhado sobre o
+        // véu, do tamanho declarado para a janela.
+        let surface = shell.theme.colors.surface;
+        let panel = shell
+            .paint(size)
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::FillRect(fill) if fill.color == surface => Some(fill.rect),
+                _ => None,
+            })
+            .find(|rect| rect.size == NEW_ITEM_PANEL_SIZE)
+            .unwrap_or_default();
+        let center_x = panel.origin.x + panel.size.width / 2.0;
+        let center_y = panel.origin.y + panel.size.height / 2.0;
+        assert!(
+            (center_x - size.width / 2.0).abs() < 1.0,
+            "centro horizontal em {center_x}, esperado {}",
+            size.width / 2.0
+        );
+        assert!(
+            (center_y - size.height / 2.0).abs() < 1.0,
+            "centro vertical em {center_y}, esperado {}",
+            size.height / 2.0
+        );
+    }
+
+    /// Reler o disco repõe os itens da árvore, e não só a expansão.
+    ///
+    /// O pacote e a classe eram criados e não apareciam: a `TreeView` guarda os
+    /// itens dela, e a IDE relia o `FileNode` sem repô-los.
+    #[test]
+    fn reloading_the_workspace_shows_what_was_created() {
+        let root = std::env::temp_dir().join(format!("er-ide-reload-{}", std::process::id()));
+        let package = root.join("src/main/java/br/com");
+        assert!(std::fs::create_dir_all(&package).is_ok());
+        let Ok(mut shell) = IdeShell::open(&root) else {
+            panic!("workspace de teste não abriu");
+        };
+        shell.reveal_in_explorer(&package);
+        let size = Size::new(1280.0, 800.0);
+        let shows = |shell: &mut IdeShell, needle: &str| {
+            shell.paint(size).iter().any(|command| match command {
+                PaintCommand::DrawText(text) => text.text.contains(needle),
+                _ => false,
+            })
+        };
+        assert!(
+            !shows(&mut shell, "Pedido"),
+            "a classe ainda não existe"
+        );
+
+        assert!(std::fs::write(package.join("Pedido.java"), "class Pedido {}").is_ok());
+        assert!(shell.reload_workspace().is_ok());
+        shell.reveal_in_explorer(&package);
+        assert!(
+            shows(&mut shell, "Pedido.java"),
+            "a classe criada precisa aparecer na árvore"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Clicar no campo move o cursor, e o que se digita entra ali.
+    ///
+    /// O clique é entregue ao componente, que conhece a medição da fonte; a IDE
+    /// não tenta adivinhar em que caractere o ponteiro caiu.
+    #[test]
+    fn clicking_a_field_moves_the_cursor_before_typing() {
+        let mut shell = shell_with_package();
+        let size = Size::new(1_000.0, 700.0);
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        shell.run_explorer_command("explorer.new.package");
+        shell.new_item_modal.layout(
+            &LayoutContext::default(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = new_item_geometry(shell.new_item_modal.panel_bounds());
+        // Clique antes do primeiro caractere leva o cursor para o começo.
+        shell.pointer_down(
+            Point::new(
+                geometry.package.origin.x + 1.0,
+                geometry.package.origin.y + 8.0,
+            ),
+            size,
+        );
+        shell.text_input("dev.");
+        shell.key_down("Enter");
+        assert_eq!(
+            shell.take_new_item_request().map(|request| request.package),
+            Some("dev.br.com".to_owned())
+        );
+    }
+
+    /// Com o nome preenchido, o tipo é pedido dentro do pacote informado.
+    #[test]
+    fn enter_with_a_name_asks_for_the_type_inside_the_package() {
+        let mut shell = shell_with_package();
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        shell.run_explorer_command("explorer.new.interface");
+        // Ao criar um tipo o foco já está no nome.
+        shell.text_input("Repositorio");
+        shell.key_down("Enter");
+        assert_eq!(
+            shell.take_new_item_request(),
+            Some(NewItemRequest {
+                kind: NewItemKind::Interface,
+                package: "br.com".to_owned(),
+                name: "Repositorio".to_owned(),
+                source_root: PathBuf::from("demo/src/main/java"),
+            })
+        );
+    }
+
+    /// Tab troca o campo, então o pacote também é editável ao criar um tipo.
+    #[test]
+    fn tab_moves_between_the_two_fields() {
+        let mut shell = shell_with_package();
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        shell.run_explorer_command("explorer.new.class");
+        shell.key_down("Tab");
+        shell.text_input(".exemplo");
+        shell.key_down("Tab");
+        shell.text_input("Pedido");
+        shell.key_down("Enter");
+        assert_eq!(
+            shell.take_new_item_request(),
+            Some(NewItemRequest {
+                kind: NewItemKind::Class,
+                package: "br.com.exemplo".to_owned(),
+                name: "Pedido".to_owned(),
+                source_root: PathBuf::from("demo/src/main/java"),
+            })
+        );
+    }
+
+    /// Classe sem nome não é pedido válido, e a janela fica aberta dizendo o quê.
+    #[test]
+    fn a_type_without_a_name_is_refused_without_closing() {
+        let mut shell = shell_with_package();
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        shell.run_explorer_command("explorer.new.class");
+        shell.key_down("Enter");
+        assert_eq!(shell.take_new_item_request(), None);
+        assert!(shell.new_item_dialog_open());
+        assert_eq!(
+            shell
+                .new_item_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.message.clone()),
+            Some("Informe o nome.".to_owned())
+        );
+    }
+
+    /// Esc fecha sem pedir nada.
+    #[test]
+    fn escape_closes_the_new_item_dialog_without_creating() {
+        let mut shell = shell_with_package();
+        shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+        shell.run_explorer_command("explorer.new.class");
+        shell.escape();
+        assert!(!shell.new_item_dialog_open());
+        assert_eq!(shell.take_new_item_request(), None);
+    }
+
+    /// Esc é cancelar: fechar sem descartar salvaria pela porta dos fundos.
+    #[test]
+    fn escape_in_the_settings_discards_every_change() {
+        let mut shell = test_shell();
+        let size = Size::new(1_000.0, 700.0);
+        shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
+        let geometry = open_settings_geometry(&mut shell, size);
+        choose_second_jdk(&mut shell, &geometry, size);
+        shell.escape();
+        assert_eq!(shell.take_settings_jdk_result(), None);
+        assert!(!shell.settings_dialog_open());
+        assert_eq!(shell.jdk_combo.selected_index(), 0);
+    }
+
+    fn open_settings_geometry(shell: &mut IdeShell, size: Size) -> SettingsDialogGeometry {
+        shell.settings_modal.layout(
+            &LayoutContext::default(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        settings_dialog_geometry(shell.settings_modal.panel_bounds())
+    }
+
+    /// Abre o combo e clica na segunda linha.
+    fn choose_second_jdk(shell: &mut IdeShell, geometry: &SettingsDialogGeometry, size: Size) {
+        shell.pointer_down(
+            Point::new(
+                geometry.combo.origin.x + 10.0,
+                geometry.combo.origin.y + 10.0,
+            ),
+            size,
+        );
+        shell.pointer_down(
+            Point::new(
+                geometry.combo.origin.x + 10.0,
+                geometry.combo.origin.y + geometry.combo.size.height + 28.0 + 5.0,
+            ),
+            size,
+        );
     }
 }

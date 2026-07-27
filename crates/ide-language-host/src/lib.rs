@@ -124,6 +124,8 @@ struct Registry {
 
 pub struct LanguageHost {
     workspace_root: RwLock<PathBuf>,
+    /// JDK escolhido na IDE, repassado a cada ativação.
+    jdk_home: RwLock<Option<PathBuf>>,
     config: LanguageHostConfig,
     registry: Mutex<Registry>,
     next_request_id: AtomicU64,
@@ -139,6 +141,7 @@ impl LanguageHost {
     pub fn with_config(workspace_root: impl Into<PathBuf>, config: LanguageHostConfig) -> Self {
         Self {
             workspace_root: RwLock::new(workspace_root.into()),
+            jdk_home: RwLock::new(None),
             config: LanguageHostConfig {
                 worker_queue_capacity: config.worker_queue_capacity.max(1),
                 max_active_providers: config.max_active_providers.max(1),
@@ -154,6 +157,52 @@ impl LanguageHost {
             .write()
             .map_err(|_| LanguageHostError::WorkerStopped)?;
         *workspace_root = root.into();
+        Ok(())
+    }
+
+    /// Registra o JDK escolhido na IDE. Devolve `true` quando ele mudou.
+    ///
+    /// Mudar não basta para os providers já ativos: eles indexaram a biblioteca
+    /// padrão do JDK anterior. Quem troca é responsável por chamar
+    /// [`LanguageHost::reactivate`] em seguida.
+    pub fn set_jdk_home(&self, home: Option<PathBuf>) -> Result<bool, LanguageHostError> {
+        let mut jdk_home = self
+            .jdk_home
+            .write()
+            .map_err(|_| LanguageHostError::WorkerStopped)?;
+        if *jdk_home == home {
+            return Ok(false);
+        }
+        *jdk_home = home;
+        Ok(true)
+    }
+
+    /// Desliga os providers ativos para que a próxima requisição os reativite.
+    ///
+    /// A ativação é preguiçosa, então derrubar o worker e voltar o estado para
+    /// registrado é o bastante: a próxima requisição sobe um provider novo com o
+    /// contexto atual. As rotas de documento ficam, mas os documentos abertos
+    /// não — o provider novo nasce sem nenhum, e quem sincroniza precisa
+    /// reabri-los.
+    pub async fn reactivate(&self) -> Result<(), LanguageHostError> {
+        let workers = {
+            let mut registry = self
+                .registry
+                .lock()
+                .map_err(|_| LanguageHostError::WorkerStopped)?;
+            registry
+                .providers
+                .values_mut()
+                .filter(|entry| entry.state == ProviderState::Active)
+                .filter_map(|entry| {
+                    entry.state = ProviderState::Registered;
+                    entry.worker.take()
+                })
+                .collect::<Vec<_>>()
+        };
+        for worker in workers {
+            worker.shutdown().await?;
+        }
         Ok(())
     }
 
@@ -245,6 +294,23 @@ impl LanguageHost {
                 extension: normalize_extension(extension),
                 capabilities: required,
             })
+    }
+
+    /// Caracteres que pedem completação sozinhos, para o documento aberto.
+    ///
+    /// Vêm do provider que atende o documento, não de uma lista do editor: cada
+    /// linguagem tem a sua, e o editor não conhece sintaxe nenhuma.
+    #[must_use]
+    pub fn trigger_characters(&self, document_id: DocumentId) -> Vec<char> {
+        let Ok(registry) = self.registry.lock() else {
+            return Vec::new();
+        };
+        registry
+            .document_routes
+            .get(&document_id)
+            .and_then(|provider_id| registry.providers.get(provider_id))
+            .map(|entry| entry.metadata.trigger_characters.clone())
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -520,11 +586,19 @@ impl LanguageHost {
                 .clone();
             (Arc::clone(&entry.provider), entry.metadata.clone(), root)
         };
+        let jdk_home = self
+            .jdk_home
+            .read()
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+            .clone();
 
         let worker = ProviderWorker::spawn(
             provider,
             metadata.clone(),
-            LanguageActivationContext { workspace_root },
+            LanguageActivationContext {
+                workspace_root,
+                jdk_home,
+            },
             self.config.worker_queue_capacity,
         );
         let mut registry = self
@@ -1128,6 +1202,7 @@ mod tests {
                 display_name: self.provider_id.0.clone(),
                 extensions: vec![".JAVA".to_owned()],
                 api_version: LANGUAGE_API_VERSION,
+                trigger_characters: vec!['.'],
             }
         }
 
@@ -1235,6 +1310,7 @@ mod tests {
                         major: LANGUAGE_API_VERSION.major + 1,
                         minor: 0,
                     },
+                    trigger_characters: Vec::new(),
                 }
             }
 
@@ -1309,6 +1385,43 @@ mod tests {
             Err(error) => panic!("worker thread lock failed: {error}"),
         };
         assert!(worker_thread.is_some_and(|thread| thread != caller_thread));
+    }
+
+    /// Trocar o JDK derruba o provider ativo para que ele reindexe.
+    ///
+    /// O provider indexa a biblioteca padrão na ativação, então continuar com o
+    /// worker antigo significaria responder pelo JDK que o usuário acabou de
+    /// abandonar. Registrar o mesmo caminho de novo não derruba nada.
+    #[test]
+    fn changing_the_jdk_brings_active_providers_down_to_reindex() {
+        let host = LanguageHost::new(".");
+        let provider = Arc::new(TestProvider::new(
+            "java.jdk",
+            LanguageCapabilities::SYNTAX | LanguageCapabilities::COMPLETION,
+        ));
+        success(host.register(provider.clone()));
+        assert!(success(host.set_jdk_home(Some(PathBuf::from("jdk-17")))));
+        // O mesmo JDK não é uma troca.
+        assert!(!success(host.set_jdk_home(Some(PathBuf::from("jdk-17")))));
+
+        let document = DocumentSnapshot {
+            id: DocumentId(1),
+            path: "A.java".into(),
+            version: 1,
+            text: "class A {}".to_owned(),
+        };
+        success(pollster::block_on(
+            host.open_document(host.request_context(), document),
+        ));
+        assert_eq!(provider.activations.load(Ordering::Relaxed), 1);
+
+        assert!(success(host.set_jdk_home(Some(PathBuf::from("jdk-21")))));
+        success(pollster::block_on(host.reactivate()));
+        // A rota do documento fica: a próxima requisição sobe um provider novo.
+        // O resultado da operação não interessa aqui — este provider de teste não
+        // implementa `syntax`. O que se verifica é a reativação.
+        let _ = pollster::block_on(host.syntax(host.request_context(), DocumentId(1)));
+        assert_eq!(provider.activations.load(Ordering::Relaxed), 2);
     }
 
     #[test]

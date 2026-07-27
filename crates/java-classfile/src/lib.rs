@@ -126,6 +126,65 @@ pub fn index_jar(path: &Path, max_classes: usize) -> Result<Vec<ClassDescriptor>
     index_jar_reader(File::open(path)?, max_classes)
 }
 
+/// Nomes binários das classes de um arquivo, lidos só pelo diretório dele.
+///
+/// O nome de uma classe está no caminho da entrada, e o caminho está no
+/// diretório central do zip. Abrir e decodificar cada `.class` só para descobrir
+/// como ele se chama custa milhares de leituras — em `java.base.jmod` são mais
+/// de seis mil — e o índice precisa apenas do nome. Os membros vêm depois, de
+/// uma classe por vez, em [`read_class_in_archive`].
+///
+/// Serve jar, zip e `.jmod`, que guarda as classes sob `classes/`.
+pub fn list_classes(path: &Path, max_classes: usize) -> Result<Vec<String>, ClassFileError> {
+    let archive = zip::ZipArchive::new(File::open(path)?)?;
+    Ok(archive
+        .file_names()
+        .filter_map(binary_name_of_entry)
+        .take(max_classes)
+        .collect())
+}
+
+/// Nome binário de uma entrada de arquivo compactado, se ela for uma classe.
+fn binary_name_of_entry(entry: &str) -> Option<String> {
+    let class = entry.strip_suffix(".class")?;
+    // Um `.jmod` prefixa tudo com `classes/`; um jar não prefixa nada.
+    let class = class.strip_prefix("classes/").unwrap_or(class);
+    // Classe anônima — `System$1` — não tem nome que alguém escreva, e um
+    // arquivo de metadados de pacote ou módulo não é um tipo.
+    let anonymous = class
+        .rsplit('$')
+        .next()
+        .is_some_and(|last| !last.is_empty() && last.chars().all(|value| value.is_ascii_digit()));
+    (!anonymous && !class.ends_with("package-info") && !class.ends_with("module-info"))
+        .then(|| class.replace('/', "."))
+}
+
+/// Lê uma única classe de dentro de um jar, zip ou `.jmod`, pelo nome binário.
+///
+/// Indexar o arquivo inteiro para responder sobre um tipo custa milhares de
+/// leituras que ninguém pediu. Quem já sabe o nome — porque ele veio do índice —
+/// abre só a entrada que interessa.
+pub fn read_class_in_archive(
+    path: &Path,
+    binary_name: &str,
+) -> Result<ClassDescriptor, ClassFileError> {
+    let mut archive = zip::ZipArchive::new(File::open(path)?)?;
+    let relative = format!("{}.class", binary_name.replace('.', "/"));
+    // Um `.jmod` prefixa tudo com `classes/`; um jar não prefixa nada.
+    let entry_name = if archive.index_for_name(&relative).is_some() {
+        relative
+    } else {
+        format!("classes/{relative}")
+    };
+    let mut entry = archive.by_name(&entry_name)?;
+    if entry.size() > MAX_CLASS_BYTES {
+        return Err(ClassFileError::Invalid);
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes)?;
+    read_class(&bytes)
+}
+
 pub fn index_jar_reader<R: Read + Seek>(
     reader: R,
     max_classes: usize,

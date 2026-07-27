@@ -82,6 +82,32 @@ fn search_node(node: &FileNode, query: &str, limit: usize, output: &mut Vec<Sear
 pub enum WorkspaceError {
     #[error("workspace I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0} já existe")]
+    AlreadyExists(PathBuf),
+}
+
+/// Cria o diretório e os intermediários que faltarem.
+///
+/// Um pacote Java é uma cadeia de diretórios, e criar `br.com.exemplo` de uma
+/// vez é o que o usuário pediu ao digitar o nome inteiro.
+pub fn create_directory(path: &Path) -> Result<(), WorkspaceError> {
+    fs::create_dir_all(path)?;
+    Ok(())
+}
+
+/// Cria o arquivo com o conteúdo, recusando sobrescrever o que já existe.
+///
+/// Sobrescrever apagaria trabalho por causa de um nome repetido digitado sem
+/// atenção; o erro é a resposta útil.
+pub fn create_file(path: &Path, contents: &str) -> Result<(), WorkspaceError> {
+    if path.exists() {
+        return Err(WorkspaceError::AlreadyExists(path.to_path_buf()));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, contents)?;
+    Ok(())
 }
 
 #[cfg(test)]

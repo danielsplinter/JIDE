@@ -147,6 +147,28 @@ impl EditorSession {
     pub fn document(&self, id: DocumentId) -> Option<&OpenDocument> {
         self.documents.get(&id)
     }
+
+    /// Grava o documento no caminho de onde ele veio.
+    ///
+    /// A sessão já lê arquivo em [`EditorSession::open`]; gravar é a operação
+    /// simétrica e mora no mesmo lugar. O buffer só deixa de estar sujo depois de
+    /// a escrita ter dado certo — marcar antes faria a aba anunciar como salvo um
+    /// conteúdo que não chegou ao disco.
+    pub fn save(&mut self, id: DocumentId) -> Result<PathBuf, BufferError> {
+        let document = self
+            .documents
+            .get_mut(&id)
+            .ok_or(BufferError::UnknownDocument(id))?;
+        fs::write(&document.path, document.buffer.text())?;
+        document.buffer.mark_saved();
+        Ok(document.path.clone())
+    }
+
+    /// Grava o documento ativo.
+    pub fn save_active(&mut self) -> Result<PathBuf, BufferError> {
+        let id = self.active.ok_or(BufferError::NoActiveDocument)?;
+        self.save(id)
+    }
     pub fn tabs(&self) -> impl Iterator<Item = &OpenDocument> {
         self.tabs.iter().filter_map(|id| self.documents.get(id))
     }
@@ -158,6 +180,8 @@ pub enum BufferError {
     InvalidRange,
     #[error("unknown document {0:?}")]
     UnknownDocument(DocumentId),
+    #[error("nenhum documento aberto")]
+    NoActiveDocument,
     #[error("document I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }

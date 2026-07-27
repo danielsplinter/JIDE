@@ -45,11 +45,25 @@ pub struct LanguageMetadata {
     pub display_name: String,
     pub extensions: Vec<String>,
     pub api_version: ApiVersion,
+    /// Caracteres que, ao serem digitados, pedem completação sozinhos.
+    ///
+    /// Em Java é o ponto; em outra linguagem pode ser `::` ou `->`. Quem sabe
+    /// disso é a linguagem, e por isso o editor pergunta em vez de carregar uma
+    /// lista própria — a alternativa seria a shell decidir sobre a sintaxe de
+    /// uma linguagem que ela não conhece.
+    pub trigger_characters: Vec<char>,
 }
 
 #[derive(Clone, Debug)]
 pub struct LanguageActivationContext {
     pub workspace_root: std::path::PathBuf,
+    /// Raiz do JDK que o usuário escolheu na IDE.
+    ///
+    /// A biblioteca padrão de uma linguagem vem da instalação escolhida, não de
+    /// uma variável de ambiente: trocar de JDK pelo menu tem que trocar as
+    /// classes que a completação conhece. `None` quando nenhuma instalação foi
+    /// detectada ainda.
+    pub jdk_home: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]

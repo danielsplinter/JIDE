@@ -43,6 +43,8 @@ impl LanguageProvider for JavaLanguageProvider {
             display_name: "Java nativo".to_owned(),
             extensions: vec!["java".to_owned()],
             api_version: LANGUAGE_API_VERSION,
+            // O ponto pede os membros do que está à esquerda dele.
+            trigger_characters: vec!['.'],
         }
     }
 
@@ -59,7 +61,10 @@ impl LanguageProvider for JavaLanguageProvider {
         &self,
         context: LanguageActivationContext,
     ) -> Result<Box<dyn ActiveLanguage>, LanguageError> {
-        Ok(Box::new(JavaLanguage::new(&context.workspace_root)?))
+        Ok(Box::new(JavaLanguage::new(
+            &context.workspace_root,
+            context.jdk_home.as_deref(),
+        )?))
     }
 }
 
@@ -79,12 +84,66 @@ struct JavaLanguage {
 }
 
 impl JavaLanguage {
-    fn new(workspace_root: &Path) -> Result<Self, LanguageError> {
+    /// Membros públicos do tipo à esquerda do ponto.
+    ///
+    /// Duas origens, nesta ordem: o arquivo aberto, que responde pelo tipo que
+    /// ainda não foi compilado, e as classes compiladas do workspace, que
+    /// respondem pelo JDK, pelas dependências e pelo próprio projeto depois de
+    /// um build. A cadeia de superclasses é percorrida porque `getClass` e
+    /// `toString` são tão membros do objeto quanto os declarados nele.
+    fn member_completion(
+        &self,
+        access: &MemberAccess,
+        document: &ParsedDocument,
+    ) -> Vec<CompletionItem> {
+        let type_name = receiver_type(&access.receiver, &document.semantic.symbols);
+        let mut items = members_in_document(&type_name, &document.semantic);
+        let mut current = Some(type_name);
+        let mut depth = 0;
+        while let Some(name) = current.take()
+            && depth < MAX_SUPER_DEPTH
+        {
+            depth += 1;
+            let Some(descriptor) = self
+                .workspace_index
+                .external_classes
+                .iter()
+                .find(|class| class.simple == name || class.binary == name)
+                .and_then(ExternalClass::descriptor)
+            else {
+                break;
+            };
+            items.extend(
+                descriptor
+                    .fields
+                    .iter()
+                    .filter(|member| is_visible_member(member))
+                    .map(|member| completion_for_class_member(member, false)),
+            );
+            items.extend(
+                descriptor
+                    .methods
+                    .iter()
+                    .filter(|member| is_visible_member(member))
+                    .map(|member| completion_for_class_member(member, true)),
+            );
+            current = descriptor.super_name;
+        }
+        let mut seen = HashSet::new();
+        items.retain(|item| {
+            item.label.starts_with(&access.prefix) && seen.insert(item.label.clone())
+        });
+        items.sort_by(|left, right| left.label.cmp(&right.label));
+        items.truncate(100);
+        items
+    }
+
+    fn new(workspace_root: &Path, jdk_home: Option<&Path>) -> Result<Self, LanguageError> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_java::LANGUAGE.into())
             .map_err(|error| LanguageError::Provider(error.to_string()))?;
-        let workspace_index = WorkspaceIndex::scan(workspace_root, &mut parser);
+        let workspace_index = WorkspaceIndex::scan(workspace_root, jdk_home, &mut parser);
         Ok(Self {
             language_id: LanguageId(JAVA_LANGUAGE_ID.to_owned()),
             parser: Mutex::new(parser),
@@ -216,6 +275,13 @@ impl ActiveLanguage for JavaLanguage {
         let document = documents
             .get(&request.document_id)
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))?;
+        // Depois de um ponto, o que interessa são os membros do objeto à
+        // esquerda — não todo símbolo do projeto que começa com o mesmo prefixo.
+        if let Ok(offset) = offset_for_position(&document.snapshot.text, request.position)
+            && let Some(access) = member_access(&document.snapshot.text, offset)
+        {
+            return Ok(self.member_completion(&access, document));
+        }
         let mut items = Vec::new();
         let mut seen = HashSet::new();
         for symbol in document
@@ -228,11 +294,11 @@ impl ActiveLanguage for JavaLanguage {
                 items.push(completion_for_symbol(symbol));
             }
         }
-        for (name, path) in &self.workspace_index.external_classes {
-            if name.starts_with(&request.prefix) && seen.insert(name.clone()) {
+        for class in &self.workspace_index.external_classes {
+            if class.simple.starts_with(&request.prefix) && seen.insert(class.simple.clone()) {
                 items.push(CompletionItem {
-                    label: name.clone(),
-                    detail: Some(format!("class file em {}", path.display())),
+                    label: class.simple.clone(),
+                    detail: Some(format!("class file em {}", class.origin.display())),
                     kind: CompletionKind::Class,
                 });
             }
@@ -351,18 +417,123 @@ impl ActiveLanguage for JavaLanguage {
     }
 }
 
+/// Tipo compilado que o workspace alcança: `.class` do próprio projeto ou
+/// classe dentro de um jar de dependência.
+#[derive(Clone, Debug)]
+struct ExternalClass {
+    /// Nome simples, como aparece escrito no código.
+    simple: String,
+    /// Nome binário, que localiza a classe dentro do jar.
+    binary: String,
+    /// Arquivo `.class` ou o jar que a contém.
+    origin: PathBuf,
+}
+
 #[derive(Default)]
 struct WorkspaceIndex {
     symbols: Vec<SemanticSymbol>,
     references: HashMap<String, Vec<Location>>,
-    external_classes: Vec<(String, PathBuf)>,
+    external_classes: Vec<ExternalClass>,
+}
+
+/// Teto de classes indexadas da biblioteca padrão.
+///
+/// `java.base` tem pouco mais de seis mil; o JDK inteiro passa de trinta mil.
+/// O índice guarda só os nomes, mas guardar todos os módulos para responder
+/// sobre `java.lang` custaria memória sem melhorar resposta nenhuma.
+const MAX_JDK_CLASSES: usize = 24_000;
+
+impl WorkspaceIndex {
+    /// Indexa a biblioteca padrão do JDK apontado por `JAVA_HOME`.
+    ///
+    /// A partir do Java 9 as classes vivem em `jmods/*.jmod`, que são zips com
+    /// tudo sob `classes/`; até o 8, em `jre/lib/rt.jar`. Nos dois casos basta
+    /// ler o diretório do arquivo: o nome da classe está no caminho da entrada,
+    /// e os membros são lidos depois, um tipo por vez.
+    ///
+    /// O JDK é o escolhido na IDE. `JAVA_HOME` só entra quando nenhuma
+    /// instalação foi escolhida ainda — um caminho fixo de ambiente não pode
+    /// decidir no lugar do usuário, mas serve enquanto ele não decidiu.
+    fn scan_jdk(&mut self, jdk_home: Option<&Path>) {
+        let Some(home) = jdk_home
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))
+        else {
+            return;
+        };
+        let mut archives = Vec::new();
+        if let Ok(entries) = fs::read_dir(home.join("jmods")) {
+            archives.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("jmod"))
+                    }),
+            );
+            // `java.base` primeiro: se o teto cortar alguma coisa, que não seja
+            // `java.lang`.
+            archives.sort_by_key(|path| {
+                let base = path.file_name().is_some_and(|name| name == "java.base.jmod");
+                (!base, path.clone())
+            });
+        } else {
+            archives.extend(
+                [home.join("jre/lib/rt.jar"), home.join("lib/rt.jar")]
+                    .into_iter()
+                    .filter(|path| path.is_file()),
+            );
+        }
+        let mut remaining = MAX_JDK_CLASSES;
+        for archive in archives {
+            if remaining == 0 {
+                break;
+            }
+            let Ok(names) = java_classfile::list_classes(&archive, remaining) else {
+                continue;
+            };
+            remaining = remaining.saturating_sub(names.len());
+            self.external_classes
+                .extend(names.into_iter().map(|binary| ExternalClass {
+                    simple: simple_class_name(&binary),
+                    binary,
+                    origin: archive.clone(),
+                }));
+        }
+    }
+}
+
+impl ExternalClass {
+    /// Lê os metadados da classe, de onde quer que ela esteja.
+    ///
+    /// A leitura é sob demanda: guardar os membros de todas as classes de todos
+    /// os jars indexados custaria memória proporcional ao classpath inteiro,
+    /// para responder sobre um tipo de cada vez.
+    fn descriptor(&self) -> Option<java_classfile::ClassDescriptor> {
+        if self.origin.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("jar")
+                || extension.eq_ignore_ascii_case("zip")
+                || extension.eq_ignore_ascii_case("jmod")
+        }) {
+            java_classfile::read_class_in_archive(&self.origin, &self.binary).ok()
+        } else {
+            fs::read(&self.origin)
+                .ok()
+                .and_then(|bytes| java_classfile::read_class(&bytes).ok())
+        }
+    }
 }
 
 impl WorkspaceIndex {
-    fn scan(root: &Path, parser: &mut Parser) -> Self {
+    fn scan(root: &Path, jdk_home: Option<&Path>, parser: &mut Parser) -> Self {
         let mut paths = Vec::new();
         collect_workspace_paths(root, &mut paths, 600);
         let mut index = Self::default();
+        // A biblioteca padrão vem antes do workspace: `String` e `System` são
+        // do JDK, e um tipo do projeto com o mesmo nome simples é a exceção,
+        // não a regra.
+        index.scan_jdk(jdk_home);
         let mut java_count = 0;
         let mut archive_count = 0;
         for path in paths {
@@ -387,18 +558,22 @@ impl WorkspaceIndex {
                     if let Ok(bytes) = fs::read(&path)
                         && let Ok(class) = java_classfile::read_class(&bytes)
                     {
-                        index
-                            .external_classes
-                            .push((simple_class_name(&class.binary_name), path));
+                        index.external_classes.push(ExternalClass {
+                            simple: simple_class_name(&class.binary_name),
+                            binary: class.binary_name.clone(),
+                            origin: path,
+                        });
                     }
                 }
                 Some(extension) if extension.eq_ignore_ascii_case("jar") && archive_count < 64 => {
                     if let Ok(classes) = java_classfile::index_jar(&path, 20_000) {
-                        index.external_classes.extend(
-                            classes
-                                .into_iter()
-                                .map(|class| (simple_class_name(&class.binary_name), path.clone())),
-                        );
+                        index
+                            .external_classes
+                            .extend(classes.into_iter().map(|class| ExternalClass {
+                                simple: simple_class_name(&class.binary_name),
+                                binary: class.binary_name,
+                                origin: path.clone(),
+                            }));
                     }
                     archive_count += 1;
                 }
@@ -444,12 +619,18 @@ fn merge_references(
     }
 }
 
+/// Nome simples, como se escreve no código.
+///
+/// O último segmento, e não o primeiro: `java.lang.System$Logger` se escreve
+/// `System.Logger`, e o tipo se chama `Logger`. Tomando o primeiro, a classe
+/// aninhada — e a anônima `System$1` — atenderiam por `System`, e uma delas
+/// responderia no lugar da verdadeira.
 fn simple_class_name(binary_name: &str) -> String {
     binary_name
         .rsplit('.')
         .next()
         .unwrap_or(binary_name)
-        .split('$')
+        .rsplit('$')
         .next()
         .unwrap_or(binary_name)
         .to_owned()
@@ -607,6 +788,237 @@ fn is_declaration_name(node: Node<'_>) -> bool {
             .is_some_and(|name| name.id() == node.id())
             || parent.kind() == "variable_declarator"
     })
+}
+
+/// Profundidade máxima da cadeia de superclasses percorrida.
+///
+/// Herança em Java termina em `Object`, e parar cedo evita que um índice
+/// inconsistente vire laço infinito.
+const MAX_SUPER_DEPTH: usize = 12;
+
+/// Marca de membro público num arquivo `.class`, pela especificação da JVM.
+const ACC_PUBLIC: u16 = 0x0001;
+/// Sintético e ponte: gerados pelo compilador, não escritos por ninguém.
+const ACC_SYNTHETIC: u16 = 0x1000;
+const ACC_BRIDGE: u16 = 0x0040;
+
+/// Acesso a membro sendo digitado: `pedido.` ou `pedido.get`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemberAccess {
+    /// Expressão à esquerda do ponto.
+    receiver: String,
+    /// O que já foi digitado depois do ponto.
+    prefix: String,
+}
+
+/// Lê para trás a partir do cursor procurando um acesso por ponto.
+///
+/// Só o identificador imediatamente antes do ponto conta. Encadeamento
+/// (`a.b().c.`) exigiria saber o tipo de retorno de cada elo, que é outra
+/// análise — e oferecer os membros do elo errado seria pior do que não oferecer
+/// nada.
+fn member_access(text: &str, offset: usize) -> Option<MemberAccess> {
+    let head = &text[..offset.min(text.len())];
+    let prefix_start = head
+        .char_indices()
+        .rev()
+        .find(|(_, value)| !is_identifier_char(*value))
+        .map_or(0, |(index, value)| index + value.len_utf8());
+    let prefix = head[prefix_start..].to_owned();
+    let before = head[..prefix_start].trim_end();
+    let receiver_end = before.strip_suffix('.')?.trim_end();
+    let receiver_start = receiver_end
+        .char_indices()
+        .rev()
+        .find(|(_, value)| !is_identifier_char(*value))
+        .map_or(0, |(index, value)| index + value.len_utf8());
+    let receiver = receiver_end[receiver_start..].to_owned();
+    // Ponto sem identificador à esquerda é literal decimal ou erro de digitação,
+    // não acesso a membro.
+    (!receiver.is_empty() && !receiver.starts_with(|value: char| value.is_ascii_digit()))
+        .then_some(MemberAccess { receiver, prefix })
+}
+
+fn is_identifier_char(value: char) -> bool {
+    value.is_alphanumeric() || value == '_' || value == '$'
+}
+
+/// A posição está dentro do intervalo.
+fn within(range: &TextRange, position: TextPosition) -> bool {
+    let point = (position.line, position.column);
+    point >= (range.start.line, range.start.column) && point <= (range.end.line, range.end.column)
+}
+
+/// Nome do tipo que o receptor tem.
+///
+/// Variável, parâmetro ou campo declarado no arquivo entrega o tipo pela
+/// declaração. Não achando nenhum, o próprio receptor é tomado como nome de
+/// tipo — é o caso do acesso estático, `Integer.` ou `Math.`.
+fn receiver_type(receiver: &str, symbols: &[SemanticSymbol]) -> String {
+    symbols
+        .iter()
+        .filter(|symbol| {
+            matches!(
+                symbol.kind,
+                SymbolKind::LocalVariable | SymbolKind::Parameter | SymbolKind::Field
+            )
+        })
+        .find(|symbol| symbol.name == receiver)
+        .and_then(|symbol| symbol.type_descriptor.as_ref())
+        .map_or_else(|| receiver.to_owned(), |descriptor| descriptor.name.clone())
+}
+
+/// Traduz um descritor da JVM para a forma que se lê no código.
+///
+/// `Ljava/lang/String;` vira `String`, `[I` vira `int[]`. O nome simples basta:
+/// o menu mostra o tipo para diferenciar membros, não para qualificar imports.
+fn readable_descriptor(descriptor: &str) -> String {
+    let mut characters = descriptor.chars().peekable();
+    let mut arrays = 0;
+    while characters.peek() == Some(&'[') {
+        characters.next();
+        arrays += 1;
+    }
+    let mut name = match characters.next() {
+        Some('B') => "byte".to_owned(),
+        Some('C') => "char".to_owned(),
+        Some('D') => "double".to_owned(),
+        Some('F') => "float".to_owned(),
+        Some('I') => "int".to_owned(),
+        Some('J') => "long".to_owned(),
+        Some('S') => "short".to_owned(),
+        Some('Z') => "boolean".to_owned(),
+        Some('V') => "void".to_owned(),
+        Some('L') => {
+            // No descritor o nome vem com barras — `java/lang/String` — e o
+            // índice do workspace trabalha com pontos.
+            let binary: String = characters
+                .by_ref()
+                .take_while(|value| *value != ';')
+                .collect();
+            simple_class_name(&binary.replace('/', "."))
+        }
+        _ => descriptor.to_owned(),
+    };
+    for _ in 0..arrays {
+        name.push_str("[]");
+    }
+    name
+}
+
+/// Parâmetros e retorno de um descritor de método.
+fn method_signature(descriptor: &str) -> (Vec<String>, String) {
+    let Some((parameters, result)) = descriptor
+        .strip_prefix('(')
+        .and_then(|rest| rest.split_once(')'))
+    else {
+        return (Vec::new(), readable_descriptor(descriptor));
+    };
+    let mut types = Vec::new();
+    let mut rest = parameters;
+    while !rest.is_empty() {
+        let arrays = rest.len() - rest.trim_start_matches('[').len();
+        let body = &rest[arrays..];
+        let consumed = if body.starts_with('L') {
+            body.find(';').map_or(body.len(), |index| index + 1)
+        } else {
+            1
+        };
+        types.push(readable_descriptor(&rest[..arrays + consumed]));
+        rest = &rest[arrays + consumed..];
+    }
+    (types, readable_descriptor(result))
+}
+
+/// Membro público de uma classe compilada vira item do menu.
+fn completion_for_class_member(
+    member: &java_classfile::ClassMember,
+    method: bool,
+) -> CompletionItem {
+    if method {
+        let (parameters, result) = method_signature(&member.descriptor);
+        CompletionItem {
+            label: format!("{}({})", member.name, parameters.join(", ")),
+            detail: Some(result),
+            kind: CompletionKind::Method,
+        }
+    } else {
+        CompletionItem {
+            label: member.name.clone(),
+            detail: Some(readable_descriptor(&member.descriptor)),
+            kind: CompletionKind::Field,
+        }
+    }
+}
+
+/// Membros declarados dentro da classe, no próprio arquivo aberto.
+///
+/// Serve o tipo que ainda não foi compilado — a classe que está sendo escrita
+/// agora, ou a que vive no mesmo arquivo. O corpo da classe é um escopo, e o
+/// escopo já sabe quais símbolos nasceram dentro dele; o que falta é ligar o
+/// nome da classe ao corpo dela, que é o primeiro escopo aberto depois do nome.
+fn members_in_document(type_name: &str, semantic: &SemanticSnapshot) -> Vec<CompletionItem> {
+    let Some(class) = semantic.symbols.iter().find(|symbol| {
+        symbol.name == type_name
+            && matches!(
+                symbol.kind,
+                SymbolKind::Class | SymbolKind::Interface | SymbolKind::Record | SymbolKind::Enum
+            )
+    }) else {
+        return Vec::new();
+    };
+    let Some(body) = semantic
+        .scopes
+        .iter()
+        .filter(|scope| {
+            scope.depth == class.scope_depth + 1
+                && (scope.range.start.line, scope.range.start.column)
+                    >= (
+                        class.location.range.end.line,
+                        class.location.range.end.column,
+                    )
+        })
+        .min_by_key(|scope| (scope.range.start.line, scope.range.start.column))
+    else {
+        return Vec::new();
+    };
+    // Um campo é registrado no corpo da classe, mas um método abre escopo
+    // próprio e é registrado dentro dele — por isso a busca é por posição, e
+    // não pela lista de símbolos do corpo. A profundidade separa o que é membro
+    // desta classe do que pertence a uma classe aninhada mais abaixo.
+    semantic
+        .symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.kind, SymbolKind::Method | SymbolKind::Field))
+        .filter(|symbol| {
+            (symbol.scope_depth == body.depth || symbol.scope_depth == body.depth + 1)
+                && within(&body.range, symbol.location.range.start)
+        })
+        .map(|symbol| CompletionItem {
+            label: if symbol.kind == SymbolKind::Method {
+                format!("{}()", symbol.name)
+            } else {
+                symbol.name.clone()
+            },
+            detail: symbol
+                .type_descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.name.clone()),
+            kind: if symbol.kind == SymbolKind::Method {
+                CompletionKind::Method
+            } else {
+                CompletionKind::Field
+            },
+        })
+        .collect()
+}
+
+/// Só o que o usuário pode escrever com o ponto.
+fn is_visible_member(member: &java_classfile::ClassMember) -> bool {
+    member.access_flags & ACC_PUBLIC != 0
+        && member.access_flags & (ACC_SYNTHETIC | ACC_BRIDGE) == 0
+        // Construtor e inicializador estático não são alcançáveis por ponto.
+        && !member.name.starts_with('<')
 }
 
 fn parse_type(value: &str) -> TypeDescriptor {
@@ -1029,9 +1441,14 @@ mod tests {
     use super::*;
 
     fn active() -> Box<dyn ActiveLanguage> {
+        active_with_jdk(None)
+    }
+
+    fn active_with_jdk(jdk_home: Option<PathBuf>) -> Box<dyn ActiveLanguage> {
         match pollster::block_on(
             JavaLanguageProvider::new().activate(LanguageActivationContext {
                 workspace_root: ".".into(),
+                jdk_home,
             }),
         ) {
             Ok(active) => active,
@@ -1111,6 +1528,230 @@ mod tests {
             version: 1,
             text: text.to_owned(),
         }
+    }
+
+    /// O que está antes do ponto é o receptor; o que está depois é o filtro.
+    #[test]
+    fn a_dot_marks_a_member_access() {
+        assert_eq!(
+            member_access("pedido.", 7),
+            Some(MemberAccess {
+                receiver: "pedido".to_owned(),
+                prefix: String::new(),
+            })
+        );
+        assert_eq!(
+            member_access("    pedido.getVal", 17),
+            Some(MemberAccess {
+                receiver: "pedido".to_owned(),
+                prefix: "getVal".to_owned(),
+            })
+        );
+    }
+
+    /// Sem ponto não há acesso a membro, e um decimal não é um objeto.
+    #[test]
+    fn a_decimal_literal_is_not_a_member_access() {
+        assert_eq!(member_access("total", 5), None);
+        assert_eq!(member_access("valor = 3.14", 12), None);
+    }
+
+    /// O tipo vem da declaração da variável; sem declaração, o próprio nome é
+    /// tomado como tipo, que é o caso do acesso estático.
+    #[test]
+    fn the_receiver_type_comes_from_the_declaration() {
+        let symbols = vec![SemanticSymbol {
+            name: "pedido".to_owned(),
+            kind: SymbolKind::LocalVariable,
+            location: Location {
+                path: "Example.java".into(),
+                range: TextRange::default(),
+            },
+            type_descriptor: Some(parse_type("Pedido")),
+            scope_depth: 1,
+        }];
+        assert_eq!(receiver_type("pedido", &symbols), "Pedido");
+        assert_eq!(receiver_type("Integer", &symbols), "Integer");
+    }
+
+    /// Descritores da JVM viram o que se lê no código.
+    #[test]
+    fn jvm_descriptors_are_shown_as_written_types() {
+        assert_eq!(readable_descriptor("Ljava/lang/String;"), "String");
+        assert_eq!(readable_descriptor("[I"), "int[]");
+        assert_eq!(readable_descriptor("V"), "void");
+        let (parameters, result) = method_signature("(Ljava/lang/String;I[J)Z");
+        assert_eq!(parameters, vec!["String", "int", "long[]"]);
+        assert_eq!(result, "boolean");
+    }
+
+    /// Membros do tipo declarado no próprio arquivo, que ainda não foi
+    /// compilado — o caso da classe que está sendo escrita agora.
+    #[test]
+    fn members_of_a_class_in_the_open_file_are_offered_after_the_dot() {
+        let active = active();
+        let source = concat!(
+            "class Pedido {\n",
+            "    int total;\n",
+            "    String descricao() { return \"\"; }\n",
+            "    private void interno() {}\n",
+            "}\n",
+            "class Uso {\n",
+            "    void executar() {\n",
+            "        Pedido pedido = new Pedido();\n",
+            "        pedido.\n",
+            "    }\n",
+            "}\n",
+        );
+        if let Err(error) = pollster::block_on(active.open_document(snapshot(source))) {
+            panic!("falha ao abrir documento: {error}");
+        }
+        let line = source[..source.find("pedido.\n").unwrap_or(0)]
+            .matches('\n')
+            .count() as u32;
+        let items = match pollster::block_on(active.completion(CompletionRequest {
+            document_id: DocumentId(1),
+            position: TextPosition { line, column: 15 },
+            prefix: String::new(),
+        })) {
+            Ok(items) => items,
+            Err(error) => panic!("falha na completação: {error}"),
+        };
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"total"), "campo do tipo: {labels:?}");
+        assert!(labels.contains(&"descricao()"), "método do tipo: {labels:?}");
+        // O menu depois do ponto fala do objeto, não do arquivo: nada de
+        // palavra-chave nem de classe solta do índice.
+        assert!(!labels.contains(&"class"), "palavra-chave vazou: {labels:?}");
+        assert!(!labels.contains(&"Uso"), "classe vizinha vazou: {labels:?}");
+    }
+
+    /// O prefixo já digitado filtra os membros.
+    #[test]
+    fn what_is_typed_after_the_dot_filters_the_members() {
+        let active = active();
+        let source = concat!(
+            "class Pedido {\n",
+            "    int total;\n",
+            "    String descricao() { return \"\"; }\n",
+            "}\n",
+            "class Uso {\n",
+            "    void executar() {\n",
+            "        Pedido pedido = new Pedido();\n",
+            "        pedido.des\n",
+            "    }\n",
+            "}\n",
+        );
+        if let Err(error) = pollster::block_on(active.open_document(snapshot(source))) {
+            panic!("falha ao abrir documento: {error}");
+        }
+        let line = source[..source.find("pedido.des").unwrap_or(0)]
+            .matches('\n')
+            .count() as u32;
+        let items = match pollster::block_on(active.completion(CompletionRequest {
+            document_id: DocumentId(1),
+            position: TextPosition { line, column: 18 },
+            prefix: "des".to_owned(),
+        })) {
+            Ok(items) => items,
+            Err(error) => panic!("falha na completação: {error}"),
+        };
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, vec!["descricao()"]);
+    }
+
+    /// Um tipo da biblioteca padrão responde pelos próprios membros.
+    ///
+    /// `System` não está no workspace nem no arquivo aberto: vem do JDK, que até
+    /// então nunca era indexado — era por isso que digitar `System.` não
+    /// mostrava nada.
+    #[test]
+    fn a_jdk_type_offers_its_members() {
+        if std::env::var_os("JAVA_HOME").is_none() {
+            // Sem JDK apontado não há o que indexar, e inventar um aqui testaria
+            // outra coisa que não esta ligação.
+            return;
+        }
+        let active = active();
+        let source = "class Uso {\n    void executar() {\n        System.\n    }\n}\n";
+        if let Err(error) = pollster::block_on(active.open_document(snapshot(source))) {
+            panic!("falha ao abrir documento: {error}");
+        }
+        let items = match pollster::block_on(active.completion(CompletionRequest {
+            document_id: DocumentId(1),
+            position: TextPosition {
+                line: 2,
+                column: 15,
+            },
+            prefix: String::new(),
+        })) {
+            Ok(items) => items,
+            Err(error) => panic!("falha na completação: {error}"),
+        };
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"out"), "campo estático: {labels:?}");
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.starts_with("currentTimeMillis")),
+            "método estático: {labels:?}"
+        );
+        // Herdado de Object, e tão membro do objeto quanto os declarados.
+        assert!(
+            labels.iter().any(|label| label.starts_with("toString")),
+            "membro herdado: {labels:?}"
+        );
+    }
+
+    /// O JDK indexado é o que a IDE aponta, não o do ambiente.
+    ///
+    /// Apontando para uma pasta que não é JDK, a biblioteca padrão não entra —
+    /// mesmo com `JAVA_HOME` válido na máquina. É o que garante que trocar de
+    /// JDK pelo menu troque as classes que a completação conhece, em vez de
+    /// ficar preso num caminho de ambiente.
+    #[test]
+    fn the_indexed_jdk_is_the_one_the_ide_points_at() {
+        let active = active_with_jdk(Some(PathBuf::from("jdk-que-nao-existe")));
+        let source = "class Uso {\n    void executar() {\n        System.\n    }\n}\n";
+        if let Err(error) = pollster::block_on(active.open_document(snapshot(source))) {
+            panic!("falha ao abrir documento: {error}");
+        }
+        let items = match pollster::block_on(active.completion(CompletionRequest {
+            document_id: DocumentId(1),
+            position: TextPosition {
+                line: 2,
+                column: 15,
+            },
+            prefix: String::new(),
+        })) {
+            Ok(items) => items,
+            Err(error) => panic!("falha na completação: {error}"),
+        };
+        assert!(
+            items.is_empty(),
+            "o JDK do ambiente não devia responder: {:?}",
+            items.iter().map(|item| &item.label).collect::<Vec<_>>()
+        );
+    }
+
+    /// Sem ponto, a completação continua sendo a do arquivo inteiro.
+    #[test]
+    fn without_a_dot_the_completion_still_covers_the_file() {
+        let active = active();
+        let source = "class Pedido {\n    int total;\n}\n";
+        if let Err(error) = pollster::block_on(active.open_document(snapshot(source))) {
+            panic!("falha ao abrir documento: {error}");
+        }
+        let items = match pollster::block_on(active.completion(CompletionRequest {
+            document_id: DocumentId(1),
+            position: TextPosition { line: 2, column: 1 },
+            prefix: "Ped".to_owned(),
+        })) {
+            Ok(items) => items,
+            Err(error) => panic!("falha na completação: {error}"),
+        };
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"Pedido"), "{labels:?}");
     }
 
     #[test]
@@ -1285,6 +1926,7 @@ mod tests {
         let provider = JavaLanguageProvider::new();
         let active = match pollster::block_on(provider.activate(LanguageActivationContext {
             workspace_root: root.clone(),
+            jdk_home: None,
         })) {
             Ok(active) => active,
             Err(error) => panic!("provider activation failed: {error}"),

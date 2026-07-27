@@ -28,13 +28,15 @@ use ide_toolchain_api::{
     CompilationRequest, CompilerAdapter, DetectionContext, ExecutionRequest, RuntimeAdapter,
     TestAdapter, TestRequest, ToolchainProvider,
 };
-use ide_ui::{DebugRequest, DebugView, IdeShell, NavigationRequest, SettingsPage};
+use ide_ui::{
+    DebugRequest, DebugView, IdeShell, NavigationRequest, NewItemKind, NewItemRequest, SettingsPage,
+};
 use java_gradle_adapter::{GRADLE_BUILD_SYSTEM_ID, GradleAdapter};
 use java_javac_adapter::JavaJavacAdapter;
 use java_maven_adapter::{MAVEN_BUILD_SYSTEM_ID, MavenAdapter};
 use java_toolchain::{ClasspathBuilder, JavaToolchainProvider, JavaToolchainSelection};
 use language_java::{JAVA_PROVIDER_ID, JavaLanguageProvider};
-use ui_core::{Point, Size, WindowId};
+use ui_core::{Modifiers, Point, Size, WindowId};
 use ui_render_api::{FrameInfo, UiRenderer};
 use ui_render_wgpu::WgpuRenderer;
 use ui_window_api::WindowRequest;
@@ -415,18 +417,12 @@ impl NativeIde {
                 }
             }
         }
+        self.apply_jdk_to_languages();
     }
 
-    fn open_jdk_selector(&mut self) {
-        let selected = self.java_toolchains.selected().map(|value| &value.id);
-        let selected_index = self
-            .java_toolchains
-            .installations()
-            .iter()
-            .position(|installation| Some(&installation.id) == selected)
-            .unwrap_or(0);
-        let items = self
-            .java_toolchains
+    /// Rótulo de cada JDK detectado, na ordem da lista.
+    fn jdk_labels(&self) -> Vec<String> {
+        self.java_toolchains
             .installations()
             .iter()
             .map(|installation| {
@@ -439,7 +435,18 @@ impl NativeIde {
                     installation.home.display()
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    fn open_jdk_selector(&mut self) {
+        let selected = self.java_toolchains.selected().map(|value| &value.id);
+        let selected_index = self
+            .java_toolchains
+            .installations()
+            .iter()
+            .position(|installation| Some(&installation.id) == selected)
+            .unwrap_or(0);
+        let items = self.jdk_labels();
         if let Some(shell) = self.shell.as_mut() {
             shell.open_settings_dialog(items, selected_index);
         }
@@ -460,10 +467,13 @@ impl NativeIde {
         match JavaToolchainProvider::installation_from_home(folder) {
             Ok(installation) => {
                 let home = installation.home.clone();
-                self.java_toolchains.add_and_select(installation);
-                self.open_jdk_selector();
+                // A pasta apontada entra na lista e fica pendente: quem aplica é
+                // o Salvar, como qualquer escolha feita na janela.
+                let index = self.java_toolchains.add(installation);
+                let labels = self.jdk_labels();
                 if let Some(shell) = self.shell.as_mut() {
-                    shell.set_status_message(format!("Selected JDK: {}", home.display()));
+                    shell.set_jdk_options(labels, index);
+                    shell.set_status_message(format!("JDK a salvar: {}", home.display()));
                 }
             }
             Err(_) => {
@@ -473,6 +483,87 @@ impl NativeIde {
                     );
                 }
             }
+        }
+    }
+
+    /// Cria o pacote e, se houver nome, o tipo dentro dele.
+    ///
+    /// O pacote sempre é criado: é o diretório onde o tipo vai morar, e criá-lo
+    /// sozinho é o caso de uso do "Novo pacote". O gabarito Java mora aqui, no
+    /// ponto onde a IDE já compõe as peças Java — o `ide-workspace` grava
+    /// arquivo sem saber de linguagem, e a janela não escreve código.
+    fn create_new_item(&mut self, request: NewItemRequest) {
+        let directory = request
+            .package
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .fold(request.source_root.clone(), |path, segment| {
+                path.join(segment)
+            });
+        if let Err(error) = ide_workspace::create_directory(&directory) {
+            if let Some(shell) = self.shell.as_mut() {
+                shell.set_new_item_message(error.to_string());
+            }
+            return;
+        }
+        let created_file = if request.name.is_empty() {
+            None
+        } else {
+            let path = directory.join(format!("{}.java", request.name));
+            let source = java_source(&request, &request.name);
+            if let Err(error) = ide_workspace::create_file(&path, &source) {
+                if let Some(shell) = self.shell.as_mut() {
+                    shell.set_new_item_message(error.to_string());
+                }
+                return;
+            }
+            Some(path)
+        };
+        if let Some(shell) = self.shell.as_mut() {
+            shell.close_new_item_dialog();
+            // A árvore precisa reler o disco: o que acabou de nascer não estava
+            // na varredura anterior.
+            if let Err(error) = shell.reload_workspace() {
+                shell.set_status_message(error.to_string());
+            }
+            // O que nasceu dentro de uma pasta fechada não aparece: revelar o
+            // caminho é parte de ter criado.
+            shell.reveal_in_explorer(&directory);
+            match &created_file {
+                Some(path) => {
+                    shell.set_status_message(format!("Criado {}", path.display()));
+                    if let Err(error) = shell.open_file(path) {
+                        shell.set_status_message(error);
+                    }
+                }
+                None => shell.set_status_message(format!("Criado {}", directory.display())),
+            }
+        }
+        self.sync_languages();
+    }
+
+    /// Informa ao host de linguagens qual JDK está escolhido.
+    ///
+    /// A biblioteca padrão que a completação conhece vem dessa instalação, então
+    /// trocar de JDK derruba os providers ativos: eles indexaram o JDK anterior.
+    /// Os documentos abertos são esquecidos de propósito — o provider novo nasce
+    /// sem nenhum, e a próxima sincronização os reabre.
+    fn apply_jdk_to_languages(&mut self) {
+        let Some(language_host) = &self.language_host else {
+            return;
+        };
+        let home = self
+            .java_toolchains
+            .selected()
+            .map(|installation| installation.home.clone());
+        match language_host.set_jdk_home(home) {
+            Ok(true) => {
+                if pollster::block_on(language_host.reactivate()).is_ok() {
+                    self.language_documents.clear();
+                }
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "não foi possível registrar o JDK escolhido"),
         }
     }
 
@@ -489,6 +580,7 @@ impl NativeIde {
         if let Some(shell) = self.shell.as_mut() {
             shell.set_status_message(format!("Selected JDK: {}", installation.home.display()));
         }
+        self.apply_jdk_to_languages();
     }
 
     /// Detecta o build system da raiz e importa módulos e dependências.
@@ -1345,6 +1437,16 @@ impl ApplicationHandler for NativeIde {
                 }
             }
             WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if let Some(shell) = self.shell.as_mut() {
+                    shell.secondary_pointer_down(self.cursor, window.logical_size());
+                }
+                window.request_redraw();
+            }
+            WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
@@ -1430,6 +1532,13 @@ impl ApplicationHandler for NativeIde {
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("b"))
                 {
                     build_requested = true;
+                } else if self.control_pressed
+                    && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("s"))
+                {
+                    // Salvar é do shell, que é dono da sessão do editor.
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.save_active_document();
+                    }
                 } else if self.control_pressed && event.text.as_deref() == Some(" ") {
                     completion_requested = true;
                 } else {
@@ -1482,6 +1591,19 @@ impl ApplicationHandler for NativeIde {
                                 shell.key_down("Enter");
                             }
                         }
+                        // Tab precisa de um braço próprio: o texto que o sistema
+                        // entrega para ela é `\t`, e o caminho genérico abaixo
+                        // descarta caracteres de controle.
+                        Key::Named(NamedKey::Tab) => {
+                            let modifiers = Modifiers {
+                                shift: self.shift_pressed,
+                                control: self.control_pressed,
+                                ..Modifiers::default()
+                            };
+                            if let Some(shell) = self.shell.as_mut() {
+                                shell.key_down_with_modifiers("Tab", modifiers);
+                            }
+                        }
                         Key::Named(NamedKey::ArrowLeft) => {
                             if let Some(shell) = self.shell.as_mut() {
                                 shell.key_down("ArrowLeft");
@@ -1502,11 +1624,34 @@ impl ApplicationHandler for NativeIde {
                                 shell.key_down("ArrowUp");
                             }
                         }
+                        // Nem todo teclado entrega Tab como tecla nomeada; em
+                        // alguns layouts ela chega só como o texto `\t`, que o
+                        // filtro de caracteres de controle abaixo descartaria.
+                        _ if event.text.as_deref() == Some("\t") => {
+                            let modifiers = Modifiers {
+                                shift: self.shift_pressed,
+                                control: self.control_pressed,
+                                ..Modifiers::default()
+                            };
+                            if let Some(shell) = self.shell.as_mut() {
+                                shell.key_down_with_modifiers("Tab", modifiers);
+                            }
+                        }
                         _ => {
                             if let Some(text) = event.text
                                 && !text.chars().any(char::is_control)
                                 && let Some(shell) = self.shell.as_mut()
                             {
+                                // Alguns caracteres pedem completação sozinhos —
+                                // em Java, o ponto. Quais são é a linguagem
+                                // quem diz; o editor só pergunta.
+                                if let (Some(document_id), Some(host)) =
+                                    (shell.active_document(), self.language_host.as_ref())
+                                {
+                                    let triggers = host.trigger_characters(document_id);
+                                    completion_requested |=
+                                        text.chars().any(|typed| triggers.contains(&typed));
+                                }
                                 shell.text_input(&text);
                             }
                         }
@@ -1547,6 +1692,9 @@ impl ApplicationHandler for NativeIde {
             .is_some_and(IdeShell::take_open_settings_request);
         if open_settings {
             self.open_jdk_selector();
+        }
+        if let Some(request) = self.shell.as_mut().and_then(IdeShell::take_new_item_request) {
+            self.create_new_item(request);
         }
         let configured_jdk = self
             .shell
@@ -1637,6 +1785,26 @@ fn position_at_offset(text: &str, offset: usize) -> TextPosition {
         line: line as u32,
         column: column as u32,
     }
+}
+
+/// Gabarito do arquivo Java criado.
+///
+/// A declaração de pacote vem do caminho, que é a regra da linguagem: o
+/// diretório espelha o pacote, e um arquivo sem `package` na pasta errada não
+/// compila. Um pacote raiz não declara nada.
+fn java_source(request: &NewItemRequest, name: &str) -> String {
+    let declaration = if request.package.is_empty() {
+        String::new()
+    } else {
+        format!("package {};\n\n", request.package)
+    };
+    let keyword = match request.kind {
+        NewItemKind::Interface => "interface",
+        // Um pacote criado com nome de tipo produz uma classe: é o tipo mais
+        // comum, e quem quer interface pede interface no menu.
+        NewItemKind::Class | NewItemKind::Package => "class",
+    };
+    format!("{declaration}public {keyword} {name} {{\n}}\n")
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
