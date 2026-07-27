@@ -169,7 +169,43 @@ JARs do workspace. Fontes abertas substituem os resultados estáveis do índice
 na resolução. Definições no mesmo arquivo e no escopo mais profundo têm
 prioridade; depois são consultadas outras fontes do workspace.
 
-`Ctrl+Click` usa `DefinitionRequest` e abre a localização retornada.
+`Ctrl+Click` usa `DefinitionRequest` e abre a localização retornada, **rolando o
+editor até ela**. Sem isso, um destino no mesmo arquivo mas fora da área visível
+movia o cursor e mais nada: a navegação parecia não funcionar justamente para
+método, constante e variável, que quase sempre estão declarados no próprio
+arquivo. Tipos pareciam funcionar só porque abriam outra aba.
+
+Com `Ctrl` pressionado, o cursor vira uma mão sobre **tudo que pode levar a uma
+definição** — tipo, método, campo, variável e anotação —, e não apenas sobre
+tipos. Palavra-chave, literal, comentário e operador ficam de fora: nenhum
+declara nada, e uma mão sobre cada palavra do arquivo não informa coisa alguma.
+
+O cursor precisa concordar com o clique. Enquanto só tipo acendia a mão, o clique
+navegava em método, campo e variável sem que nada na tela dissesse que era
+possível, e a conclusão natural era que ali não funcionava.
+
+Isso exige que o realce classifique também os **usos**, e não apenas as
+declarações. Um identificador que não é declaração é uma referência a algo
+declarado em outro lugar — a constante numa comparação, a variável passada como
+argumento, o contador de um laço — e recebe o mesmo papel da declaração
+correspondente. Ficam sem papel apenas os fragmentos de nome qualificado, o `org`
+e o `springframework` de um import, que não nomeiam nada que se possa abrir.
+
+A linha de destino fica **destacada** enquanto o cursor continuar nela, com a
+mesma decoração que marca a linha em que a execução parou. O destaque não é
+apagado por ninguém: ele vale enquanto o cursor estiver onde a navegação o pôs, e
+o primeiro clique ou tecla o encerra sozinho. Assim nenhum caminho novo precisa
+lembrar de limpá-lo. O índice
+cobre **toda forma de declarar um tipo ou membro**, e não apenas classe: `record`,
+`interface`, `enum`, constante de enumeração, tipo de anotação e seus elementos,
+construtor — inclusive o compacto de um registro —, método, campo, parâmetro e
+variável local.
+
+`record` faltava, e a falha era silenciosa do jeito pior: navegar até uma classe
+funcionava, até um registro não encontrava nada. Como registro é a forma comum de
+declarar um DTO em Java moderno, o efeito prático era a navegação parecer quebrada
+justamente nos tipos do próprio projeto.
+
 `Ctrl+Space` solicita autocomplete, mostra até oito opções visíveis, permite
 navegar com as setas, confirmar com Enter e cancelar com Escape.
 

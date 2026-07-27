@@ -1657,6 +1657,76 @@ mod tests {
 
     use super::*;
 
+    /// Ctrl+clique encontra a definição em outro arquivo do projeto, para
+    /// qualquer forma de declarar um tipo.
+    ///
+    /// `record` não estava no índice: navegar até um DTO — a forma mais comum
+    /// de declarar um no Java moderno — não encontrava nada, enquanto classes e
+    /// interfaces funcionavam.
+    #[test]
+    fn navigation_finds_definitions_declared_in_other_files() {
+        let root = std::env::temp_dir().join(format!("er-ide-nav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let pacote = root.join("src");
+        assert!(std::fs::create_dir_all(&pacote).is_ok());
+        assert!(std::fs::write(pacote.join("Pedido.java"), "public record Pedido(String v) {}
+").is_ok());
+        assert!(std::fs::write(pacote.join("Servico.java"), "public interface Servico {}
+").is_ok());
+        assert!(std::fs::write(pacote.join("Estado.java"), "public enum Estado { ATIVO }
+").is_ok());
+        assert!(std::fs::write(pacote.join("Ajuda.java"), "public class Ajuda {}
+").is_ok());
+        let uso = pacote.join("Uso.java");
+        let texto = "public class Uso { void f() { Pedido p; Servico s; Estado e; Ajuda a; } }
+";
+        assert!(std::fs::write(&uso, texto).is_ok());
+
+        let language_host = LanguageHost::new(&root);
+        assert!(
+            language_host
+                .register(Arc::new(JavaLanguageProvider::new()))
+                .is_ok()
+        );
+        let mut ide = NativeIde {
+            language_host: Some(language_host),
+            shell: Some(match IdeShell::open(&root) {
+                Ok(shell) => shell,
+                Err(error) => panic!("projeto não abriu: {error}"),
+            }),
+            ..NativeIde::default()
+        };
+        let document_id = match ide.shell.as_mut().map(|shell| shell.open_file(&uso)) {
+            Some(Ok(id)) => id,
+            _ => panic!("documento não abriu"),
+        };
+        ide.sync_languages();
+
+        for (token, arquivo) in [
+            ("Pedido", "Pedido.java"),
+            ("Servico", "Servico.java"),
+            ("Estado", "Estado.java"),
+            ("Ajuda", "Ajuda.java"),
+        ] {
+            let byte_offset = texto.find(token).unwrap_or_default();
+            ide.navigate_to_definition(NavigationRequest {
+                document_id,
+                byte_offset,
+                token: token.to_owned(),
+            });
+            let mensagem = ide
+                .shell
+                .as_ref()
+                .map(|shell| shell.status_message().to_owned())
+                .unwrap_or_default();
+            assert!(
+                mensagem.contains(arquivo),
+                "{token} deveria levar a {arquivo}, veio: {mensagem}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// O código já aparece colorido no primeiro quadro.
     ///
     /// O realce era pedido só dentro do tratamento de eventos, então o texto

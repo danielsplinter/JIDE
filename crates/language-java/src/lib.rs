@@ -571,9 +571,15 @@ fn declaration<'tree>(
 ) -> Option<(SymbolKind, Node<'tree>, Option<TypeDescriptor>)> {
     let kind = match node.kind() {
         "class_declaration" => SymbolKind::Class,
+        // Um `record` declara um tipo como qualquer outro; sem ele no índice,
+        // navegar até um DTO não encontrava nada.
+        "record_declaration" => SymbolKind::Record,
         "interface_declaration" => SymbolKind::Interface,
         "enum_declaration" => SymbolKind::Enum,
+        "enum_constant" => SymbolKind::EnumConstant,
         "annotation_type_declaration" => SymbolKind::Annotation,
+        "annotation_type_element_declaration" => SymbolKind::Method,
+        "compact_constructor_declaration" => SymbolKind::Constructor,
         "constructor_declaration" => SymbolKind::Constructor,
         "method_declaration" => SymbolKind::Method,
         "field_declaration" => SymbolKind::Field,
@@ -638,9 +644,13 @@ fn completion_for_symbol(symbol: &SemanticSymbol) -> CompletionItem {
             .as_ref()
             .map(|kind| kind.name.clone()),
         kind: match symbol.kind {
-            SymbolKind::Class | SymbolKind::Annotation => CompletionKind::Class,
+            // Um registro se completa como o tipo que ele é.
+            SymbolKind::Class | SymbolKind::Record | SymbolKind::Annotation => {
+                CompletionKind::Class
+            }
             SymbolKind::Interface => CompletionKind::Interface,
             SymbolKind::Enum => CompletionKind::Enum,
+            SymbolKind::EnumConstant => CompletionKind::Field,
             SymbolKind::Constructor => CompletionKind::Constructor,
             SymbolKind::Method => CompletionKind::Method,
             SymbolKind::Field => CompletionKind::Field,
@@ -842,7 +852,15 @@ fn highlight_kind(node: Node<'_>) -> Option<SyntaxHighlightKind> {
             }
             "field_access" | "field_declaration" => Some(SyntaxHighlightKind::Field),
             "variable_declarator" | "formal_parameter" => Some(SyntaxHighlightKind::Variable),
-            _ => None,
+            // Fragmento de um nome qualificado — o `org` e o `springframework` de
+            // um import. Não nomeia nada que se possa abrir.
+            "scoped_identifier" | "package_declaration" => None,
+            // Qualquer outro identificador é uma **referência** a algo declarado
+            // em outro lugar: a constante usada numa comparação, a variável
+            // passada como argumento, o contador de um laço. Classificá-los só
+            // na declaração deixava o uso sem realce, e sem realce a interface
+            // não tinha como saber que dali dá para navegar.
+            _ => Some(SyntaxHighlightKind::Variable),
         });
     }
     if matches!(kind, "marker_annotation" | "annotation") {
@@ -1019,6 +1037,71 @@ mod tests {
             Ok(active) => active,
             Err(error) => panic!("failed to activate Java provider: {error}"),
         }
+    }
+
+    /// O **uso** de uma constante, variável ou contador também é realçado.
+    ///
+    /// Só as declarações eram classificadas. Sem realce no uso, a interface não
+    /// tinha como saber que dali dá para navegar, e o cursor não virava mão
+    /// justamente onde o usuário quer clicar.
+    #[test]
+    fn identifier_references_are_highlighted_not_only_declarations() {
+        let texto = concat!(
+            "import org.exemplo.Coisa;
+",
+            "class A {
+",
+            "  static final int TOTAL = 10;
+",
+            "  void f() {
+",
+            "    for (int i = 0; i < TOTAL; i++) { usa(i); }
+",
+            "  }
+",
+            "}
+"
+        );
+        let provider = active();
+        assert!(pollster::block_on(provider.open_document(snapshot(texto))).is_ok());
+        let resultado = match pollster::block_on(provider.syntax(DocumentId(1))) {
+            Ok(resultado) => resultado,
+            Err(error) => panic!("análise falhou: {error}"),
+        };
+
+        let kind_em = |ancora: &str, alvo: &str| {
+            let base = texto.find(ancora).unwrap_or_else(|| panic!("âncora {ancora}"));
+            let offset = base + ancora.find(alvo).unwrap_or(0);
+            let antes = &texto[..offset];
+            let line = antes.matches(char::from(10)).count() as u32;
+            let column = antes.rsplit(char::from(10)).next().unwrap_or("").chars().count() as u32;
+            resultado
+                .highlights
+                .iter()
+                .find(|highlight| {
+                    (highlight.range.start.line, highlight.range.start.column) <= (line, column)
+                        && (line, column) < (highlight.range.end.line, highlight.range.end.column)
+                })
+                .map(|highlight| highlight.kind)
+        };
+
+        assert_eq!(
+            kind_em("i < TOTAL", "TOTAL"),
+            Some(SyntaxHighlightKind::Variable),
+            "constante usada numa comparação"
+        );
+        assert_eq!(
+            kind_em("usa(i)", "i"),
+            Some(SyntaxHighlightKind::Variable),
+            "variável passada como argumento"
+        );
+        assert_eq!(
+            kind_em("i++", "i"),
+            Some(SyntaxHighlightKind::Variable),
+            "contador de laço"
+        );
+        // Fragmento de nome qualificado não nomeia nada que se possa abrir.
+        assert_eq!(kind_em("org.exemplo", "org"), None);
     }
 
     fn snapshot(text: &str) -> DocumentSnapshot {

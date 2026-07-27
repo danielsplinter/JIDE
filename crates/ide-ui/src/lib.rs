@@ -217,6 +217,18 @@ pub struct IdeShell {
     /// um pergunta à fonte que vai desenhar. A IDE não constrói o mecanismo:
     /// ela recebe a porta e a repassa aos widgets.
     text_metrics: Option<Arc<dyn TextMetrics>>,
+    /// Linha alcançada pela última navegação, com o cursor que ela deixou.
+    ///
+    /// O destaque vale enquanto o cursor continuar onde a navegação o pôs. Não
+    /// há o que limpar: assim que o usuário clica ou digita, o cursor muda e o
+    /// destaque deixa de valer sozinho — nenhum caminho novo precisa lembrar de
+    /// apagá-lo.
+    navigated: Option<(usize, usize)>,
+    /// Linha que precisa aparecer no próximo quadro.
+    ///
+    /// Quem navega não conhece a altura do editor; ela só existe na pintura, que
+    /// é onde a revelação acontece.
+    pending_reveal: Option<usize>,
     /// Cópia do documento ativo para desenho, com a revisão que a originou.
     ///
     /// O texto continua sendo do `EditorSession`; o editor da biblioteca é
@@ -338,6 +350,8 @@ impl IdeShell {
             terminal_last_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_minimized: false,
             text_metrics: None,
+            navigated: None,
+            pending_reveal: None,
             editor_view: None,
             sidebar_splitter: Splitter::new(SIDEBAR_SPLITTER_ID, SplitOrientation::Horizontal),
             terminal_splitter: Splitter::new(TERMINAL_SPLITTER_ID, SplitOrientation::Vertical),
@@ -527,6 +541,12 @@ impl IdeShell {
         self.completion_items = items;
         self.completion_selected = 0;
     }
+    /// Mensagem atual da barra de estado.
+    #[must_use]
+    pub fn status_message(&self) -> &str {
+        &self.status_message
+    }
+
     pub fn set_status_message(&mut self, message: impl Into<String>) {
         self.status_message = message.into();
     }
@@ -687,8 +707,7 @@ impl IdeShell {
             .filter(|snapshot| snapshot.version == document.buffer.revision())
             .is_some_and(|snapshot| {
                 snapshot.highlights.iter().any(|highlight| {
-                    highlight.kind == SyntaxHighlightKind::Type
-                        && position_in_range(line, column, highlight.range)
+                    is_navigable(highlight.kind) && position_in_range(line, column, highlight.range)
                 })
             })
     }
@@ -1296,6 +1315,7 @@ impl IdeShell {
             .chars()
             .count();
         let scroll_line = self.editor_scroll_line;
+        let reveal = self.pending_reveal;
         let bounds = self.editor_view_rect(size);
         let context = self.layout_context();
         let Some((_, _, editor)) = self.editor_view.as_mut() else {
@@ -1307,6 +1327,12 @@ impl IdeShell {
         editor.set_focused(focused);
         editor.set_cursor(cursor);
         editor.set_scroll_line(scroll_line);
+        if let Some(line) = reveal {
+            editor.reveal_line(line);
+        }
+        let scrolled = editor.scroll_line();
+        self.editor_scroll_line = scrolled;
+        self.pending_reveal = None;
     }
 
     /// Converte o realce da IDE, que fala em linha e coluna, para os intervalos
@@ -1360,17 +1386,25 @@ impl IdeShell {
                 LineDecoration::mark(*line as usize, mark)
             })
             .collect();
+        let destacar = |decorations: &mut Vec<LineDecoration>, line: usize| {
+            match decorations.iter_mut().find(|item| item.line == line) {
+                Some(existing) => *existing = existing.with_highlight(),
+                None => decorations.push(LineDecoration::highlight(line)),
+            }
+        };
         if let Some((_, line)) = self
             .debug
             .stopped_at
             .as_ref()
             .filter(|(stopped, _)| stopped == path)
         {
-            let line = *line as usize;
-            match decorations.iter_mut().find(|item| item.line == line) {
-                Some(existing) => *existing = existing.with_highlight(),
-                None => decorations.push(LineDecoration::highlight(line)),
-            }
+            destacar(&mut decorations, *line as usize);
+        }
+        // Destino da última navegação, enquanto o cursor não sair de lá.
+        if let Some((line, cursor)) = self.navigated
+            && cursor == self.cursor_offset
+        {
+            destacar(&mut decorations, line);
         }
         decorations
     }
@@ -1719,6 +1753,10 @@ impl IdeShell {
         let id = self.open_file(path)?;
         let text = self.active_text().unwrap_or_default();
         self.cursor_offset = offset_for_line_column(text, line, column);
+        // Sem revelar a linha, a navegação move o cursor para fora da área
+        // visível e parece que nada aconteceu.
+        self.pending_reveal = Some(line);
+        self.navigated = Some((line, self.cursor_offset));
         self.focus = ShellFocus::Editor;
         self.status_message = format!("Definition: {}:{}:{}", path.display(), line + 1, column + 1);
         Ok(id)
@@ -3125,6 +3163,26 @@ fn label(text: &str, origin: Point, color: Color, size: f32) -> PaintCommand {
     })
 }
 
+/// Se um token realçado pode levar a uma definição.
+///
+/// O cursor precisa concordar com o clique. Enquanto só `Type` acendia a mão, o
+/// clique navegava em método, campo e variável sem que nada na tela dissesse que
+/// era possível — e o usuário concluía, com razão, que ali não funcionava.
+///
+/// Palavra-chave, literal, comentário e operador ficam de fora: nenhum deles
+/// declara nada, e uma mão sobre cada palavra do arquivo não informa coisa
+/// alguma.
+const fn is_navigable(kind: SyntaxHighlightKind) -> bool {
+    matches!(
+        kind,
+        SyntaxHighlightKind::Type
+            | SyntaxHighlightKind::Function
+            | SyntaxHighlightKind::Field
+            | SyntaxHighlightKind::Variable
+            | SyntaxHighlightKind::Annotation
+    )
+}
+
 /// Papel do realce da IDE no vocabulário do editor da biblioteca.
 const fn token_kind_for(kind: SyntaxHighlightKind) -> TokenKind {
     match kind {
@@ -3849,6 +3907,66 @@ mod tests {
         assert_eq!(shell.active_text(), Some("Example"));
     }
 
+    /// A mão acende no que dá para navegar, não só em tipo.
+    ///
+    /// Enquanto só `Type` acendia, o clique navegava em método, campo e variável
+    /// sem que nada na tela dissesse que era possível.
+    #[test]
+    fn the_navigation_cursor_agrees_with_what_the_click_resolves() {
+        let mut shell = test_shell();
+        //                                    0         1         2         3
+        //                                    0123456789012345678901234567890
+        let document_id = shell.editor.open_memory("A.java", "void metodo() { int x = y; }");
+        let realce = |coluna_inicial: u32, coluna_final: u32, kind| ide_domain::SyntaxHighlight {
+            range: ide_domain::TextRange {
+                start: ide_domain::TextPosition {
+                    line: 0,
+                    column: coluna_inicial,
+                },
+                end: ide_domain::TextPosition {
+                    line: 0,
+                    column: coluna_final,
+                },
+            },
+            kind,
+        };
+        shell.set_syntax_snapshot(ide_domain::SyntaxSnapshot {
+            document_id,
+            version: 0,
+            tree: ide_domain::SyntaxNode {
+                kind: "program".to_owned(),
+                range: ide_domain::TextRange::default(),
+                has_error: false,
+                children: Vec::new(),
+            },
+            outline: Vec::new(),
+            highlights: vec![
+                realce(0, 4, SyntaxHighlightKind::Keyword),
+                realce(5, 11, SyntaxHighlightKind::Function),
+                realce(20, 21, SyntaxHighlightKind::Variable),
+                realce(24, 25, SyntaxHighlightKind::Field),
+            ],
+            imports: Vec::new(),
+            diagnostics: Vec::new(),
+        });
+
+        let size = Size::new(1280.0, 800.0);
+        let editor_x = ACTIVITY_WIDTH + shell.sidebar_width(size);
+        let sobre = |coluna: f32| {
+            Point::new(
+                editor_x + EDITOR_GUTTER + coluna * EDITOR_CHAR_WIDTH,
+                shell.geometry(size).content_top + 15.0,
+            )
+        };
+        assert!(shell.navigation_hover(sobre(7.0), size, true), "método");
+        assert!(shell.navigation_hover(sobre(20.0), size, true), "variável");
+        assert!(shell.navigation_hover(sobre(24.0), size, true), "campo");
+        assert!(
+            !shell.navigation_hover(sobre(1.0), size, true),
+            "palavra-chave não leva a lugar nenhum"
+        );
+    }
+
     #[test]
     fn control_hover_over_java_type_uses_navigation_cursor_state() {
         let mut shell = test_shell();
@@ -4379,6 +4497,75 @@ mod tests {
                 token: "target".to_owned(),
             })
         );
+    }
+
+    /// Ir para a definição rola o editor até o destino.
+    ///
+    /// Antes o cursor era movido e mais nada: um método declarado abaixo da área
+    /// visível continuava fora da tela, e a navegação parecia não ter acontecido.
+    #[test]
+    fn going_to_a_definition_scrolls_the_target_line_into_view() {
+        let mut shell = test_shell();
+        let texto = (0..200)
+            .map(|linha| format!("linha {linha}"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        shell.editor.open_memory("Longo.java", &texto);
+        let size = Size::new(1280.0, 800.0);
+        let visiveis = shell.editor_visible_lines(size);
+        assert!(120 > visiveis, "o destino precisa estar fora da tela");
+        assert_eq!(shell.editor_scroll_line(), 0);
+
+        assert!(shell.open_location(Path::new("Longo.java"), 120, 0).is_ok());
+        // A revelação acontece na pintura, que é onde a altura do editor existe.
+        let _ = shell.paint(size);
+
+        let topo = shell.editor_scroll_line();
+        assert!(
+            topo <= 120 && 120 < topo + visiveis,
+            "a linha 120 precisa ficar visível; topo={topo}, visíveis={visiveis}"
+        );
+        // E rolou o mínimo necessário, não saltou para o fim do arquivo.
+        assert!(topo > 0);
+    }
+
+    /// A linha de destino fica destacada até o cursor sair de lá.
+    #[test]
+    fn the_navigated_line_is_highlighted_until_the_cursor_moves() {
+        let mut shell = test_shell();
+        let texto = (0..60)
+            .map(|linha| format!("linha {linha}"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        shell.editor.open_memory("Longo.java", &texto);
+        let size = Size::new(1280.0, 800.0);
+        let destaque = Theme::default().colors.highlight;
+        let destacadas = |shell: &mut IdeShell| {
+            shell
+                .paint(size)
+                .iter()
+                .filter(|command| {
+                    matches!(command, PaintCommand::FillRect(fill) if fill.color == destaque)
+                })
+                .count()
+        };
+        assert_eq!(destacadas(&mut shell), 0, "sem navegação, nada destacado");
+
+        assert!(shell.open_location(Path::new("Longo.java"), 30, 0).is_ok());
+        assert_eq!(destacadas(&mut shell), 1, "o destino fica destacado");
+
+        // Clicar em outro lugar tira o destaque, sem ninguém precisar apagá-lo.
+        let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
+        shell.pointer_down(
+            Point::new(
+                editor_x + EDITOR_GUTTER + 2.0 * EDITOR_CHAR_WIDTH,
+                TITLE_HEIGHT + TAB_HEIGHT + 3.0 * EDITOR_LINE_HEIGHT + 5.0,
+            ),
+            size,
+        );
+        assert_eq!(destacadas(&mut shell), 0, "mover o cursor encerra o destaque");
     }
 
     #[test]

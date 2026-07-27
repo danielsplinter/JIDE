@@ -146,8 +146,12 @@ pub struct SyntaxSnapshot {
 pub enum SymbolKind {
     Package,
     Class,
+    /// Registro — uma classe, mas declarada por `record`.
+    Record,
     Interface,
     Enum,
+    /// Constante de enumeração, como um item declarado dentro de um `enum`.
+    EnumConstant,
     Annotation,
     Constructor,
     Method,
