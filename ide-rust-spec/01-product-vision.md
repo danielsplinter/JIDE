@@ -27,8 +27,14 @@ Cancelar o seletor não altera o workspace atual.
 O projeto escolhido é registrado na configuração do usuário e reaberto
 automaticamente na próxima inicialização: quem abre a IDE pela segunda vez
 espera continuar de onde parou, sem repetir a seleção de pasta. Um caminho que
-não existe mais é ignorado em silêncio e a IDE abre normalmente. Os detalhes do
-arquivo e das regras estão em [08 — Persistência](08-storage-and-memory.md).
+não existe mais é ignorado em silêncio e a IDE abre normalmente.
+
+As abas abertas voltam junto com o projeto, já com o conteúdo carregado e
+**colorido**: quem reabre a IDE espera continuar de onde parou, e não repetir a
+navegação pelo Explorer até os arquivos em que estava trabalhando. O realce é
+pedido na própria inicialização, e não no primeiro evento de interface — senão o
+código apareceria sem cor até o usuário clicar em algum lugar. Os detalhes do arquivo e das
+regras estão em [08 — Persistência](08-storage-and-memory.md).
 
 O menu `Configurações` abre uma janela modal com navegação em um painel
 esquerdo e o conteúdo da opção selecionada no painel direito. A primeira opção
@@ -39,10 +45,32 @@ conteúdo inferior permanece inativo até o fechamento. Barra principal, combo e
 isolamento modal devem reutilizar respectivamente `MenuBar`, `ComboBox` e
 `ModalHost` da ERLibUi, sem duplicar desenho ou hit testing na IDE.
 
+O rodapé é a `StatusBar` da ERLibUi, e é dela também a altura que o restante do
+layout desconta. A mensagem da última ação fica à esquerda; codificação, posição
+do cursor e resumo do projeto ficam ancorados à direita, sempre no mesmo lugar.
+Antes tudo era uma linha só, separada por marcadores, e cada mensagem longa
+deslocava a posição do cursor para outro ponto da barra.
+
+O Explorer é a `TreeView` da ERLibUi. Recuo, marcador de expansão, recorte,
+virtualização, seleção e deslocamento horizontal pertencem ao componente; a IDE
+entrega os arquivos e traduz o nó escolhido de volta para um caminho. A árvore
+identifica nós por número e o Explorer os identifica por caminho — o caminho é o
+que sobrevive a uma releitura do disco, então ele é a origem do número.
+
 Todo o conteúdo da árvore deve ser recortado pelos limites do painel esquerdo.
 Quando nomes ou níveis de indentação ultrapassarem a largura disponível, o
 Explorer deve mostrar uma barra de rolagem horizontal com clique na trilha e
 arraste do indicador. Texto da árvore nunca pode vazar sobre o editor.
+
+Diferente das abas, a árvore não é remontada a cada quadro: remontar milhares de
+nós custaria caro, e ela só muda quando o projeto ou a expansão mudam.
+
+As quatro barras de rolagem da janela — editor, terminal e as duas do Explorer —
+são a `Scrollbar` da ERLibUi. A IDE informa quanto conteúdo existe, quanto cabe e
+onde está, e recebe de volta o deslocamento escolhido; o indicador, o arraste que
+preserva o ponto da pegada e o clique na trilha pertencem ao componente. As
+barras verticais contam linhas e a horizontal conta pontos de largura, o que para
+o componente é a mesma aritmética.
 
 O Explorer também deve possuir barra de rolagem vertical quando a árvore
 ultrapassar a altura disponível. A borda direita do painel deve permitir
@@ -50,14 +78,52 @@ redimensionamento horizontal por clique, retenção e arraste. Editor e painel d
 terminal ocupam sempre a largura restante e acompanham imediatamente essa
 mudança de layout, sem enviar redimensionamentos ao PTY.
 
-Cada aba de editor deve exibir um botão `x` próprio. Clicar nesse botão fecha
-somente o documento correspondente e ativa uma aba remanescente quando
-necessário.
+Esse divisor e o que separa editor e terminal são `Splitter` da ERLibUi, com
+limites em pontos — a largura mínima da barra lateral e a do editor, a altura
+mínima do terminal e o espaço que o editor precisa manter. A área que aceita o
+arraste é maior que a linha desenhada, e a linha se destaca quando o ponteiro se
+aproxima, o que antes não acontecia: a borda parecia decoração.
 
-O título de cada aba deve permanecer estritamente dentro de seus limites e
-reservar espaço fixo para o botão `x`. Nomes longos são abreviados com
-reticências e também recortados graficamente; nunca podem invadir a aba vizinha
-ou cobrir seu botão de fechamento.
+Abas do editor e do painel de terminal são o `Tabs` da ERLibUi, com largura fixa
+por aba. Cada aba de editor exibe um botão `x` próprio; clicar nesse botão fecha
+somente o documento correspondente e ativa uma aba remanescente quando
+necessário. Abas de terminal não fecham: um terminal pertence à janela enquanto
+ela existir.
+
+O título de cada aba permanece estritamente dentro de seus limites e reserva
+espaço fixo para a faixa de ações. Nomes longos são abreviados com reticências e
+também recortados graficamente; nunca podem invadir a aba vizinha ou cobrir seu
+botão de fechamento. Um documento alterado e não gravado é sinalizado por um
+ponto nessa mesma faixa, que dá lugar ao `x` quando o ponteiro está sobre a aba.
+
+Nada disso é decidido aqui: a IDE monta as abas a partir dos documentos abertos e
+traduz o comando que o componente emite. Como o widget é reconstruído a cada
+quadro a partir dessa verdade, nenhuma abertura, gravação ou fechamento precisa
+lembrar de sincronizar a barra de abas.
+
+A fonte de código é monoespaçada, e isso é uma decisão assumida da IDE, não um
+detalhe de implementação: o editor localiza coluna, seleção e cursor por
+contagem de colunas, como qualquer editor de código. Trocar por fonte
+proporcional embaralharia o texto. A premissa é verificada por teste na
+biblioteca; a largura concreta não é fixada, porque monoespaçadas diferentes têm
+larguras diferentes e o editor mede a que estiver instalada.
+
+A IDE não mede texto: ela entrega aos componentes o mecanismo de texto da
+ERLibUi, e cada um pergunta a largura do que vai desenhar. Métrica de fonte é
+conhecimento de interface, e mantê-la aqui faria cada aplicação da biblioteca
+redescobrir a mesma coisa.
+
+O código é desenhado pelo `CodeEditor` da ERLibUi. Calha, números de linha,
+realce sintático, marcas de ponto de parada, linha em execução e cursor pertencem
+ao componente; a IDE entrega o texto do documento ativo, o realce convertido do
+analisador e as decorações, e recebe de volta a linha clicada na calha. As
+métricas — altura da linha e largura da calha — vêm de lá, para que cursor, popup
+de autocomplete e cliques usem os mesmos números que o desenho.
+
+O texto continua sendo do `EditorSession`: o editor da biblioteca guarda uma cópia
+para desenhar, reconstruída quando a revisão do documento muda. Por isso pintar
+exige acesso mutável ao shell — deixar essa reconciliação para os manipuladores de
+evento faria cada esquecimento virar um quadro desatualizado.
 
 O suporte a cada linguagem será fornecido por um módulo desacoplado, chamado neste documento de `Language Provider`.
 
@@ -153,6 +219,10 @@ modais acompanham o mesmo tema que o resto da janela.
 Reimplementar aparência na IDE é o caminho errado: cada cor duplicada aqui é uma
 cor que deixa de acompanhar o tema. Quando um componente da biblioteca não
 atende, a correção pertence à biblioteca.
+
+A regra é verificada por teste: nenhuma cor literal pode aparecer na camada de
+apresentação. Quando falta uma cor, acrescenta-se um token ao tema da
+biblioteca, e não uma exceção aqui.
 
 ## Executar a aplicação
 

@@ -65,6 +65,12 @@ impl Default for DebugConfig {
 pub struct WorkspaceConfig {
     /// Último projeto aberto, reaberto na próxima inicialização.
     pub last_path: Option<PathBuf>,
+    /// Documentos abertos no último uso, na ordem das abas.
+    #[serde(default)]
+    pub open_documents: Vec<PathBuf>,
+    /// Documento em foco no último uso.
+    #[serde(default)]
+    pub active_document: Option<PathBuf>,
 }
 
 impl WorkspaceConfig {
@@ -77,6 +83,34 @@ impl WorkspaceConfig {
         self.last_path
             .as_ref()
             .filter(|path| path.is_dir())
+            .cloned()
+    }
+
+    /// Documentos a reabrir em um projeto, apenas os que ainda são arquivos.
+    ///
+    /// As abas pertencem ao projeto em que foram abertas: reabrir em outro
+    /// projeto mostraria arquivos que nada têm a ver com o trabalho atual. Um
+    /// arquivo apagado ou renomeado no meio-tempo é ignorado em silêncio, pela
+    /// mesma razão que um projeto inexistente não impede a IDE de abrir.
+    #[must_use]
+    pub fn resolved_documents(&self, root: &Path) -> Vec<PathBuf> {
+        if self.last_path.as_deref() != Some(root) {
+            return Vec::new();
+        }
+        self.open_documents
+            .iter()
+            .filter(|path| path.is_file())
+            .cloned()
+            .collect()
+    }
+
+    /// Documento a focar na reabertura, se ele estiver entre os restaurados.
+    #[must_use]
+    pub fn resolved_active_document(&self, root: &Path) -> Option<PathBuf> {
+        let restored = self.resolved_documents(root);
+        self.active_document
+            .as_ref()
+            .filter(|path| restored.contains(path))
             .cloned()
     }
 }
@@ -105,6 +139,13 @@ impl AppConfig {
 
     /// Registra o projeto aberto e grava a configuração.
     pub fn remember_workspace(&mut self, root: &Path, path: &Path) -> Result<(), ConfigError> {
+        // Trocar de projeto descarta as abas do anterior. Sem isso elas
+        // passariam a valer para a nova raiz, e voltar ao projeto antigo
+        // reabriria arquivos de outro.
+        if self.workspace.last_path.as_deref() != Some(root) {
+            self.workspace.open_documents.clear();
+            self.workspace.active_document = None;
+        }
         self.workspace.last_path = Some(root.to_path_buf());
         self.save(path)
     }
@@ -113,6 +154,22 @@ impl AppConfig {
     #[must_use]
     pub fn resolved_project(&self) -> Option<PathBuf> {
         self.workspace.resolved_last_path()
+    }
+
+    /// Registra as abas abertas e grava a configuração.
+    ///
+    /// A gravação acompanha qualquer mudança do conjunto — abrir, fechar ou
+    /// trocar de aba —, porque reabrir uma aba que o usuário fechou é tão
+    /// errado quanto perder uma que ele deixou aberta.
+    pub fn remember_documents(
+        &mut self,
+        open: &[PathBuf],
+        active: Option<&Path>,
+        path: &Path,
+    ) -> Result<(), ConfigError> {
+        self.workspace.open_documents = open.to_vec();
+        self.workspace.active_document = active.map(Path::to_path_buf);
+        self.save(path)
     }
 
     /// Registra o alvo de depuração usado e grava a configuração.
@@ -215,6 +272,84 @@ mod tests {
     fn absent_config_uses_bounded_defaults() {
         let config = AppConfig::load(Path::new("missing-ide-config.toml"));
         assert!(matches!(config, Ok(value) if value.event_capacity == 1_024));
+    }
+
+    /// As abas voltam com o projeto, e só as que ainda existem.
+    #[test]
+    fn the_open_tabs_survive_a_restart() {
+        let root = temporary("abas");
+        let project = root.join("projeto");
+        assert!(fs::create_dir_all(&project).is_ok());
+        let first = project.join("Primeiro.java");
+        let second = project.join("Segundo.java");
+        let removed = project.join("Apagado.java");
+        for file in [&first, &second, &removed] {
+            assert!(fs::write(file, "conteudo").is_ok());
+        }
+        let file = root.join("config").join("config.toml");
+
+        let mut config = AppConfig::default();
+        assert!(config.remember_workspace(&project, &file).is_ok());
+        let open = vec![first.clone(), second.clone(), removed.clone()];
+        assert!(
+            config
+                .remember_documents(&open, Some(&second), &file)
+                .is_ok()
+        );
+
+        assert!(fs::remove_file(&removed).is_ok());
+        let reloaded = match AppConfig::load(&file) {
+            Ok(config) => config,
+            Err(error) => panic!("releitura falhou: {error}"),
+        };
+        assert_eq!(
+            reloaded.workspace.resolved_documents(&project),
+            vec![first, second.clone()],
+            "o arquivo apagado é ignorado em silêncio"
+        );
+        assert_eq!(
+            reloaded.workspace.resolved_active_document(&project),
+            Some(second)
+        );
+    }
+
+    /// Abas pertencem ao projeto em que foram abertas.
+    #[test]
+    fn tabs_do_not_follow_the_user_to_another_project() {
+        let root = temporary("outro-projeto");
+        let first_project = root.join("um");
+        let second_project = root.join("dois");
+        assert!(fs::create_dir_all(&first_project).is_ok());
+        assert!(fs::create_dir_all(&second_project).is_ok());
+        let document = first_project.join("Classe.java");
+        assert!(fs::write(&document, "conteudo").is_ok());
+        let file = root.join("config").join("config.toml");
+
+        let mut config = AppConfig::default();
+        assert!(config.remember_workspace(&first_project, &file).is_ok());
+        assert!(
+            config
+                .remember_documents(std::slice::from_ref(&document), Some(&document), &file)
+                .is_ok()
+        );
+        assert!(
+            config
+                .workspace
+                .resolved_documents(&second_project)
+                .is_empty(),
+            "outro projeto não herda as abas"
+        );
+
+        // Abrir o segundo projeto descarta as abas do primeiro, para que voltar
+        // ao primeiro não traga arquivos que não são dele.
+        assert!(config.remember_workspace(&second_project, &file).is_ok());
+        assert!(config.workspace.open_documents.is_empty());
+        assert!(
+            config
+                .workspace
+                .resolved_documents(&first_project)
+                .is_empty()
+        );
     }
 
     #[test]

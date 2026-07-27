@@ -57,6 +57,11 @@ event_capacity = 1024
 
 [workspace]
 last_path = "C:/Users/exemplo/projetos/minha-app"
+open_documents = [
+    "C:/Users/exemplo/projetos/minha-app/src/main/java/App.java",
+    "C:/Users/exemplo/projetos/minha-app/pom.xml",
+]
+active_document = "C:/Users/exemplo/projetos/minha-app/pom.xml"
 
 [run]
 # Opcional: como subir a aplicação. Vazio significa deduzir do projeto.
@@ -88,6 +93,30 @@ Regras:
 - falha ao gravar não interrompe o trabalho; o projeto continua aberto e o
   usuário é avisado na barra de status;
 - a IDE nunca grava configuração do usuário dentro do projeto.
+
+### Abas abertas
+
+As abas abertas são registradas em `workspace.open_documents`, na ordem em que
+aparecem, e a que está em foco em `workspace.active_document`. Na inicialização
+seguinte elas voltam com o projeto, já com o conteúdo carregado: quem reabre a
+IDE espera continuar de onde parou, e não repetir a navegação pelo Explorer.
+
+Regras:
+
+- as abas pertencem ao projeto em que foram abertas. Abrir outro projeto
+  descarta o registro do anterior, para que voltar ao primeiro não traga
+  arquivos que não são dele;
+- um arquivo apagado ou renomeado no meio-tempo é ignorado em silêncio, pela
+  mesma razão que um projeto inexistente não impede a IDE de abrir;
+- documentos criados em memória, sem arquivo por trás, não são registrados:
+  seriam abas impossíveis de reabrir;
+- o registro acompanha **qualquer** mudança do conjunto — abrir, fechar ou trocar
+  de aba. Reabrir uma aba que o usuário fechou é tão errado quanto perder uma que
+  ele deixou aberta;
+- a comparação é feita a cada quadro, e não sinalizada em cada ponto que abre ou
+  fecha uma aba: comparar alguns caminhos é barato, e assim nenhum caminho novo
+  pode esquecer de avisar;
+- falha ao gravar não interrompe o trabalho, como no registro do projeto.
 
 ### Execução e depuração
 

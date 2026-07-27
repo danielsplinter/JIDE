@@ -513,6 +513,12 @@ a execução. Um painel à direita do editor mostra estado, pilha e variáveis, 
 escolher um quadro navega até sua linha. A sessão vive em thread própria: nem a
 parada, nem o passo, nem a queda da conexão bloqueiam a janela.
 
+Pilha e variáveis são `ListView` da ERLibUi, com a altura de linha reduzida que a
+lista oferece. A IDE não desenha linha, seleção nem recorte, e não decide qual
+linha foi clicada: entrega o ponteiro à lista e reage à escolha dela — clique
+fora das linhas não é escolha de quadro nenhum. Em troca, a pilha ganhou rolagem,
+foco e nó de acessibilidade que o desenho manual não tinha.
+
 ### Adapters específicos de servidor
 
 Detecção de instalação, perfis, deploy, leitura de logs e scripts próprios —

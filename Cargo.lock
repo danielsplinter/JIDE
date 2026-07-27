@@ -849,6 +849,7 @@ dependencies = [
  "ui-core",
  "ui-render-api",
  "ui-render-wgpu",
+ "ui-text-cosmic",
  "ui-window-api",
  "ui-window-winit",
  "winit",
@@ -2783,6 +2784,7 @@ dependencies = [
  "ui-accessibility-api",
  "ui-core",
  "ui-render-api",
+ "ui-text-api",
 ]
 
 [[package]]
@@ -2826,6 +2828,22 @@ dependencies = [
  "ui-render-api",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "ui-text-api"
+version = "0.1.0"
+dependencies = [
+ "ui-core",
+]
+
+[[package]]
+name = "ui-text-cosmic"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "ui-core",
+ "ui-text-api",
 ]
 
 [[package]]

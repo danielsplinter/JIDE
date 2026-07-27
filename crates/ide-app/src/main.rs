@@ -69,6 +69,8 @@ struct NativeIde {
     debug_thread: Option<ide_debug_api::ThreadId>,
     config: AppConfig,
     config_path: Option<PathBuf>,
+    /// Abas já registradas na configuração, para gravar só quando mudarem.
+    remembered_documents: Vec<PathBuf>,
     tool_events: Option<Receiver<ToolEvent>>,
     tool_sender: Option<Sender<ToolEvent>>,
 }
@@ -120,7 +122,25 @@ impl NativeIde {
             .register(Arc::new(JavaLanguageProvider::new()))
             .map_err(|error| error.to_string())?;
         self.language_host = Some(language_host);
-        self.shell = Some(IdeShell::open(&root).map_err(|error| error.to_string())?);
+        let mut shell = IdeShell::open(&root).map_err(|error| error.to_string())?;
+        // Os componentes medem o texto pela mesma fonte que vai desenhá-lo. Quem
+        // constrói o mecanismo é a aplicação; a interface só recebe a porta.
+        shell.set_text_metrics(Arc::new(ui_text_cosmic::CosmicTextEngine::new()));
+        // As abas do último uso voltam com o projeto: quem reabre a IDE espera
+        // continuar de onde parou, e um arquivo que sumiu é ignorado em
+        // silêncio, como um projeto inexistente.
+        for document in self.config.workspace.resolved_documents(&root) {
+            if let Err(error) = shell.open_file(&document) {
+                tracing::warn!(%error, path = %document.display(), "aba não pôde ser reaberta");
+            }
+        }
+        if let Some(active) = self.config.workspace.resolved_active_document(&root)
+            && let Err(error) = shell.open_file(&active)
+        {
+            tracing::warn!(%error, path = %active.display(), "aba ativa não pôde ser restaurada");
+        }
+        self.remembered_documents = shell.open_document_paths();
+        self.shell = Some(shell);
         let processes: Arc<dyn ProcessSupervisor> = Arc::new(NativeProcessSupervisor::default());
         self.java_adapter = Some(Arc::new(JavaJavacAdapter::new(processes.clone())));
         self.build_systems
@@ -142,6 +162,13 @@ impl NativeIde {
             .set_title(&format!("ER IDE — {}", root.display()));
         window.show();
         self.window = Some(window);
+        // As abas restauradas já estão abertas, mas ninguém pediu o realce
+        // delas: `sync_languages` só rodava dentro do tratamento de eventos, e
+        // por isso o código aparecia sem cor até o primeiro clique.
+        self.sync_languages();
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
         Ok(())
     }
 
@@ -206,6 +233,7 @@ impl NativeIde {
                 self.remember_project(&folder);
                 self.detect_java_toolchains(&folder);
                 self.import_project(&folder);
+                self.sync_languages();
                 if let Some(window) = self.window.as_ref() {
                     window
                         .inner()
@@ -787,6 +815,36 @@ impl NativeIde {
                 .unwrap_or_default();
             self.send_debug(debug::DebugCommand::SetBreakpoints { path, lines });
         }
+        self.remember_documents();
+    }
+
+    /// Mantém as abas abertas registradas na configuração.
+    ///
+    /// O conjunto é comparado a cada quadro em vez de sinalizado em cada ponto
+    /// que abre ou fecha uma aba: comparar alguns caminhos é barato, e nenhum
+    /// caminho novo pode esquecer de avisar.
+    fn remember_documents(&mut self) {
+        let Some(shell) = self.shell.as_ref() else {
+            return;
+        };
+        let open = shell.open_document_paths();
+        let active = shell.active_document_path();
+        if open == self.remembered_documents
+            && active.as_deref() == self.config.workspace.active_document.as_deref()
+        {
+            return;
+        }
+        let Some(path) = self.config_path.clone() else {
+            self.remembered_documents = open;
+            return;
+        };
+        if let Err(error) = self
+            .config
+            .remember_documents(&open, active.as_deref(), &path)
+        {
+            tracing::warn!(%error, path = %path.display(), "abas não puderam ser gravadas");
+        }
+        self.remembered_documents = open;
     }
 
     fn send_debug(&self, command: debug::DebugCommand) {
@@ -1325,9 +1383,11 @@ impl ApplicationHandler for NativeIde {
                 });
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                if self.shell.as_ref().is_some_and(|shell| {
-                    shell.selection_dialog_open() || shell.settings_dialog_open()
-                }) {
+                if self
+                    .shell
+                    .as_ref()
+                    .is_some_and(IdeShell::settings_dialog_open)
+                {
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
                             if let Some(shell) = self.shell.as_mut() {
@@ -1488,13 +1548,6 @@ impl ApplicationHandler for NativeIde {
         if open_settings {
             self.open_jdk_selector();
         }
-        let selected_jdk = self
-            .shell
-            .as_mut()
-            .and_then(IdeShell::take_selection_result);
-        if let Some(index) = selected_jdk {
-            self.select_jdk(index);
-        }
         let configured_jdk = self
             .shell
             .as_mut()
@@ -1603,6 +1656,119 @@ mod tests {
     use ide_project_model::{BuildSystemId, ModuleId, ProjectModule, SourceRoots};
 
     use super::*;
+
+    /// O código já aparece colorido no primeiro quadro.
+    ///
+    /// O realce era pedido só dentro do tratamento de eventos, então o texto
+    /// ficava sem cor até o primeiro clique ou troca de aba.
+    #[test]
+    fn the_code_is_highlighted_before_the_first_interaction() {
+        let root = std::env::temp_dir().join(format!("er-ide-realce-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(std::fs::create_dir_all(&root).is_ok());
+        let file = root.join("Exemplo.java");
+        assert!(std::fs::write(&file, "public class Exemplo {}").is_ok());
+
+        let language_host = LanguageHost::new(&root);
+        assert!(
+            language_host
+                .register(Arc::new(JavaLanguageProvider::new()))
+                .is_ok()
+        );
+
+        let mut ide = NativeIde {
+            language_host: Some(language_host),
+            shell: Some(match IdeShell::open(&root) {
+                Ok(shell) => shell,
+                Err(error) => panic!("projeto não abriu: {error}"),
+            }),
+            ..NativeIde::default()
+        };
+        if let Some(shell) = ide.shell.as_mut() {
+            assert!(shell.open_file(&file).is_ok());
+        }
+
+        let keyword_colored = |ide: &mut NativeIde| {
+            let colors = ui_core::Theme::default().colors;
+            ide.shell
+                .as_mut()
+                .map(|shell| shell.paint(Size::new(1_280.0, 800.0)))
+                .unwrap_or_default()
+                .iter()
+                .any(|command| {
+                    matches!(
+                        command,
+                        ui_render_api::PaintCommand::DrawText(text)
+                            if text.text == "public" && text.color == colors.syntax_keyword
+                    )
+                })
+        };
+        assert!(
+            !keyword_colored(&mut ide),
+            "sem o realce pedido, o texto sai sem cor"
+        );
+
+        // É isto que a inicialização passou a fazer.
+        ide.sync_languages();
+        assert!(
+            keyword_colored(&mut ide),
+            "depois de pedir o realce, o código aparece colorido"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Ciclo completo: abrir abas, gravar, reabrir a IDE e encontrá-las de volta.
+    #[test]
+    fn the_open_tabs_come_back_with_the_project() {
+        let root = std::env::temp_dir().join(format!("er-ide-abas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("projeto");
+        assert!(std::fs::create_dir_all(&project).is_ok());
+        let first = project.join("Primeiro.java");
+        let second = project.join("Segundo.java");
+        assert!(std::fs::write(&first, "class Primeiro {}").is_ok());
+        assert!(std::fs::write(&second, "class Segundo {}").is_ok());
+        let config_file = root.join("config.toml");
+
+        // Sessão de trabalho: dois arquivos abertos pelo Explorer.
+        let mut shell = match IdeShell::open(&project) {
+            Ok(shell) => shell,
+            Err(error) => panic!("projeto não abriu: {error}"),
+        };
+        assert!(shell.open_file(&first).is_ok());
+        assert!(shell.open_file(&second).is_ok());
+
+        let mut config = AppConfig::default();
+        assert!(config.remember_workspace(&project, &config_file).is_ok());
+        assert!(
+            config
+                .remember_documents(
+                    &shell.open_document_paths(),
+                    shell.active_document_path().as_deref(),
+                    &config_file,
+                )
+                .is_ok()
+        );
+
+        // Nova inicialização: a mesma restauração que `initialize` faz.
+        let reopened = match AppConfig::load(&config_file) {
+            Ok(config) => config,
+            Err(error) => panic!("releitura falhou: {error}"),
+        };
+        let mut restored = match IdeShell::open(&project) {
+            Ok(shell) => shell,
+            Err(error) => panic!("projeto não reabriu: {error}"),
+        };
+        assert_eq!(restored.tab_count(), 0, "a IDE abre sem abas");
+        for document in reopened.workspace.resolved_documents(&project) {
+            assert!(restored.open_file(&document).is_ok());
+        }
+        assert_eq!(restored.open_document_paths(), vec![first, second.clone()]);
+        assert_eq!(restored.active_document_path(), Some(second));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn maven_descriptor() -> ProjectDescriptor {
         ProjectDescriptor {

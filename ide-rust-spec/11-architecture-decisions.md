@@ -90,3 +90,35 @@ adapter, um formato de configuração e um ciclo de vida para cada um.
 **Consequência:** operações específicas de produto ficam disponíveis apenas como
 adapters opcionais posteriores, e nenhuma funcionalidade essencial pode depender
 delas.
+
+## ADR-013 — Interrupção do terminal: defeito conhecido, não resolvido
+
+**Situação:** parar a aplicação escreve `0x03` na entrada do PTY, que é como um
+terminal envia `Ctrl+C`. Isso **não interrompe** o processo em primeiro plano
+com `portable-pty` 0.8.1 no Windows.
+
+**Evidência:** um `ping -n 30` segue respondendo por mais de doze segundos depois
+da interrupção, com `cmd` e com `powershell`, dentro e fora de sandbox, tanto com
+`0x03` cru quanto seguido de `CR` ou `CRLF`. Com o Maven real, a aplicação sobe,
+o stop não produz saída alguma — nem log de encerramento, nem a pergunta do lote
+— e o comando seguinte é engolido pelo processo que continua rodando.
+
+O caso decisivo é o `pause`, que continua com **qualquer** tecla: ele não é
+dispensado pelo `0x03`. A entrada não chega ao processo filho nem como sinal nem
+como tecla, embora comandos digitados e submetidos com quebra de linha cheguem
+normalmente.
+
+**Caminhos já descartados:**
+
+- subir para `portable-pty` 0.9.0 — o terminal deixa de produzir qualquer saída;
+- enviar a tecla em win32-input-mode (`ESC [ 67;46;3;1;8;1 _`), apesar de o
+  pseudoconsole ser criado com `PSEUDOCONSOLE_WIN32_INPUT_MODE`.
+
+**Caminho restante:** `GenerateConsoleCtrlEvent`, que exige Win32 direto e
+esbarra no `unsafe_code = "forbid"` do workspace — decisão de arquitetura, não
+detalhe de implementação.
+
+**Consequência:** o botão de parar não interrompe a aplicação. Os dois testes que
+cobrem o comportamento estão marcados como `ignored` apontando para esta decisão,
+em vez de removidos: eles descrevem o comportamento correto e voltam a valer no
+dia em que a interrupção funcionar.

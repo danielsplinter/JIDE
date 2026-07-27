@@ -33,6 +33,7 @@ tokio.workspace = true
 ui-core = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-core" }
 ui-render-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-api" }
 ui-render-wgpu = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-wgpu" }
+ui-text-cosmic = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-text-cosmic" }
 ui-window-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-window-api" }
 ui-window-winit = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-window-winit" }
 winit.workspace = true

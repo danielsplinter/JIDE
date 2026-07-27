@@ -2,7 +2,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use ide_domain::{
@@ -11,38 +13,42 @@ use ide_domain::{
 };
 use ide_terminal::{ShellKind, TerminalSession};
 use ide_text::EditorSession;
+use ui_editor::{
+    CodeEditor, GutterMark, LineDecoration, SyntaxSpan, TextRange as EditorRange, TokenKind,
+};
 use ide_workspace::{FileNode, WorkspaceError};
-use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
+use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 use ui_components::{
-    Button, ComboBox, ComboBoxItem, Icon, IconTint, MenuBar, MenuBarItem, MenuItem, ModalHost,
-    TextInput,
+    Button, ComboBox, ComboBoxItem, Icon, IconTint, ListView, MenuBar, MenuBarItem, MenuItem,
+    ModalHost, Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter, StatusBar, TabItem,
+    Tabs, TextInput, TreeItem, TreeView,
 };
 use ui_core::{
-    Color, ColorTokens, EventResult, FontId, KeyEvent, Modifiers, Point, PointerButton,
+    Color, ColorTokens, CommandId, EventResult, FontId, KeyEvent, Modifiers, Point, PointerButton,
     PointerEvent, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
 };
-use ui_render_api::{
-    DrawTextCommand, FillCircleCommand, FillRectCommand, PaintCommand, StrokeCircleCommand,
-    StrokeRectCommand,
-};
+use ui_render_api::{DrawTextCommand, FillRectCommand, PaintCommand, StrokeRectCommand};
 
 const ACTIVITY_WIDTH: f32 = 48.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
-const SIDEBAR_RESIZE_HIT: f32 = 5.0;
 const TITLE_HEIGHT: f32 = 36.0;
 const TAB_HEIGHT: f32 = 38.0;
 const EXPLORER_ROW_HEIGHT: f32 = 23.0;
 const EXPLORER_TOP: f32 = 106.0;
-const EDITOR_LINE_HEIGHT: f32 = 22.0;
-const EDITOR_GUTTER: f32 = 55.0;
+/// Métricas do editor: elas são do componente que desenha o código, e a IDE
+/// as consulta para posicionar cursor, popup e cliques no mesmo lugar.
+const EDITOR_LINE_HEIGHT: f32 = CodeEditor::line_height();
+const EDITOR_GUTTER: f32 = CodeEditor::gutter_width();
+/// Largura do caractere na fonte de código, definida pelo editor que a desenha.
+const EDITOR_CHAR_WIDTH: f32 = CodeEditor::default_char_width();
 const TAB_WIDTH: f32 = 140.0;
+const TERMINAL_TAB_WIDTH: f32 = 110.0;
+const TERMINAL_TAB_HEIGHT: f32 = 30.0;
 const TERMINAL_DEFAULT_HEIGHT: f32 = 180.0;
 const TERMINAL_MIN_HEIGHT: f32 = 120.0;
 const TERMINAL_COLLAPSED_HEIGHT: f32 = 30.0;
-const TERMINAL_RESIZE_HIT: f32 = 5.0;
 const TERMINAL_CHAR_WIDTH: f32 = 8.4;
-const DIALOG_ROW_HEIGHT: f32 = 34.0;
 const DEBUG_PANEL_WIDTH: f32 = 320.0;
 const DEBUG_ROW_HEIGHT: f32 = 21.0;
 const MENU_BAR_ID: WidgetId = WidgetId(10_001);
@@ -56,6 +62,19 @@ const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
 const STOP_BUTTON_ID: WidgetId = WidgetId(10_009);
 const RUN_BUTTON_ID: WidgetId = WidgetId(10_010);
 const DEBUG_BUTTON_ID: WidgetId = WidgetId(10_011);
+const DEBUG_FRAMES_ID: WidgetId = WidgetId(10_012);
+const DEBUG_VARIABLES_ID: WidgetId = WidgetId(10_013);
+const STATUS_BAR_ID: WidgetId = WidgetId(10_014);
+const EDITOR_TABS_ID: WidgetId = WidgetId(10_015);
+const TERMINAL_TABS_ID: WidgetId = WidgetId(10_016);
+const EDITOR_SCROLLBAR_ID: WidgetId = WidgetId(10_017);
+const TERMINAL_SCROLLBAR_ID: WidgetId = WidgetId(10_018);
+const EXPLORER_VERTICAL_SCROLLBAR_ID: WidgetId = WidgetId(10_019);
+const EXPLORER_HORIZONTAL_SCROLLBAR_ID: WidgetId = WidgetId(10_021);
+const EXPLORER_TREE_ID: WidgetId = WidgetId(10_020);
+const SIDEBAR_SPLITTER_ID: WidgetId = WidgetId(10_022);
+const TERMINAL_SPLITTER_ID: WidgetId = WidgetId(10_023);
+const EDITOR_VIEW_ID: WidgetId = WidgetId(10_024);
 
 /// Página ativa da janela de configurações.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -132,12 +151,16 @@ struct TerminalSelection {
     focus: TextPosition,
 }
 
-#[derive(Clone, Copy)]
-enum ScrollbarDrag {
-    Editor { pointer_offset: f32 },
-    Terminal { pointer_offset: f32 },
-    ExplorerHorizontal { pointer_offset: f32 },
-    ExplorerVertical { pointer_offset: f32 },
+/// Qual barra de rolagem está sob o gesto.
+///
+/// O deslocamento da pegada pertence ao componente; aqui só se registra qual
+/// deles está sendo arrastado, para que o mesmo movimento não role duas áreas.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollTarget {
+    Editor,
+    Terminal,
+    ExplorerHorizontal,
+    ExplorerVertical,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -163,12 +186,6 @@ struct TerminalTab {
     follow_output: bool,
 }
 
-struct SelectionDialog {
-    title: String,
-    items: Vec<String>,
-    selected: usize,
-}
-
 struct SettingsDialog {
     message: Option<String>,
 }
@@ -176,6 +193,10 @@ struct SettingsDialog {
 pub struct IdeShell {
     workspace_name: String,
     workspace: FileNode,
+    /// O Explorer é a `TreeView` da biblioteca. Ela é reconstruída só quando a
+    /// árvore ou a expansão mudam — o caminho oposto ao das abas, porque
+    /// remontar milhares de nós a cada quadro custaria caro.
+    explorer_tree: TreeView,
     expanded: HashSet<PathBuf>,
     editor: EditorSession,
     cursor_offset: usize,
@@ -190,9 +211,32 @@ pub struct IdeShell {
     terminal_height: f32,
     terminal_last_height: f32,
     terminal_minimized: bool,
-    terminal_resizing: bool,
-    sidebar_resizing: bool,
-    scrollbar_drag: Option<ScrollbarDrag>,
+    /// Medição de texto oferecida pela aplicação.
+    ///
+    /// Sem ela os componentes estimam por contagem de caracteres; com ela cada
+    /// um pergunta à fonte que vai desenhar. A IDE não constrói o mecanismo:
+    /// ela recebe a porta e a repassa aos widgets.
+    text_metrics: Option<Arc<dyn TextMetrics>>,
+    /// Cópia do documento ativo para desenho, com a revisão que a originou.
+    ///
+    /// O texto continua sendo do `EditorSession`; o editor da biblioteca é
+    /// quem o desenha, e é reconstruído só quando a revisão muda.
+    editor_view: Option<(DocumentId, u64, CodeEditor)>,
+    /// Divisores redimensionáveis do layout, com limites em pontos.
+    ///
+    /// Eles guardam o arraste entre um evento e o seguinte; a posição e os
+    /// limites são reconciliados com o tamanho da janela a cada uso.
+    sidebar_splitter: Splitter,
+    terminal_splitter: Splitter,
+    scrollbar_drag: Option<ScrollTarget>,
+    /// As quatro barras de rolagem da janela, como widgets da biblioteca.
+    ///
+    /// Elas guardam o estado do arraste entre um evento e o seguinte; faixa,
+    /// trilha e deslocamento são reconciliados com o conteúdo a cada uso.
+    editor_scrollbar: Scrollbar,
+    terminal_scrollbar: Scrollbar,
+    explorer_vertical_scrollbar: Scrollbar,
+    explorer_horizontal_scrollbar: Scrollbar,
     terminal_selection: Option<TerminalSelection>,
     terminal_selecting: bool,
     menu_bar: MenuBar,
@@ -215,8 +259,6 @@ pub struct IdeShell {
     syntax_snapshots: HashMap<DocumentId, SyntaxSnapshot>,
     completion_items: Vec<CompletionItem>,
     completion_selected: usize,
-    selection_dialog: Option<SelectionDialog>,
-    selection_result: Option<usize>,
     settings_dialog: Option<SettingsDialog>,
     settings_jdk_result: Option<usize>,
     settings_page: SettingsPage,
@@ -233,6 +275,13 @@ pub struct IdeShell {
     verified_breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
     breakpoints_dirty: Option<PathBuf>,
     debug: DebugView,
+    /// Última posição do ponteiro, entregue às abas reconstruídas a cada quadro
+    /// para que o botão de fechar apareça sob o cursor.
+    pointer: Point,
+    /// Pilha de chamadas e variáveis são listas da biblioteca: rolagem,
+    /// seleção, recorte e acessibilidade não se reimplementam aqui.
+    debug_frames: ListView,
+    debug_variables: ListView,
     debug_requests: Vec<DebugRequest>,
 }
 
@@ -268,9 +317,12 @@ impl IdeShell {
                     })
             })
             .collect();
-        Self {
+        let explorer_tree = TreeView::new(EXPLORER_TREE_ID, explorer_items(&workspace))
+            .with_row_height(EXPLORER_ROW_HEIGHT);
+        let mut shell = Self {
             workspace_name,
             workspace,
+            explorer_tree,
             expanded,
             editor: EditorSession::default(),
             cursor_offset: 0,
@@ -285,9 +337,24 @@ impl IdeShell {
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_last_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_minimized: false,
-            terminal_resizing: false,
-            sidebar_resizing: false,
+            text_metrics: None,
+            editor_view: None,
+            sidebar_splitter: Splitter::new(SIDEBAR_SPLITTER_ID, SplitOrientation::Horizontal),
+            terminal_splitter: Splitter::new(TERMINAL_SPLITTER_ID, SplitOrientation::Vertical),
             scrollbar_drag: None,
+            editor_scrollbar: Scrollbar::new(EDITOR_SCROLLBAR_ID, ScrollbarOrientation::Vertical),
+            terminal_scrollbar: Scrollbar::new(
+                TERMINAL_SCROLLBAR_ID,
+                ScrollbarOrientation::Vertical,
+            ),
+            explorer_vertical_scrollbar: Scrollbar::new(
+                EXPLORER_VERTICAL_SCROLLBAR_ID,
+                ScrollbarOrientation::Vertical,
+            ),
+            explorer_horizontal_scrollbar: Scrollbar::new(
+                EXPLORER_HORIZONTAL_SCROLLBAR_ID,
+                ScrollbarOrientation::Horizontal,
+            ),
             terminal_selection: None,
             terminal_selecting: false,
             menu_bar: MenuBar::new(
@@ -341,8 +408,6 @@ impl IdeShell {
             syntax_snapshots: HashMap::new(),
             completion_items: Vec::new(),
             completion_selected: 0,
-            selection_dialog: None,
-            selection_result: None,
             settings_dialog: None,
             settings_jdk_result: None,
             settings_page: SettingsPage::default(),
@@ -365,7 +430,36 @@ impl IdeShell {
             verified_breakpoints: BTreeMap::new(),
             breakpoints_dirty: None,
             debug: DebugView::default(),
+            pointer: Point::new(-1.0, -1.0),
+            debug_frames: ListView::new(DEBUG_FRAMES_ID, Vec::<String>::new())
+                .with_row_height(DEBUG_ROW_HEIGHT),
+            debug_variables: ListView::new(DEBUG_VARIABLES_ID, Vec::<String>::new())
+                .with_row_height(DEBUG_ROW_HEIGHT),
             debug_requests: Vec::new(),
+        };
+        shell.sync_explorer_tree();
+        shell
+    }
+
+    /// Recebe o mecanismo que mede o texto que a janela desenha.
+    pub fn set_text_metrics(&mut self, metrics: Arc<dyn TextMetrics>) {
+        self.text_metrics = Some(metrics);
+    }
+
+    /// Contexto de pintura com a medição disponível, quando houver.
+    fn paint_context(&self) -> PaintContext {
+        let context = PaintContext::with_theme(self.theme);
+        match self.text_metrics.as_ref() {
+            Some(metrics) => context.measuring(Arc::clone(metrics)),
+            None => context,
+        }
+    }
+
+    /// Contexto de layout com a medição disponível, quando houver.
+    fn layout_context(&self) -> LayoutContext {
+        match self.text_metrics.as_ref() {
+            Some(metrics) => LayoutContext::with_text_metrics(Arc::clone(metrics)),
+            None => LayoutContext::default(),
         }
     }
 
@@ -435,25 +529,6 @@ impl IdeShell {
     }
     pub fn set_status_message(&mut self, message: impl Into<String>) {
         self.status_message = message.into();
-    }
-    pub fn open_selection_dialog(
-        &mut self,
-        title: impl Into<String>,
-        items: Vec<String>,
-        selected: usize,
-    ) {
-        self.selection_dialog = Some(SelectionDialog {
-            title: title.into(),
-            selected: selected.min(items.len().saturating_sub(1)),
-            items,
-        });
-        self.selection_result = None;
-    }
-    pub fn take_selection_result(&mut self) -> Option<usize> {
-        self.selection_result.take()
-    }
-    pub const fn selection_dialog_open(&self) -> bool {
-        self.selection_dialog.is_some()
     }
     pub fn open_settings_dialog(&mut self, jdk_items: Vec<String>, selected_jdk: usize) {
         self.jdk_combo.set_items(
@@ -620,6 +695,29 @@ impl IdeShell {
     pub fn tab_count(&self) -> usize {
         self.editor.tabs().count()
     }
+
+    /// Caminhos das abas abertas, na ordem em que aparecem.
+    ///
+    /// Documentos criados em memória não têm arquivo por trás e ficam de fora:
+    /// registrar um caminho que não existe só produziria uma aba impossível de
+    /// reabrir.
+    #[must_use]
+    pub fn open_document_paths(&self) -> Vec<PathBuf> {
+        self.editor
+            .tabs()
+            .filter(|document| document.path.is_file())
+            .map(|document| document.path.clone())
+            .collect()
+    }
+
+    /// Caminho do documento em foco.
+    #[must_use]
+    pub fn active_document_path(&self) -> Option<PathBuf> {
+        self.editor
+            .active()
+            .map(|document| document.path.clone())
+            .filter(|path| path.is_file())
+    }
     pub fn is_expanded(&self, path: &Path) -> bool {
         self.expanded.contains(path)
     }
@@ -642,10 +740,10 @@ impl IdeShell {
         self.terminal_minimized
     }
     pub const fn terminal_resizing(&self) -> bool {
-        self.terminal_resizing
+        self.terminal_splitter.is_dragging()
     }
     pub const fn sidebar_resizing(&self) -> bool {
-        self.sidebar_resizing
+        self.sidebar_splitter.is_dragging()
     }
     pub fn active_terminal_lines(&self) -> impl Iterator<Item = &str> {
         self.active_terminal()
@@ -732,6 +830,24 @@ impl IdeShell {
             let _ = self.open_location(&path, line as usize, 0);
         }
         self.debug = view;
+        self.debug_frames.set_items(
+            self.debug
+                .frames
+                .iter()
+                .map(|frame| match &frame.location {
+                    Some((_, line)) => format!("{}:{}", frame.name, line + 1),
+                    None => frame.name.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        self.debug_frames.set_selected(Some(self.debug.selected_frame));
+        self.debug_variables.set_items(
+            self.debug
+                .variables
+                .iter()
+                .map(|variable| format!("{} = {}", variable.name, variable.value))
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[must_use]
@@ -816,6 +932,449 @@ impl IdeShell {
         geometry
     }
 
+    /// Abas do editor montadas a partir dos documentos abertos.
+    ///
+    /// O widget é reconstruído a cada uso porque a verdade são os documentos, e
+    /// não uma cópia deles: assim nenhuma abertura, gravação ou fechamento
+    /// precisa lembrar de sincronizar a barra de abas.
+    fn editor_tabs(&self) -> Tabs {
+        let items = self
+            .editor
+            .tabs()
+            .map(|document| {
+                let title = document
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("?");
+                TabItem::new(document.id.0, title)
+                    .closable()
+                    .modified(document.buffer.is_dirty())
+            })
+            .collect();
+        let mut tabs = Tabs::new(EDITOR_TABS_ID, items)
+            .with_tab_width(TAB_WIDTH)
+            .with_pointer(self.pointer);
+        if let Some(active) = self.editor.active_id() {
+            tabs.set_active_id(active.0);
+        }
+        tabs
+    }
+
+    fn editor_tabs_rect(&self, size: Size) -> Rect {
+        let geo = self.geometry(size);
+        Rect::new(
+            ACTIVITY_WIDTH + self.sidebar_width(size),
+            TITLE_HEIGHT,
+            geo.editor_width,
+            TAB_HEIGHT,
+        )
+    }
+
+    /// Abas do painel de terminal, uma por perfil aberto. Terminais não fecham
+    /// pela aba: eles pertencem à janela enquanto ela existir.
+    fn terminal_tabs(&self) -> Tabs {
+        let items = self
+            .terminals
+            .iter()
+            .enumerate()
+            .map(|(index, terminal)| {
+                TabItem::new(index as u64, terminal.session.selected_profile().kind.label())
+            })
+            .collect();
+        let mut tabs = Tabs::new(TERMINAL_TABS_ID, items).with_tab_width(TERMINAL_TAB_WIDTH);
+        tabs.set_active(self.active_terminal);
+        tabs
+    }
+
+    fn terminal_tabs_rect(&self, size: Size) -> Rect {
+        let geo = self.geometry(size);
+        Rect::new(
+            ACTIVITY_WIDTH + self.sidebar_width(size),
+            geo.editor_bottom,
+            geo.editor_width,
+            TERMINAL_TAB_HEIGHT,
+        )
+    }
+
+    /// Trilha, faixa e deslocamento de uma barra, na unidade do seu conteúdo.
+    ///
+    /// As barras verticais contam linhas e a horizontal conta pontos de largura:
+    /// para o componente é a mesma aritmética, e é por isso que uma só barra
+    /// serve às quatro áreas.
+    fn scrollbar_range(&self, target: ScrollTarget, size: Size) -> (Rect, f32, f32, f32) {
+        match target {
+            ScrollTarget::Editor => (
+                self.editor_scrollbar_rect(size),
+                self.active_text().map_or(0, |text| text.lines().count()) as f32,
+                self.editor_visible_lines(size) as f32,
+                self.editor_scroll_line as f32,
+            ),
+            ScrollTarget::Terminal => {
+                let active = &self.terminals[self.active_terminal];
+                (
+                    self.terminal_scrollbar_rect(size),
+                    active.session.line_count() as f32,
+                    self.terminal_visible_lines(size) as f32,
+                    active.scroll_line as f32,
+                )
+            }
+            ScrollTarget::ExplorerVertical => (
+                self.explorer_vertical_scrollbar_rect(size),
+                self.visible_entries().len() as f32,
+                self.explorer_visible_lines(size) as f32,
+                self.explorer_scroll_line as f32,
+            ),
+            ScrollTarget::ExplorerHorizontal => {
+                let track = self.explorer_horizontal_scrollbar_rect(size);
+                (
+                    track,
+                    self.explorer_content_width(size),
+                    (track.size.width - 28.0).max(1.0),
+                    self.explorer_scroll_x,
+                )
+            }
+        }
+    }
+
+    fn scrollbar_mut(&mut self, target: ScrollTarget) -> &mut Scrollbar {
+        match target {
+            ScrollTarget::Editor => &mut self.editor_scrollbar,
+            ScrollTarget::Terminal => &mut self.terminal_scrollbar,
+            ScrollTarget::ExplorerVertical => &mut self.explorer_vertical_scrollbar,
+            ScrollTarget::ExplorerHorizontal => &mut self.explorer_horizontal_scrollbar,
+        }
+    }
+
+    /// Alinha a barra ao conteúdo atual antes de entregar-lhe um evento.
+    fn sync_scrollbar(&mut self, target: ScrollTarget, size: Size) {
+        let (track, content, viewport, offset) = self.scrollbar_range(target, size);
+        let context = self.layout_context();
+        let bar = self.scrollbar_mut(target);
+        bar.layout(&context, track);
+        bar.set_range(content, viewport);
+        bar.set_offset(offset);
+    }
+
+    /// Traz de volta o deslocamento que a barra escolheu.
+    fn apply_scrollbar(&mut self, target: ScrollTarget) {
+        let offset = self.scrollbar_mut(target).offset();
+        match target {
+            ScrollTarget::Editor => self.editor_scroll_line = offset.round().max(0.0) as usize,
+            ScrollTarget::Terminal => {
+                let maximum = self.terminal_scrollbar.max_offset();
+                let active = self.active_terminal;
+                self.terminals[active].scroll_line = offset.round().max(0.0) as usize;
+                // Chegar ao fim volta a acompanhar a saída; parar no meio é
+                // pedir para ficar onde está.
+                self.terminals[active].follow_output = offset >= maximum;
+            }
+            ScrollTarget::ExplorerVertical => {
+                self.explorer_scroll_line = offset.round().max(0.0) as usize;
+            }
+            ScrollTarget::ExplorerHorizontal => self.explorer_scroll_x = offset.max(0.0),
+        }
+    }
+
+    /// Entrega o clique à barra cuja trilha o contém.
+    fn scrollbar_pointer_down(&mut self, point: Point, size: Size) -> bool {
+        for target in [
+            ScrollTarget::Terminal,
+            ScrollTarget::Editor,
+            ScrollTarget::ExplorerHorizontal,
+            ScrollTarget::ExplorerVertical,
+        ] {
+            if target == ScrollTarget::Terminal && self.terminal_minimized {
+                continue;
+            }
+            let (track, ..) = self.scrollbar_range(target, size);
+            if !track.contains(point) {
+                continue;
+            }
+            self.sync_scrollbar(target, size);
+            let handled = self.scrollbar_mut(target).event(
+                &mut EventContext::default(),
+                &UiEvent::PointerDown(primary_pointer(point)),
+            );
+            if matches!(handled, EventResult::Handled) {
+                self.apply_scrollbar(target);
+                self.scrollbar_drag = Some(target);
+            }
+            // A trilha consome o clique mesmo sem indicador: ali não há
+            // conteúdo para reagir embaixo.
+            return true;
+        }
+        false
+    }
+
+    /// Desenha uma barra com o componente da biblioteca.
+    fn paint_scrollbar(&self, target: ScrollTarget, size: Size) -> Vec<PaintCommand> {
+        let (track, content, viewport, offset) = self.scrollbar_range(target, size);
+        let orientation = match target {
+            ScrollTarget::ExplorerHorizontal => ScrollbarOrientation::Horizontal,
+            _ => ScrollbarOrientation::Vertical,
+        };
+        let mut bar = Scrollbar::new(WidgetId(0), orientation).with_range(content, viewport);
+        bar.layout(&self.layout_context(), track);
+        bar.set_offset(offset);
+        let mut paint = self.paint_context();
+        bar.paint(&mut paint);
+        paint.into_commands()
+    }
+
+    /// Área da árvore de arquivos.
+    fn explorer_tree_rect(&self, size: Size) -> Rect {
+        let geo = self.geometry(size);
+        Rect::new(
+            ACTIVITY_WIDTH,
+            EXPLORER_TOP,
+            self.sidebar_width(size),
+            (geo.content_bottom - 12.0 - EXPLORER_TOP).max(0.0),
+        )
+    }
+
+    /// Espelha na árvore o que a IDE considera expandido.
+    ///
+    /// A expansão continua sendo do shell porque ela é indexada por caminho e
+    /// serve a mais gente do que ao desenho; a árvore recebe as identidades
+    /// correspondentes.
+    fn sync_explorer_tree(&mut self) {
+        let ids: Vec<u64> = self.expanded.iter().map(|path| explorer_id(path)).collect();
+        self.explorer_tree.set_expanded(ids);
+    }
+
+    /// Posiciona a árvore de acordo com as barras de rolagem da janela.
+    fn explorer_tree_for(&self, size: Size) -> TreeView {
+        let mut tree = self.explorer_tree.clone();
+        tree.layout(&self.layout_context(), self.explorer_tree_rect(size));
+        tree.set_scroll_offset(Point::new(
+            self.explorer_scroll_x,
+            self.explorer_scroll_line as f32 * EXPLORER_ROW_HEIGHT,
+        ));
+        tree
+    }
+
+    fn explorer_path_for(&self, id: u64) -> Option<(PathBuf, bool)> {
+        fn visit(node: &FileNode, id: u64) -> Option<(PathBuf, bool)> {
+            if explorer_id(&node.path) == id {
+                return Some((node.path.clone(), node.is_directory));
+            }
+            node.children.iter().find_map(|child| visit(child, id))
+        }
+        visit(&self.workspace, id)
+    }
+
+    /// Divisor da barra lateral posicionado pelo layout atual.
+    ///
+    /// A barra lateral é limitada pela largura mínima dela e pela do editor; o
+    /// terminal, pela altura mínima dele e pelo espaço que o editor precisa
+    /// manter. São limites em pontos, não proporções.
+    fn sidebar_splitter_for(&self, size: Size) -> Splitter {
+        let geometry = self.geometry(size);
+        let mut splitter = self.sidebar_splitter.clone();
+        splitter.layout(
+            &self.layout_context(),
+            Rect::new(
+                0.0,
+                TITLE_HEIGHT,
+                size.width,
+                (geometry.content_bottom - TITLE_HEIGHT).max(0.0),
+            ),
+        );
+        splitter.set_range(
+            ACTIVITY_WIDTH + SIDEBAR_MIN_WIDTH,
+            ACTIVITY_WIDTH + (size.width - 320.0).max(SIDEBAR_MIN_WIDTH),
+        );
+        splitter.set_position(ACTIVITY_WIDTH + self.sidebar_width(size));
+        splitter
+    }
+
+    fn terminal_splitter_for(&self, size: Size) -> Splitter {
+        let geometry = self.geometry(size);
+        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        let maximum =
+            (geometry.content_bottom - geometry.content_top - 100.0).max(TERMINAL_MIN_HEIGHT);
+        let mut splitter = self.terminal_splitter.clone();
+        splitter.layout(
+            &self.layout_context(),
+            Rect::new(
+                editor_x,
+                geometry.content_top,
+                (size.width - editor_x).max(0.0),
+                (geometry.content_bottom - geometry.content_top).max(0.0),
+            ),
+        );
+        splitter.set_range(
+            geometry.content_bottom - maximum,
+            geometry.content_bottom - TERMINAL_MIN_HEIGHT,
+        );
+        splitter.set_position(geometry.editor_bottom);
+        splitter
+    }
+
+    fn sync_splitters(&mut self, size: Size) {
+        self.sidebar_splitter = self.sidebar_splitter_for(size);
+        self.terminal_splitter = self.terminal_splitter_for(size);
+    }
+
+    /// Traz de volta o tamanho que cada divisor definiu.
+    fn apply_splitters(&mut self, size: Size) {
+        let content_bottom = self.geometry(size).content_bottom;
+        if self.sidebar_splitter.is_dragging() {
+            self.sidebar_width = self.sidebar_splitter.position() - ACTIVITY_WIDTH;
+        }
+        if self.terminal_splitter.is_dragging() {
+            self.terminal_height = content_bottom - self.terminal_splitter.position();
+            self.terminal_last_height = self.terminal_height;
+        }
+    }
+
+    /// Entrega o clique ao divisor cujo alvo o contém.
+    fn splitter_pointer_down(&mut self, point: Point, size: Size) -> bool {
+        self.sync_splitters(size);
+        let event = UiEvent::PointerDown(primary_pointer(point));
+        let mut context = EventContext::default();
+        if matches!(
+            self.sidebar_splitter.event(&mut context, &event),
+            EventResult::Handled
+        ) {
+            return true;
+        }
+        !self.terminal_minimized
+            && matches!(
+                self.terminal_splitter.event(&mut context, &event),
+                EventResult::Handled
+            )
+    }
+
+    /// Linha da calha sob o ponteiro, respondida pelo próprio editor.
+    fn gutter_line_at(&mut self, point: Point, size: Size) -> Option<usize> {
+        self.refresh_editor_view(size);
+        self.editor_view
+            .as_ref()
+            .and_then(|(_, _, editor)| editor.gutter_line_at(point))
+    }
+
+    fn editor_view_rect(&self, size: Size) -> Rect {
+        let geometry = self.geometry(size);
+        Rect::new(
+            ACTIVITY_WIDTH + self.sidebar_width(size),
+            geometry.content_top,
+            geometry.editor_width,
+            geometry.editor_height,
+        )
+    }
+
+    /// Mantém a cópia de desenho alinhada ao documento, ao realce sintático, aos
+    /// pontos de parada e à rolagem.
+    ///
+    /// O texto só é copiado quando a revisão muda; o resto é barato e vai a cada
+    /// quadro, porque muda por fora do editor — o depurador pára em outra linha,
+    /// o analisador entrega outro realce.
+    fn refresh_editor_view(&mut self, size: Size) {
+        let Some(document) = self.editor.active() else {
+            self.editor_view = None;
+            return;
+        };
+        let (id, revision) = (document.id, document.buffer.revision());
+        let stale = !matches!(&self.editor_view, Some((view_id, view_revision, _))
+            if *view_id == id && *view_revision == revision);
+        if stale {
+            let editor = CodeEditor::new(EDITOR_VIEW_ID, document.buffer.text());
+            self.editor_view = Some((id, revision, editor));
+        }
+        let path = document.path.clone();
+        let syntax = self.editor_syntax(id, revision);
+        let decorations = self.editor_decorations(&path);
+        let focused = self.focus == ShellFocus::Editor;
+        // A IDE conta bytes e o editor conta caracteres: sem converter, o cursor
+        // sairia do lugar no primeiro acento do arquivo.
+        let text = document.buffer.text();
+        let cursor = text
+            .get(..self.cursor_offset.min(text.len()))
+            .unwrap_or(text)
+            .chars()
+            .count();
+        let scroll_line = self.editor_scroll_line;
+        let bounds = self.editor_view_rect(size);
+        let context = self.layout_context();
+        let Some((_, _, editor)) = self.editor_view.as_mut() else {
+            return;
+        };
+        editor.layout(&context, bounds);
+        editor.set_syntax(syntax);
+        editor.set_decorations(decorations);
+        editor.set_focused(focused);
+        editor.set_cursor(cursor);
+        editor.set_scroll_line(scroll_line);
+    }
+
+    /// Converte o realce da IDE, que fala em linha e coluna, para os intervalos
+    /// absolutos que o editor da biblioteca usa.
+    fn editor_syntax(&self, id: DocumentId, revision: u64) -> Vec<SyntaxSpan> {
+        let Some(snapshot) = self
+            .syntax_snapshots
+            .get(&id)
+            .filter(|snapshot| snapshot.version == revision)
+        else {
+            return Vec::new();
+        };
+        let Some((_, _, editor)) = self.editor_view.as_ref() else {
+            return Vec::new();
+        };
+        let buffer = editor.buffer();
+        snapshot
+            .highlights
+            .iter()
+            .map(|highlight| SyntaxSpan {
+                range: EditorRange::new(
+                    buffer.offset(
+                        highlight.range.start.line as usize,
+                        highlight.range.start.column as usize,
+                    ),
+                    buffer.offset(
+                        highlight.range.end.line as usize,
+                        highlight.range.end.column as usize,
+                    ),
+                ),
+                token_kind: token_kind_for(highlight.kind),
+            })
+            .collect()
+    }
+
+    /// Pontos de parada e a linha em que a execução parou.
+    fn editor_decorations(&self, path: &Path) -> Vec<LineDecoration> {
+        let mut decorations: Vec<LineDecoration> = self
+            .breakpoints
+            .get(path)
+            .into_iter()
+            .flatten()
+            .map(|line| {
+                // Confirmado pelo alvo é um disco; ainda não registrado — sem
+                // sessão, ou classe não carregada — é só o contorno.
+                let mark = if self.breakpoint_is_verified(path, *line) {
+                    GutterMark::Breakpoint
+                } else {
+                    GutterMark::PendingBreakpoint
+                };
+                LineDecoration::mark(*line as usize, mark)
+            })
+            .collect();
+        if let Some((_, line)) = self
+            .debug
+            .stopped_at
+            .as_ref()
+            .filter(|(stopped, _)| stopped == path)
+        {
+            let line = *line as usize;
+            match decorations.iter_mut().find(|item| item.line == line) {
+                Some(existing) => *existing = existing.with_highlight(),
+                None => decorations.push(LineDecoration::highlight(line)),
+            }
+        }
+        decorations
+    }
+
     fn debug_panel_rect(&self, size: Size) -> Rect {
         let geometry = self.geometry(size);
         let x = ACTIVITY_WIDTH + self.sidebar_width(size) + geometry.editor_width;
@@ -866,54 +1425,25 @@ impl IdeShell {
 
         commands.push(label(
             "Pilha de chamadas",
-            Point::new(panel.origin.x + 12.0, geometry.frames_top - 20.0),
+            Point::new(panel.origin.x + 12.0, geometry.frames.origin.y - 20.0),
             colors.muted_text,
             12.0,
         ));
-        for (index, frame) in self.debug.frames.iter().take(8).enumerate() {
-            let y = geometry.frames_top + index as f32 * DEBUG_ROW_HEIGHT;
-            if index == self.debug.selected_frame {
-                commands.push(fill(
-                    Rect::new(
-                        panel.origin.x + 6.0,
-                        y - 2.0,
-                        panel.size.width - 12.0,
-                        DEBUG_ROW_HEIGHT,
-                    ),
-                    colors.elevated,
-                ));
-            }
-            let line = frame
-                .location
-                .as_ref()
-                .map(|(_, line)| format!(":{}", line + 1))
-                .unwrap_or_default();
-            commands.push(label(
-                &ellipsize(&format!("{}{line}", frame.name), 38),
-                Point::new(panel.origin.x + 12.0, y),
-                colors.text,
-                12.0,
-            ));
-        }
+        let mut frames = self.debug_frames.clone();
+        frames.layout(&self.layout_context(), geometry.frames);
+        let mut variables = self.debug_variables.clone();
+        variables.layout(&self.layout_context(), geometry.variables);
+        let mut lists = self.paint_context();
+        frames.paint(&mut lists);
 
         commands.push(label(
             "Variáveis",
-            Point::new(panel.origin.x + 12.0, geometry.variables_top - 20.0),
+            Point::new(panel.origin.x + 12.0, geometry.variables.origin.y - 20.0),
             colors.muted_text,
             12.0,
         ));
-        let rows = ((panel.origin.y + panel.size.height - geometry.variables_top)
-            / DEBUG_ROW_HEIGHT)
-            .max(0.0) as usize;
-        for (index, variable) in self.debug.variables.iter().take(rows).enumerate() {
-            let y = geometry.variables_top + index as f32 * DEBUG_ROW_HEIGHT;
-            commands.push(label(
-                &ellipsize(&format!("{} = {}", variable.name, variable.value), 38),
-                Point::new(panel.origin.x + 12.0, y),
-                colors.text,
-                12.0,
-            ));
-        }
+        variables.paint(&mut lists);
+        commands.extend(lists.into_commands());
         commands.push(PaintCommand::PopClip);
         commands
     }
@@ -926,25 +1456,30 @@ impl IdeShell {
                 return;
             }
         }
-        if point.y >= geometry.frames_top && point.y < geometry.frames_top + geometry.frames_height
-        {
-            let row = ((point.y - geometry.frames_top) / DEBUG_ROW_HEIGHT).floor() as usize;
-            if row < self.debug.frames.len() {
-                self.debug.selected_frame = row;
-                self.debug_requests.push(DebugRequest::SelectFrame(row));
-                if let Some((path, line)) = self.debug.frames[row].location.clone() {
-                    let _ = self.open_location(&path, line as usize, 0);
-                }
-            }
+        // A lista resolve qual linha foi clicada; a IDE só reage à escolha.
+        // Clicar fora das linhas é ignorado por ela, e é isso que distingue uma
+        // escolha de um clique no vazio do painel.
+        self.debug_frames.layout(&self.layout_context(), geometry.frames);
+        let result = self.debug_frames.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        if matches!(result, EventResult::Ignored) {
+            return;
         }
-    }
-
-    /// Linha do documento sob o ponteiro, considerando a rolagem atual.
-    fn line_at_point(&self, point: Point, editor_top: f32) -> usize {
-        self.editor_scroll_line
-            + ((point.y - editor_top - 15.0) / EDITOR_LINE_HEIGHT)
-                .floor()
-                .max(0.0) as usize
+        let Some(row) = self.debug_frames.selected() else {
+            return;
+        };
+        self.debug.selected_frame = row;
+        self.debug_requests.push(DebugRequest::SelectFrame(row));
+        if let Some((path, line)) = self
+            .debug
+            .frames
+            .get(row)
+            .and_then(|frame| frame.location.clone())
+        {
+            let _ = self.open_location(&path, line as usize, 0);
+        }
     }
 
     fn sidebar_width(&self, size: Size) -> f32 {
@@ -969,9 +1504,6 @@ impl IdeShell {
             self.settings_dialog = None;
             return;
         }
-        if self.selection_dialog.take().is_some() {
-            return;
-        }
         if !self.completion_items.is_empty() {
             self.completion_items.clear();
             return;
@@ -991,15 +1523,11 @@ impl IdeShell {
             self.settings_dialog_pointer_down(point, size);
             return;
         }
-        if self.selection_dialog.is_some() {
-            self.selection_dialog_pointer_down(point, size);
-            return;
-        }
         if point.y < TITLE_HEIGHT && self.action_buttons_pointer_down(point, size) {
             return;
         }
         self.menu_bar.layout(
-            &LayoutContext,
+            &self.layout_context(),
             Rect::new(82.0, 0.0, (size.width - 82.0).max(0.0), TITLE_HEIGHT),
         );
         let mut menu_context = EventContext::default();
@@ -1069,127 +1597,53 @@ impl IdeShell {
             }
             return;
         }
-        let terminal_track = self.terminal_scrollbar_rect(size);
-        if !self.terminal_minimized && terminal_track.contains(point) {
-            let active = self.active_terminal;
-            let metrics = scrollbar_metrics(
-                terminal_track,
-                self.terminals[active].session.line_count(),
-                self.terminal_visible_lines(size),
-                self.terminals[active].scroll_line,
-            );
-            if let Some(metrics) = metrics {
-                let pointer_offset = if metrics.thumb.contains(point) {
-                    point.y - metrics.thumb.origin.y
-                } else {
-                    metrics.thumb.size.height / 2.0
-                };
-                self.terminals[active].scroll_line =
-                    offset_from_scrollbar(point.y - pointer_offset, metrics);
-                self.terminals[active].follow_output =
-                    self.terminals[active].scroll_line >= metrics.max_offset;
-                self.scrollbar_drag = Some(ScrollbarDrag::Terminal { pointer_offset });
-            }
+        if self.scrollbar_pointer_down(point, size) {
             return;
         }
-        let editor_track = self.editor_scrollbar_rect(size);
-        if editor_track.contains(point) {
-            let total = self.active_text().map_or(0, |text| text.lines().count());
-            let visible = self.editor_visible_lines(size);
-            if let Some(metrics) =
-                scrollbar_metrics(editor_track, total, visible, self.editor_scroll_line)
-            {
-                let pointer_offset = if metrics.thumb.contains(point) {
-                    point.y - metrics.thumb.origin.y
-                } else {
-                    metrics.thumb.size.height / 2.0
-                };
-                self.editor_scroll_line = offset_from_scrollbar(point.y - pointer_offset, metrics);
-                self.scrollbar_drag = Some(ScrollbarDrag::Editor { pointer_offset });
-            }
-            return;
-        }
-        let explorer_track = self.explorer_horizontal_scrollbar_rect(size);
-        if explorer_track.contains(point) {
-            if let Some(metrics) = self.explorer_horizontal_metrics(size) {
-                let pointer_offset = if metrics.thumb.contains(point) {
-                    point.x - metrics.thumb.origin.x
-                } else {
-                    metrics.thumb.size.width / 2.0
-                };
-                self.explorer_scroll_x =
-                    offset_from_horizontal_scrollbar(point.x - pointer_offset, metrics);
-                self.scrollbar_drag = Some(ScrollbarDrag::ExplorerHorizontal { pointer_offset });
-            }
-            return;
-        }
-        if (point.x - editor_x).abs() <= SIDEBAR_RESIZE_HIT
-            && point.y >= TITLE_HEIGHT
-            && point.y < geometry.content_bottom
-        {
-            self.sidebar_resizing = true;
-            return;
-        }
-        let explorer_vertical_track = self.explorer_vertical_scrollbar_rect(size);
-        if explorer_vertical_track.contains(point) {
-            let total = self.visible_entries().len();
-            let visible = self.explorer_visible_lines(size);
-            if let Some(metrics) = scrollbar_metrics(
-                explorer_vertical_track,
-                total,
-                visible,
-                self.explorer_scroll_line,
-            ) {
-                let pointer_offset = if metrics.thumb.contains(point) {
-                    point.y - metrics.thumb.origin.y
-                } else {
-                    metrics.thumb.size.height / 2.0
-                };
-                self.explorer_scroll_line =
-                    offset_from_scrollbar(point.y - pointer_offset, metrics);
-                self.scrollbar_drag = Some(ScrollbarDrag::ExplorerVertical { pointer_offset });
-            }
-            return;
-        }
-        if !self.terminal_minimized
-            && (point.y - geometry.editor_bottom).abs() <= TERMINAL_RESIZE_HIT
-            && point.x >= editor_x
-        {
-            self.terminal_resizing = true;
+        if self.splitter_pointer_down(point, size) {
             return;
         }
         if point.y >= TITLE_HEIGHT && point.y < TITLE_HEIGHT + TAB_HEIGHT && point.x >= editor_x {
-            let index = ((point.x - editor_x) / TAB_WIDTH).floor() as usize;
-            let tab = self.editor.tabs().nth(index).map(|document| document.id);
-            if let Some(id) = tab {
-                let within_tab = (point.x - editor_x) - index as f32 * TAB_WIDTH;
-                if within_tab >= TAB_WIDTH - 30.0 {
+            // Quem decide entre ativar e fechar é o componente; a IDE traduz o
+            // comando recebido para o documento correspondente.
+            self.pointer = point;
+            let mut tabs = self.editor_tabs();
+            tabs.layout(&self.layout_context(), self.editor_tabs_rect(size));
+            match tab_command(&mut tabs, point) {
+                Some(TabCommand::Select(id)) => {
+                    let _ = self.editor.activate(DocumentId(id));
+                    self.cursor_offset = 0;
+                    self.focus = ShellFocus::Editor;
+                }
+                Some(TabCommand::Close(id)) => {
+                    let id = DocumentId(id);
                     if self.editor.close(id).is_ok() {
                         self.syntax_snapshots.remove(&id);
                         self.cursor_offset = self.active_text().map_or(0, str::len);
                         self.status_message = "Tab closed".to_owned();
                     }
-                } else {
-                    let _ = self.editor.activate(id);
-                    self.cursor_offset = 0;
-                    self.focus = ShellFocus::Editor;
                 }
+                None => {}
             }
             return;
         }
         if point.x >= ACTIVITY_WIDTH && point.x < editor_x && point.y >= EXPLORER_TOP {
-            let row = self.explorer_scroll_line
-                + ((point.y - EXPLORER_TOP) / EXPLORER_ROW_HEIGHT).floor() as usize;
-            let entry = self
-                .visible_entries()
-                .get(row)
-                .map(|(_, node)| (node.path.clone(), node.is_directory));
+            // Qual nó foi clicado é a árvore quem sabe: o recuo, o deslocamento
+            // horizontal e a virtualização são dela.
+            let mut tree = self.explorer_tree_for(size);
+            tree.event(
+                &mut EventContext::default(),
+                &UiEvent::PointerDown(primary_pointer(point)),
+            );
+            let entry = tree.selected().and_then(|id| self.explorer_path_for(id));
             if let Some((path, is_directory)) = entry {
                 self.focus = ShellFocus::Explorer;
+                self.explorer_tree.set_selected(Some(explorer_id(&path)));
                 if is_directory {
                     if !self.expanded.remove(&path) {
                         self.expanded.insert(path);
                     }
+                    self.sync_explorer_tree();
                 } else if let Err(error) = self.open_file(&path) {
                     self.status_message = error;
                 }
@@ -1204,18 +1658,10 @@ impl IdeShell {
             self.debug_panel_pointer_down(point, size);
             return;
         }
-        if point.x >= editor_x
-            && point.x < editor_x + EDITOR_GUTTER
-            && point.y >= geometry.content_top
-            && point.y < geometry.editor_bottom
-        {
-            // A calha é a área de breakpoints, e não posiciona o cursor.
-            let line = self.line_at_point(point, geometry.content_top);
-            if let Some(path) = self.editor.active().map(|document| document.path.clone())
-                && self
-                    .active_text()
-                    .is_some_and(|text| line < text.lines().count().max(1))
-            {
+        // A calha é a área de pontos de parada e não posiciona o cursor. Qual
+        // linha foi clicada é o editor quem responde.
+        if let Some(line) = self.gutter_line_at(point, size) {
+            if let Some(path) = self.editor.active().map(|document| document.path.clone()) {
                 self.toggle_breakpoint(&path, line as u32);
             }
             return;
@@ -1243,10 +1689,11 @@ impl IdeShell {
             }
         } else if point.x >= editor_x && point.y >= geometry.editor_bottom {
             self.focus = ShellFocus::Terminal;
-            if point.y < geometry.editor_bottom + 30.0 {
-                let index = ((point.x - editor_x) / 110.0).floor().max(0.0) as usize;
-                if index < self.terminals.len() {
-                    self.active_terminal = index;
+            if point.y < geometry.editor_bottom + TERMINAL_TAB_HEIGHT {
+                let mut tabs = self.terminal_tabs();
+                tabs.layout(&self.layout_context(), self.terminal_tabs_rect(size));
+                if let Some(TabCommand::Select(index)) = tab_command(&mut tabs, point) {
+                    self.active_terminal = index as usize;
                     self.status_message = format!(
                         "Terminal: {}",
                         self.active_terminal().selected_profile().kind.label()
@@ -1278,59 +1725,17 @@ impl IdeShell {
     }
 
     pub fn pointer_move(&mut self, point: Point, size: Size) -> bool {
-        if self.settings_modal.is_open() || self.selection_dialog.is_some() {
+        self.pointer = point;
+        if self.settings_modal.is_open() {
             return false;
         }
-        let geometry = self.geometry(size);
-        if let Some(drag) = self.scrollbar_drag {
-            match drag {
-                ScrollbarDrag::Editor { pointer_offset } => {
-                    let track = self.editor_scrollbar_rect(size);
-                    let total = self.active_text().map_or(0, |text| text.lines().count());
-                    if let Some(metrics) = scrollbar_metrics(
-                        track,
-                        total,
-                        self.editor_visible_lines(size),
-                        self.editor_scroll_line,
-                    ) {
-                        self.editor_scroll_line =
-                            offset_from_scrollbar(point.y - pointer_offset, metrics);
-                    }
-                }
-                ScrollbarDrag::Terminal { pointer_offset } => {
-                    let track = self.terminal_scrollbar_rect(size);
-                    let active = self.active_terminal;
-                    if let Some(metrics) = scrollbar_metrics(
-                        track,
-                        self.terminals[active].session.line_count(),
-                        self.terminal_visible_lines(size),
-                        self.terminals[active].scroll_line,
-                    ) {
-                        self.terminals[active].scroll_line =
-                            offset_from_scrollbar(point.y - pointer_offset, metrics);
-                        self.terminals[active].follow_output =
-                            self.terminals[active].scroll_line >= metrics.max_offset;
-                    }
-                }
-                ScrollbarDrag::ExplorerHorizontal { pointer_offset } => {
-                    if let Some(metrics) = self.explorer_horizontal_metrics(size) {
-                        self.explorer_scroll_x =
-                            offset_from_horizontal_scrollbar(point.x - pointer_offset, metrics);
-                    }
-                }
-                ScrollbarDrag::ExplorerVertical { pointer_offset } => {
-                    let track = self.explorer_vertical_scrollbar_rect(size);
-                    if let Some(metrics) = scrollbar_metrics(
-                        track,
-                        self.visible_entries().len(),
-                        self.explorer_visible_lines(size),
-                        self.explorer_scroll_line,
-                    ) {
-                        self.explorer_scroll_line =
-                            offset_from_scrollbar(point.y - pointer_offset, metrics);
-                    }
-                }
-            }
+        if let Some(target) = self.scrollbar_drag {
+            self.sync_scrollbar(target, size);
+            self.scrollbar_mut(target).event(
+                &mut EventContext::default(),
+                &UiEvent::PointerMove(primary_pointer(point)),
+            );
+            self.apply_scrollbar(target);
             return true;
         }
         if self.terminal_selecting {
@@ -1340,35 +1745,43 @@ impl IdeShell {
             }
             return true;
         }
-        if self.terminal_resizing {
-            let max_height =
-                (geometry.content_bottom - geometry.content_top - 100.0).max(TERMINAL_MIN_HEIGHT);
-            self.terminal_height =
-                (geometry.content_bottom - point.y).clamp(TERMINAL_MIN_HEIGHT, max_height);
-            self.terminal_last_height = self.terminal_height;
+        // O movimento vai sempre aos divisores: mesmo parados, eles precisam
+        // saber que o ponteiro passou por cima para se destacar.
+        let dragging = self.sidebar_resizing() || self.terminal_resizing();
+        self.sync_splitters(size);
+        let event = UiEvent::PointerMove(primary_pointer(point));
+        self.sidebar_splitter
+            .event(&mut EventContext::default(), &event);
+        self.terminal_splitter
+            .event(&mut EventContext::default(), &event);
+        if dragging {
+            self.apply_splitters(size);
             return true;
         }
-        if self.sidebar_resizing {
-            self.sidebar_width = (point.x - ACTIVITY_WIDTH).clamp(
-                SIDEBAR_MIN_WIDTH,
-                (size.width - 320.0).max(SIDEBAR_MIN_WIDTH),
-            );
-            return true;
-        }
-        !self.terminal_minimized
-            && (point.y - geometry.editor_bottom).abs() <= TERMINAL_RESIZE_HIT
-            && point.x >= ACTIVITY_WIDTH + self.sidebar_width(size)
+        // Parado, o retorno diz se o ponteiro está sobre o divisor do terminal,
+        // para a janela trocar o cursor.
+        !self.terminal_minimized && self.terminal_splitter.hit_area().contains(point)
     }
 
     pub fn pointer_up(&mut self) {
-        self.terminal_resizing = false;
-        self.sidebar_resizing = false;
-        self.scrollbar_drag = None;
+        let event = UiEvent::PointerUp(primary_pointer(Point::ZERO));
+        self.sidebar_splitter
+            .event(&mut EventContext::default(), &event);
+        self.terminal_splitter
+            .event(&mut EventContext::default(), &event);
+        // A barra também precisa saber que o gesto acabou: ela é quem guarda o
+        // ponto da pegada.
+        if let Some(target) = self.scrollbar_drag.take() {
+            self.scrollbar_mut(target).event(
+                &mut EventContext::default(),
+                &UiEvent::PointerUp(primary_pointer(Point::ZERO)),
+            );
+        }
         self.terminal_selecting = false;
     }
 
     pub fn scroll(&mut self, point: Point, delta_lines: isize, size: Size) {
-        if self.settings_modal.is_open() || self.selection_dialog.is_some() {
+        if self.settings_modal.is_open() {
             return;
         }
         let geo = self.geometry(size);
@@ -1471,29 +1884,14 @@ impl IdeShell {
         )
     }
 
-    fn explorer_content_width(&self) -> f32 {
-        self.visible_entries()
-            .into_iter()
-            .map(|(depth, node)| {
-                let name = node
-                    .path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("?");
-                28.0 + (depth * 2 + name.chars().count() + 2) as f32 * TERMINAL_CHAR_WIDTH
-            })
-            .fold(0.0, f32::max)
+    /// Largura do conteúdo da árvore, medida pela árvore já posicionada.
+    ///
+    /// A instância persistente nunca passa por `layout` — quem é posicionada é a
+    /// cópia usada para desenhar —, e é ela quem conhece a medida.
+    fn explorer_content_width(&self, size: Size) -> f32 {
+        self.explorer_tree_for(size).content_size().width
     }
 
-    fn explorer_horizontal_metrics(&self, size: Size) -> Option<HorizontalScrollbarMetrics> {
-        let track = self.explorer_horizontal_scrollbar_rect(size);
-        horizontal_scrollbar_metrics(
-            track,
-            self.explorer_content_width(),
-            (track.size.width - 28.0).max(1.0),
-            self.explorer_scroll_x,
-        )
-    }
 
     fn terminal_position_at(&self, point: Point, size: Size) -> TextPosition {
         let geo = self.geometry(size);
@@ -1559,9 +1957,6 @@ impl IdeShell {
             let _ = self.settings_text_input(text);
             return;
         }
-        if self.selection_dialog.is_some() {
-            return;
-        }
         match self.focus {
             ShellFocus::Editor => self.edit_active(text),
             ShellFocus::Search => self.search_query.push_str(text),
@@ -1587,20 +1982,6 @@ impl IdeShell {
                 if !self.settings_modal.is_open() {
                     self.settings_dialog = None;
                 }
-            }
-            return;
-        }
-        if let Some(dialog) = self.selection_dialog.as_mut() {
-            match key.to_ascii_lowercase().as_str() {
-                "arrowdown" if !dialog.items.is_empty() => {
-                    dialog.selected = (dialog.selected + 1).min(dialog.items.len() - 1);
-                }
-                "arrowup" => dialog.selected = dialog.selected.saturating_sub(1),
-                "enter" if !dialog.items.is_empty() => {
-                    self.selection_result = Some(dialog.selected);
-                    self.selection_dialog = None;
-                }
-                _ => {}
             }
             return;
         }
@@ -1709,10 +2090,8 @@ impl IdeShell {
             return 0;
         };
         let line_index = self.editor_scroll_line
-            + ((point.y - editor_top - 15.0) / EDITOR_LINE_HEIGHT)
-                .floor()
-                .max(0.0) as usize;
-        let column = ((point.x - editor_x - EDITOR_GUTTER) / 8.4)
+            + ((point.y - editor_top) / EDITOR_LINE_HEIGHT).floor().max(0.0) as usize;
+        let column = ((point.x - editor_x - EDITOR_GUTTER) / EDITOR_CHAR_WIDTH)
             .round()
             .max(0.0) as usize;
         let mut offset = 0;
@@ -1746,7 +2125,13 @@ impl IdeShell {
         output
     }
 
-    pub fn paint(&self, size: Size) -> Vec<PaintCommand> {
+    /// Desenha o quadro.
+    ///
+    /// Pintar exige acesso mutável porque o shell mantém widgets com estado
+    /// próprio — o editor guarda uma cópia do documento ativo, reconstruída
+    /// quando o texto muda. Deixar essa reconciliação para os manipuladores de evento faria
+    /// cada esquecimento virar um quadro desatualizado.
+    pub fn paint(&mut self, size: Size) -> Vec<PaintCommand> {
         let sidebar = self.sidebar_width(size);
         let editor_x = ACTIVITY_WIDTH + sidebar;
         let geo = self.geometry(size);
@@ -1790,17 +2175,6 @@ impl IdeShell {
                     geo.terminal_height,
                 ),
                 colors.surface,
-            ),
-            // A barra de status usa a mesma superfície dos demais painéis,
-            // separada por uma linha de borda. Em destaque, ela competia com o
-            // conteúdo e deixava o texto com contraste baixo demais para ler.
-            fill(
-                Rect::new(0.0, geo.content_bottom, size.width, 24.0),
-                colors.surface,
-            ),
-            fill(
-                Rect::new(0.0, geo.content_bottom, size.width, 1.0),
-                colors.border,
             ),
             stroke(
                 Rect::new(
@@ -1857,242 +2231,47 @@ impl IdeShell {
             self.sidebar_width(size),
             (geo.content_bottom - EXPLORER_TOP + EXPLORER_ROW_HEIGHT - 12.0).max(0.0),
         )));
-        let explorer_visible = self.explorer_visible_lines(size);
-        let explorer_total = self.visible_entries().len();
-        let explorer_offset = self
-            .explorer_scroll_line
-            .min(explorer_total.saturating_sub(explorer_visible));
-        for (index, (depth, node)) in self
-            .visible_entries()
-            .into_iter()
-            .skip(explorer_offset)
-            .take(explorer_visible)
-            .enumerate()
-        {
-            let name = node
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("?");
-            let marker = if node.is_directory {
-                if self.expanded.contains(&node.path) {
-                    "▾"
-                } else {
-                    "▸"
-                }
-            } else {
-                " "
-            };
-            commands.push(label(
-                &format!("{}{} {}", "  ".repeat(depth), marker, name),
-                Point::new(
-                    ACTIVITY_WIDTH + 14.0 - self.explorer_scroll_x,
-                    EXPLORER_TOP + index as f32 * EXPLORER_ROW_HEIGHT,
-                ),
-                colors.text,
-                14.0,
-            ));
-        }
+        // A árvore é um componente: recuo, marcador de expansão, virtualização,
+        // seleção e deslocamento horizontal pertencem a ela.
+        let tree = self.explorer_tree_for(size);
+        let mut tree_paint = self.paint_context();
+        tree.paint(&mut tree_paint);
+        commands.extend(tree_paint.into_commands());
         commands.push(PaintCommand::PopClip);
-        commands.extend(horizontal_scrollbar(
-            self.explorer_horizontal_scrollbar_rect(size),
-            self.explorer_content_width(),
-            (self.sidebar_width(size) - 28.0).max(1.0),
-            self.explorer_scroll_x,
-            colors,
-        ));
-        commands.extend(scrollbar(
-            self.explorer_vertical_scrollbar_rect(size),
-            explorer_total,
-            explorer_visible,
-            explorer_offset,
-            colors,
-        ));
-        commands.push(fill(
-            Rect::new(
-                editor_x - 1.0,
-                TITLE_HEIGHT,
-                1.0,
-                geo.content_bottom - TITLE_HEIGHT,
-            ),
-            colors.border,
-        ));
-        commands.push(PaintCommand::PushClip(Rect::new(
-            editor_x,
-            TITLE_HEIGHT,
-            geo.editor_width,
-            TAB_HEIGHT,
-        )));
-        for (index, document) in self.editor.tabs().enumerate() {
-            let x = editor_x + index as f32 * TAB_WIDTH;
-            if Some(document.id) == self.editor.active_id() {
-                commands.push(fill(
-                    Rect::new(x, TITLE_HEIGHT, TAB_WIDTH, TAB_HEIGHT),
-                    colors.background,
-                ));
-                commands.push(fill(
-                    Rect::new(x, TITLE_HEIGHT, TAB_WIDTH, 2.0),
-                    colors.accent,
-                ));
-            }
-            let mut title = document
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("?")
-                .to_owned();
-            if document.buffer.is_dirty() {
-                title.push_str(" ●");
-            }
-            let title = ellipsize(&title, 13);
-            commands.push(PaintCommand::PushClip(Rect::new(
-                x + 8.0,
-                TITLE_HEIGHT,
-                TAB_WIDTH - 38.0,
-                TAB_HEIGHT,
-            )));
-            commands.push(label(
-                &title,
-                Point::new(x + 14.0, TITLE_HEIGHT + 11.0),
-                colors.text,
-                14.0,
-            ));
-            commands.push(PaintCommand::PopClip);
-            commands.push(label(
-                "x",
-                Point::new(x + TAB_WIDTH - 22.0, TITLE_HEIGHT + 10.0),
-                colors.muted_text,
-                14.0,
-            ));
+        commands.extend(self.paint_scrollbar(ScrollTarget::ExplorerHorizontal, size));
+        commands.extend(self.paint_scrollbar(ScrollTarget::ExplorerVertical, size));
+        // Os divisores se desenham: a linha é a mesma borda de antes, mas agora
+        // ela se destaca sob o ponteiro, que é o que revela que dá para arrastar.
+        let mut splitters = self.paint_context();
+        self.sidebar_splitter_for(size).paint(&mut splitters);
+        if !self.terminal_minimized {
+            self.terminal_splitter_for(size).paint(&mut splitters);
         }
-        commands.push(PaintCommand::PopClip);
+        commands.extend(splitters.into_commands());
+        // As abas são um componente: largura, faixa da aba ativa, corte do
+        // título, ponto de alterado e botão de fechar pertencem a ele.
+        let mut editor_tabs = self.editor_tabs();
+        editor_tabs.layout(&self.layout_context(), self.editor_tabs_rect(size));
+        let mut tabs_paint = self.paint_context();
+        editor_tabs.paint(&mut tabs_paint);
+        commands.extend(tabs_paint.into_commands());
         commands.push(PaintCommand::PushClip(Rect::new(
             editor_x,
             geo.content_top,
             geo.editor_width,
             geo.editor_height,
         )));
-        // A calha é a faixa de breakpoints e precisa ser visível: sem contraste,
-        // não há como saber onde clicar para marcar uma linha.
-        commands.push(fill(
-            Rect::new(editor_x, geo.content_top, EDITOR_GUTTER, geo.editor_height),
-            colors.background,
-        ));
-        commands.push(fill(
-            Rect::new(
-                editor_x + EDITOR_GUTTER - 1.0,
-                geo.content_top,
-                1.0,
-                geo.editor_height,
-            ),
-            colors.border,
-        ));
-        if let Some(text) = self.active_text() {
-            let visible = (geo.editor_height / EDITOR_LINE_HEIGHT).ceil() as usize;
-            let active_path = self
-                .editor
-                .active()
-                .map(|document| document.path.clone())
-                .unwrap_or_default();
-            let breakpoints = self.breakpoints.get(&active_path);
-            let stopped_line = self
-                .debug
-                .stopped_at
-                .as_ref()
-                .filter(|(path, _)| path == &active_path)
-                .map(|(_, line)| *line);
-            for (index, line) in text
-                .lines()
-                .skip(self.editor_scroll_line)
-                .take(visible)
-                .enumerate()
-            {
-                let y = geo.content_top + 15.0 + index as f32 * EDITOR_LINE_HEIGHT;
-                let document_line = (index + self.editor_scroll_line) as u32;
-                if stopped_line == Some(document_line) {
-                    commands.push(fill(
-                        Rect::new(editor_x, y - 4.0, geo.editor_width, EDITOR_LINE_HEIGHT),
-                        Color::rgba(0.24, 0.20, 0.06, 1.0),
-                    ));
-                }
-                if breakpoints.is_some_and(|lines| lines.contains(&document_line)) {
-                    let center = Point::new(editor_x + 42.0, y + 5.0);
-                    // Confirmado pelo alvo: círculo cheio. Ainda não registrado
-                    // — sem sessão, ou classe não carregada — apenas o contorno.
-                    if self.breakpoint_is_verified(&active_path, document_line) {
-                        commands.push(PaintCommand::FillCircle(FillCircleCommand {
-                            center,
-                            radius: 5.0,
-                            color: colors.danger,
-                        }));
-                    } else {
-                        commands.push(PaintCommand::StrokeCircle(StrokeCircleCommand {
-                            center,
-                            radius: 4.5,
-                            color: colors.danger,
-                            width: 1.6,
-                        }));
-                    }
-                }
-                commands.push(label(
-                    &(index + self.editor_scroll_line + 1).to_string(),
-                    Point::new(editor_x + 12.0, y),
-                    colors.muted_text,
-                    13.0,
-                ));
-                if let Some(snapshot) = self
-                    .active_document()
-                    .and_then(|id| self.syntax_snapshots.get(&id))
-                    .filter(|snapshot| {
-                        self.editor
-                            .document(snapshot.document_id)
-                            .is_some_and(|document| document.buffer.revision() == snapshot.version)
-                    })
-                {
-                    commands.extend(highlighted_line(
-                        line,
-                        index + self.editor_scroll_line,
-                        Point::new(editor_x + EDITOR_GUTTER, y),
-                        snapshot,
-                        colors,
-                    ));
-                } else {
-                    commands.push(label(
-                        line,
-                        Point::new(editor_x + EDITOR_GUTTER, y),
-                        syntax_color(line, colors.text, colors.accent, colors.muted_text),
-                        15.0,
-                    ));
-                }
+        if self.editor.active().is_some() {
+            // O editor da biblioteca desenha calha, números, realce, marcas de
+            // ponto de parada, linha em execução e cursor. A IDE entrega o
+            // texto, o realce e as decorações.
+            self.refresh_editor_view(size);
+            if let Some((_, _, editor)) = self.editor_view.as_ref() {
+                let mut editor_paint = self.paint_context();
+                editor.paint(&mut editor_paint);
+                commands.extend(editor_paint.into_commands());
             }
-            if self.focus == ShellFocus::Editor {
-                let (line, column) = line_column(text, self.cursor_offset);
-                if line >= self.editor_scroll_line && line < self.editor_scroll_line + visible {
-                    commands.push(fill(
-                        Rect::new(
-                            editor_x + EDITOR_GUTTER + column as f32 * 8.4,
-                            geo.content_top
-                                + 14.0
-                                + (line - self.editor_scroll_line) as f32 * EDITOR_LINE_HEIGHT,
-                            2.0,
-                            18.0,
-                        ),
-                        colors.text,
-                    ));
-                }
-            }
-            commands.extend(scrollbar(
-                Rect::new(
-                    editor_x + geo.editor_width - 10.0,
-                    geo.content_top,
-                    10.0,
-                    geo.editor_height,
-                ),
-                text.lines().count(),
-                visible,
-                self.editor_scroll_line,
-                colors,
-            ));
+            commands.extend(self.paint_scrollbar(ScrollTarget::Editor, size));
         } else {
             commands.push(label(
                 "Select a file in Explorer",
@@ -2106,26 +2285,11 @@ impl IdeShell {
             commands.extend(self.paint_debug_panel(size, colors));
         }
         if !self.terminal_minimized {
-            for (index, terminal) in self.terminals.iter().enumerate() {
-                let profile = terminal.session.selected_profile();
-                let x = editor_x + index as f32 * 110.0;
-                if index == self.active_terminal {
-                    commands.push(fill(
-                        Rect::new(x, geo.editor_bottom, 110.0, 30.0),
-                        colors.elevated,
-                    ));
-                    commands.push(fill(
-                        Rect::new(x, geo.editor_bottom, 110.0, 2.0),
-                        colors.accent,
-                    ));
-                }
-                commands.push(label(
-                    profile.kind.label(),
-                    Point::new(x + 10.0, geo.editor_bottom + 8.0),
-                    colors.text,
-                    13.0,
-                ));
-            }
+            let mut terminal_tabs = self.terminal_tabs();
+            terminal_tabs.layout(&self.layout_context(), self.terminal_tabs_rect(size));
+            let mut terminal_tabs_paint = self.paint_context();
+            terminal_tabs.paint(&mut terminal_tabs_paint);
+            commands.extend(terminal_tabs_paint.into_commands());
             commands.push(fill(
                 Rect::new(editor_x, geo.editor_bottom + 30.0, geo.editor_width, 30.0),
                 colors.background,
@@ -2168,7 +2332,7 @@ impl IdeShell {
                             (end.saturating_sub(start) as f32 * TERMINAL_CHAR_WIDTH).max(2.0),
                             EDITOR_LINE_HEIGHT,
                         ),
-                        Color::rgba(0.22, 0.42, 0.72, 0.65),
+                        colors.selection,
                     ));
                 }
                 commands.push(label(
@@ -2178,25 +2342,14 @@ impl IdeShell {
                         geo.editor_bottom + 68.0 + index as f32 * EDITOR_LINE_HEIGHT,
                     ),
                     if line.is_error {
-                        Color::rgba(0.95, 0.40, 0.42, 1.0)
+                        colors.danger
                     } else {
                         colors.muted_text
                     },
                     14.0,
                 ));
             }
-            commands.extend(scrollbar(
-                Rect::new(
-                    editor_x + geo.editor_width - 10.0,
-                    geo.editor_bottom + 60.0,
-                    10.0,
-                    geo.terminal_height - 60.0,
-                ),
-                active_terminal.session.line_count(),
-                terminal_visible,
-                terminal_offset,
-                colors,
-            ));
+            commands.extend(self.paint_scrollbar(ScrollTarget::Terminal, size));
         } else {
             commands.push(label(
                 "Terminal",
@@ -2210,7 +2363,7 @@ impl IdeShell {
             && let Some(text) = self.active_text()
         {
             let (line, column) = line_column(text, self.cursor_offset);
-            let popup_x = (editor_x + EDITOR_GUTTER + column as f32 * 8.4)
+            let popup_x = (editor_x + EDITOR_GUTTER + column as f32 * EDITOR_CHAR_WIDTH)
                 .min(size.width - 270.0)
                 .max(editor_x + EDITOR_GUTTER);
             let popup_y = (geo.content_top
@@ -2276,27 +2429,37 @@ impl IdeShell {
             .active_text()
             .map(|text| line_column(text, self.cursor_offset))
             .unwrap_or((0, 0));
-        commands.push(label(
-            &format!(
-                "{}  •  UTF-8  •  Ln {}, Col {}{}",
-                self.status_message,
-                position.0 + 1,
-                position.1 + 1,
-                self.project_summary
-                    .as_deref()
-                    .map(|summary| format!("  •  {summary}"))
-                    .unwrap_or_default()
+        // A barra de estado é da biblioteca: superfície, borda, alinhamento e
+        // recorte vêm de lá. A IDE só diz o que cada segmento informa — a
+        // mensagem da última ação à esquerda, e à direita o que o usuário
+        // procura sempre no mesmo lugar.
+        let mut status_bar = StatusBar::new(STATUS_BAR_ID).with_leading([&self.status_message]);
+        let mut trailing = vec![
+            "UTF-8".to_owned(),
+            format!("Ln {}, Col {}", position.0 + 1, position.1 + 1),
+        ];
+        if let Some(summary) = self.project_summary.as_deref() {
+            trailing.push(summary.to_owned());
+        }
+        status_bar.set_trailing(trailing);
+        status_bar.layout(
+            &self.layout_context(),
+            Rect::new(
+                0.0,
+                geo.content_bottom,
+                size.width,
+                size.height - geo.content_bottom,
             ),
-            Point::new(12.0, geo.content_bottom + 5.0),
-            colors.text,
-            12.0,
-        ));
+        );
+        let mut status_paint = self.paint_context();
+        status_bar.paint(&mut status_paint);
+        commands.extend(status_paint.into_commands());
         let mut menu_bar = self.menu_bar.clone();
         menu_bar.layout(
-            &LayoutContext,
+            &self.layout_context(),
             Rect::new(82.0, 0.0, (size.width - 82.0).max(0.0), TITLE_HEIGHT),
         );
-        let mut menu_paint = PaintContext::with_theme(self.theme);
+        let mut menu_paint = self.paint_context();
         menu_bar.paint(&mut menu_paint);
         commands.extend(menu_paint.into_commands());
         // Os botões de ação são widgets da biblioteca: a IDE define papel e
@@ -2316,21 +2479,21 @@ impl IdeShell {
             IconTint::Muted
         });
         let mut run = self.run_button.clone();
-        let mut actions = PaintContext::with_theme(self.theme);
+        let mut actions = self.paint_context();
         for (button, rect) in [
             (&mut stop, rects[0]),
             (&mut run, rects[1]),
             (&mut debug, rects[2]),
         ] {
-            button.layout(&LayoutContext, rect);
+            button.layout(&self.layout_context(), rect);
             button.paint(&mut actions);
         }
         commands.extend(actions.into_commands());
         if self.settings_modal.is_open() {
             let mut modal = self.settings_modal.clone();
-            modal.layout(&LayoutContext, Rect::new(0.0, 0.0, size.width, size.height));
+            modal.layout(&self.layout_context(), Rect::new(0.0, 0.0, size.width, size.height));
             let geometry = settings_dialog_geometry(modal.panel_bounds());
-            let mut modal_paint = PaintContext::with_theme(self.theme);
+            let mut modal_paint = self.paint_context();
             modal.paint(&mut modal_paint);
             commands.extend(modal_paint.into_commands());
             commands.push(fill(geometry.sidebar, colors.surface));
@@ -2364,7 +2527,7 @@ impl IdeShell {
                     14.0,
                 ));
             }
-            let mut component_paint = PaintContext::with_theme(self.theme);
+            let mut component_paint = self.paint_context();
             match self.settings_page {
                 SettingsPage::Compiler => {
                     commands.push(label(
@@ -2380,27 +2543,27 @@ impl IdeShell {
                         13.0,
                     ));
                     let mut combo = self.jdk_combo.clone();
-                    combo.layout(&LayoutContext, geometry.combo);
+                    combo.layout(&self.layout_context(), geometry.combo);
                     combo.paint(&mut component_paint);
                     let mut browse = self.jdk_browse_button.clone();
-                    browse.layout(&LayoutContext, geometry.browse);
+                    browse.layout(&self.layout_context(), geometry.browse);
                     browse.paint(&mut component_paint);
                 }
                 SettingsPage::Debug => {
                     commands.extend(self.paint_debug_settings(&geometry, colors));
                     let mut host = self.debug_host.clone();
-                    host.layout(&LayoutContext, geometry.debug_host);
+                    host.layout(&self.layout_context(), geometry.debug_host);
                     host.paint(&mut component_paint);
                     let mut port = self.debug_port.clone();
-                    port.layout(&LayoutContext, geometry.debug_port);
+                    port.layout(&self.layout_context(), geometry.debug_port);
                     port.paint(&mut component_paint);
                     let mut attach = self.debug_attach_button.clone();
-                    attach.layout(&LayoutContext, geometry.debug_attach);
+                    attach.layout(&self.layout_context(), geometry.debug_attach);
                     attach.paint(&mut component_paint);
                 }
             }
             let mut close = self.settings_close_button.clone();
-            close.layout(&LayoutContext, geometry.close);
+            close.layout(&self.layout_context(), geometry.close);
             close.paint(&mut component_paint);
             commands.extend(component_paint.into_commands());
             if let Some(message) = self
@@ -2411,106 +2574,12 @@ impl IdeShell {
                 commands.push(label(
                     message,
                     Point::new(geometry.combo.origin.x, geometry.combo.origin.y + 54.0),
-                    Color::rgba(0.95, 0.55, 0.42, 1.0),
+                    colors.danger,
                     13.0,
                 ));
             }
         }
-        if let Some(dialog) = &self.selection_dialog {
-            let (dialog_rect, rows_top, buttons_top) =
-                selection_dialog_geometry(size, dialog.items.len());
-            commands.push(fill(
-                Rect::new(0.0, 0.0, size.width, size.height),
-                Color::rgba(0.0, 0.0, 0.0, 0.55),
-            ));
-            commands.push(fill(dialog_rect, colors.elevated));
-            commands.push(stroke(dialog_rect, colors.accent));
-            commands.push(label(
-                &dialog.title,
-                Point::new(dialog_rect.origin.x + 20.0, dialog_rect.origin.y + 18.0),
-                colors.text,
-                18.0,
-            ));
-            if dialog.items.is_empty() {
-                commands.push(label(
-                    "Nenhum JDK detectado. Configure JAVA_HOME.",
-                    Point::new(dialog_rect.origin.x + 20.0, rows_top + 8.0),
-                    colors.muted_text,
-                    14.0,
-                ));
-            }
-            for (index, item) in dialog.items.iter().enumerate() {
-                let row = Rect::new(
-                    dialog_rect.origin.x + 16.0,
-                    rows_top + index as f32 * DIALOG_ROW_HEIGHT,
-                    dialog_rect.size.width - 32.0,
-                    DIALOG_ROW_HEIGHT - 2.0,
-                );
-                if index == dialog.selected {
-                    commands.push(fill(row, colors.surface));
-                    commands.push(stroke(row, colors.accent));
-                }
-                commands.push(label(
-                    item,
-                    Point::new(row.origin.x + 10.0, row.origin.y + 8.0),
-                    colors.text,
-                    14.0,
-                ));
-            }
-            let cancel = selection_dialog_cancel_rect(dialog_rect, buttons_top);
-            let confirm = selection_dialog_confirm_rect(dialog_rect, buttons_top);
-            commands.push(fill(cancel, colors.surface));
-            commands.push(stroke(cancel, colors.border));
-            commands.push(label(
-                "Cancelar",
-                Point::new(cancel.origin.x + 22.0, cancel.origin.y + 8.0),
-                colors.text,
-                14.0,
-            ));
-            commands.push(fill(
-                confirm,
-                if dialog.items.is_empty() {
-                    colors.border
-                } else {
-                    colors.accent
-                },
-            ));
-            commands.push(label(
-                "Selecionar",
-                Point::new(confirm.origin.x + 18.0, confirm.origin.y + 8.0),
-                colors.text,
-                14.0,
-            ));
-        }
         commands
-    }
-
-    fn selection_dialog_pointer_down(&mut self, point: Point, size: Size) {
-        let Some(dialog) = self.selection_dialog.as_mut() else {
-            return;
-        };
-        let (dialog_rect, rows_top, buttons_top) =
-            selection_dialog_geometry(size, dialog.items.len());
-        let cancel = selection_dialog_cancel_rect(dialog_rect, buttons_top);
-        if cancel.contains(point) {
-            self.selection_dialog = None;
-            return;
-        }
-        let confirm = selection_dialog_confirm_rect(dialog_rect, buttons_top);
-        if confirm.contains(point) && !dialog.items.is_empty() {
-            self.selection_result = Some(dialog.selected);
-            self.selection_dialog = None;
-            return;
-        }
-        if point.x >= dialog_rect.origin.x + 16.0
-            && point.x < dialog_rect.origin.x + dialog_rect.size.width - 16.0
-            && point.y >= rows_top
-        {
-            let index = ((point.y - rows_top) / DIALOG_ROW_HEIGHT).floor() as usize;
-            if index < dialog.items.len() {
-                dialog.selected = index;
-            }
-        }
     }
 
     fn settings_dialog_pointer_down(&mut self, point: Point, size: Size) {
@@ -2518,7 +2587,7 @@ impl IdeShell {
             return;
         }
         self.settings_modal
-            .layout(&LayoutContext, Rect::new(0.0, 0.0, size.width, size.height));
+            .layout(&self.layout_context(), Rect::new(0.0, 0.0, size.width, size.height));
         let geometry = settings_dialog_geometry(self.settings_modal.panel_bounds());
         if geometry.compiler_option.contains(point) {
             self.settings_page = SettingsPage::Compiler;
@@ -2534,11 +2603,11 @@ impl IdeShell {
             self.debug_page_pointer_down(point, &geometry);
             return;
         }
-        self.jdk_combo.layout(&LayoutContext, geometry.combo);
+        self.jdk_combo.layout(&self.layout_context(), geometry.combo);
         self.jdk_browse_button
-            .layout(&LayoutContext, geometry.browse);
+            .layout(&self.layout_context(), geometry.browse);
         self.settings_close_button
-            .layout(&LayoutContext, geometry.close);
+            .layout(&self.layout_context(), geometry.close);
         let event = UiEvent::PointerDown(primary_pointer(point));
         let mut context = EventContext::default();
         let combo_result = self.jdk_combo.event(&mut context, &event);
@@ -2616,7 +2685,7 @@ impl IdeShell {
         }
         self.settings_focus = None;
         self.settings_close_button
-            .layout(&LayoutContext, geometry.close);
+            .layout(&self.layout_context(), geometry.close);
         let close_result = click_widget(&mut self.settings_close_button, point);
         let _ = self.handle_settings_action(close_result);
     }
@@ -2630,9 +2699,9 @@ impl IdeShell {
     /// Roteia o clique para os botões de ação, que são widgets da biblioteca.
     fn action_buttons_pointer_down(&mut self, point: Point, size: Size) -> bool {
         let rects = action_button_rects(size);
-        self.stop_button.layout(&LayoutContext, rects[0]);
-        self.run_button.layout(&LayoutContext, rects[1]);
-        self.debug_button.layout(&LayoutContext, rects[2]);
+        self.stop_button.layout(&self.layout_context(), rects[0]);
+        self.run_button.layout(&self.layout_context(), rects[1]);
+        self.debug_button.layout(&self.layout_context(), rects[2]);
         let commands = [
             click_widget(&mut self.stop_button, point),
             click_widget(&mut self.run_button, point),
@@ -2846,39 +2915,6 @@ fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
     }
 }
 
-fn selection_dialog_geometry(size: Size, item_count: usize) -> (Rect, f32, f32) {
-    let rows_height = item_count.max(1) as f32 * DIALOG_ROW_HEIGHT;
-    let width = 620.0_f32.min((size.width - 40.0).max(320.0));
-    let height = 112.0 + rows_height;
-    let rect = Rect::new(
-        ((size.width - width) / 2.0).max(0.0),
-        ((size.height - height) / 2.0).max(0.0),
-        width,
-        height,
-    );
-    let rows_top = rect.origin.y + 52.0;
-    let buttons_top = rect.origin.y + rect.size.height - 44.0;
-    (rect, rows_top, buttons_top)
-}
-
-fn selection_dialog_cancel_rect(dialog: Rect, buttons_top: f32) -> Rect {
-    Rect::new(
-        dialog.origin.x + dialog.size.width - 224.0,
-        buttons_top,
-        96.0,
-        32.0,
-    )
-}
-
-fn selection_dialog_confirm_rect(dialog: Rect, buttons_top: f32) -> Rect {
-    Rect::new(
-        dialog.origin.x + dialog.size.width - 118.0,
-        buttons_top,
-        102.0,
-        32.0,
-    )
-}
-
 struct Geometry {
     content_top: f32,
     content_bottom: f32,
@@ -2925,9 +2961,9 @@ const DEBUG_BUTTONS: [(&str, DebugRequest); 5] = [
 struct DebugPanelGeometry {
     panel: Rect,
     buttons: Vec<Rect>,
-    frames_top: f32,
-    frames_height: f32,
-    variables_top: f32,
+    /// Área das listas, já no formato que os widgets da biblioteca recebem.
+    frames: Rect,
+    variables: Rect,
 }
 
 fn debug_panel_geometry(panel: Rect, frame_count: usize) -> DebugPanelGeometry {
@@ -2945,18 +2981,26 @@ fn debug_panel_geometry(panel: Rect, frame_count: usize) -> DebugPanelGeometry {
     let frames_top = panel.origin.y + 86.0;
     let visible_frames = frame_count.clamp(1, 8) as f32;
     let frames_height = visible_frames * DEBUG_ROW_HEIGHT;
+    let list_x = panel.origin.x + 6.0;
+    let list_width = (panel.size.width - 12.0).max(0.0);
+    let variables_top = frames_top + frames_height + 30.0;
     DebugPanelGeometry {
         panel,
         buttons,
-        frames_top,
-        frames_height,
-        variables_top: frames_top + frames_height + 30.0,
+        frames: Rect::new(list_x, frames_top, list_width, frames_height),
+        variables: Rect::new(
+            list_x,
+            variables_top,
+            list_width,
+            (panel.origin.y + panel.size.height - variables_top).max(0.0),
+        ),
     }
 }
 
 fn geometry(size: Size, requested_terminal_height: f32, sidebar_width: f32) -> Geometry {
     let content_top = TITLE_HEIGHT + TAB_HEIGHT;
-    let content_bottom = size.height - 24.0;
+    // O rodapé é a barra de estado da biblioteca; a altura é dela.
+    let content_bottom = size.height - StatusBar::HEIGHT;
     let terminal_height = requested_terminal_height
         .min((content_bottom - content_top - 100.0).max(TERMINAL_COLLAPSED_HEIGHT));
     let editor_height = (content_bottom - content_top - terminal_height).max(0.0);
@@ -3081,136 +3125,77 @@ fn label(text: &str, origin: Point, color: Color, size: f32) -> PaintCommand {
     })
 }
 
-fn ellipsize(text: &str, max_characters: usize) -> String {
-    if text.chars().count() <= max_characters {
-        return text.to_owned();
+/// Papel do realce da IDE no vocabulário do editor da biblioteca.
+const fn token_kind_for(kind: SyntaxHighlightKind) -> TokenKind {
+    match kind {
+        SyntaxHighlightKind::Keyword | SyntaxHighlightKind::Operator => TokenKind::Keyword,
+        SyntaxHighlightKind::Type => TokenKind::Type,
+        SyntaxHighlightKind::Function => TokenKind::Function,
+        SyntaxHighlightKind::String => TokenKind::String,
+        SyntaxHighlightKind::Number => TokenKind::Number,
+        SyntaxHighlightKind::Comment => TokenKind::Comment,
+        // Anotação e nomes comuns não têm token próprio no editor: seguem o
+        // texto, que é o que o tema define para código sem classificação.
+        SyntaxHighlightKind::Annotation
+        | SyntaxHighlightKind::Field
+        | SyntaxHighlightKind::Variable => TokenKind::Plain,
     }
-    let visible = max_characters.saturating_sub(1);
-    let mut shortened = text.chars().take(visible).collect::<String>();
-    shortened.push('…');
-    shortened
 }
 
-fn scrollbar(
-    track: Rect,
-    total: usize,
-    visible: usize,
-    offset: usize,
-    colors: ColorTokens,
-) -> Vec<PaintCommand> {
-    let mut commands = vec![fill(track, colors.elevated)];
-    let Some(metrics) = scrollbar_metrics(track, total, visible, offset) else {
-        return commands;
-    };
-    commands.push(fill(
-        Rect::new(
-            metrics.thumb.origin.x + 2.0,
-            metrics.thumb.origin.y,
-            track.size.width - 4.0,
-            metrics.thumb.size.height,
-        ),
-        colors.muted_text,
-    ));
-    commands
+/// Identidade estável de um nó do Explorer.
+///
+/// A árvore da biblioteca identifica nós por número e o Explorer os identifica
+/// por caminho; o caminho é o que sobrevive a uma releitura do disco, então ele
+/// é a origem do número.
+fn explorer_id(path: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
 }
 
-#[derive(Clone, Copy)]
-struct ScrollbarMetrics {
-    track: Rect,
-    thumb: Rect,
-    max_offset: usize,
+/// Converte a árvore de arquivos em itens da biblioteca.
+fn explorer_items(node: &FileNode) -> Vec<TreeItem> {
+    node.children
+        .iter()
+        .map(|child| {
+            TreeItem::new(
+                explorer_id(&child.path),
+                child
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("?"),
+                explorer_items(child),
+            )
+        })
+        .collect()
 }
 
-fn scrollbar_metrics(
-    track: Rect,
-    total: usize,
-    visible: usize,
-    offset: usize,
-) -> Option<ScrollbarMetrics> {
-    if total <= visible || total == 0 || track.size.height <= 0.0 {
+/// O que uma barra de abas pediu para um clique.
+enum TabCommand {
+    Select(u64),
+    Close(u64),
+}
+
+/// Entrega o clique ao componente de abas e traduz o comando emitido.
+///
+/// Um clique é pressionar e soltar; a interface da IDE só encaminha o
+/// pressionar, então os dois eventos vão juntos.
+fn tab_command(tabs: &mut Tabs, point: Point) -> Option<TabCommand> {
+    let mut context = EventContext::default();
+    let event = UiEvent::PointerDown(primary_pointer(point));
+    tabs.event(&mut context, &event);
+    let result = tabs.event(&mut context, &UiEvent::PointerUp(primary_pointer(point)));
+    let EventResult::Action(WidgetAction::Command(CommandId(command))) = result else {
         return None;
-    }
-    let ratio = visible as f32 / total as f32;
-    let thumb_height = (track.size.height * ratio).max(24.0).min(track.size.height);
-    let max_offset = total.saturating_sub(visible).max(1);
-    let travel = (track.size.height - thumb_height).max(0.0);
-    let y = track.origin.y + travel * offset.min(max_offset) as f32 / max_offset as f32;
-    Some(ScrollbarMetrics {
-        track,
-        thumb: Rect::new(track.origin.x, y, track.size.width, thumb_height),
-        max_offset,
-    })
-}
-
-fn offset_from_scrollbar(thumb_y: f32, metrics: ScrollbarMetrics) -> usize {
-    let travel = (metrics.track.size.height - metrics.thumb.size.height).max(0.0);
-    if travel == 0.0 {
-        return 0;
-    }
-    let position = (thumb_y - metrics.track.origin.y).clamp(0.0, travel);
-    (position / travel * metrics.max_offset as f32).round() as usize
-}
-
-#[derive(Clone, Copy)]
-struct HorizontalScrollbarMetrics {
-    track: Rect,
-    thumb: Rect,
-    max_offset: f32,
-}
-
-fn horizontal_scrollbar_metrics(
-    track: Rect,
-    total_width: f32,
-    visible_width: f32,
-    offset: f32,
-) -> Option<HorizontalScrollbarMetrics> {
-    if total_width <= visible_width || total_width <= 0.0 || track.size.width <= 0.0 {
-        return None;
-    }
-    let thumb_width = (track.size.width * visible_width / total_width)
-        .max(24.0)
-        .min(track.size.width);
-    let max_offset = (total_width - visible_width).max(1.0);
-    let travel = (track.size.width - thumb_width).max(0.0);
-    let x = track.origin.x + travel * offset.clamp(0.0, max_offset) / max_offset;
-    Some(HorizontalScrollbarMetrics {
-        track,
-        thumb: Rect::new(x, track.origin.y, thumb_width, track.size.height),
-        max_offset,
-    })
-}
-
-fn offset_from_horizontal_scrollbar(thumb_x: f32, metrics: HorizontalScrollbarMetrics) -> f32 {
-    let travel = (metrics.track.size.width - metrics.thumb.size.width).max(0.0);
-    if travel == 0.0 {
-        return 0.0;
-    }
-    let position = (thumb_x - metrics.track.origin.x).clamp(0.0, travel);
-    position / travel * metrics.max_offset
-}
-
-fn horizontal_scrollbar(
-    track: Rect,
-    total_width: f32,
-    visible_width: f32,
-    offset: f32,
-    colors: ColorTokens,
-) -> Vec<PaintCommand> {
-    let mut commands = vec![fill(track, colors.elevated)];
-    let Some(metrics) = horizontal_scrollbar_metrics(track, total_width, visible_width, offset)
-    else {
-        return commands;
     };
-    commands.push(fill(
-        Rect::new(
-            metrics.thumb.origin.x,
-            metrics.thumb.origin.y + 2.0,
-            metrics.thumb.size.width,
-            (metrics.thumb.size.height - 4.0).max(2.0),
-        ),
-        colors.muted_text,
-    ));
-    commands
+    if let Some(id) = command.strip_prefix("tabs.close.") {
+        return id.parse().ok().map(TabCommand::Close);
+    }
+    command
+        .strip_prefix("tabs.select.")
+        .and_then(|id| id.parse().ok())
+        .map(TabCommand::Select)
 }
 
 fn ordered_selection(selection: TerminalSelection) -> (TextPosition, TextPosition) {
@@ -3245,123 +3230,6 @@ fn selection_columns(
     };
     (to > from).then_some((from, to))
 }
-fn syntax_color(line: &str, plain: Color, keyword: Color, muted: Color) -> Color {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("//") {
-        muted
-    } else if ["use ", "fn ", "let ", "pub ", "struct ", "impl "]
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
-    {
-        keyword
-    } else {
-        plain
-    }
-}
-
-fn highlighted_line(
-    line: &str,
-    line_index: usize,
-    origin: Point,
-    snapshot: &SyntaxSnapshot,
-    colors: ColorTokens,
-) -> Vec<PaintCommand> {
-    let line_length = line.chars().count();
-    let mut spans = snapshot
-        .highlights
-        .iter()
-        .filter_map(|highlight| {
-            let start_line = highlight.range.start.line as usize;
-            let end_line = highlight.range.end.line as usize;
-            if line_index < start_line || line_index > end_line {
-                return None;
-            }
-            let start = if line_index == start_line {
-                highlight.range.start.column as usize
-            } else {
-                0
-            };
-            let end = if line_index == end_line {
-                highlight.range.end.column as usize
-            } else {
-                line_length
-            };
-            (start < end).then_some((start.min(line_length), end.min(line_length), highlight.kind))
-        })
-        .collect::<Vec<_>>();
-    spans.sort_by_key(|(start, end, _)| (*start, *end));
-
-    let mut commands = Vec::new();
-    let mut column = 0;
-    for (start, end, kind) in spans {
-        let start = start.max(column);
-        if start > column {
-            push_line_segment(&mut commands, line, column, start, origin, colors.text);
-        }
-        if end > start {
-            push_line_segment(
-                &mut commands,
-                line,
-                start,
-                end,
-                origin,
-                syntax_highlight_color(kind, colors),
-            );
-            column = end;
-        }
-    }
-    if column < line_length {
-        push_line_segment(
-            &mut commands,
-            line,
-            column,
-            line_length,
-            origin,
-            colors.text,
-        );
-    }
-    if line_length == 0 {
-        commands.push(label("", origin, colors.text, 15.0));
-    }
-    commands
-}
-
-fn push_line_segment(
-    commands: &mut Vec<PaintCommand>,
-    line: &str,
-    start: usize,
-    end: usize,
-    origin: Point,
-    color: Color,
-) {
-    let text = line
-        .chars()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect::<String>();
-    if !text.is_empty() {
-        commands.push(label(
-            &text,
-            Point::new(origin.x + start as f32 * 8.4, origin.y),
-            color,
-            15.0,
-        ));
-    }
-}
-
-fn syntax_highlight_color(kind: SyntaxHighlightKind, colors: ColorTokens) -> Color {
-    match kind {
-        SyntaxHighlightKind::Keyword | SyntaxHighlightKind::Operator => colors.accent,
-        SyntaxHighlightKind::Type => colors.syntax_type,
-        SyntaxHighlightKind::Function => colors.syntax_function,
-        SyntaxHighlightKind::String => colors.syntax_string,
-        SyntaxHighlightKind::Number => colors.syntax_number,
-        SyntaxHighlightKind::Comment => colors.muted_text,
-        SyntaxHighlightKind::Annotation => colors.syntax_annotation,
-        SyntaxHighlightKind::Field | SyntaxHighlightKind::Variable => colors.text,
-    }
-}
-
 fn count_outline(items: &[OutlineItem]) -> usize {
     items
         .iter()
@@ -3387,6 +3255,43 @@ mod tests {
         })
     }
 
+    /// O Explorer desenha pela árvore da biblioteca, e a rolagem horizontal
+    /// desloca as linhas em vez de cortá-las.
+    #[test]
+    fn the_explorer_paints_through_the_tree_and_slides_horizontally() {
+        let root = PathBuf::from("workspace");
+        let mut shell = IdeShell::from_tree(FileNode {
+            path: root.clone(),
+            is_directory: true,
+            children: vec![FileNode {
+                path: root.join("um_arquivo_de_nome_bem_longo_para_exceder_o_painel.rs"),
+                is_directory: false,
+                children: Vec::new(),
+            }],
+        });
+        let size = Size::new(1280.0, 800.0);
+        let origin_of = |shell: &mut IdeShell| {
+            shell
+                .paint(size)
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::DrawText(text) if text.text.contains("um_arquivo") => {
+                        Some(text.origin.x)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        let before = origin_of(&mut shell);
+        assert!(before > 0.0, "o Explorer precisa desenhar o arquivo");
+
+        shell.explorer_scroll_x = 20.0;
+        assert!(
+            (before - origin_of(&mut shell) - 20.0).abs() < 0.1,
+            "a linha desliza com a rolagem horizontal"
+        );
+    }
+
     #[test]
     fn explorer_click_toggles_directory() {
         let mut shell = test_shell();
@@ -3407,6 +3312,51 @@ mod tests {
             "class Main {\n  void run() {\n    int total = 1;\n  }\n}",
         );
         (shell, path)
+    }
+
+    /// A calha mostra a diferença entre pedido e confirmado, e a linha parada
+    /// é destacada inteira.
+    #[test]
+    fn the_gutter_shows_pending_and_confirmed_breakpoints_and_the_stopped_line() {
+        let mut shell = test_shell();
+        shell.editor.open_memory("A.java", "um\ndois\ntres\nquatro");
+        let path = PathBuf::from("A.java");
+        let size = Size::new(1280.0, 800.0);
+        shell.toggle_breakpoint(&path, 1);
+        // Só as marcas da calha interessam; a janela desenha outros círculos.
+        let gutter = ACTIVITY_WIDTH + SIDEBAR_WIDTH + EDITOR_GUTTER;
+        let circles = |shell: &mut IdeShell| {
+            shell
+                .paint(size)
+                .iter()
+                .fold((0, 0), |(filled, outlined), command| match command {
+                    PaintCommand::FillCircle(circle) if circle.center.x < gutter => {
+                        (filled + 1, outlined)
+                    }
+                    PaintCommand::StrokeCircle(circle) if circle.center.x < gutter => {
+                        (filled, outlined + 1)
+                    }
+                    _ => (filled, outlined),
+                })
+        };
+        assert_eq!(circles(&mut shell), (0, 1), "sem sessão, o ponto é pendente");
+
+        shell.set_verified_breakpoints(&path, &[1]);
+        assert_eq!(circles(&mut shell), (1, 0), "confirmado vira disco");
+
+        shell.set_debug_view(DebugView {
+            attached: true,
+            stopped_at: Some((path, 2)),
+            ..DebugView::default()
+        });
+        let highlight = Theme::default().colors.highlight;
+        assert!(
+            shell.paint(size).iter().any(|command| matches!(
+                command,
+                PaintCommand::FillRect(fill) if fill.color == highlight
+            )),
+            "a linha em execução é destacada"
+        );
     }
 
     #[test]
@@ -3502,7 +3452,7 @@ mod tests {
         shell.pointer_down(
             Point::new(
                 panel.panel.origin.x + 40.0,
-                panel.frames_top + DEBUG_ROW_HEIGHT,
+                panel.frames.origin.y + DEBUG_ROW_HEIGHT + 2.0,
             ),
             size,
         );
@@ -3511,6 +3461,37 @@ mod tests {
             vec![DebugRequest::SelectFrame(1)]
         );
         assert_eq!(shell.debug_view().selected_frame, 1);
+
+        // Clicar abaixo do último quadro não é escolha de quadro nenhum.
+        shell.pointer_down(
+            Point::new(
+                panel.panel.origin.x + 40.0,
+                panel.frames.origin.y + panel.frames.size.height + 6.0,
+            ),
+            size,
+        );
+        assert_eq!(shell.take_debug_requests(), vec![]);
+        assert_eq!(shell.debug_view().selected_frame, 1);
+    }
+
+    /// A barra de estado informa em segmentos: a mensagem à esquerda, e o que
+    /// se procura sempre no mesmo lugar ancorado à direita.
+    #[test]
+    fn the_status_bar_reports_message_and_position_in_separate_segments() {
+        let mut shell = test_shell();
+        shell.set_status_message("Compilação concluída");
+        let size = Size::new(1_000.0, 700.0);
+        let texts: Vec<String> = shell
+            .paint(size)
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|text| text == "Compilação concluída"));
+        assert!(texts.iter().any(|text| text == "UTF-8"));
+        assert!(texts.iter().any(|text| text == "Ln 1, Col 1"));
     }
 
     #[test]
@@ -3548,7 +3529,7 @@ mod tests {
             .zip(action_button_rects(Size::new(1_280.0, 800.0)))
         {
             let mut button = button.clone();
-            button.layout(&LayoutContext, rect);
+            button.layout(&LayoutContext::default(), rect);
             button.paint(&mut context);
             button.accessibility(&mut accessibility);
         }
@@ -3609,7 +3590,7 @@ mod tests {
         );
 
         let colors = Theme::default().colors;
-        let icon_color = |shell: &IdeShell| {
+        let icon_color = |shell: &mut IdeShell| {
             shell.paint(size).iter().find_map(|command| match command {
                 PaintCommand::FillRect(rect)
                     if stop.contains(rect.rect.origin) && rect.rect.size.width < 20.0 =>
@@ -3620,7 +3601,7 @@ mod tests {
             })
         };
         assert_eq!(
-            icon_color(&shell),
+            icon_color(&mut shell),
             Some(colors.muted_text),
             "sem aplicação iniciada, o ícone fica apagado"
         );
@@ -3744,7 +3725,7 @@ mod tests {
         shell.open_settings_dialog(vec!["JDK 8".to_owned()], 0);
         shell
             .settings_modal
-            .layout(&LayoutContext, Rect::new(0.0, 0.0, size.width, size.height));
+            .layout(&LayoutContext::default(), Rect::new(0.0, 0.0, size.width, size.height));
         let geometry = settings_dialog_geometry(shell.settings_modal.panel_bounds());
 
         shell.pointer_down(
@@ -3845,7 +3826,7 @@ mod tests {
             matches!(
                 command,
                 PaintCommand::DrawText(text)
-                    if text.text == "public" && text.color == colors.accent
+                    if text.text == "public" && text.color == colors.syntax_keyword
             )
         }));
     }
@@ -3898,7 +3879,7 @@ mod tests {
         let size = Size::new(1280.0, 800.0);
         let editor_x = ACTIVITY_WIDTH + shell.sidebar_width(size);
         let point = Point::new(
-            editor_x + EDITOR_GUTTER + 8.0 * 8.4,
+            editor_x + EDITOR_GUTTER + 8.0 * EDITOR_CHAR_WIDTH,
             shell.geometry(size).content_top + 15.0,
         );
         assert!(!shell.navigation_hover(point, size, false));
@@ -3928,7 +3909,9 @@ mod tests {
         });
         let size = Size::new(1280.0, 800.0);
         let track = shell.explorer_horizontal_scrollbar_rect(size);
-        assert!(shell.explorer_horizontal_metrics(size).is_some());
+        // O nome não cabe na largura visível, então há o que rolar.
+        let (_, content, viewport, _) = shell.scrollbar_range(ScrollTarget::ExplorerHorizontal, size);
+        assert!(content > viewport);
         shell.pointer_down(
             Point::new(
                 track.origin.x + track.size.width - 1.0,
@@ -4003,6 +3986,29 @@ mod tests {
         assert_eq!(shell.active_document(), Some(first));
     }
 
+    /// Documento alterado e não gravado é sinalizado na aba.
+    #[test]
+    fn an_unsaved_document_is_marked_on_its_tab() {
+        let mut shell = test_shell();
+        shell.editor.open_memory("first.rs", "one");
+        let size = Size::new(1280.0, 800.0);
+        let marks = |shell: &mut IdeShell| {
+            shell
+                .paint(size)
+                .iter()
+                .filter_map(|command| match command {
+                    PaintCommand::DrawText(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .any(|text| text == "●")
+        };
+        assert!(!marks(&mut shell), "documento intacto não é marcado");
+
+        shell.focus = ShellFocus::Editor;
+        shell.edit_active("x");
+        assert!(marks(&mut shell), "documento alterado é marcado");
+    }
+
     #[test]
     fn long_tab_titles_are_clipped_and_ellipsized_before_close_button() {
         let mut shell = test_shell();
@@ -4017,14 +4023,46 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(texts.contains(&"ExplosionEff…"));
+        // O nome inteiro não cabe: aparece encurtado, com a marca do corte, e o
+        // desenho fica contido na faixa das abas.
         assert!(!texts.contains(&"ExplosionEffectManager.ts"));
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with("Explosion") && text.ends_with('…')),
+            "esperava um título encurtado, veio {texts:?}"
+        );
+        let tabs = shell.editor_tabs_rect(Size::new(1280.0, 800.0));
         assert!(rendered.iter().any(|command| {
-            matches!(
-                command,
-                PaintCommand::PushClip(rect) if rect.size.width == TAB_WIDTH - 38.0
-            )
+            matches!(command, PaintCommand::PushClip(rect) if *rect == tabs)
         }));
+    }
+
+    /// O divisor é desenhado no lugar certo desde o primeiro quadro, antes de
+    /// qualquer evento de ponteiro, e se destaca quando o ponteiro se aproxima.
+    #[test]
+    fn the_sidebar_divider_is_painted_in_place_and_highlights_under_the_pointer() {
+        let mut shell = test_shell();
+        let size = Size::new(1280.0, 800.0);
+        let divider_color = |shell: &mut IdeShell| {
+            let x = ACTIVITY_WIDTH + shell.sidebar_width(size);
+            shell
+                .paint(size)
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::FillRect(fill)
+                        if (fill.rect.origin.x - x).abs() < 0.01
+                            && fill.rect.size.width == Splitter::THICKNESS =>
+                    {
+                        Some(fill.color)
+                    }
+                    _ => None,
+                })
+        };
+        assert_eq!(divider_color(&mut shell), Some(shell.theme().colors.border));
+
+        shell.pointer_move(Point::new(ACTIVITY_WIDTH + SIDEBAR_WIDTH, 300.0), size);
+        assert_eq!(divider_color(&mut shell), Some(shell.theme().colors.accent));
     }
 
     #[test]
@@ -4158,18 +4196,36 @@ mod tests {
         assert!(first_output_y > input_y);
     }
 
+    /// Clicar no fim da trilha do editor leva ao fim do documento, e arrastar
+    /// de volta traz o conteúdo junto.
     #[test]
-    fn scrollbar_maps_click_and_drag_to_content_offsets() {
-        let track = Rect::new(100.0, 20.0, 10.0, 200.0);
-        let metrics = match scrollbar_metrics(track, 100, 10, 0) {
-            Some(metrics) => metrics,
-            None => panic!("scrollbar metrics unavailable"),
-        };
-        assert_eq!(offset_from_scrollbar(track.origin.y, metrics), 0);
-        assert_eq!(
-            offset_from_scrollbar(track.origin.y + track.size.height, metrics),
-            90
+    fn the_editor_scrollbar_maps_click_and_drag_to_content_offsets() {
+        let mut shell = test_shell();
+        let text = (0..200)
+            .map(|line| format!("linha {line}"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        shell.editor.open_memory("longo.rs", &text);
+        let size = Size::new(1280.0, 800.0);
+        let track = shell.editor_scrollbar_rect(size);
+        let visible = shell.editor_visible_lines(size);
+
+        shell.pointer_down(
+            Point::new(track.origin.x + 5.0, track.origin.y + track.size.height),
+            size,
         );
+        assert_eq!(shell.editor_scroll_line, 200 - visible);
+
+        shell.pointer_move(Point::new(track.origin.x + 5.0, track.origin.y), size);
+        assert_eq!(shell.editor_scroll_line, 0);
+
+        shell.pointer_up();
+        shell.pointer_move(
+            Point::new(track.origin.x + 5.0, track.origin.y + track.size.height),
+            size,
+        );
+        assert_eq!(shell.editor_scroll_line, 0, "soltar encerra o arraste");
     }
 
     #[test]
@@ -4309,7 +4365,7 @@ mod tests {
         let document_id = shell.editor.open_memory("main.rs", "fn target() {}\n");
         let size = Size::new(1280.0, 800.0);
         let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
-        let target_x = editor_x + EDITOR_GUTTER + 5.0 * 8.4;
+        let target_x = editor_x + EDITOR_GUTTER + 5.0 * EDITOR_CHAR_WIDTH;
         shell.pointer_down_with_modifiers(
             Point::new(target_x, TITLE_HEIGHT + TAB_HEIGHT + 15.0),
             size,
@@ -4335,61 +4391,6 @@ mod tests {
         assert_eq!(shell.focus(), ShellFocus::Editor);
     }
 
-    #[test]
-    fn selection_dialog_supports_keyboard_confirmation_and_cancel() {
-        let mut shell = test_shell();
-        shell.open_selection_dialog(
-            "Selecionar JDK",
-            vec!["JDK 8".to_owned(), "JDK 17".to_owned()],
-            0,
-        );
-        assert!(shell.selection_dialog_open());
-        assert!(
-            shell
-                .paint(Size::new(1_000.0, 700.0))
-                .iter()
-                .any(|command| {
-                    matches!(
-                        command,
-                        PaintCommand::DrawText(text) if text.text == "Selecionar JDK"
-                    )
-                })
-        );
-
-        shell.key_down("ArrowDown");
-        shell.key_down("Enter");
-        assert!(!shell.selection_dialog_open());
-        assert_eq!(shell.take_selection_result(), Some(1));
-
-        shell.open_selection_dialog("Selecionar JDK", vec!["JDK 17".to_owned()], 0);
-        shell.escape();
-        assert!(!shell.selection_dialog_open());
-        assert_eq!(shell.take_selection_result(), None);
-    }
-
-    #[test]
-    fn selection_dialog_supports_mouse_selection_and_confirmation() {
-        let mut shell = test_shell();
-        let size = Size::new(1_000.0, 700.0);
-        shell.open_selection_dialog(
-            "Selecionar JDK",
-            vec!["JDK 8".to_owned(), "JDK 17".to_owned()],
-            0,
-        );
-        let (dialog, rows_top, buttons_top) = selection_dialog_geometry(size, 2);
-        shell.pointer_down(
-            Point::new(dialog.origin.x + 30.0, rows_top + DIALOG_ROW_HEIGHT + 5.0),
-            size,
-        );
-        let confirm = selection_dialog_confirm_rect(dialog, buttons_top);
-        shell.pointer_down(
-            Point::new(confirm.origin.x + 10.0, confirm.origin.y + 10.0),
-            size,
-        );
-
-        assert_eq!(shell.take_selection_result(), Some(1));
-        assert!(!shell.selection_dialog_open());
-    }
 
     #[test]
     fn project_menu_requests_build_and_reimport() {
@@ -4405,6 +4406,26 @@ mod tests {
         shell.pointer_down(Point::new(200.0, TITLE_HEIGHT + 38.0), size);
         assert!(shell.take_reimport_project_request());
         assert!(!shell.take_build_project_request());
+    }
+
+    /// A interface não define cor própria: todas vêm do tema da ERLibUi.
+    ///
+    /// Sem esta trava, uma cor solta volta a aparecer na primeira pressa — foi
+    /// o que aconteceu com a barra de status e com o marcador de breakpoint.
+    #[test]
+    fn the_interface_does_not_hardcode_colors() {
+        let source = include_str!("lib.rs");
+        let tests_start = source
+            .find("\nmod tests {")
+            .unwrap_or_else(|| panic!("módulo de testes não encontrado"));
+        for (number, line) in source[..tests_start].lines().enumerate() {
+            assert!(
+                !line.contains("Color::rgba"),
+                "linha {} usa cor fixa; use um token de `Theme`: {}",
+                number + 1,
+                line.trim()
+            );
+        }
     }
 
     #[test]
@@ -4560,7 +4581,7 @@ mod tests {
         shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
         shell
             .settings_modal
-            .layout(&LayoutContext, Rect::new(0.0, 0.0, size.width, size.height));
+            .layout(&LayoutContext::default(), Rect::new(0.0, 0.0, size.width, size.height));
         let geometry = settings_dialog_geometry(shell.settings_modal.panel_bounds());
         shell.pointer_down(
             Point::new(
