@@ -141,6 +141,38 @@ bitflags::bitflags! {
 }
 ```
 
+## Completação de membros
+
+`COMPLETION` cobre dois pedidos diferentes no mesmo método. Sem contexto de
+acesso, a resposta é o que o prefixo alcança no arquivo e no índice do workspace.
+Depois de um caractere de gatilho da linguagem, a resposta são os **membros do
+receptor** — e só eles: devolver palavras-chave e classes soltas ali seria falar de
+outra coisa que não o objeto à esquerda do ponto.
+
+Quem separa os dois casos é o provider, não o editor. Ele tem o texto e a posição,
+então ele lê para trás e decide se há acesso a membro, qual é o receptor e qual é o
+prefixo já digitado. O editor não conhece a sintaxe da linguagem, e o pedido
+continua sendo um `CompletionRequest` sem campo novo.
+
+A resolução do tipo do receptor tem duas fontes:
+
+- a **declaração no arquivo aberto** — variável local, parâmetro ou campo —, que o
+  índice semântico já registra em `type_descriptor`;
+- o **próprio nome** tomado como tipo, quando não há declaração. É o caso do
+  acesso estático, `Integer.` ou `Math.`.
+
+Os membros também vêm de duas fontes somadas: o arquivo aberto, que responde pelo
+tipo que ainda não foi compilado, e as classes compiladas alcançadas pelo índice —
+biblioteca padrão do toolchain escolhido, dependências e o próprio projeto depois
+de um build. A cadeia de superclasses é percorrida porque um membro herdado é tão
+membro do objeto quanto o declarado. Só o que é público entra, sem construtor e sem
+membro sintético.
+
+Indexar a biblioteca padrão exige ler os nomes **pelo diretório do arquivo
+compactado**, e não decodificando cada classe: um único módulo do JDK passa de seis
+mil classes, e o índice precisa apenas do nome. Os membros de um tipo são lidos sob
+demanda, um tipo por vez.
+
 ## Estratégia de fallback
 
 Se uma capability não estiver disponível no provider principal, o host pode consultar outro adapter.

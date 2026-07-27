@@ -29,8 +29,25 @@ sem reclamar.
 Clique em diretórios
 para expandir ou recolher e em arquivos de texto para abri-los. Clique nas abas
 para alternar documentos. Clique no editor para posicionar o cursor e digite
-normalmente; `Backspace`, `Enter` e as setas esquerda/direita estão disponíveis.
+normalmente; `Backspace`, `Enter`, `Tab` e as setas esquerda/direita estão
+disponíveis. `Tab` indenta até a próxima parada de quatro colunas e `Shift+Tab`
+recolhe a indentação da linha — a indentação usa espaços, porque o editor mede o
+texto por coluna de largura fixa e um `	` ocuparia uma coluna no texto e várias
+na tela. `Ctrl+S` grava a aba ativa, o mesmo que `Arquivo → Salvar`.
 Pressione `F3` para abrir a busca e `Esc` para fechá-la.
+
+No Explorer, as cadeias de pacote Java aparecem comprimidas numa linha só —
+`br.com.exemplo.endpoints` em vez de quatro níveis —, como no IntelliJ. Os
+diretórios intermediários existem porque o Java exige que o diretório espelhe o
+pacote, e não carregam informação nenhuma.
+
+O **clique com o botão direito** sobre um item do Explorer abre um menu com o que
+faz sentido naquele alvo. Dentro de uma raiz de fontes Java as opções são novo
+pacote, nova classe e nova interface; fora dela, nova pasta. As três ações Java
+abrem a mesma janela, com dois campos: o pacote — já preenchido com o do item
+clicado — e o nome. `Enter` cria o pacote e, quando há nome, o tipo dentro dele,
+com a declaração `package` deduzida do caminho. `Tab` alterna os campos e `Esc`
+fecha sem criar.
 
 Editor e terminal possuem rolagem independente. No cabeçalho do terminal,
 selecione PowerShell, CMD ou Git Bash; este último aparece quando o Git for
@@ -50,9 +67,30 @@ restaurar, o painel recupera a última altura definida pelo usuário.
 abre a localização com `open_location`, posicionando o cursor na linha e coluna
 retornadas. `Ctrl+Space` abre o autocomplete.
 
+Digitar `.` depois de uma variável, parâmetro, campo ou nome de tipo abre a lista
+com os **membros públicos** daquele tipo, filtrada pelo que se digita em seguida;
+as setas navegam e `Enter` ou `Tab` aceitam. O tipo vem da declaração no arquivo
+aberto, e os membros vêm de duas origens somadas: o próprio arquivo, que responde
+pelo tipo ainda não compilado, e as classes compiladas — o JDK, as dependências em
+jar e o projeto depois de um build. A cadeia de superclasses é percorrida, então
+`toString()` aparece como qualquer membro declarado.
+
+Quais caracteres disparam a lista é a linguagem quem informa, não o editor: o
+provider declara os seus, e em Java é o ponto.
+
+Ainda fora do alcance: encadeamento (`pedido.getCliente().`), substituição de
+genéricos, `this` e `super` como receptores, e classes de outro arquivo que ainda
+não foram compiladas.
+
 ## Toolchain e build
 
-`Ctrl+Shift+J` abre `Configurações → Compilador e VM` para escolher o JDK.
+`Ctrl+Shift+J` abre `Configurações → Compilador e VM` para escolher o JDK. A
+janela de Configurações só aplica ao **Salvar**; `Cancelar` e `Esc` descartam o
+que foi mexido e restauram o que estava valendo na abertura.
+
+O JDK escolhido ali é o que a completação usa para conhecer a biblioteca padrão —
+trocá-lo reindexa o provider, que havia indexado a instalação anterior. Enquanto
+nenhuma instalação for escolhida, vale o `JAVA_HOME`.
 `Ctrl+B` compila as fontes Java com `javac`, `F5` compila e executa a classe
 ativa e `Ctrl+Shift+T` a executa como teste.
 

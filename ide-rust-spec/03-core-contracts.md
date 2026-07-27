@@ -37,6 +37,41 @@ pub trait LanguageProvider: Send + Sync {
 }
 ```
 
+O metadado declara os **caracteres de gatilho** da linguagem — o que, ao ser
+digitado, pede completação sozinho. Em Java é o ponto; em outra linguagem pode ser
+`::` ou `->`. Quem sabe disso é a linguagem, e o editor pergunta: a alternativa
+seria a shell decidir sobre a sintaxe de uma linguagem que ela não conhece.
+
+```rust
+pub struct LanguageMetadata {
+    pub language_id: LanguageId,
+    pub provider_id: ProviderId,
+    pub display_name: String,
+    pub extensions: Vec<String>,
+    pub api_version: ApiVersion,
+    pub trigger_characters: Vec<char>,
+}
+```
+
+O contexto de ativação carrega, além da raiz do workspace, a **raiz do toolchain
+escolhido na IDE**:
+
+```rust
+pub struct LanguageActivationContext {
+    pub workspace_root: PathBuf,
+    pub jdk_home: Option<PathBuf>,
+}
+```
+
+A biblioteca padrão que a completação conhece vem dessa instalação, não de uma
+variável de ambiente: trocar de JDK pelo menu tem que trocar as classes que a
+completação enxerga. Como o provider indexa a biblioteca padrão na ativação,
+mudar a escolha exige derrubar os providers ativos — o host expõe `set_jdk_home`,
+que informa se houve troca, e `reactivate`, que faz a próxima requisição subir um
+provider novo com o contexto atual. As rotas de documento permanecem, mas os
+documentos abertos não: o provider novo nasce sem nenhum, e quem sincroniza
+precisa reabri-los.
+
 ## Instância ativa de linguagem
 
 ```rust
