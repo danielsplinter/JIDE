@@ -2630,6 +2630,10 @@ impl IdeShell {
         } else if self.focus == ShellFocus::Editor {
             match key.to_ascii_lowercase().as_str() {
                 "enter" => self.edit_active("\n"),
+                // Com um trecho marcado, Tab desloca o bloco inteiro.
+                "tab" if self.editor_selection_range().is_some() => {
+                    self.shift_selected_lines(!modifiers.shift);
+                }
                 "tab" if modifiers.shift => self.unindent(),
                 "tab" => self.indent(),
                 "arrowleft" => {
@@ -2644,6 +2648,8 @@ impl IdeShell {
                         next_boundary(self.active_text().unwrap_or_default(), self.cursor_offset);
                     self.move_editor_cursor(target, modifiers.shift);
                 }
+                "arrowup" => self.move_editor_line(-1, modifiers.shift),
+                "arrowdown" => self.move_editor_line(1, modifiers.shift),
                 _ => {}
             }
         }
@@ -2763,6 +2769,83 @@ impl IdeShell {
             self.editor_selection = None;
         }
         self.cursor_offset = target;
+    }
+
+    /// Move o cursor uma linha acima ou abaixo, preservando a coluna.
+    ///
+    /// A coluna é limitada pelo comprimento da linha de destino: descer de uma
+    /// linha longa para uma curta põe o cursor no fim dela, e não num ponto que
+    /// não existe. Na primeira e na última linha o movimento não faz nada, em vez
+    /// de saltar para o começo ou o fim do arquivo.
+    fn move_editor_line(&mut self, delta: isize, selecting: bool) {
+        let Some(text) = self.active_text().map(str::to_owned) else {
+            return;
+        };
+        let (line, column) = line_column(&text, self.cursor_offset);
+        let lines = text.lines().count().max(1);
+        let Some(target_line) = line
+            .checked_add_signed(delta)
+            .filter(|target| *target < lines)
+        else {
+            return;
+        };
+        let target = offset_for_line_column(&text, target_line, column);
+        self.move_editor_cursor(target, selecting);
+    }
+
+    /// Desloca as linhas tocadas pela seleção, para dentro ou para fora.
+    ///
+    /// A regra é a mesma do editor da biblioteca, e é ele quem a executa: a IDE
+    /// converte bytes para caracteres, entrega o intervalo e traz de volta o
+    /// texto e a seleção resultantes.
+    fn shift_selected_lines(&mut self, indent: bool) -> bool {
+        let Some(range) = self.editor_selection_range() else {
+            return false;
+        };
+        let Some(text) = self.active_text().map(str::to_owned) else {
+            return false;
+        };
+        let chars_before = |bytes: usize| {
+            text.get(..bytes.min(text.len()))
+                .unwrap_or(&text)
+                .chars()
+                .count()
+        };
+        // Um editor de rascunho aplica a regra sobre este texto. A view desenhada
+        // é reconstruída a partir do buffer a cada revisão, então mexer nela aqui
+        // seria escrever no lugar errado.
+        let mut editor = CodeEditor::new(EDITOR_VIEW_ID, &text);
+        editor.set_selection(Some(EditorRange::new(
+            chars_before(range.start),
+            chars_before(range.end),
+        )));
+        editor.shift_selected_lines(indent);
+        let updated = editor.buffer().to_text();
+        let shifted = editor.selection();
+        let Some(document) = self.editor.active_mut() else {
+            return false;
+        };
+        let whole = 0..document.buffer.text().len();
+        if document.buffer.replace(whole, &updated).is_err() {
+            return false;
+        }
+        self.status_message = "Modified".to_owned();
+        // De volta para bytes, que é como a IDE conta.
+        let bytes_at = |chars: usize| {
+            updated
+                .char_indices()
+                .nth(chars)
+                .map_or(updated.len(), |(index, _)| index)
+        };
+        match shifted {
+            Some(range) => {
+                let (start, end) = (bytes_at(range.start), bytes_at(range.end));
+                self.editor_selection = Some((start, end));
+                self.cursor_offset = end;
+            }
+            None => self.editor_selection = None,
+        }
+        true
     }
 
     /// Intervalo selecionado no editor, em ordem crescente.
@@ -6460,6 +6543,76 @@ mod tests {
         shell.editor_selection = Some((0, 5));
         shell.secondary_pointer_down(editor_column(&shell, size, 2), size);
         assert!(copy_enabled(shell.context_menu.entries()));
+    }
+
+    /// As setas verticais movem o cursor entre linhas, preservando a coluna.
+    #[test]
+    fn vertical_arrows_move_the_cursor_between_lines() {
+        let mut shell = shell_editing("primeira
+segunda
+ab");
+        shell.cursor_offset = 4;
+        shell.key_down("ArrowDown");
+        // Mesma coluna na linha de baixo.
+        assert_eq!(shell.cursor_offset, "primeira
+".len() + 4);
+
+        // Descer para uma linha curta para no fim dela, e não num ponto inexistente.
+        shell.key_down("ArrowDown");
+        assert_eq!(shell.cursor_offset, "primeira
+segunda
+ab".len());
+
+        // Na última linha, descer de novo não faz nada.
+        shell.key_down("ArrowDown");
+        assert_eq!(shell.cursor_offset, "primeira
+segunda
+ab".len());
+
+        shell.key_down("ArrowUp");
+        assert_eq!(shell.cursor_offset, "primeira
+".len() + 2);
+    }
+
+    /// Shift com as setas verticais estende a seleção por linhas.
+    #[test]
+    fn shift_with_vertical_arrows_extends_the_selection() {
+        let mut shell = shell_editing("um
+dois
+tres");
+        shell.cursor_offset = 0;
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        shell.key_down_with_modifiers("ArrowDown", shift);
+        assert_eq!(shell.editor_selection_range(), Some(0..3));
+    }
+
+    /// Tab com um bloco marcado desloca todas as linhas dele.
+    #[test]
+    fn tab_shifts_the_selected_block() {
+        let mut shell = shell_editing("um
+dois
+tres");
+        // Da segunda linha até o meio da terceira.
+        shell.editor_selection = Some((3, 9));
+        shell.cursor_offset = 9;
+        shell.key_down("Tab");
+        assert_eq!(shell.active_text(), Some("um
+    dois
+    tres"));
+        // A seleção segue cobrindo o bloco, para indentar de novo sem remarcar.
+        assert_eq!(shell.editor_selection_range(), Some(3..20));
+
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        shell.key_down_with_modifiers("Tab", shift);
+        assert_eq!(shell.active_text(), Some("um
+dois
+tres"));
     }
 
     /// Arrastar no editor seleciona, e digitar substitui o trecho marcado.

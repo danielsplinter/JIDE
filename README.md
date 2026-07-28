@@ -29,16 +29,25 @@ sem reclamar.
 Clique em diretórios
 para expandir ou recolher e em arquivos de texto para abri-los. Clique nas abas
 para alternar documentos. Clique no editor para posicionar o cursor e digite
-normalmente; `Backspace`, `Enter`, `Tab` e as setas esquerda/direita estão
-disponíveis. Arraste para selecionar um trecho, dê **duplo clique** para
-selecionar a palavra sob o ponteiro, ou use as setas com `Shift`; mover sem
-`Shift` desfaz a seleção. Digitar ou apagar com um trecho marcado age sobre ele.
-`Ctrl+C` copia e `Ctrl+V` cola, usando a área de transferência **do sistema** — o
-mesmo que o clique com o botão direito sobre o editor oferece em Copiar e Colar.
-Sem seleção, Copiar aparece desabilitado em vez de sumir do menu. `Tab` indenta até a próxima parada de quatro colunas e `Shift+Tab`
-recolhe a indentação da linha — a indentação usa espaços, porque o editor mede o
-texto por coluna de largura fixa e um `	` ocuparia uma coluna no texto e várias
-na tela. `Ctrl+S` grava a aba ativa, o mesmo que `Arquivo → Salvar`.
+normalmente; `Backspace`, `Enter` e as quatro setas estão disponíveis — as
+verticais movem entre linhas preservando a coluna, e param no fim de uma linha
+mais curta em vez de num ponto que não existe.
+
+Arraste para selecionar um trecho, dê **duplo clique** para selecionar a palavra
+sob o ponteiro, ou use as setas com `Shift`; mover sem `Shift` desfaz a seleção.
+Digitar ou apagar com um trecho marcado age sobre ele. `Ctrl+C` copia e `Ctrl+V`
+cola, usando a área de transferência **do sistema** — o mesmo que o clique com o
+botão direito sobre o editor oferece em Copiar e Colar. Sem seleção, Copiar
+aparece desabilitado em vez de sumir do menu.
+
+`Tab` indenta até a próxima parada de quatro colunas e `Shift+Tab` recolhe a
+indentação da linha. **Com um trecho marcado, os dois deslocam todas as linhas do
+bloco** e mantêm a seleção, para indentar vários níveis sem remarcar; recolher
+para quando alguma linha já está na margem, preservando a relação entre elas. A
+indentação usa espaços, porque o editor mede o texto por coluna de largura fixa e
+um `\t` ocuparia uma coluna no texto e várias na tela.
+
+`Ctrl+S` grava a aba ativa, o mesmo que `Arquivo → Salvar`.
 Pressione `F3` para abrir a busca e `Esc` para fechá-la.
 
 No Explorer, as cadeias de pacote Java aparecem comprimidas numa linha só —
