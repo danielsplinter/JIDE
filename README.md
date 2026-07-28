@@ -177,6 +177,15 @@ selecionado e abre uma janela com dois painéis: à esquerda, uma **árvore** co
 valor pedido e os campos dentro dele; à direita, o nome, o tipo e o valor completo
 do nó destacado.
 
+O painel direito tem, abaixo do detalhe, um **editor de código**: escreva uma
+expressão e clique em **Executar** — ou `Ctrl+Enter` — para avaliá-la no quadro
+atual. O resultado passa a ser o que a árvore mostra.
+
+Esse editor é o mesmo painel da janela principal, com os comportamentos que não
+fazem sentido ali desligados por configuração: não há arquivo para salvar,
+definição para navegar nem linha onde parar a execução. O painel é um componente
+com área própria, então qualquer tela pode abri-lo escolhendo o que ligar.
+
 A árvore abre já com o primeiro nível à mostra. Clicar em um campo que também é
 objeto revela os campos dele, um nível por vez — pedir tudo de uma vez percorreria
 o grafo inteiro, que pode ser fundo e cíclico. Clicar de novo fecha. `Esc` ou

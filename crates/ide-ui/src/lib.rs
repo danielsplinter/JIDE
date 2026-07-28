@@ -1,5 +1,8 @@
 #![doc = "Shell visual e interativo da IDE baseado no ERLibUi."]
 
+mod editor;
+pub use editor::{EditorAction, EditorCapabilities, EditorPane};
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
@@ -12,7 +15,7 @@ use ide_domain::{
     SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition,
 };
 use ide_terminal::{ShellKind, TerminalSession};
-use ide_text::EditorSession;
+use ide_text::{EditorSession, TextBuffer};
 use ui_editor::{
     CodeEditor, GutterMark, LineDecoration, SyntaxSpan, TextRange as EditorRange, TokenKind,
 };
@@ -87,11 +90,15 @@ const INSPECTION_NAME_ID: WidgetId = WidgetId(10_047);
 const INSPECTION_TYPE_ID: WidgetId = WidgetId(10_048);
 const INSPECTION_VALUE_ID: WidgetId = WidgetId(10_049);
 const INSPECTION_EMPTY_ID: WidgetId = WidgetId(10_050);
+const INSPECTION_RUN_ID: WidgetId = WidgetId(10_052);
+const INSPECTION_SOURCE_CAPTION_ID: WidgetId = WidgetId(10_053);
 /// A janela é larga porque o valor de um objeto costuma ser longo.
 const INSPECTION_PANEL_SIZE: Size = Size::new(720.0, 420.0);
 const INSPECTION_ROW_HEIGHT: f32 = 26.0;
 /// Fatia da janela ocupada pela lista, à esquerda.
 const INSPECTION_LIST_FRACTION: f32 = 0.42;
+/// Fatia do painel direito ocupada pelo detalhe; o resto é o editor.
+const INSPECTION_DETAIL_FRACTION: f32 = 0.45;
 const DEBUG_HOST_ID: WidgetId = WidgetId(10_006);
 const DEBUG_PORT_ID: WidgetId = WidgetId(10_007);
 const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
@@ -293,6 +300,14 @@ pub struct NewItemRequest {
     pub source_root: PathBuf,
 }
 
+/// Para onde vão as teclas dentro da janela de inspeção.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum InspectionFocus {
+    #[default]
+    Tree,
+    Source,
+}
+
 /// Um valor na árvore de inspeção, com os campos já revelados.
 ///
 /// O caminho é a expressão que endereça o valor a partir da raiz —
@@ -481,6 +496,15 @@ pub struct IdeShell {
     inspection: Option<InspectionView>,
     inspection_tree: TreeView,
     inspection_close_button: Button,
+    /// Editor de expressões do painel direito da inspeção.
+    ///
+    /// É o mesmo painel da janela principal, com os comportamentos que não fazem
+    /// sentido aqui desligados: não há arquivo para salvar, definição para
+    /// navegar nem linha onde parar a execução.
+    inspection_editor: EditorPane,
+    inspection_source: TextBuffer,
+    inspection_run_button: Button,
+    inspection_focus: InspectionFocus,
     open_project_requested: bool,
     open_settings_requested: bool,
     build_project_requested: bool,
@@ -728,6 +752,11 @@ impl IdeShell {
                 .with_row_height(INSPECTION_ROW_HEIGHT),
             inspection_close_button: Button::new(INSPECTION_CLOSE_ID, "Fechar")
                 .with_command("inspect.close"),
+            inspection_editor: EditorPane::new(EditorCapabilities::plain()),
+            inspection_source: TextBuffer::new(String::new()),
+            inspection_run_button: Button::new(INSPECTION_RUN_ID, "Executar")
+                .with_command("inspect.run"),
+            inspection_focus: InspectionFocus::Tree,
             open_project_requested: false,
             open_settings_requested: false,
             build_project_requested: false,
@@ -2655,6 +2684,9 @@ impl IdeShell {
     }
 
     pub fn text_input(&mut self, text: &str) {
+        if self.inspection_text_input(text) {
+            return;
+        }
         if self.new_item_text_input(text) {
             return;
         }
@@ -2681,6 +2713,9 @@ impl IdeShell {
     /// sozinho não diz se é para indentar ou recolher.
     pub fn key_down_with_modifiers(&mut self, key: &str, modifiers: Modifiers) {
         if self.context_menu_key(key, modifiers) {
+            return;
+        }
+        if self.inspection_key(key, modifiers) {
             return;
         }
         if self.new_item_key(key) {
@@ -2892,6 +2927,52 @@ impl IdeShell {
 
     pub const fn inspection_open(&self) -> bool {
         self.inspection_modal.is_open()
+    }
+
+    /// Texto do editor de expressões da inspeção.
+    #[must_use]
+    pub fn inspection_source(&self) -> &str {
+        self.inspection_source.text()
+    }
+
+    /// Executa o que está escrito no editor, no quadro atual.
+    pub fn run_inspection_source(&mut self) {
+        let code = self.inspection_source.text().trim().to_owned();
+        if code.is_empty() {
+            self.status_message = "Escreva a expressão a executar".to_owned();
+            return;
+        }
+        self.status_message = format!("Executando {code}");
+        self.debug_requests.push(DebugRequest::Evaluate(code));
+    }
+
+    /// Digitação dentro da janela de inspeção. Devolve `true` quando consumiu.
+    fn inspection_text_input(&mut self, text: &str) -> bool {
+        if !self.inspection_modal.is_open() || self.inspection_focus != InspectionFocus::Source {
+            return false;
+        }
+        self.inspection_editor
+            .insert(&mut self.inspection_source, text);
+        true
+    }
+
+    /// Tecla dentro da janela de inspeção. Devolve `true` quando consumiu.
+    fn inspection_key(&mut self, key: &str, modifiers: Modifiers) -> bool {
+        if !self.inspection_modal.is_open() || self.inspection_focus != InspectionFocus::Source {
+            return false;
+        }
+        // Ctrl+Enter executa: a mão já está no teclado, escrevendo a expressão.
+        if modifiers.control && key.eq_ignore_ascii_case("enter") {
+            self.run_inspection_source();
+            return true;
+        }
+        self.inspection_editor.key(
+            &mut self.inspection_source,
+            key,
+            modifiers.shift,
+            modifiers.control,
+        );
+        true
     }
 
     /// Expressão que está sendo inspecionada.
@@ -3761,6 +3842,30 @@ impl IdeShell {
             ),
         }
 
+        // O editor de expressões é o mesmo painel da janela principal, com os
+        // comportamentos de arquivo desligados.
+        self.paint_settings_text(
+            &mut paint,
+            INSPECTION_SOURCE_CAPTION_ID,
+            "Código a executar no quadro atual",
+            Point::new(geometry.source.origin.x, geometry.source.origin.y - 16.0),
+            13.0,
+            IconTint::Muted,
+        );
+        let mut editor = self.inspection_editor.clone();
+        editor.set_bounds(geometry.source);
+        editor.sync(
+            &self.layout_context(),
+            &self.inspection_source,
+            &[],
+            Vec::new(),
+            true,
+        );
+        editor.paint(&mut paint);
+
+        let mut run = self.inspection_run_button.clone();
+        run.layout(&self.layout_context(), geometry.run);
+        run.paint(&mut paint);
         let mut close = self.inspection_close_button.clone();
         close.layout(&self.layout_context(), geometry.close);
         close.paint(&mut paint);
@@ -3778,6 +3883,19 @@ impl IdeShell {
             self.close_inspection();
             return;
         }
+        if geometry.run.contains(point) {
+            self.run_inspection_source();
+            return;
+        }
+        if geometry.source.contains(point) {
+            // O editor cuida do próprio cursor e da própria seleção.
+            self.inspection_editor.set_bounds(geometry.source);
+            self.inspection_editor
+                .pointer_down(&self.inspection_source, point, false);
+            self.inspection_focus = InspectionFocus::Source;
+            return;
+        }
+        self.inspection_focus = InspectionFocus::Tree;
         if !geometry.list.contains(point) {
             return;
         }
@@ -4420,10 +4538,13 @@ fn inspection_items(node: &InspectionNode) -> TreeItem {
     )
 }
 
-/// Os dois painéis da janela de inspeção e o botão de fechar.
+/// Os dois painéis da janela de inspeção e os botões.
 struct InspectionGeometry {
     list: Rect,
     detail: Rect,
+    /// Editor de expressões, na parte de baixo do painel direito.
+    source: Rect,
+    run: Rect,
     close: Rect,
 }
 
@@ -4432,11 +4553,17 @@ fn inspection_geometry(panel: Rect) -> InspectionGeometry {
     let height = (panel.size.height - 112.0).max(80.0);
     let list_width = (panel.size.width - 32.0) * INSPECTION_LIST_FRACTION;
     let list = Rect::new(panel.origin.x + 16.0, top, list_width, height);
-    let detail = Rect::new(
-        list.origin.x + list.size.width + 16.0,
-        top,
-        (panel.size.width - list_width - 48.0).max(80.0),
-        height,
+    let right_x = list.origin.x + list.size.width + 16.0;
+    let right_width = (panel.size.width - list_width - 48.0).max(80.0);
+    // O detalhe fica em cima e o editor embaixo: o valor é o que se lê, o código
+    // é o que se escreve.
+    let detail_height = (height * INSPECTION_DETAIL_FRACTION).max(60.0);
+    let detail = Rect::new(right_x, top, right_width, detail_height);
+    let source = Rect::new(
+        right_x,
+        top + detail_height + 18.0,
+        right_width,
+        (height - detail_height - 18.0).max(60.0),
     );
     let close = Rect::new(
         panel.origin.x + panel.size.width - 104.0,
@@ -4444,9 +4571,12 @@ fn inspection_geometry(panel: Rect) -> InspectionGeometry {
         88.0,
         34.0,
     );
+    let run = Rect::new(close.origin.x - 108.0, close.origin.y, 98.0, 34.0);
     InspectionGeometry {
         list,
         detail,
+        source,
+        run,
         close,
     }
 }
@@ -7110,6 +7240,63 @@ mod tests {
                 .any(|text| text.contains("nome = (String) João da Silva")),
             "o campo do objeto aninhado precisa aparecer"
         );
+    }
+
+    /// O painel direito reusa o editor, com os comportamentos de arquivo
+    /// desligados: escrever ali não é editar um arquivo do projeto.
+    #[test]
+    fn the_inspection_editor_reuses_the_pane_without_file_behaviours() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        let geometry = inspection_layout(&mut shell, size);
+        let capabilities = shell.inspection_editor.capabilities();
+        assert!(!capabilities.save, "não há arquivo para salvar");
+        assert!(!capabilities.navigation, "não há definição para navegar");
+        assert!(!capabilities.breakpoint_gutter, "não há linha onde parar");
+        assert!(!capabilities.context_menu);
+
+        // Clicar no editor leva o foco e a digitação para lá.
+        shell.pointer_down(
+            Point::new(geometry.source.origin.x + 60.0, geometry.source.origin.y + 8.0),
+            size,
+        );
+        shell.text_input("pedido.total");
+        assert_eq!(shell.inspection_source(), "pedido.total");
+        // O documento aberto no editor principal não foi tocado.
+        assert_eq!(shell.active_text(), Some("int total = 10;"));
+    }
+
+    /// Executar pede a avaliação do que foi digitado.
+    #[test]
+    fn running_the_inspection_source_asks_for_its_evaluation() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        let geometry = inspection_layout(&mut shell, size);
+        shell.pointer_down(
+            Point::new(geometry.source.origin.x + 60.0, geometry.source.origin.y + 8.0),
+            size,
+        );
+        shell.text_input("pedido.cliente.nome");
+        shell.pointer_down(
+            Point::new(geometry.run.origin.x + 10.0, geometry.run.origin.y + 10.0),
+            size,
+        );
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("pedido.cliente.nome".to_owned())]
+        );
+    }
+
+    /// Sem nada escrito, Executar avisa em vez de pedir a avaliação do vazio.
+    #[test]
+    fn running_an_empty_source_asks_nothing() {
+        let mut shell = shell_editing("int total = 10;");
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        shell.run_inspection_source();
+        assert!(shell.take_debug_requests().is_empty());
+        assert_eq!(shell.status_message(), "Escreva a expressão a executar");
     }
 
     /// Esc e o botão Fechar dispensam a janela.
