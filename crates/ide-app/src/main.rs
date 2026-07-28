@@ -905,6 +905,19 @@ impl NativeIde {
                         });
                     }
                 }
+                DebugRequest::Evaluate(expression) => {
+                    // A avaliação acontece no quadro que o usuário está olhando:
+                    // o mesmo nome vale coisas diferentes em quadros diferentes.
+                    if let Some(thread) = self.debug_thread {
+                        self.send_debug(debug::DebugCommand::Evaluate {
+                            thread,
+                            frame: self.debug_view.selected_frame,
+                            expression,
+                        });
+                    } else if let Some(shell) = self.shell.as_mut() {
+                        shell.set_status_message("Nenhuma thread parada para inspecionar");
+                    }
+                }
             }
         }
         if self.shell.as_mut().is_some_and(IdeShell::take_run_request) {

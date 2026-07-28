@@ -46,6 +46,12 @@ pub(crate) enum DebugCommand {
         thread: ThreadId,
         frame: usize,
     },
+    /// Avalia uma expressão no quadro escolhido e relata o valor.
+    Evaluate {
+        thread: ThreadId,
+        frame: usize,
+        expression: String,
+    },
 }
 
 pub(crate) enum DebugUiEvent {
@@ -226,6 +232,21 @@ async fn worker(mut commands: UnboundedReceiver<DebugCommand>, ui: Sender<DebugU
                     let _ = active.detach().await;
                 }
             }
+            DebugCommand::Evaluate {
+                thread,
+                frame,
+                expression,
+            } => {
+                let Some(active) = session.as_ref() else {
+                    continue;
+                };
+                let message =
+                    match evaluate_in_frame(active.as_ref(), thread, frame, &expression).await {
+                        Ok(value) => value,
+                        Err(error) => error,
+                    };
+                let _ = ui.send(DebugUiEvent::Status(message));
+            }
             DebugCommand::Refresh { thread, frame } => {
                 let Some(active) = session.as_ref() else {
                     continue;
@@ -244,6 +265,34 @@ async fn worker(mut commands: UnboundedReceiver<DebugCommand>, ui: Sender<DebugU
     if let Some(active) = session.take() {
         let _ = active.detach().await;
     }
+}
+
+/// Avalia uma expressão no quadro pedido e descreve o resultado.
+///
+/// O quadro chega por índice, que é como a interface o conhece; o identificador
+/// que o alvo entende sai da pilha atual, porque ela pode ter mudado desde a
+/// última leitura.
+async fn evaluate_in_frame(
+    session: &dyn DebugSession,
+    thread: ThreadId,
+    frame: usize,
+    expression: &str,
+) -> Result<String, String> {
+    let frames = session
+        .stack_trace(thread)
+        .await
+        .map_err(|error| error.to_string())?;
+    let selected = frames
+        .get(frame.min(frames.len().saturating_sub(1)))
+        .ok_or_else(|| "Nenhum quadro para inspecionar".to_owned())?;
+    let value = session
+        .evaluate(thread, selected.id, expression)
+        .await
+        .map_err(|error| format!("{expression}: {error}"))?;
+    Ok(match value.type_name {
+        Some(type_name) => format!("{expression} = {} ({type_name})", value.value),
+        None => format!("{expression} = {}", value.value),
+    })
 }
 
 /// Registra os breakpoints de um arquivo e informa o resultado à interface.

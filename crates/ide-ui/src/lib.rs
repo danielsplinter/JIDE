@@ -141,6 +141,12 @@ pub enum DebugRequest {
     StepOut,
     Detach,
     SelectFrame(usize),
+    /// Avalia uma expressão no quadro selecionado.
+    ///
+    /// É o que "Inspecionar" pede sobre o trecho marcado no editor: o valor de um
+    /// nome só existe com a execução parada, e é o quadro atual que lhe dá
+    /// sentido.
+    Evaluate(String),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1844,6 +1850,7 @@ impl IdeShell {
             self.focus = ShellFocus::Editor;
             self.context_menu.set_entries(editor_menu_entries(
                 self.editor_selection_range().is_some(),
+                self.debug.attached,
             ));
             self.context_menu.layout(
                 &self.layout_context(),
@@ -1945,6 +1952,10 @@ impl IdeShell {
             }
             "editor.paste" => {
                 self.paste_clipboard();
+                return;
+            }
+            "debug.inspect" => {
+                self.inspect_selection();
                 return;
             }
             _ => {}
@@ -2699,6 +2710,24 @@ impl IdeShell {
         self.editor_selection = Some((start, end));
         self.editor_selecting = false;
         self.cursor_offset = end;
+    }
+
+    /// Pede a avaliação do trecho marcado no quadro atual da depuração.
+    fn inspect_selection(&mut self) {
+        let Some(range) = self.editor_selection_range() else {
+            return;
+        };
+        let Some(expression) = self
+            .active_text()
+            .and_then(|text| text.get(range))
+            .map(str::trim)
+            .filter(|expression| !expression.is_empty())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        self.status_message = format!("Inspecionando {expression}");
+        self.debug_requests.push(DebugRequest::Evaluate(expression));
     }
 
     /// Copia o trecho selecionado para a área de transferência do sistema.
@@ -4444,15 +4473,27 @@ fn compact_package_chain(node: &FileNode) -> (&FileNode, String) {
 /// Copiar sem seleção não tem o que copiar, então aparece desabilitado em vez de
 /// sumir: um item que troca de lugar entre duas aberturas faz o usuário procurar
 /// a ação onde ela não está mais.
-fn editor_menu_entries(has_selection: bool) -> Vec<MenuEntry> {
+fn editor_menu_entries(has_selection: bool, debugging: bool) -> Vec<MenuEntry> {
     let copy = MenuItem::new("Copiar", CommandId("editor.copy".to_owned()));
-    vec![
+    let mut entries = vec![
         MenuEntry::Item(if has_selection { copy } else { copy.disabled() }),
         MenuEntry::Item(MenuItem::new(
             "Colar",
             CommandId("editor.paste".to_owned()),
         )),
-    ]
+    ];
+    // Inspecionar só existe com uma sessão de depuração de pé: fora dela não há
+    // quadro que dê valor ao nome, e o item prometeria o que não pode cumprir.
+    if debugging {
+        entries.push(MenuEntry::Separator);
+        let inspect = MenuItem::new("Inspecionar", CommandId("debug.inspect".to_owned()));
+        entries.push(MenuEntry::Item(if has_selection {
+            inspect
+        } else {
+            inspect.disabled()
+        }));
+    }
+    entries
 }
 
 /// Ações que fazem sentido no diretório clicado.
@@ -6543,6 +6584,61 @@ mod tests {
         shell.editor_selection = Some((0, 5));
         shell.secondary_pointer_down(editor_column(&shell, size, 2), size);
         assert!(copy_enabled(shell.context_menu.entries()));
+    }
+
+    /// Sem depuração em curso o menu do editor não oferece Inspecionar.
+    ///
+    /// Fora de uma sessão não há quadro que dê valor ao nome, e o item prometeria
+    /// o que não pode cumprir.
+    #[test]
+    fn inspect_only_appears_while_debugging() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.editor_selection = Some((4, 9));
+        shell.secondary_pointer_down(editor_column(&shell, size, 6), size);
+        assert_eq!(
+            entry_labels(shell.context_menu.entries()),
+            vec!["Copiar", "Colar"]
+        );
+
+        shell.debug.attached = true;
+        shell.secondary_pointer_down(editor_column(&shell, size, 6), size);
+        assert_eq!(
+            entry_labels(shell.context_menu.entries()),
+            vec!["Copiar", "Colar", "—", "Inspecionar"]
+        );
+    }
+
+    /// Inspecionar pede a avaliação do trecho marcado.
+    #[test]
+    fn inspecting_asks_to_evaluate_the_selected_text() {
+        let mut shell = shell_editing("int total = 10;");
+        shell.debug.attached = true;
+        shell.editor_selection = Some((4, 9));
+        shell.run_explorer_command("debug.inspect");
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("total".to_owned())]
+        );
+        assert_eq!(shell.status_message(), "Inspecionando total");
+    }
+
+    /// Sem seleção, Inspecionar aparece desabilitado e nada é pedido.
+    #[test]
+    fn inspecting_without_a_selection_asks_nothing() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.debug.attached = true;
+        shell.secondary_pointer_down(editor_column(&shell, size, 6), size);
+        let entries = shell.context_menu.entries();
+        let enabled = match &entries[3] {
+            MenuEntry::Item(item) => item.enabled,
+            MenuEntry::Separator => true,
+        };
+        assert!(!enabled, "sem seleção não há o que inspecionar");
+
+        shell.run_explorer_command("debug.inspect");
+        assert!(shell.take_debug_requests().is_empty());
     }
 
     /// As setas verticais movem o cursor entre linhas, preservando a coluna.

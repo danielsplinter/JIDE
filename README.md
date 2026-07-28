@@ -171,6 +171,13 @@ sai dele. `Depurar → Desconectar` encerra a sessão e o processo segue rodando
 normalmente. Inspecionar valores nunca executa código no alvo: variáveis,
 `this` e campos são lidos, mas chamadas de método são recusadas.
 
+Com a sessão de pé, selecionar uma variável no editor e clicar com o **botão
+direito** oferece **Inspecionar**, que avalia o trecho marcado no quadro
+selecionado e mostra o valor e o tipo na barra de estado. O item só aparece
+durante a depuração — fora dela não há quadro que dê valor ao nome — e fica
+desabilitado sem seleção. O quadro é o que estiver escolhido no painel: o mesmo
+nome vale coisas diferentes em quadros diferentes.
+
 ## Verificação
 
 ```text
