@@ -17,7 +17,7 @@ use ide_domain::{
 use ide_terminal::{ShellKind, TerminalSession};
 use ide_text::{EditorSession, TextBuffer};
 use ui_editor::{
-    CodeEditor, GutterMark, LineDecoration, SyntaxSpan, TextRange as EditorRange, TokenKind,
+    CodeEditor, GutterMark, LineDecoration, TokenKind,
 };
 use ide_workspace::{FileNode, WorkspaceError};
 use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
@@ -47,7 +47,6 @@ const EXPLORER_TOP: f32 = 106.0;
 /// as consulta para posicionar cursor, popup e cliques no mesmo lugar.
 const EDITOR_LINE_HEIGHT: f32 = CodeEditor::line_height();
 /// Largura de uma parada de tabulação, em colunas.
-const EDITOR_INDENT: usize = 4;
 const EDITOR_GUTTER: f32 = CodeEditor::gutter_width();
 /// Largura do caractere na fonte de código, definida pelo editor que a desenha.
 const EDITOR_CHAR_WIDTH: f32 = CodeEditor::default_char_width();
@@ -117,7 +116,6 @@ const EXPLORER_HORIZONTAL_SCROLLBAR_ID: WidgetId = WidgetId(10_021);
 const EXPLORER_TREE_ID: WidgetId = WidgetId(10_020);
 const SIDEBAR_SPLITTER_ID: WidgetId = WidgetId(10_022);
 const TERMINAL_SPLITTER_ID: WidgetId = WidgetId(10_023);
-const EDITOR_VIEW_ID: WidgetId = WidgetId(10_024);
 const EXPLORER_CONTEXT_MENU_ID: WidgetId = WidgetId(10_025);
 const COMPLETION_POPUP_ID: WidgetId = WidgetId(10_026);
 const COMPLETION_LIST_ID: WidgetId = WidgetId(10_027);
@@ -410,12 +408,15 @@ pub struct IdeShell {
     context_menu_target: Option<PathBuf>,
     expanded: HashSet<PathBuf>,
     editor: EditorSession,
-    cursor_offset: usize,
+    /// Painel de edição do editor principal, com tudo ligado.
+    ///
+    /// Cursor, seleção, rolagem e a view de desenho vivem nele — o shell entrega
+    /// o buffer do documento ativo e reage ao que o painel pede.
+    editor_pane: EditorPane,
     focus: ShellFocus,
     search_query: String,
     terminals: Vec<TerminalTab>,
     active_terminal: usize,
-    editor_scroll_line: usize,
     explorer_scroll_x: f32,
     explorer_scroll_line: usize,
     sidebar_width: f32,
@@ -444,20 +445,11 @@ pub struct IdeShell {
     ///
     /// Quem navega não conhece a altura do editor; ela só existe na pintura, que
     /// é onde a revelação acontece.
-    pending_reveal: Option<usize>,
-    /// Cópia do documento ativo para desenho, com a revisão que a originou.
-    ///
-    /// O texto continua sendo do `EditorSession`; o editor da biblioteca é
-    /// quem o desenha, e é reconstruído só quando a revisão muda.
-    editor_view: Option<(DocumentId, u64, CodeEditor)>,
-    /// Seleção do editor em bytes: âncora e foco.
     ///
     /// A IDE conta bytes e o editor da biblioteca conta caracteres, então a
     /// conversão fica na borda entre os dois — guardar em caracteres faria toda
     /// edição converter de volta.
-    editor_selection: Option<(usize, usize)>,
     /// Arraste de seleção em curso no editor.
-    editor_selecting: bool,
     /// Divisores redimensionáveis do layout, com limites em pontos.
     ///
     /// Eles guardam o arraste entre um evento e o seguinte; a posição e os
@@ -647,12 +639,11 @@ impl IdeShell {
             context_menu_target: None,
             expanded,
             editor: EditorSession::default(),
-            cursor_offset: 0,
+            editor_pane: EditorPane::new(EditorCapabilities::full()),
             focus: ShellFocus::None,
             search_query: String::new(),
             terminals,
             active_terminal: 0,
-            editor_scroll_line: 0,
             explorer_scroll_x: 0.0,
             explorer_scroll_line: 0,
             sidebar_width: SIDEBAR_WIDTH,
@@ -662,10 +653,6 @@ impl IdeShell {
             text_metrics: None,
             clipboard: None,
             navigated: None,
-            pending_reveal: None,
-            editor_view: None,
-            editor_selection: None,
-            editor_selecting: false,
             sidebar_splitter: Splitter::new(SIDEBAR_SPLITTER_ID, SplitOrientation::Horizontal),
             terminal_splitter: Splitter::new(TERMINAL_SPLITTER_ID, SplitOrientation::Vertical),
             scrollbar_drag: None,
@@ -832,7 +819,7 @@ impl IdeShell {
 
     pub fn open_file(&mut self, path: &Path) -> Result<DocumentId, String> {
         let id = self.editor.open(path).map_err(|error| error.to_string())?;
-        self.cursor_offset = 0;
+        self.editor_pane.set_cursor(0);
         self.focus = ShellFocus::Editor;
         self.status_message = format!("Opened {}", path.display());
         Ok(id)
@@ -880,14 +867,14 @@ impl IdeShell {
     }
     pub fn completion_request(&self) -> Option<CompletionRequest> {
         let document = self.editor.active()?;
-        let (line, column) = line_column(document.buffer.text(), self.cursor_offset);
+        let (line, column) = line_column(document.buffer.text(), self.editor_pane.cursor());
         Some(CompletionRequest {
             document_id: document.id,
             position: DomainTextPosition {
                 line: line as u32,
                 column: column as u32,
             },
-            prefix: identifier_prefix(document.buffer.text(), self.cursor_offset),
+            prefix: identifier_prefix(document.buffer.text(), self.editor_pane.cursor()),
         })
     }
     pub fn set_completions(&mut self, items: Vec<CompletionItem>) {
@@ -1079,7 +1066,14 @@ impl IdeShell {
         let Some(document) = self.editor.active() else {
             return false;
         };
-        let offset = self.offset_at_point(point, editor_x, geometry.content_top);
+        let mut pane = self.editor_pane.clone();
+        pane.set_bounds(Rect::new(
+            editor_x,
+            geometry.content_top,
+            geometry.editor_width,
+            geometry.editor_height,
+        ));
+        let offset = pane.offset_at_point(&document.buffer, point);
         if token_at(document.buffer.text(), offset).is_none() {
             return false;
         }
@@ -1126,7 +1120,7 @@ impl IdeShell {
         self.active_terminal().selected_profile().kind
     }
     pub const fn editor_scroll_line(&self) -> usize {
-        self.editor_scroll_line
+        self.editor_pane.scroll_line()
     }
     pub fn terminal_scroll_line(&self) -> usize {
         self.terminals[self.active_terminal].scroll_line
@@ -1176,7 +1170,7 @@ impl IdeShell {
             return;
         };
         let path = document.path.clone();
-        let (line, _) = line_column(document.buffer.text(), self.cursor_offset);
+        let (line, _) = line_column(document.buffer.text(), self.editor_pane.cursor());
         self.toggle_breakpoint(&path, line as u32);
     }
 
@@ -1409,7 +1403,7 @@ impl IdeShell {
                 self.editor_scrollbar_rect(size),
                 self.active_text().map_or(0, |text| text.lines().count()) as f32,
                 self.editor_visible_lines(size) as f32,
-                self.editor_scroll_line as f32,
+                self.editor_pane.scroll_line() as f32,
             ),
             ScrollTarget::Terminal => {
                 let active = &self.terminals[self.active_terminal];
@@ -1461,7 +1455,9 @@ impl IdeShell {
     fn apply_scrollbar(&mut self, target: ScrollTarget) {
         let offset = self.scrollbar_mut(target).offset();
         match target {
-            ScrollTarget::Editor => self.editor_scroll_line = offset.round().max(0.0) as usize,
+            ScrollTarget::Editor => self
+                .editor_pane
+                .set_scroll_line(offset.round().max(0.0) as usize),
             ScrollTarget::Terminal => {
                 let maximum = self.terminal_scrollbar.max_offset();
                 let active = self.active_terminal;
@@ -1648,13 +1644,6 @@ impl IdeShell {
             )
     }
 
-    /// Linha da calha sob o ponteiro, respondida pelo próprio editor.
-    fn gutter_line_at(&mut self, point: Point, size: Size) -> Option<usize> {
-        self.refresh_editor_view(size);
-        self.editor_view
-            .as_ref()
-            .and_then(|(_, _, editor)| editor.gutter_line_at(point))
-    }
 
     fn editor_view_rect(&self, size: Size) -> Rect {
         let geometry = self.geometry(size);
@@ -1666,73 +1655,33 @@ impl IdeShell {
         )
     }
 
-    /// Mantém a cópia de desenho alinhada ao documento, ao realce sintático, aos
-    /// pontos de parada e à rolagem.
+    /// Alinha o painel de edição ao documento, ao realce e às decorações.
     ///
-    /// O texto só é copiado quando a revisão muda; o resto é barato e vai a cada
-    /// quadro, porque muda por fora do editor — o depurador pára em outra linha,
-    /// o analisador entrega outro realce.
-    fn refresh_editor_view(&mut self, size: Size) {
+    /// O texto vive no documento; o painel guarda cursor, seleção, rolagem e a
+    /// cópia de desenho, e só refaz esta última quando a revisão muda.
+    fn sync_editor_pane(&mut self, size: Size) {
         let Some(document) = self.editor.active() else {
-            self.editor_view = None;
             return;
         };
-        let (id, revision) = (document.id, document.buffer.revision());
-        let stale = !matches!(&self.editor_view, Some((view_id, view_revision, _))
-            if *view_id == id && *view_revision == revision);
-        if stale {
-            let editor = CodeEditor::new(EDITOR_VIEW_ID, document.buffer.text());
-            self.editor_view = Some((id, revision, editor));
-        }
-        let path = document.path.clone();
+        let (id, revision, path) = (document.id, document.buffer.revision(), document.path.clone());
         let syntax = self.editor_syntax(id, revision);
         let decorations = self.editor_decorations(&path);
         let focused = self.focus == ShellFocus::Editor;
-        // A IDE conta bytes e o editor conta caracteres: sem converter, o cursor
-        // sairia do lugar no primeiro acento do arquivo.
-        let text = document.buffer.text();
-        let cursor = text
-            .get(..self.cursor_offset.min(text.len()))
-            .unwrap_or(text)
-            .chars()
-            .count();
-        // A seleção também vai em caracteres, e por isso é convertida aqui.
-        let selection = self.editor_selection_range().map(|range| {
-            let chars = |offset: usize| {
-                text.get(..offset.min(text.len()))
-                    .unwrap_or(text)
-                    .chars()
-                    .count()
-            };
-            EditorRange::new(chars(range.start), chars(range.end))
-        });
-        let scroll_line = self.editor_scroll_line;
-        let reveal = self.pending_reveal;
         let bounds = self.editor_view_rect(size);
         let context = self.layout_context();
-        let Some((_, _, editor)) = self.editor_view.as_mut() else {
+        self.editor_pane.set_bounds(bounds);
+        let Some(document) = self.editor.active() else {
             return;
         };
-        editor.layout(&context, bounds);
-        editor.set_syntax(syntax);
-        editor.set_decorations(decorations);
-        editor.set_focused(focused);
-        editor.set_cursor(cursor);
-        // Depois do cursor: `set_cursor` significa "cursor movido, sem seleção" e
-        // limpa a âncora, então a ordem inversa apagaria a seleção todo quadro.
-        editor.set_selection(selection);
-        editor.set_scroll_line(scroll_line);
-        if let Some(line) = reveal {
-            editor.reveal_line(line);
-        }
-        let scrolled = editor.scroll_line();
-        self.editor_scroll_line = scrolled;
-        self.pending_reveal = None;
+        self.editor_pane
+            .sync(&context, &document.buffer, &syntax, decorations, focused);
     }
 
     /// Converte o realce da IDE, que fala em linha e coluna, para os intervalos
     /// absolutos que o editor da biblioteca usa.
-    fn editor_syntax(&self, id: DocumentId, revision: u64) -> Vec<SyntaxSpan> {
+    /// Converte o realce, que fala em linha e coluna, para deslocamentos em
+    /// caracteres — que é como o editor da biblioteca conta.
+    fn editor_syntax(&self, id: DocumentId, revision: u64) -> Vec<(usize, usize, TokenKind)> {
         let Some(snapshot) = self
             .syntax_snapshots
             .get(&id)
@@ -1740,25 +1689,18 @@ impl IdeShell {
         else {
             return Vec::new();
         };
-        let Some((_, _, editor)) = self.editor_view.as_ref() else {
+        let Some(text) = self.active_text() else {
             return Vec::new();
         };
-        let buffer = editor.buffer();
         snapshot
             .highlights
             .iter()
-            .map(|highlight| SyntaxSpan {
-                range: EditorRange::new(
-                    buffer.offset(
-                        highlight.range.start.line as usize,
-                        highlight.range.start.column as usize,
-                    ),
-                    buffer.offset(
-                        highlight.range.end.line as usize,
-                        highlight.range.end.column as usize,
-                    ),
-                ),
-                token_kind: token_kind_for(highlight.kind),
+            .map(|highlight| {
+                (
+                    char_offset_of(text, highlight.range.start),
+                    char_offset_of(text, highlight.range.end),
+                    token_kind_for(highlight.kind),
+                )
             })
             .collect()
     }
@@ -1797,7 +1739,7 @@ impl IdeShell {
         }
         // Destino da última navegação, enquanto o cursor não sair de lá.
         if let Some((line, cursor)) = self.navigated
-            && cursor == self.cursor_offset
+            && cursor == self.editor_pane.cursor()
         {
             destacar(&mut decorations, line);
         }
@@ -1982,7 +1924,7 @@ impl IdeShell {
         {
             self.focus = ShellFocus::Editor;
             self.context_menu.set_entries(editor_menu_entries(
-                self.editor_selection_range().is_some(),
+                self.editor_pane.selection_range().is_some(),
                 self.debug.attached,
             ));
             self.context_menu.layout(
@@ -2313,14 +2255,14 @@ impl IdeShell {
             match tab_command(&mut tabs, point) {
                 Some(TabCommand::Select(id)) => {
                     let _ = self.editor.activate(DocumentId(id));
-                    self.cursor_offset = 0;
+                    self.editor_pane.set_cursor(0);
                     self.focus = ShellFocus::Editor;
                 }
                 Some(TabCommand::Close(id)) => {
                     let id = DocumentId(id);
                     if self.editor.close(id).is_ok() {
                         self.syntax_snapshots.remove(&id);
-                        self.cursor_offset = self.active_text().map_or(0, str::len);
+                        self.editor_pane.set_cursor(self.active_text().map_or(0, str::len));
                         self.status_message = "Tab closed".to_owned();
                     }
                 }
@@ -2359,39 +2301,21 @@ impl IdeShell {
             self.debug_panel_pointer_down(point, size);
             return;
         }
-        // A calha é a área de pontos de parada e não posiciona o cursor. Qual
-        // linha foi clicada é o editor quem responde.
-        if let Some(line) = self.gutter_line_at(point, size) {
-            if let Some(path) = self.editor.active().map(|document| document.path.clone()) {
-                self.toggle_breakpoint(&path, line as u32);
-            }
-            return;
-        }
         if point.x >= editor_x
             && point.x < editor_x + geometry.editor_width
             && point.y >= geometry.content_top
             && point.y < geometry.editor_bottom
         {
             self.focus = ShellFocus::Editor;
-            self.cursor_offset = self.offset_at_point(point, editor_x, geometry.content_top);
-            // Pressionar fixa a âncora; o movimento seguinte decide se o gesto
-            // virou seleção.
-            self.editor_selection = Some((self.cursor_offset, self.cursor_offset));
-            self.editor_selecting = true;
-            if control
-                && let (Some(document_id), Some(token)) = (
-                    self.editor.active_id(),
-                    self.active_text()
-                        .and_then(|text| token_at(text, self.cursor_offset)),
-                )
-            {
-                self.status_message = format!("Go to definition: {token}");
-                self.pending_navigation = Some(NavigationRequest {
-                    document_id,
-                    byte_offset: self.cursor_offset,
-                    token,
-                });
-            }
+            // O painel cuida de cursor, âncora e calha; o shell só reage ao que
+            // ele pede.
+            let bounds = self.editor_view_rect(size);
+            self.editor_pane.set_bounds(bounds);
+            let Some(document) = self.editor.active() else {
+                return;
+            };
+            let action = self.editor_pane.pointer_down(&document.buffer, point, control);
+            self.handle_editor_action(action);
         } else if point.x >= editor_x && point.y >= geometry.editor_bottom {
             self.focus = ShellFocus::Terminal;
             if point.y < geometry.editor_bottom + TERMINAL_TAB_HEIGHT {
@@ -2415,6 +2339,37 @@ impl IdeShell {
         }
     }
 
+    /// Executa o que o painel de edição pediu.
+    ///
+    /// O painel edita texto; navegar até uma definição, marcar breakpoint,
+    /// gravar e abrir menu são coisas que só o shell tem como fazer.
+    fn handle_editor_action(&mut self, action: EditorAction) {
+        match action {
+            EditorAction::Navigate(offset) => {
+                if let (Some(document_id), Some(token)) = (
+                    self.editor.active_id(),
+                    self.active_text().and_then(|text| token_at(text, offset)),
+                ) {
+                    self.status_message = format!("Go to definition: {token}");
+                    self.pending_navigation = Some(NavigationRequest {
+                        document_id,
+                        byte_offset: offset,
+                        token,
+                    });
+                }
+            }
+            EditorAction::ToggleBreakpoint(line) => {
+                if let Some(path) = self.editor.active().map(|document| document.path.clone()) {
+                    self.toggle_breakpoint(&path, line as u32);
+                }
+            }
+            EditorAction::Save => {
+                self.save_active_document();
+            }
+            EditorAction::ContextMenu(_) | EditorAction::None => {}
+        }
+    }
+
     pub fn open_location(
         &mut self,
         path: &Path,
@@ -2423,11 +2378,11 @@ impl IdeShell {
     ) -> Result<DocumentId, String> {
         let id = self.open_file(path)?;
         let text = self.active_text().unwrap_or_default();
-        self.cursor_offset = offset_for_line_column(text, line, column);
+        self.editor_pane.set_cursor(offset_for_line_column(text, line, column));
         // Sem revelar a linha, a navegação move o cursor para fora da área
         // visível e parece que nada aconteceu.
-        self.pending_reveal = Some(line);
-        self.navigated = Some((line, self.cursor_offset));
+        self.editor_pane.reveal_line(line);
+        self.navigated = Some((line, self.editor_pane.cursor()));
         self.focus = ShellFocus::Editor;
         self.status_message = format!("Definition: {}:{}:{}", path.display(), line + 1, column + 1);
         Ok(id)
@@ -2451,14 +2406,12 @@ impl IdeShell {
             self.apply_scrollbar(target);
             return true;
         }
-        if self.editor_selecting {
-            let geometry = self.geometry(size);
-            let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
-            let focus = self.offset_at_point(point, editor_x, geometry.content_top);
-            self.cursor_offset = focus;
-            if let Some((anchor, _)) = self.editor_selection {
-                self.editor_selection = Some((anchor, focus));
-            }
+        // O arraste no editor é do painel, que sabe se um gesto começou nele.
+        let bounds = self.editor_view_rect(size);
+        self.editor_pane.set_bounds(bounds);
+        if let Some(document) = self.editor.active()
+            && self.editor_pane.pointer_move(&document.buffer, point)
+        {
             return true;
         }
         if self.terminal_selecting {
@@ -2487,14 +2440,8 @@ impl IdeShell {
     }
 
     pub fn pointer_up(&mut self) {
-        self.editor_selecting = false;
-        // Pressionar e soltar no mesmo ponto é um clique, não uma seleção vazia.
-        if self
-            .editor_selection
-            .is_some_and(|(anchor, focus)| anchor == focus)
-        {
-            self.editor_selection = None;
-        }
+        // Encerrar o gesto é do painel, que sabe se ele virou seleção.
+        self.editor_pane.pointer_up();
         let event = UiEvent::PointerUp(primary_pointer(Point::ZERO));
         self.sidebar_splitter
             .event(&mut EventContext::default(), &event);
@@ -2533,10 +2480,12 @@ impl IdeShell {
             let total = self.active_text().map_or(0, |text| text.lines().count());
             let visible = (geo.editor_height / EDITOR_LINE_HEIGHT).floor().max(1.0) as usize;
             let max = total.saturating_sub(visible);
-            self.editor_scroll_line = self
-                .editor_scroll_line
+            let scrolled = self
+                .editor_pane
+                .scroll_line()
                 .saturating_add_signed(delta_lines)
                 .min(max);
+            self.editor_pane.set_scroll_line(scrolled);
         } else if point.y >= geo.editor_bottom && point.y < geo.content_bottom {
             let visible = ((geo.terminal_height - 62.0) / EDITOR_LINE_HEIGHT)
                 .floor()
@@ -2782,77 +2731,39 @@ impl IdeShell {
                 .line_count()
                 .saturating_sub(1);
         } else if self.focus == ShellFocus::Editor {
-            match key.to_ascii_lowercase().as_str() {
-                "enter" => self.edit_active("\n"),
-                // Com um trecho marcado, Tab desloca o bloco inteiro.
-                "tab" if self.editor_selection_range().is_some() => {
-                    self.shift_selected_lines(!modifiers.shift);
-                }
-                "tab" if modifiers.shift => self.unindent(),
-                "tab" => self.indent(),
-                "arrowleft" => {
-                    let target = previous_boundary(
-                        self.active_text().unwrap_or_default(),
-                        self.cursor_offset,
-                    );
-                    self.move_editor_cursor(target, modifiers.shift);
-                }
-                "arrowright" => {
-                    let target =
-                        next_boundary(self.active_text().unwrap_or_default(), self.cursor_offset);
-                    self.move_editor_cursor(target, modifiers.shift);
-                }
-                "arrowup" => self.move_editor_line(-1, modifiers.shift),
-                "arrowdown" => self.move_editor_line(1, modifiers.shift),
-                _ => {}
+            // Edição, seleção e movimento são do painel. O shell cuida do que
+            // sobra: a lista de completação, a marca de modificado e as ações
+            // que o painel não tem como executar.
+            self.completion_items.clear();
+            let Some(document) = self.editor.active_mut() else {
+                return;
+            };
+            let before = document.buffer.revision();
+            let action = self.editor_pane.key(
+                &mut document.buffer,
+                key,
+                modifiers.shift,
+                modifiers.control,
+            );
+            if document.buffer.revision() != before {
+                self.status_message = "Modified".to_owned();
             }
+            self.handle_editor_action(action);
         }
     }
 
     /// Seleciona a palavra sob o ponteiro. É o que o duplo clique pede.
-    ///
-    /// A regra do que é palavra é do editor da biblioteca, que já a tem para o
-    /// próprio uso — reimplementá-la aqui daria duas definições que divergiriam.
-    /// A conversão entre caracteres e bytes fica nesta borda.
     pub fn select_word_at_point(&mut self, point: Point, size: Size) {
-        let geometry = self.geometry(size);
-        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
-        if point.x < editor_x
-            || point.x >= editor_x + geometry.editor_width
-            || point.y < geometry.content_top
-            || point.y >= geometry.editor_bottom
-        {
+        let bounds = self.editor_view_rect(size);
+        self.editor_pane.set_bounds(bounds);
+        if !bounds.contains(point) {
             return;
         }
         self.focus = ShellFocus::Editor;
-        let offset = self.offset_at_point(point, editor_x, geometry.content_top);
-        self.cursor_offset = offset;
-        self.refresh_editor_view(size);
-        let Some(text) = self.active_text().map(str::to_owned) else {
+        let Some(document) = self.editor.active() else {
             return;
         };
-        let chars_before = text
-            .get(..offset.min(text.len()))
-            .unwrap_or(&text)
-            .chars()
-            .count();
-        let Some((_, _, editor)) = self.editor_view.as_mut() else {
-            return;
-        };
-        editor.select_word_at(chars_before);
-        let Some(word) = editor.selection() else {
-            return;
-        };
-        // De volta para bytes, que é como a IDE conta.
-        let bytes_at = |chars: usize| {
-            text.char_indices()
-                .nth(chars)
-                .map_or(text.len(), |(index, _)| index)
-        };
-        let (start, end) = (bytes_at(word.start), bytes_at(word.end));
-        self.editor_selection = Some((start, end));
-        self.editor_selecting = false;
-        self.cursor_offset = end;
+        self.editor_pane.select_word_at(&document.buffer, point);
     }
 
     /// Abre a janela de inspeção com o valor avaliado e seus campos.
@@ -2999,7 +2910,7 @@ impl IdeShell {
 
     /// Pede a avaliação do trecho marcado no quadro atual da depuração.
     fn inspect_selection(&mut self) {
-        let Some(range) = self.editor_selection_range() else {
+        let Some(range) = self.editor_pane.selection_range() else {
             return;
         };
         let Some(expression) = self
@@ -3017,7 +2928,7 @@ impl IdeShell {
 
     /// Copia o trecho selecionado para a área de transferência do sistema.
     pub fn copy_selection(&mut self) -> bool {
-        let Some(range) = self.editor_selection_range() else {
+        let Some(range) = self.editor_pane.selection_range() else {
             self.status_message = "Nada selecionado".to_owned();
             return false;
         };
@@ -3068,200 +2979,30 @@ impl IdeShell {
         }
     }
 
-    /// Move o cursor, estendendo a seleção quando `selecting`.
-    ///
-    /// Sem `Shift` o movimento desfaz a seleção: mover é escolher outro ponto, e
-    /// manter o trecho marcado faria a próxima digitação apagar o que o usuário
-    /// não estava mais olhando.
-    fn move_editor_cursor(&mut self, target: usize, selecting: bool) {
-        if selecting {
-            let anchor = self
-                .editor_selection
-                .map_or(self.cursor_offset, |(anchor, _)| anchor);
-            self.editor_selection = Some((anchor, target));
-        } else {
-            self.editor_selection = None;
-        }
-        self.cursor_offset = target;
-    }
 
-    /// Move o cursor uma linha acima ou abaixo, preservando a coluna.
-    ///
-    /// A coluna é limitada pelo comprimento da linha de destino: descer de uma
-    /// linha longa para uma curta põe o cursor no fim dela, e não num ponto que
-    /// não existe. Na primeira e na última linha o movimento não faz nada, em vez
-    /// de saltar para o começo ou o fim do arquivo.
-    fn move_editor_line(&mut self, delta: isize, selecting: bool) {
-        let Some(text) = self.active_text().map(str::to_owned) else {
-            return;
-        };
-        let (line, column) = line_column(&text, self.cursor_offset);
-        let lines = text.lines().count().max(1);
-        let Some(target_line) = line
-            .checked_add_signed(delta)
-            .filter(|target| *target < lines)
-        else {
-            return;
-        };
-        let target = offset_for_line_column(&text, target_line, column);
-        self.move_editor_cursor(target, selecting);
-    }
-
-    /// Desloca as linhas tocadas pela seleção, para dentro ou para fora.
-    ///
-    /// A regra é a mesma do editor da biblioteca, e é ele quem a executa: a IDE
-    /// converte bytes para caracteres, entrega o intervalo e traz de volta o
-    /// texto e a seleção resultantes.
-    fn shift_selected_lines(&mut self, indent: bool) -> bool {
-        let Some(range) = self.editor_selection_range() else {
-            return false;
-        };
-        let Some(text) = self.active_text().map(str::to_owned) else {
-            return false;
-        };
-        let chars_before = |bytes: usize| {
-            text.get(..bytes.min(text.len()))
-                .unwrap_or(&text)
-                .chars()
-                .count()
-        };
-        // Um editor de rascunho aplica a regra sobre este texto. A view desenhada
-        // é reconstruída a partir do buffer a cada revisão, então mexer nela aqui
-        // seria escrever no lugar errado.
-        let mut editor = CodeEditor::new(EDITOR_VIEW_ID, &text);
-        editor.set_selection(Some(EditorRange::new(
-            chars_before(range.start),
-            chars_before(range.end),
-        )));
-        editor.shift_selected_lines(indent);
-        let updated = editor.buffer().to_text();
-        let shifted = editor.selection();
-        let Some(document) = self.editor.active_mut() else {
-            return false;
-        };
-        let whole = 0..document.buffer.text().len();
-        if document.buffer.replace(whole, &updated).is_err() {
-            return false;
-        }
-        self.status_message = "Modified".to_owned();
-        // De volta para bytes, que é como a IDE conta.
-        let bytes_at = |chars: usize| {
-            updated
-                .char_indices()
-                .nth(chars)
-                .map_or(updated.len(), |(index, _)| index)
-        };
-        match shifted {
-            Some(range) => {
-                let (start, end) = (bytes_at(range.start), bytes_at(range.end));
-                self.editor_selection = Some((start, end));
-                self.cursor_offset = end;
-            }
-            None => self.editor_selection = None,
-        }
-        true
-    }
-
-    /// Intervalo selecionado no editor, em ordem crescente.
-    fn editor_selection_range(&self) -> Option<std::ops::Range<usize>> {
-        let (anchor, focus) = self.editor_selection?;
-        let (start, end) = if anchor <= focus {
-            (anchor, focus)
-        } else {
-            (focus, anchor)
-        };
-        (start < end).then_some(start..end)
-    }
-
-    /// Apaga o trecho selecionado. Devolve `true` quando havia algo para apagar.
-    ///
-    /// Digitar ou apagar com um trecho marcado age sobre ele — é para isso que
-    /// selecionar serve.
-    fn delete_editor_selection(&mut self) -> bool {
-        let Some(range) = self.editor_selection_range() else {
-            return false;
-        };
-        self.editor_selection = None;
-        let start = range.start;
-        let Some(document) = self.editor.active_mut() else {
-            return false;
-        };
-        if document.buffer.replace(range, "").is_ok() {
-            self.cursor_offset = start;
-            self.status_message = "Modified".to_owned();
-            return true;
-        }
-        false
-    }
-
+    /// Escreve no documento ativo pelo painel de edição.
     fn edit_active(&mut self, text: &str) {
         self.completion_items.clear();
-        // O que estava selecionado sai antes de o novo texto entrar.
-        self.delete_editor_selection();
-        if let Some(document) = self.editor.active_mut() {
-            let cursor = self.cursor_offset.min(document.buffer.text().len());
-            if document.buffer.replace(cursor..cursor, text).is_ok() {
-                self.cursor_offset = cursor + text.len();
-                self.status_message = "Modified".to_owned();
-            }
-        }
-    }
-
-    /// Avança até a próxima parada de tabulação, escrevendo espaços.
-    ///
-    /// O editor desenha e mede o texto por coluna de largura fixa; um `\t`
-    /// contaria como uma coluna e ocuparia várias na tela, e o cursor deixaria
-    /// de cair onde o clique cai.
-    fn indent(&mut self) {
-        let (_, column) = line_column(self.active_text().unwrap_or_default(), self.cursor_offset);
-        let spaces = EDITOR_INDENT - column % EDITOR_INDENT;
-        self.edit_active(&" ".repeat(spaces));
-    }
-
-    /// Recolhe a indentação da linha, e não o que está antes do cursor.
-    fn unindent(&mut self) {
-        self.completion_items.clear();
         let Some(document) = self.editor.active_mut() else {
             return;
         };
-        let text = document.buffer.text();
-        let cursor = self.cursor_offset.min(text.len());
-        let line_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
-        let removable = text[line_start..]
-            .chars()
-            .take(EDITOR_INDENT)
-            .take_while(|value| *value == ' ')
-            .count();
-        if removable == 0 {
-            return;
-        }
-        if document
-            .buffer
-            .replace(line_start..line_start + removable, "")
-            .is_ok()
-        {
-            self.cursor_offset = cursor.saturating_sub(removable).max(line_start);
+        if self.editor_pane.insert(&mut document.buffer, text) {
             self.status_message = "Modified".to_owned();
         }
     }
+
+
 
     fn backspace(&mut self) {
         self.completion_items.clear();
-        // Com trecho marcado, apagar é apagar o trecho.
-        if self.delete_editor_selection() {
+        let Some(document) = self.editor.active_mut() else {
             return;
-        }
-        if let Some(document) = self.editor.active_mut() {
-            let previous = previous_boundary(document.buffer.text(), self.cursor_offset);
-            if previous < self.cursor_offset
-                && document
-                    .buffer
-                    .replace(previous..self.cursor_offset, "")
-                    .is_ok()
-            {
-                self.cursor_offset = previous;
-                self.status_message = "Modified".to_owned();
-            }
+        };
+        let before = document.buffer.revision();
+        self.editor_pane
+            .key(&mut document.buffer, "backspace", false, false);
+        if document.buffer.revision() != before {
+            self.status_message = "Modified".to_owned();
         }
     }
 
@@ -3270,35 +3011,17 @@ impl IdeShell {
             return;
         };
         if let Some(document) = self.editor.active_mut() {
-            let cursor = self.cursor_offset.min(document.buffer.text().len());
+            let cursor = self.editor_pane.cursor().min(document.buffer.text().len());
             let prefix = identifier_prefix(document.buffer.text(), cursor);
             let start = cursor.saturating_sub(prefix.len());
             if document.buffer.replace(start..cursor, &item.label).is_ok() {
-                self.cursor_offset = start + item.label.len();
+                self.editor_pane.set_cursor(start + item.label.len());
                 self.status_message = format!("Completed {}", item.label);
             }
         }
         self.completion_items.clear();
     }
 
-    fn offset_at_point(&self, point: Point, editor_x: f32, editor_top: f32) -> usize {
-        let Some(text) = self.active_text() else {
-            return 0;
-        };
-        let line_index = self.editor_scroll_line
-            + ((point.y - editor_top) / EDITOR_LINE_HEIGHT).floor().max(0.0) as usize;
-        let column = ((point.x - editor_x - EDITOR_GUTTER) / EDITOR_CHAR_WIDTH)
-            .round()
-            .max(0.0) as usize;
-        let mut offset = 0;
-        for (index, line) in text.split('\n').enumerate() {
-            if index == line_index {
-                return offset + byte_at_column(line, column);
-            }
-            offset += line.len() + 1;
-        }
-        text.len()
-    }
 
     fn visible_entries(&self) -> Vec<(usize, &FileNode)> {
         fn visit<'a>(
@@ -3461,12 +3184,10 @@ impl IdeShell {
             // O editor da biblioteca desenha calha, números, realce, marcas de
             // ponto de parada, linha em execução e cursor. A IDE entrega o
             // texto, o realce e as decorações.
-            self.refresh_editor_view(size);
-            if let Some((_, _, editor)) = self.editor_view.as_ref() {
-                let mut editor_paint = self.paint_context();
-                editor.paint(&mut editor_paint);
-                commands.extend(editor_paint.into_commands());
-            }
+            self.sync_editor_pane(size);
+            let mut editor_paint = self.paint_context();
+            self.editor_pane.paint(&mut editor_paint);
+            commands.extend(editor_paint.into_commands());
             commands.extend(self.paint_scrollbar(ScrollTarget::Editor, size));
         } else {
             commands.push(label(
@@ -3558,13 +3279,13 @@ impl IdeShell {
             && self.focus == ShellFocus::Editor
             && let Some(text) = self.active_text()
         {
-            let (line, column) = line_column(text, self.cursor_offset);
+            let (line, column) = line_column(text, self.editor_pane.cursor());
             let popup_x = (editor_x + EDITOR_GUTTER + column as f32 * EDITOR_CHAR_WIDTH)
                 .min(size.width - 270.0)
                 .max(editor_x + EDITOR_GUTTER);
             let popup_y = (geo.content_top
                 + 36.0
-                + line.saturating_sub(self.editor_scroll_line) as f32 * EDITOR_LINE_HEIGHT)
+                + line.saturating_sub(self.editor_pane.scroll_line()) as f32 * EDITOR_LINE_HEIGHT)
                 .min(geo.editor_bottom - 190.0);
             // Superfície flutuante e lista são da biblioteca: a IDE só diz onde
             // ancorar, o que listar e o que está selecionado.
@@ -3625,7 +3346,7 @@ impl IdeShell {
         }
         let position = self
             .active_text()
-            .map(|text| line_column(text, self.cursor_offset))
+            .map(|text| line_column(text, self.editor_pane.cursor()))
             .unwrap_or((0, 0));
         // A barra de estado é da biblioteca: superfície, borda, alinhamento e
         // recorte vêm de lá. A IDE só diz o que cada segmento informa — a
@@ -4804,6 +4525,20 @@ fn byte_at_column(text: &str, column: usize) -> usize {
         .nth(column)
         .map_or(text.len(), |(index, _)| index)
 }
+/// Deslocamento em caracteres de uma posição em linha e coluna.
+///
+/// O realce chega em linha e coluna, e o editor da biblioteca conta caracteres.
+fn char_offset_of(text: &str, position: DomainTextPosition) -> usize {
+    let mut offset = 0;
+    for (index, line) in text.lines().enumerate() {
+        if index == position.line as usize {
+            return offset + (position.column as usize).min(line.chars().count());
+        }
+        offset += line.chars().count() + 1;
+    }
+    offset
+}
+
 fn line_column(text: &str, cursor: usize) -> (usize, usize) {
     let prefix = &text[..cursor.min(text.len())];
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
@@ -5350,10 +5085,10 @@ mod tests {
         let mut shell = test_shell();
         shell.editor.open_memory("Example.java", "ab");
         shell.focus = ShellFocus::Editor;
-        shell.cursor_offset = 2;
+        shell.editor_pane.set_cursor(2);
         shell.key_down("Tab");
         assert_eq!(shell.active_text(), Some("ab  "));
-        assert_eq!(shell.cursor_offset, 4);
+        assert_eq!(shell.editor_pane.cursor(), 4);
     }
 
     /// Shift+Tab recolhe a margem da linha inteira, com o cursor no meio do
@@ -5365,7 +5100,7 @@ mod tests {
             .editor
             .open_memory("Example.java", "class A {\n    int valor;\n}");
         shell.focus = ShellFocus::Editor;
-        shell.cursor_offset = 14;
+        shell.editor_pane.set_cursor(14);
         shell.key_down_with_modifiers(
             "Tab",
             Modifiers {
@@ -5374,7 +5109,7 @@ mod tests {
             },
         );
         assert_eq!(shell.active_text(), Some("class A {\nint valor;\n}"));
-        assert_eq!(shell.cursor_offset, 10);
+        assert_eq!(shell.editor_pane.cursor(), 10);
     }
 
     fn entry_labels(entries: &[MenuEntry]) -> Vec<String> {
@@ -5564,7 +5299,7 @@ mod tests {
     #[test]
     fn toggling_from_the_keyboard_uses_the_cursor_line() {
         let (mut shell, path) = shell_with_java_file();
-        shell.cursor_offset = 20; // segunda linha
+        shell.editor_pane.set_cursor(20); // segunda linha
         shell.toggle_breakpoint_at_cursor();
         assert_eq!(shell.breakpoints_for(&path), vec![1]);
     }
@@ -5998,7 +5733,7 @@ mod tests {
         let mut shell = test_shell();
         shell.editor.open_memory("Example.java", "Exa");
         shell.focus = ShellFocus::Editor;
-        shell.cursor_offset = 3;
+        shell.editor_pane.set_cursor(3);
         shell.set_completions(vec![CompletionItem {
             label: "Example".to_owned(),
             detail: Some("class".to_owned()),
@@ -6437,17 +6172,17 @@ mod tests {
             Point::new(track.origin.x + 5.0, track.origin.y + track.size.height),
             size,
         );
-        assert_eq!(shell.editor_scroll_line, 200 - visible);
+        assert_eq!(shell.editor_scroll_line(), 200 - visible);
 
         shell.pointer_move(Point::new(track.origin.x + 5.0, track.origin.y), size);
-        assert_eq!(shell.editor_scroll_line, 0);
+        assert_eq!(shell.editor_scroll_line(), 0);
 
         shell.pointer_up();
         shell.pointer_move(
             Point::new(track.origin.x + 5.0, track.origin.y + track.size.height),
             size,
         );
-        assert_eq!(shell.editor_scroll_line, 0, "soltar encerra o arraste");
+        assert_eq!(shell.editor_scroll_line(), 0, "soltar encerra o arraste");
     }
 
     #[test]
@@ -6677,7 +6412,7 @@ mod tests {
         let mut shell = test_shell();
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(shell.open_location(&path, 1, 3).is_ok());
-        let position = line_column(shell.active_text().unwrap_or_default(), shell.cursor_offset);
+        let position = line_column(shell.active_text().unwrap_or_default(), shell.editor_pane.cursor());
         assert_eq!(position, (1, 3));
         assert_eq!(shell.focus(), ShellFocus::Editor);
     }
@@ -7012,7 +6747,7 @@ mod tests {
         let mut shell = test_shell();
         shell.editor.open_memory("Pedido.java", text);
         shell.focus = ShellFocus::Editor;
-        shell.cursor_offset = 0;
+        shell.editor_pane.set_cursor(0);
         shell
     }
 
@@ -7052,7 +6787,7 @@ mod tests {
         let size = Size::new(1280.0, 800.0);
         // Coluna 6 cai no meio de `total`.
         shell.select_word_at_point(editor_column(&shell, size, 6), size);
-        assert_eq!(shell.editor_selection_range(), Some(4..9));
+        assert_eq!(shell.editor_pane.selection_range(), Some(4..9));
         assert_eq!(
             shell
                 .active_text()
@@ -7068,16 +6803,16 @@ mod tests {
         let clipboard = Arc::new(FakeClipboard::default());
         let mut shell = shell_editing("total");
         shell.set_clipboard(clipboard.clone());
-        shell.editor_selection = Some((0, 5));
-        shell.cursor_offset = 5;
+        shell.editor_pane.set_cursor(5);
+        shell.editor_pane.set_selection(Some((0, 5)));
         assert!(shell.copy_selection());
         assert_eq!(
             clipboard.get_text().unwrap_or_default(),
             Some("total".to_owned())
         );
 
-        shell.editor_selection = None;
-        shell.cursor_offset = 5;
+        shell.editor_pane.set_selection(None);
+        shell.editor_pane.set_cursor(5);
         assert!(shell.paste_clipboard());
         assert_eq!(shell.active_text(), Some("totaltotal"));
     }
@@ -7089,8 +6824,8 @@ mod tests {
         assert!(clipboard.set_text("novo").is_ok());
         let mut shell = shell_editing("abcdef");
         shell.set_clipboard(clipboard);
-        shell.editor_selection = Some((1, 4));
-        shell.cursor_offset = 4;
+        shell.editor_pane.set_cursor(4);
+        shell.editor_pane.set_selection(Some((1, 4)));
         assert!(shell.paste_clipboard());
         assert_eq!(shell.active_text(), Some("anovoef"));
     }
@@ -7099,7 +6834,7 @@ mod tests {
     #[test]
     fn copying_without_a_clipboard_reports_it() {
         let mut shell = shell_editing("total");
-        shell.editor_selection = Some((0, 5));
+        shell.editor_pane.set_selection(Some((0, 5)));
         assert!(!shell.copy_selection());
         assert_eq!(shell.status_message(), "Área de transferência indisponível");
     }
@@ -7120,7 +6855,7 @@ mod tests {
         };
         assert!(!copy_enabled(entries), "sem seleção não há o que copiar");
 
-        shell.editor_selection = Some((0, 5));
+        shell.editor_pane.set_selection(Some((0, 5)));
         shell.secondary_pointer_down(editor_column(&shell, size, 2), size);
         assert!(copy_enabled(shell.context_menu.entries()));
     }
@@ -7347,7 +7082,7 @@ mod tests {
     fn inspect_only_appears_while_debugging() {
         let mut shell = shell_editing("int total = 10;");
         let size = Size::new(1280.0, 800.0);
-        shell.editor_selection = Some((4, 9));
+        shell.editor_pane.set_selection(Some((4, 9)));
         shell.secondary_pointer_down(editor_column(&shell, size, 6), size);
         assert_eq!(
             entry_labels(shell.context_menu.entries()),
@@ -7367,7 +7102,7 @@ mod tests {
     fn inspecting_asks_to_evaluate_the_selected_text() {
         let mut shell = shell_editing("int total = 10;");
         shell.debug.attached = true;
-        shell.editor_selection = Some((4, 9));
+        shell.editor_pane.set_selection(Some((4, 9)));
         shell.run_explorer_command("debug.inspect");
         assert_eq!(
             shell.take_debug_requests(),
@@ -7400,26 +7135,26 @@ mod tests {
         let mut shell = shell_editing("primeira
 segunda
 ab");
-        shell.cursor_offset = 4;
+        shell.editor_pane.set_cursor(4);
         shell.key_down("ArrowDown");
         // Mesma coluna na linha de baixo.
-        assert_eq!(shell.cursor_offset, "primeira
+        assert_eq!(shell.editor_pane.cursor(), "primeira
 ".len() + 4);
 
         // Descer para uma linha curta para no fim dela, e não num ponto inexistente.
         shell.key_down("ArrowDown");
-        assert_eq!(shell.cursor_offset, "primeira
+        assert_eq!(shell.editor_pane.cursor(), "primeira
 segunda
 ab".len());
 
         // Na última linha, descer de novo não faz nada.
         shell.key_down("ArrowDown");
-        assert_eq!(shell.cursor_offset, "primeira
+        assert_eq!(shell.editor_pane.cursor(), "primeira
 segunda
 ab".len());
 
         shell.key_down("ArrowUp");
-        assert_eq!(shell.cursor_offset, "primeira
+        assert_eq!(shell.editor_pane.cursor(), "primeira
 ".len() + 2);
     }
 
@@ -7429,13 +7164,13 @@ ab".len());
         let mut shell = shell_editing("um
 dois
 tres");
-        shell.cursor_offset = 0;
+        shell.editor_pane.set_cursor(0);
         let shift = Modifiers {
             shift: true,
             ..Modifiers::default()
         };
         shell.key_down_with_modifiers("ArrowDown", shift);
-        assert_eq!(shell.editor_selection_range(), Some(0..3));
+        assert_eq!(shell.editor_pane.selection_range(), Some(0..3));
     }
 
     /// Tab com um bloco marcado desloca todas as linhas dele.
@@ -7445,14 +7180,14 @@ tres");
 dois
 tres");
         // Da segunda linha até o meio da terceira.
-        shell.editor_selection = Some((3, 9));
-        shell.cursor_offset = 9;
+        shell.editor_pane.set_cursor(9);
+        shell.editor_pane.set_selection(Some((3, 9)));
         shell.key_down("Tab");
         assert_eq!(shell.active_text(), Some("um
     dois
     tres"));
         // A seleção segue cobrindo o bloco, para indentar de novo sem remarcar.
-        assert_eq!(shell.editor_selection_range(), Some(3..20));
+        assert_eq!(shell.editor_pane.selection_range(), Some(3..20));
 
         let shift = Modifiers {
             shift: true,
@@ -7472,11 +7207,11 @@ tres"));
         shell.pointer_down(editor_column(&shell, size, 1), size);
         shell.pointer_move(editor_column(&shell, size, 4), size);
         shell.pointer_up();
-        assert_eq!(shell.editor_selection_range(), Some(1..4));
+        assert_eq!(shell.editor_pane.selection_range(), Some(1..4));
 
         shell.text_input("Z");
         assert_eq!(shell.active_text(), Some("aZef"));
-        assert_eq!(shell.editor_selection_range(), None);
+        assert_eq!(shell.editor_pane.selection_range(), None);
     }
 
     /// A seleção chega ao editor da biblioteca, que é quem a desenha.
@@ -7507,21 +7242,21 @@ tres"));
         };
         shell.key_down_with_modifiers("ArrowRight", shift);
         shell.key_down_with_modifiers("ArrowRight", shift);
-        assert_eq!(shell.editor_selection_range(), Some(0..2));
+        assert_eq!(shell.editor_pane.selection_range(), Some(0..2));
 
         shell.key_down("ArrowRight");
-        assert_eq!(shell.editor_selection_range(), None);
+        assert_eq!(shell.editor_pane.selection_range(), None);
     }
 
     /// Backspace com trecho marcado apaga o trecho, não um caractere.
     #[test]
     fn backspace_removes_the_selection() {
         let mut shell = shell_editing("abcdef");
-        shell.editor_selection = Some((1, 4));
-        shell.cursor_offset = 4;
+        shell.editor_pane.set_cursor(4);
+        shell.editor_pane.set_selection(Some((1, 4)));
         shell.key_down("Backspace");
         assert_eq!(shell.active_text(), Some("aef"));
-        assert_eq!(shell.cursor_offset, 1);
+        assert_eq!(shell.editor_pane.cursor(), 1);
     }
 
     /// Salvar grava o conteúdo da aba e limpa a marca de modificado.
@@ -7538,7 +7273,7 @@ tres"));
             panic!("arquivo de teste não abriu");
         };
         shell.focus = ShellFocus::Editor;
-        shell.cursor_offset = 0;
+        shell.editor_pane.set_cursor(0);
         shell.text_input("// nota\n");
         assert!(shell.active_document_modified(), "a edição deixa a aba suja");
 
@@ -7569,7 +7304,7 @@ tres"));
             panic!("arquivo de teste não abriu");
         };
         shell.focus = ShellFocus::Editor;
-        shell.cursor_offset = 0;
+        shell.editor_pane.set_cursor(0);
         shell.text_input("// pelo menu\n");
         let size = Size::new(1280.0, 800.0);
         // Abre o menu Arquivo e escolhe a segunda entrada.

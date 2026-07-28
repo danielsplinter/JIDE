@@ -187,7 +187,9 @@ impl EditorPane {
     }
 
     /// Deslocamento do texto sob um ponto da tela.
-    fn offset_at(&self, buffer: &TextBuffer, point: Point) -> usize {
+    /// Deslocamento do texto sob um ponto da tela.
+    #[must_use]
+    pub fn offset_at_point(&self, buffer: &TextBuffer, point: Point) -> usize {
         let text = buffer.text();
         let line_index = self.scroll_line
             + ((point.y - self.bounds.origin.y) / CodeEditor::line_height())
@@ -234,7 +236,7 @@ impl EditorPane {
         if let Some(line) = self.gutter_line_at(point) {
             return EditorAction::ToggleBreakpoint(line);
         }
-        let offset = self.offset_at(buffer, point);
+        let offset = self.offset_at_point(buffer, point);
         self.cursor = offset;
         if control && self.capabilities.navigation {
             return EditorAction::Navigate(offset);
@@ -258,7 +260,7 @@ impl EditorPane {
         if !self.selecting {
             return false;
         }
-        let focus = self.offset_at(buffer, point);
+        let focus = self.offset_at_point(buffer, point);
         self.cursor = focus;
         if let Some((anchor, _)) = self.selection {
             self.selection = Some((anchor, focus));
@@ -283,7 +285,7 @@ impl EditorPane {
             return;
         }
         let text = buffer.text();
-        let offset = self.offset_at(buffer, point);
+        let offset = self.offset_at_point(buffer, point);
         let mut editor = CodeEditor::new(SCRATCH_VIEW_ID, text);
         editor.select_word_at(chars_before(text, offset));
         let Some(word) = editor.selection() else {
