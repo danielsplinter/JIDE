@@ -82,19 +82,41 @@ abre a localização com `open_location`, posicionando o cursor na linha e colun
 retornadas. `Ctrl+Space` abre o autocomplete.
 
 Digitar `.` depois de uma variável, parâmetro, campo ou nome de tipo abre a lista
-com os **membros públicos** daquele tipo, filtrada pelo que se digita em seguida;
-as setas navegam e `Enter` ou `Tab` aceitam. O tipo vem da declaração no arquivo
-aberto, e os membros vêm de duas origens somadas: o próprio arquivo, que responde
-pelo tipo ainda não compilado, e as classes compiladas — o JDK, as dependências em
-jar e o projeto depois de um build. A cadeia de superclasses é percorrida, então
-`toString()` aparece como qualquer membro declarado.
+com os **membros públicos** daquele tipo. Cada letra digitada em seguida refaz o
+filtro, então a lista acompanha o nome sendo escrito; apagar a alarga de volta, e
+um caractere que não faz parte de um nome — um parêntese, um espaço — a fecha,
+assim como `Esc`. As setas navegam e `Enter` ou `Tab` aceitam. `Ctrl+Space` abre a
+lista a qualquer momento, mas não é mais preciso repetir a cada letra. O tipo vem da declaração no arquivo
+aberto, e os membros vêm de três origens somadas: o próprio arquivo, que responde
+pelo tipo ainda não compilado; os **demais fontes do projeto**, porque uma classe
+por arquivo é a regra em Java e a classe usada quase nunca está no arquivo aberto;
+e as classes compiladas — o JDK, as dependências em jar e o projeto depois de um
+build. A cadeia de superclasses é percorrida nas compiladas, então `toString()`
+aparece como qualquer membro declarado.
+
+O fonte tem precedência sobre o `.class` do último build: ele é a classe como ela
+está agora. O arquivo do tipo é lido e analisado na hora da consulta, e não
+mantido analisado — guardar todos os fontes do projeto custaria memória
+proporcional ao projeto para responder sobre um tipo de cada vez.
+
+Membros `private` não aparecem, porque não se alcançam pelo ponto. Nas classes
+compiladas isso vem dos modificadores nos próprios bytes; no fonte, da árvore
+sintática, já que ele não passou por compilador nenhum.
 
 Quais caracteres disparam a lista é a linguagem quem informa, não o editor: o
 provider declara os seus, e em Java é o ponto.
 
+A lista também aparece **no editor da janela de inspeção do depurador**. Ali não
+há arquivo, então a pergunta muda de forma: em vez de uma posição num documento,
+vai o nome do tipo. O tipo do receptor sai do que está parado — `m` é uma variável
+de quadro, não existe em fonte nenhum —, e um nome que o depurador não conhece é
+lido como nome de tipo. **Quem responde pelos membros é sempre o índice do
+projeto**, de modo que uma classe que não participa do código depurado é tão
+conhecida quanto as outras.
+
 Ainda fora do alcance: encadeamento (`pedido.getCliente().`), substituição de
-genéricos, `this` e `super` como receptores, e classes de outro arquivo que ainda
-não foram compiladas.
+genéricos, `this` e `super` como receptores, e a cadeia de superclasses entre
+tipos do próprio projeto.
 
 ## Toolchain e build
 
@@ -176,10 +198,25 @@ selecionado e abre uma janela com dois painéis: à esquerda, uma **árvore** co
 valor pedido e os campos dentro dele; à direita, o nome, o tipo e o valor completo
 do nó destacado.
 
-O painel direito tem, abaixo do detalhe, um **editor de código**: escreva uma
-expressão e clique em **Executar** — ou `Ctrl+Enter` — para avaliá-la no quadro
-atual. O resultado passa a ser o que a árvore mostra, e a resposta aparece numa
-linha própria acima dos botões, dentro da janela — ela cobre a barra de estado.
+O painel direito tem, abaixo do detalhe, um **editor de código**: escreva uma ou
+mais instruções e clique em **Executar** — ou `Ctrl+Enter` — para avaliá-las no
+quadro atual.
+
+O `;` e a quebra de linha separam instruções, e elas vão ao alvo **uma de cada
+vez, na ordem escrita**: cada uma roda dentro do processo depurado e muda o que a
+seguinte vai encontrar. A primeira que falhar interrompe as demais, e a mensagem
+diz em qual parou — as seguintes esperavam um estado que não chegou a existir. O
+que rodou antes da falha teve efeito, e a árvore é relida para mostrá-lo. Um `;`
+dentro de aspas não separa nada.
+
+**A árvore continua sendo o objeto inspecionado**: o que ela mostra são os valores
+relidos ao fim da execução, com os níveis abertos ainda abertos. O retorno aparece
+numa linha própria acima dos botões, dentro da janela — ela cobre a barra de
+estado.
+
+É a diferença entre olhar o resultado e olhar o efeito. `pedido.pagar()` devolve
+`void`; trocar a árvore por isso apagaria justamente o objeto que se queria ver
+mudar.
 
 O botão fica apagado quando não há sessão de depuração de pé. A árvore continua
 mostrando o que foi lido enquanto a execução estava parada, e sem esse aviso o
@@ -192,14 +229,37 @@ método altera o objeto, a alteração vale a partir dali. Exceção lançada l�
 volta como mensagem, em vez de virar um retorno vazio.
 
 Os argumentos são literais, com o sufixo decidindo o tipo como em Java: `4L`,
-`2.5`, `true`, `false`, `null`. Texto ainda não passa — criar uma `String` no
-alvo é outra ida ao processo. O método é escolhido pelo nome e pela quantidade de
-argumentos, subindo a hierarquia; sobrecargas com a mesma quantidade não são
-distinguidas, e nesse caso o alvo recusa se os tipos não baterem.
+`2.5`, `true`, `false`, `null` e texto entre aspas. O literal é **ajustado ao tipo
+que o parâmetro declara** antes de sair: um número que vai para um
+`java.lang.Long` é embrulhado com `Long.valueOf` dentro do alvo, e um texto vira
+uma `String` criada lá. Ambos custam uma chamada a mais, feita na mesma thread
+parada.
 
-Esse editor é o mesmo painel da janela principal, com os comportamentos que não
-fazem sentido ali desligados por configuração: não há arquivo para salvar,
-definição para navegar nem linha onde parar a execução. O painel é um componente
+Esse ajuste não é conforto, é o que mantém o processo de pé: o alvo **não confere
+o tipo do argumento** antes de repassá-lo à chamada, então um `long` enviado onde
+se espera uma referência seria lido como endereço de objeto e derrubaria a
+aplicação depurada. Por isso o que não couber é recusado aqui, com o motivo na
+tela, em vez de enviado.
+
+O método é escolhido pelo nome, subindo a hierarquia. Entre sobrecargas de mesma
+quantidade de argumentos vence a que exige menos conversão — `4L` prefere
+`setId(long)` a `setId(Long)` —, e uma cujos tipos os literais não alcançam é
+descartada em vez de chamada.
+
+Depois de uma chamada, a árvore e as variáveis continuam legíveis. Executar um
+método invalida os identificadores de quadro da thread no protocolo, e a sessão
+refaz a correspondência pela profundidade da pilha — sem isso, a primeira leitura
+após um `Executar` falharia dizendo que o quadro não existe.
+
+Esse editor é o mesmo painel da janela principal, e edita do mesmo jeito: arraste
+e duplo clique selecionam, `Shift` com as setas marca, `Tab` desloca o bloco, o
+ponto abre a lista de membros, e `Ctrl+C`/`Ctrl+V` usam a área de transferência do
+sistema — com a janela aberta,
+copiar e colar agem no que se vê, não no documento atrás dela.
+
+O que está desligado por configuração são os comportamentos que não fazem sentido
+ali: não há arquivo para salvar, definição para navegar nem linha onde parar a
+execução. O painel é um componente
 com área própria, então qualquer tela pode abri-lo escolhendo o que ligar.
 
 A árvore abre já com o primeiro nível à mostra. Clicar em um campo que também é

@@ -26,17 +26,20 @@ pub(crate) mod command_set {
 
 pub(crate) mod command {
     pub(crate) const VM_VERSION: u8 = 1;
+    pub(crate) const VM_CLASSES_BY_SIGNATURE: u8 = 2;
     pub(crate) const VM_ALL_CLASSES: u8 = 3;
     pub(crate) const VM_ALL_THREADS: u8 = 4;
     pub(crate) const VM_DISPOSE: u8 = 6;
     pub(crate) const VM_ID_SIZES: u8 = 7;
     pub(crate) const VM_RESUME: u8 = 9;
+    pub(crate) const VM_CREATE_STRING: u8 = 11;
 
     pub(crate) const REFERENCE_TYPE_FIELDS: u8 = 4;
     pub(crate) const REFERENCE_TYPE_METHODS: u8 = 5;
     pub(crate) const REFERENCE_TYPE_SIGNATURE: u8 = 1;
 
     pub(crate) const CLASS_TYPE_SUPERCLASS: u8 = 1;
+    pub(crate) const CLASS_TYPE_INVOKE_METHOD: u8 = 3;
 
     pub(crate) const METHOD_LINE_TABLE: u8 = 1;
     pub(crate) const METHOD_VARIABLE_TABLE: u8 = 2;
@@ -219,6 +222,38 @@ impl Encoder {
     pub(crate) fn frame_id(&mut self, value: u64) -> &mut Self {
         let size = self.sizes.frame;
         self.id(value, size)
+    }
+
+    /// Escreve um valor precedido da etiqueta do seu tipo.
+    ///
+    /// A etiqueta é o que o alvo usa para saber o que veio, e ele **não** a
+    /// confere contra o tipo declarado: um primitivo enviado onde se espera uma
+    /// referência é lido como endereço de objeto e derruba o processo depurado.
+    /// Por isso quem monta argumentos precisa acertar o tipo antes de chegar
+    /// aqui.
+    pub(crate) fn tagged_value(&mut self, value: &Value) -> &mut Self {
+        match value {
+            Value::Bool(value) => self.u8(b'Z').u8(u8::from(*value)),
+            Value::Byte(value) => self.u8(b'B').u8(*value as u8),
+            Value::Char(value) => self
+                .u8(b'C')
+                .u8((*value >> 8) as u8)
+                .u8((*value & 0xff) as u8),
+            Value::Short(value) => {
+                self.u8(b'S')
+                    .u8((*value >> 8) as u8)
+                    .u8((*value & 0xff) as u8)
+            }
+            Value::Int(value) => self.u8(b'I').i32(*value),
+            Value::Long(value) => self.u8(b'J').i64(*value),
+            Value::Float(value) => self.u8(b'F').i32(value.to_bits() as i32),
+            Value::Double(value) => self.u8(b'D').i64(value.to_bits() as i64),
+            Value::Void => self.u8(b'V'),
+            Value::Object { tag, id } => {
+                self.u8(*tag);
+                self.object_id(*id)
+            }
+        }
     }
 
     pub(crate) fn location(&mut self, location: JdwpLocation) -> &mut Self {

@@ -420,6 +420,22 @@ impl LanguageHost {
         worker.completion(context, request).await
     }
 
+    /// Membros de um tipo, para telas que não têm documento.
+    ///
+    /// O roteamento é pelo documento aberto porque é ele que diz de qual
+    /// linguagem se está falando — a pergunta não tem posição, mas continua sendo
+    /// sobre um projeto de uma linguagem só.
+    pub async fn type_members(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        type_name: String,
+        prefix: String,
+    ) -> Result<Vec<CompletionItem>, LanguageHostError> {
+        let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
+        worker.type_members(context, type_name, prefix).await
+    }
+
     pub async fn definition(
         &self,
         context: LanguageRequestContext,
@@ -742,6 +758,12 @@ enum WorkerRequest {
         request: CompletionRequest,
         response: oneshot::Sender<Result<Vec<CompletionItem>, LanguageHostError>>,
     },
+    TypeMembers {
+        context: LanguageRequestContext,
+        type_name: String,
+        prefix: String,
+        response: oneshot::Sender<Result<Vec<CompletionItem>, LanguageHostError>>,
+    },
     Definition {
         context: LanguageRequestContext,
         request: DefinitionRequest,
@@ -933,6 +955,25 @@ impl ProviderWorker {
             .map_err(|_| LanguageHostError::WorkerStopped)?
     }
 
+    async fn type_members(
+        &self,
+        context: LanguageRequestContext,
+        type_name: String,
+        prefix: String,
+    ) -> Result<Vec<CompletionItem>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::TypeMembers {
+            context,
+            type_name,
+            prefix,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
     async fn definition(
         &self,
         context: LanguageRequestContext,
@@ -1095,6 +1136,21 @@ fn run_worker(
                 } else {
                     runtime
                         .block_on(active.completion(request))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::TypeMembers {
+                context,
+                type_name,
+                prefix,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.type_members(&type_name, &prefix))
                         .map_err(Into::into)
                 };
                 let _ = response.send(result);

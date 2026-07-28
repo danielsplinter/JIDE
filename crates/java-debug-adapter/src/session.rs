@@ -20,7 +20,7 @@ use crate::{
     resolve::{self, LineEntry},
     values::{self, type_name},
     wire::{
-        Encoder, JdwpLocation, Value, command, command_set, event_kind, invoke, modifier, step,
+        JdwpLocation, Value, command, command_set, event_kind, invoke, modifier, step,
         suspend_policy,
     },
 };
@@ -76,6 +76,15 @@ struct Cache {
     signatures: HashMap<u64, String>,
     /// Localização de cada quadro visto na última pilha lida.
     frames: HashMap<u64, JdwpLocation>,
+    /// Profundidade na pilha de cada quadro entregue a quem consome a sessão.
+    frame_depths: HashMap<u64, (u64, usize)>,
+    /// Quadro entregue antes para o identificador que vale agora.
+    ///
+    /// Executar um método no alvo invalida todos os identificadores de quadro da
+    /// thread — a mesma parada passa a ser endereçada por outro número. Quem nos
+    /// chama guardou o número antigo, e sem esta tradução tudo o que viesse
+    /// depois de uma chamada falharia com quadro inválido.
+    frame_aliases: HashMap<u64, u64>,
 }
 
 pub(crate) struct Session {
@@ -465,6 +474,50 @@ impl Session {
         })
     }
 
+    /// Traduz o quadro que quem nos chama guardou para o que o alvo aceita
+    /// agora.
+    async fn current_frame(&self, frame: u64) -> u64 {
+        self.cache
+            .lock()
+            .await
+            .frame_aliases
+            .get(&frame)
+            .copied()
+            .unwrap_or(frame)
+    }
+
+    /// Refaz a tradução depois de uma chamada, casando os quadros pela
+    /// profundidade.
+    ///
+    /// A pilha é a mesma — a execução voltou a parar onde estava —, só os
+    /// identificadores mudaram; a posição em que cada quadro está é o que
+    /// permanece.
+    async fn remap_frames(&self, thread: u64) {
+        let Ok(fresh) = self.frames(thread).await else {
+            return;
+        };
+        let mut cache = self.cache.lock().await;
+        let depths: Vec<(u64, usize)> = cache
+            .frame_depths
+            .iter()
+            .filter(|(_, (owner, _))| *owner == thread)
+            .map(|(handed, (_, depth))| (*handed, *depth))
+            .collect();
+        for (handed, depth) in depths {
+            if let Some((current, _)) = fresh.get(depth) {
+                cache.frame_aliases.insert(handed, *current);
+            }
+        }
+    }
+
+    /// Esquece a pilha lida: ela deixa de valer a cada retomada e a cada parada.
+    async fn forget_frames(&self) {
+        let mut cache = self.cache.lock().await;
+        cache.frames.clear();
+        cache.frame_depths.clear();
+        cache.frame_aliases.clear();
+    }
+
     async fn frame_location(&self, thread: u64, frame: u64) -> Result<JdwpLocation, DebugError> {
         if let Some(location) = self.cache.lock().await.frames.get(&frame) {
             return Ok(*location);
@@ -688,18 +741,19 @@ impl Session {
             }
         };
         let class_id = self.object_class(receiver).await?;
-        let (declaring, method) = self
-            .find_method(class_id, &call.method, call.arguments.len())
+        let (declaring, method, arguments) = self
+            .find_method(class_id, &call.method, &call.arguments)
             .await?;
+        let values = self.materialize(thread, arguments).await?;
 
         let mut encoder = self.connection.encoder();
         encoder.object_id(receiver);
         encoder.object_id(thread);
         encoder.reference_type_id(declaring);
         encoder.method_id(method);
-        encoder.i32(call.arguments.len() as i32);
-        for argument in &call.arguments {
-            encode_literal(&mut encoder, argument);
+        encoder.i32(values.len() as i32);
+        for value in &values {
+            encoder.tagged_value(value);
         }
         encoder.i32(invoke::SINGLE_THREADED);
         let payload = self
@@ -709,8 +763,17 @@ impl Session {
                 command::OBJECT_INVOKE_METHOD,
                 encoder.finish(),
             )
-            .await?;
-        let mut decoder = self.connection.decoder(&payload);
+            .await;
+        // Executar o método invalidou os quadros da thread, tenha a chamada dado
+        // certo ou não. Refazer a tradução aqui é o que mantém de pé o que vier
+        // depois — ler o objeto que acabou de mudar, principalmente.
+        self.remap_frames(thread).await;
+        self.invocation_result(&payload?).await
+    }
+
+    /// Retorno de uma chamada, separando a exceção que veio junto.
+    async fn invocation_result(&self, payload: &[u8]) -> Result<Value, DebugError> {
+        let mut decoder = self.connection.decoder(payload);
         let returned = decoder.tagged_value()?;
         // A exceção vem junto do retorno, e não como erro do protocolo: sem
         // olhá-la, um método que falhou pareceria ter devolvido `null`.
@@ -724,26 +787,151 @@ impl Session {
         Ok(returned)
     }
 
-    /// Procura o método pelo nome e pela quantidade de argumentos, subindo a
-    /// hierarquia.
+    /// Dá existência no alvo aos argumentos que não são primitivos.
+    ///
+    /// Embrulhar e criar texto são chamadas de verdade dentro do processo, feitas
+    /// antes da chamada que o usuário pediu; por isso acontecem na mesma thread
+    /// parada.
+    async fn materialize(
+        &self,
+        thread: u64,
+        arguments: Vec<values::Argument>,
+    ) -> Result<Vec<Value>, DebugError> {
+        let mut values = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            values.push(match argument {
+                values::Argument::Primitive(value) => value,
+                values::Argument::Null => Value::Object { tag: b'L', id: 0 },
+                values::Argument::Text(text) => Value::Object {
+                    tag: b's',
+                    id: self.create_string(&text).await?,
+                },
+                values::Argument::Boxed {
+                    class,
+                    value_of,
+                    value,
+                } => self.box_value(thread, class, value_of, value).await?,
+            });
+        }
+        Ok(values)
+    }
+
+    /// Embrulha um primitivo chamando `valueOf` da classe correspondente.
+    async fn box_value(
+        &self,
+        thread: u64,
+        class: &str,
+        value_of: &str,
+        value: Value,
+    ) -> Result<Value, DebugError> {
+        let class_id = self.class_by_signature(class).await?;
+        let methods = self.methods(class_id).await?;
+        let method = methods
+            .iter()
+            .find(|method| method.name == "valueOf" && method.signature == value_of)
+            .ok_or_else(|| {
+                DebugError::Unsupported(format!("{class} não oferece {value_of} para embrulhar"))
+            })?
+            .id;
+        let mut encoder = self.connection.encoder();
+        encoder.reference_type_id(class_id);
+        encoder.object_id(thread);
+        encoder.method_id(method);
+        encoder.i32(1);
+        encoder.tagged_value(&value);
+        encoder.i32(invoke::SINGLE_THREADED);
+        let payload = self
+            .connection
+            .request(
+                command_set::CLASS_TYPE,
+                command::CLASS_TYPE_INVOKE_METHOD,
+                encoder.finish(),
+            )
+            .await?;
+        self.invocation_result(&payload).await
+    }
+
+    async fn class_by_signature(&self, signature: &str) -> Result<u64, DebugError> {
+        let mut encoder = self.connection.encoder();
+        encoder.string(signature);
+        let payload = self
+            .connection
+            .request(
+                command_set::VIRTUAL_MACHINE,
+                command::VM_CLASSES_BY_SIGNATURE,
+                encoder.finish(),
+            )
+            .await?;
+        let mut decoder = self.connection.decoder(&payload);
+        // Uma classe de embrulho existe uma vez só; carregadores diferentes
+        // trariam mais de uma, e aí a primeira é tão boa quanto qualquer outra.
+        if decoder.i32()?.max(0) == 0 {
+            return Err(DebugError::Unsupported(format!(
+                "{signature} não está carregada no alvo"
+            )));
+        }
+        let _tag = decoder.u8()?;
+        decoder.reference_type_id()
+    }
+
+    async fn create_string(&self, text: &str) -> Result<u64, DebugError> {
+        let mut encoder = self.connection.encoder();
+        encoder.string(text);
+        let payload = self
+            .connection
+            .request(
+                command_set::VIRTUAL_MACHINE,
+                command::VM_CREATE_STRING,
+                encoder.finish(),
+            )
+            .await?;
+        self.connection.decoder(&payload).object_id()
+    }
+
+    /// Procura o método pelo nome, pela quantidade de argumentos e pelos tipos
+    /// que os literais conseguem assumir, subindo a hierarquia.
     ///
     /// Herdar é a regra: `toString` costuma estar em `Object`, não na classe do
-    /// objeto. Sobrecarga com a mesma aridade não é resolvida — nesse caso a
-    /// primeira encontrada vence, e o alvo recusa se os tipos não baterem.
+    /// objeto. Entre sobrecargas de mesma aridade vence a que exige menos
+    /// conversão, e uma cujos parâmetros o literal não alcança é descartada em
+    /// vez de chamada — o alvo não confere tipo de argumento, e chamar a errada
+    /// derruba o processo depurado.
     async fn find_method(
         &self,
         class_id: u64,
         name: &str,
-        arity: usize,
-    ) -> Result<(u64, u64), DebugError> {
+        arguments: &[values::Literal],
+    ) -> Result<(u64, u64, Vec<values::Argument>), DebugError> {
         let mut current = class_id;
+        let mut rejected: Option<String> = None;
         for _ in 0..8 {
             let methods = self.methods(current).await?;
-            if let Some(found) = methods
-                .iter()
-                .find(|method| method.name == name && signature_arity(&method.signature) == arity)
-            {
-                return Ok((current, found.id));
+            let mut best: Option<(u32, u64, Vec<values::Argument>)> = None;
+            for method in methods.iter().filter(|method| method.name == name) {
+                let parameters = values::parameter_signatures(&method.signature);
+                if parameters.len() != arguments.len() {
+                    continue;
+                }
+                let mut fit = 0;
+                let mut coerced = Vec::with_capacity(parameters.len());
+                for (literal, parameter) in arguments.iter().zip(&parameters) {
+                    let Some((argument, score)) = values::coerce(literal, parameter) else {
+                        coerced.clear();
+                        rejected = Some(method.signature.clone());
+                        break;
+                    };
+                    fit += score;
+                    coerced.push(argument);
+                }
+                if coerced.len() != parameters.len() {
+                    continue;
+                }
+                if best.as_ref().is_none_or(|(best, ..)| fit > *best) {
+                    best = Some((fit, method.id, coerced));
+                }
+            }
+            if let Some((_, method, coerced)) = best {
+                return Ok((current, method, coerced));
             }
             let mut encoder = self.connection.encoder();
             encoder.reference_type_id(current);
@@ -763,9 +951,15 @@ impl Session {
                 Ok(super_class) => current = super_class,
             }
         }
-        Err(DebugError::Unsupported(format!(
-            "método {name} com {arity} argumento(s) não encontrado"
-        )))
+        Err(match rejected {
+            Some(signature) => DebugError::Unsupported(format!(
+                "{name}{signature} existe, mas os argumentos digitados não têm os tipos que ele recebe"
+            )),
+            None => DebugError::Unsupported(format!(
+                "método {name} com {} argumento(s) não encontrado",
+                arguments.len()
+            )),
+        })
     }
 
     /// Campos de instância da classe e de suas superclasses.
@@ -962,7 +1156,7 @@ impl Session {
                     if kind == event_kind::SINGLE_STEP {
                         self.clear_request(event_kind::SINGLE_STEP, request).await;
                     }
-                    self.cache.lock().await.frames.clear();
+                    self.forget_frames().await;
                     self.events.emit(DebugEvent::Stopped {
                         thread: ThreadId(thread),
                         reason,
@@ -976,7 +1170,7 @@ impl Session {
                     let _catch = decoder.location()?;
                     let (text, _, _) = self.describe(&exception).await;
                     self.state.lock().await.suspended.insert(thread);
-                    self.cache.lock().await.frames.clear();
+                    self.forget_frames().await;
                     self.events.emit(DebugEvent::Stopped {
                         thread: ThreadId(thread),
                         reason: StopReason::Exception(text),
@@ -1165,6 +1359,15 @@ impl DebugSession for Session {
     async fn stack_trace(&self, thread: ThreadId) -> Result<Vec<StackFrame>, DebugError> {
         self.ensure_attached().await?;
         let frames = self.frames(thread.0).await?;
+        {
+            // A partir daqui estes identificadores estão nas mãos de quem nos
+            // chama, e é a profundidade deles que sobrevive a uma chamada.
+            let mut cache = self.cache.lock().await;
+            for (depth, (id, _)) in frames.iter().enumerate() {
+                cache.frame_depths.insert(*id, (thread.0, depth));
+                cache.frame_aliases.remove(id);
+            }
+        }
         let mut result = Vec::with_capacity(frames.len());
         for (id, location) in frames {
             let signature = self.signature(location.class_id).await.unwrap_or_default();
@@ -1194,11 +1397,12 @@ impl DebugSession for Session {
         frame: FrameId,
     ) -> Result<Vec<Variable>, DebugError> {
         self.ensure_attached().await?;
-        let location = self.frame_location(thread.0, frame.0).await?;
+        let frame = self.current_frame(frame.0).await;
+        let location = self.frame_location(thread.0, frame).await?;
         let slots = self.variable_slots(location).await?;
-        let values = self.slot_values(thread.0, frame.0, &slots).await?;
+        let values = self.slot_values(thread.0, frame, &slots).await?;
         let mut variables = Vec::new();
-        if let Some(id) = self.this_object(thread.0, frame.0).await? {
+        if let Some(id) = self.this_object(thread.0, frame).await? {
             variables.push(self.present("this", &Value::Object { tag: b'L', id }).await);
         }
         for ((name, _, _), value) in slots.iter().zip(values.iter()) {
@@ -1219,7 +1423,8 @@ impl DebugSession for Session {
                 "`{path}` is not an inspection path"
             )));
         };
-        let value = self.resolve_path(thread.0, frame.0, &segments).await?;
+        let frame = self.current_frame(frame.0).await;
+        let value = self.resolve_path(thread.0, frame, &segments).await?;
         let Value::Object { id, .. } = value else {
             return Ok(Vec::new());
         };
@@ -1244,8 +1449,9 @@ impl DebugSession for Session {
         self.ensure_attached().await?;
         // Uma chamada executa no alvo; um caminho apenas lê. A expressão diz qual
         // das duas coisas o usuário pediu.
+        let frame = self.current_frame(frame.0).await;
         if let Some(call) = values::parse_call(expression) {
-            let value = self.invoke(thread.0, frame.0, &call).await?;
+            let value = self.invoke(thread.0, frame, &call).await?;
             return Ok(self.present(expression, &value).await);
         }
         let Some(segments) = values::parse_path(expression) else {
@@ -1253,7 +1459,7 @@ impl DebugSession for Session {
                 "escreva um caminho — `pedido.cliente.nome` — ou uma chamada de método".to_owned(),
             ));
         };
-        let value = self.resolve_path(thread.0, frame.0, &segments).await?;
+        let value = self.resolve_path(thread.0, frame, &segments).await?;
         Ok(self.present(expression, &value).await)
     }
 
@@ -1300,7 +1506,7 @@ impl DebugSession for Session {
         for target in targets {
             self.resume_thread(target).await?;
             self.state.lock().await.suspended.remove(&target);
-            self.cache.lock().await.frames.clear();
+            self.forget_frames().await;
             self.events.emit(DebugEvent::Resumed {
                 thread: ThreadId(target),
             });
@@ -1320,7 +1526,7 @@ impl DebugSession for Session {
             )
             .await?;
         self.state.lock().await.suspended.insert(thread.0);
-        self.cache.lock().await.frames.clear();
+        self.forget_frames().await;
         self.events.emit(DebugEvent::Stopped {
             thread,
             reason: StopReason::Pause,
@@ -1339,57 +1545,5 @@ impl DebugSession for Session {
         self.connection.dispose().await;
         self.events.emit(DebugEvent::Detached { reason: None });
         Ok(())
-    }
-}
-
-/// Quantidade de argumentos de uma assinatura JNI.
-fn signature_arity(signature: &str) -> usize {
-    let Some(inside) = signature
-        .strip_prefix('(')
-        .and_then(|rest| rest.split(')').next())
-    else {
-        return 0;
-    };
-    let mut count = 0;
-    let mut rest = inside;
-    while !rest.is_empty() {
-        let arrays = rest.len() - rest.trim_start_matches('[').len();
-        let body = &rest[arrays..];
-        let consumed = if body.starts_with('L') {
-            body.find(';').map_or(body.len(), |index| index + 1)
-        } else {
-            1
-        };
-        count += 1;
-        rest = &rest[arrays + consumed..];
-    }
-    count
-}
-
-/// Escreve um literal como valor etiquetado do protocolo.
-fn encode_literal(encoder: &mut Encoder, literal: &values::Literal) {
-    match literal {
-        values::Literal::Null | values::Literal::Text(_) => {
-            // Texto exigiria criar uma `String` no alvo por
-            // `VirtualMachine.CreateString`, que é outra ida ao processo.
-            encoder.u8(b'L');
-            encoder.object_id(0);
-        }
-        values::Literal::Bool(value) => {
-            encoder.u8(b'Z');
-            encoder.u8(u8::from(*value));
-        }
-        values::Literal::Int(value) => {
-            encoder.u8(b'I');
-            encoder.i32(*value);
-        }
-        values::Literal::Long(value) => {
-            encoder.u8(b'J');
-            encoder.i64(*value);
-        }
-        values::Literal::Double(value) => {
-            encoder.u8(b'D');
-            encoder.i64(value.to_bits() as i64);
-        }
     }
 }

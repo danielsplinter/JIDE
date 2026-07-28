@@ -11,9 +11,9 @@ use async_trait::async_trait;
 use ide_domain::{
     CompletionItem, CompletionKind, CompletionRequest, DefinitionRequest, Diagnostic,
     DiagnosticSeverity, DocumentChange, DocumentId, DocumentSnapshot, ImportItem, LanguageId,
-    Location, OutlineItem, OutlineKind, ProviderId, ReferencesRequest, SemanticScope,
+    Location, MemberAccess, OutlineItem, OutlineKind, ProviderId, ReferencesRequest, SemanticScope,
     SemanticSnapshot, SemanticSymbol, SymbolKind, SyntaxHighlight, SyntaxHighlightKind, SyntaxNode,
-    SyntaxSnapshot, TextPosition, TextRange, TypeDescriptor,
+    SyntaxSnapshot, TextPosition, TextRange, TypeDescriptor, member_access,
 };
 use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
@@ -98,7 +98,24 @@ impl JavaLanguage {
     ) -> Vec<CompletionItem> {
         let type_name = receiver_type(&access.receiver, &document.semantic.symbols);
         let mut items = members_in_document(&type_name, &document.semantic);
-        let mut current = Some(type_name);
+        // O que a lista oferece é o que se alcança pelo ponto, e `private` não se
+        // alcança de fora — no arquivo aberto isso vem da árvore, porque o fonte
+        // não passou por compilador nenhum.
+        let private = private_members(&document.tree, &document.snapshot.text);
+        items.retain(|item| !private.contains(member_name(&item.label)));
+        items.extend(self.members_of_type(&type_name));
+        finish_member_list(items, &access.prefix)
+    }
+
+    /// Membros de um tipo, de onde quer que ele venha no projeto.
+    ///
+    /// O arquivo aberto fica de fora porque só ele depende de um documento; tudo
+    /// o mais — os demais fontes, o JDK, as dependências — é o mesmo índice, e
+    /// por isso a mesma busca serve à completação de dentro de um arquivo e à do
+    /// editor do depurador, que não tem arquivo nenhum.
+    fn members_of_type(&self, type_name: &str) -> Vec<CompletionItem> {
+        let mut items = self.members_in_project(type_name);
+        let mut current = Some(type_name.to_owned());
         let mut depth = 0;
         while let Some(name) = current.take()
             && depth < MAX_SUPER_DEPTH
@@ -129,12 +146,42 @@ impl JavaLanguage {
             );
             current = descriptor.super_name;
         }
-        let mut seen = HashSet::new();
-        items.retain(|item| {
-            item.label.starts_with(&access.prefix) && seen.insert(item.label.clone())
-        });
-        items.sort_by(|left, right| left.label.cmp(&right.label));
-        items.truncate(100);
+        items
+    }
+
+    /// Membros de um tipo declarado noutro arquivo do projeto.
+    ///
+    /// O arquivo é lido e analisado na hora, e não guardado analisado: manter a
+    /// análise de todos os fontes do projeto custaria memória proporcional ao
+    /// projeto para responder sobre um tipo de cada vez — o mesmo motivo pelo
+    /// qual os membros das classes compiladas são lidos sob demanda.
+    ///
+    /// A regra de o que é membro é a mesma do arquivo aberto: só a origem do
+    /// texto muda.
+    fn members_in_project(&self, type_name: &str) -> Vec<CompletionItem> {
+        let Some(path) = self.workspace_index.declarations.get(type_name) else {
+            return Vec::new();
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let Ok(mut parser) = self.parser.lock() else {
+            return Vec::new();
+        };
+        let Some(tree) = parser.parse(&text, None) else {
+            return Vec::new();
+        };
+        drop(parser);
+        let snapshot = DocumentSnapshot {
+            id: DocumentId(0),
+            path: path.clone(),
+            version: 0,
+            text,
+        };
+        let (semantic, _) = analyze_semantics(&snapshot, &tree);
+        let mut items = members_in_document(type_name, &semantic);
+        let private = private_members(&tree, &snapshot.text);
+        items.retain(|item| !private.contains(member_name(&item.label)));
         items
     }
 
@@ -262,6 +309,17 @@ impl ActiveLanguage for JavaLanguage {
             .get(&document_id)
             .map(|document| document.semantic.clone())
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))
+    }
+
+    async fn type_members(
+        &self,
+        type_name: &str,
+        prefix: &str,
+    ) -> Result<Vec<CompletionItem>, LanguageError> {
+        Ok(finish_member_list(
+            self.members_of_type(type_name),
+            prefix,
+        ))
     }
 
     async fn completion(
@@ -434,6 +492,12 @@ struct WorkspaceIndex {
     symbols: Vec<SemanticSymbol>,
     references: HashMap<String, Vec<Location>>,
     external_classes: Vec<ExternalClass>,
+    /// Arquivo que declara cada tipo do projeto, pelo nome simples.
+    ///
+    /// Guardar o caminho, e não os membros, é o que permite responder pela
+    /// classe **como ela está agora**: o fonte é a verdade, e o `.class` do
+    /// último build pode ser mais velho que o arquivo aberto ao lado.
+    declarations: HashMap<String, PathBuf>,
 }
 
 /// Teto de classes indexadas da biblioteca padrão.
@@ -549,6 +613,20 @@ impl WorkspaceIndex {
                             text,
                         };
                         let (semantic, references) = analyze_semantics(&snapshot, &tree);
+                        for symbol in &semantic.symbols {
+                            if matches!(
+                                symbol.kind,
+                                SymbolKind::Class
+                                    | SymbolKind::Interface
+                                    | SymbolKind::Record
+                                    | SymbolKind::Enum
+                            ) {
+                                index
+                                    .declarations
+                                    .entry(symbol.name.clone())
+                                    .or_insert_with(|| path.clone());
+                            }
+                        }
                         index.symbols.extend(semantic.symbols);
                         merge_references(&mut index.references, references);
                         java_count += 1;
@@ -802,47 +880,6 @@ const ACC_PUBLIC: u16 = 0x0001;
 const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_BRIDGE: u16 = 0x0040;
 
-/// Acesso a membro sendo digitado: `pedido.` ou `pedido.get`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct MemberAccess {
-    /// Expressão à esquerda do ponto.
-    receiver: String,
-    /// O que já foi digitado depois do ponto.
-    prefix: String,
-}
-
-/// Lê para trás a partir do cursor procurando um acesso por ponto.
-///
-/// Só o identificador imediatamente antes do ponto conta. Encadeamento
-/// (`a.b().c.`) exigiria saber o tipo de retorno de cada elo, que é outra
-/// análise — e oferecer os membros do elo errado seria pior do que não oferecer
-/// nada.
-fn member_access(text: &str, offset: usize) -> Option<MemberAccess> {
-    let head = &text[..offset.min(text.len())];
-    let prefix_start = head
-        .char_indices()
-        .rev()
-        .find(|(_, value)| !is_identifier_char(*value))
-        .map_or(0, |(index, value)| index + value.len_utf8());
-    let prefix = head[prefix_start..].to_owned();
-    let before = head[..prefix_start].trim_end();
-    let receiver_end = before.strip_suffix('.')?.trim_end();
-    let receiver_start = receiver_end
-        .char_indices()
-        .rev()
-        .find(|(_, value)| !is_identifier_char(*value))
-        .map_or(0, |(index, value)| index + value.len_utf8());
-    let receiver = receiver_end[receiver_start..].to_owned();
-    // Ponto sem identificador à esquerda é literal decimal ou erro de digitação,
-    // não acesso a membro.
-    (!receiver.is_empty() && !receiver.starts_with(|value: char| value.is_ascii_digit()))
-        .then_some(MemberAccess { receiver, prefix })
-}
-
-fn is_identifier_char(value: char) -> bool {
-    value.is_alphanumeric() || value == '_' || value == '$'
-}
-
 /// A posição está dentro do intervalo.
 fn within(range: &TextRange, position: TextPosition) -> bool {
     let point = (position.line, position.column);
@@ -1014,6 +1051,71 @@ fn members_in_document(type_name: &str, semantic: &SemanticSnapshot) -> Vec<Comp
 }
 
 /// Só o que o usuário pode escrever com o ponto.
+/// Filtra pelo prefixo, tira repetidos e ordena. É o fim de toda lista de
+/// membros, venha ela de onde vier.
+fn finish_member_list(mut items: Vec<CompletionItem>, prefix: &str) -> Vec<CompletionItem> {
+    let mut seen = HashSet::new();
+    items.retain(|item| item.label.starts_with(prefix) && seen.insert(item.label.clone()));
+    items.sort_by(|left, right| left.label.cmp(&right.label));
+    items.truncate(100);
+    items
+}
+
+/// Nome do membro sem os parênteses que marcam um método na lista.
+fn member_name(label: &str) -> &str {
+    label.strip_suffix("()").unwrap_or(label)
+}
+
+/// Nomes dos membros declarados `private` no arquivo.
+///
+/// As classes compiladas trazem os modificadores nos próprios bytes; o fonte
+/// não, e os símbolos da análise semântica guardam nome, tipo e escopo, não
+/// visibilidade. Ler isto da árvore é o que faz a lista depois do ponto ser de
+/// membros públicos também para o código que ainda não foi compilado.
+fn private_members(tree: &Tree, text: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut cursor = tree.walk();
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        pending.extend(node.children(&mut cursor));
+        if !matches!(node.kind(), "field_declaration" | "method_declaration") {
+            continue;
+        }
+        let private = node
+            .children(&mut node.walk())
+            .find(|child| child.kind() == "modifiers")
+            .and_then(|modifiers| modifiers.utf8_text(text.as_bytes()).ok())
+            .is_some_and(|modifiers| {
+                modifiers
+                    .split_whitespace()
+                    .any(|word| word == "private")
+            });
+        if !private {
+            continue;
+        }
+        if let Some(name) = node
+            .child_by_field_name("name")
+            .and_then(|name| name.utf8_text(text.as_bytes()).ok())
+        {
+            names.insert(name.to_owned());
+        }
+        // Um campo declara os nomes dentro dos declaradores, e podem ser vários
+        // na mesma linha: `private int a, b;`.
+        for declarator in node
+            .children(&mut node.walk())
+            .filter(|child| child.kind() == "variable_declarator")
+        {
+            if let Some(name) = declarator
+                .child_by_field_name("name")
+                .and_then(|name| name.utf8_text(text.as_bytes()).ok())
+            {
+                names.insert(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
 fn is_visible_member(member: &java_classfile::ClassMember) -> bool {
     member.access_flags & ACC_PUBLIC != 0
         && member.access_flags & (ACC_SYNTHETIC | ACC_BRIDGE) == 0
@@ -1585,6 +1687,144 @@ mod tests {
         assert_eq!(result, "boolean");
     }
 
+    /// Membros de uma classe do projeto declarada em **outro arquivo**.
+    ///
+    /// Uma classe por arquivo é a regra em Java, então este é o caso comum — e
+    /// era o que não funcionava: só o JDK e as dependências respondiam, porque a
+    /// busca olhava o arquivo aberto e as classes compiladas, nunca os outros
+    /// fontes do projeto.
+    #[test]
+    fn members_of_a_project_class_in_another_file_are_offered_after_the_dot() {
+        let root = std::env::temp_dir().join(format!("er-ide-java-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(
+            fs::write(
+                root.join("Matricula.java"),
+                concat!(
+                    "public class Matricula {\n",
+                    "    public Long id;\n",
+                    "    public String nome;\n",
+                    "    public void setId(Long id) {}\n",
+                    "    private void interno() {}\n",
+                    "}\n",
+                ),
+            )
+            .is_ok()
+        );
+
+        let active = match pollster::block_on(JavaLanguageProvider::new().activate(
+            LanguageActivationContext {
+                workspace_root: root.clone(),
+                jdk_home: None,
+            },
+        )) {
+            Ok(active) => active,
+            Err(error) => panic!("falha ao ativar o provider: {error}"),
+        };
+
+        // O arquivo aberto não declara `Matricula`; ele apenas a usa.
+        let source = concat!(
+            "class Uso {\n",
+            "    void executar() {\n",
+            "        Matricula m = new Matricula();\n",
+            "        m.\n",
+            "    }\n",
+            "}\n",
+        );
+        if let Err(error) = pollster::block_on(active.open_document(snapshot(source))) {
+            panic!("falha ao abrir documento: {error}");
+        }
+        let items = match pollster::block_on(active.completion(CompletionRequest {
+            document_id: DocumentId(1),
+            position: TextPosition {
+                line: 3,
+                column: 10,
+            },
+            prefix: String::new(),
+        })) {
+            Ok(items) => items,
+            Err(error) => panic!("falha na completação: {error}"),
+        };
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"id"), "campo público: {labels:?}");
+        assert!(labels.contains(&"nome"), "campo público: {labels:?}");
+        assert!(labels.contains(&"setId()"), "método público: {labels:?}");
+        assert!(
+            !labels.contains(&"interno()"),
+            "membro privado não é oferecido: {labels:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Consultar por nome de tipo alcança o projeto inteiro, sem arquivo aberto.
+    ///
+    /// É o que o editor do depurador usa: lá não há documento, e uma classe que
+    /// não participa do que está sendo depurado precisa ser tão conhecida quanto
+    /// qualquer outra.
+    #[test]
+    fn members_can_be_asked_by_type_name_without_any_document() {
+        let root = std::env::temp_dir().join(format!("er-ide-tipo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(
+            fs::write(
+                root.join("Relatorio.java"),
+                concat!(
+                    "public class Relatorio {\n",
+                    "    public String titulo;\n",
+                    "    public void emitir() {}\n",
+                    "    private void rascunho() {}\n",
+                    "}\n",
+                ),
+            )
+            .is_ok()
+        );
+        let active = match pollster::block_on(JavaLanguageProvider::new().activate(
+            LanguageActivationContext {
+                workspace_root: root.clone(),
+                jdk_home: None,
+            },
+        )) {
+            Ok(active) => active,
+            Err(error) => panic!("falha ao ativar o provider: {error}"),
+        };
+
+        let items = match pollster::block_on(active.type_members("Relatorio", "")) {
+            Ok(items) => items,
+            Err(error) => panic!("falha ao consultar o tipo: {error}"),
+        };
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"titulo"), "campo público: {labels:?}");
+        assert!(labels.contains(&"emitir()"), "método público: {labels:?}");
+        assert!(
+            !labels.contains(&"rascunho()"),
+            "membro privado não é oferecido: {labels:?}"
+        );
+
+        // O prefixo filtra, como na lista de dentro de um arquivo.
+        let filtrados = match pollster::block_on(active.type_members("Relatorio", "tit")) {
+            Ok(items) => items,
+            Err(error) => panic!("falha ao filtrar: {error}"),
+        };
+        assert_eq!(
+            filtrados
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["titulo"]
+        );
+
+        // Um tipo desconhecido responde vazio, e não com erro.
+        assert_eq!(
+            pollster::block_on(active.type_members("NaoExiste", ""))
+                .map(|items| items.len())
+                .unwrap_or(usize::MAX),
+            0
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// Membros do tipo declarado no próprio arquivo, que ainda não foi
     /// compilado — o caso da classe que está sendo escrita agora.
     #[test]
@@ -1620,6 +1860,10 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
         assert!(labels.contains(&"total"), "campo do tipo: {labels:?}");
         assert!(labels.contains(&"descricao()"), "método do tipo: {labels:?}");
+        assert!(
+            !labels.contains(&"interno()"),
+            "membro privado não se alcança pelo ponto: {labels:?}"
+        );
         // O menu depois do ponto fala do objeto, não do arquivo: nada de
         // palavra-chave nem de classe solta do índice.
         assert!(!labels.contains(&"class"), "palavra-chave vazou: {labels:?}");

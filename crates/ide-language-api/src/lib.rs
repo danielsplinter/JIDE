@@ -122,6 +122,21 @@ pub trait ActiveLanguage: Send + Sync {
     ) -> Result<Vec<CompletionItem>, LanguageError> {
         Err(LanguageError::Unsupported("completion".to_owned()))
     }
+    /// Membros públicos de um tipo nomeado, sem documento nem posição.
+    ///
+    /// A completação normal parte de um ponto dentro de um arquivo, e é dali que
+    /// ela descobre o tipo do receptor. Há telas em que não existe arquivo — o
+    /// editor de expressões do depurador é uma delas —, mas o tipo já é conhecido
+    /// por outro meio. O índice consultado é o mesmo da completação comum: o
+    /// projeto inteiro, as dependências e a biblioteca padrão. Uma classe que não
+    /// participa do que está sendo depurado é tão conhecida quanto as outras.
+    async fn type_members(
+        &self,
+        _type_name: &str,
+        _prefix: &str,
+    ) -> Result<Vec<CompletionItem>, LanguageError> {
+        Err(LanguageError::Unsupported("type members".to_owned()))
+    }
     async fn definition(
         &self,
         _request: DefinitionRequest,

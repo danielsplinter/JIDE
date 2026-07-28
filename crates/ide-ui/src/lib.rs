@@ -12,7 +12,7 @@ use std::{
 
 use ide_domain::{
     CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, OutlineItem,
-    SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition,
+    SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition, member_access,
 };
 use ide_terminal::{ShellKind, TerminalSession};
 use ide_text::{EditorSession, TextBuffer};
@@ -309,6 +309,23 @@ enum InspectionFocus {
     Source,
 }
 
+/// Execução em curso do editor da inspeção.
+///
+/// As instruções vão ao alvo **uma de cada vez**: cada uma roda dentro do
+/// processo depurado e pode mudar o que a seguinte vai encontrar, então a ordem
+/// é parte do que o usuário escreveu. A primeira que falhar interrompe o resto,
+/// como aconteceria num método de verdade.
+#[derive(Clone, Debug)]
+struct InspectionRun {
+    /// A que está no alvo agora.
+    current: String,
+    /// As que ainda não foram, na ordem em que foram escritas.
+    remaining: Vec<String>,
+    /// Posição da atual, contando a partir de 1.
+    position: usize,
+    total: usize,
+}
+
 /// Um valor na árvore de inspeção, com os campos já revelados.
 ///
 /// O caminho é a expressão que endereça o valor a partir da raiz —
@@ -505,6 +522,12 @@ pub struct IdeShell {
     /// A barra de estado fica atrás do painel: um erro relatado só lá deixa o
     /// usuário sem saber por que nada aconteceu.
     inspection_message: Option<String>,
+    /// O que o botão **Executar** está executando agora.
+    ///
+    /// É o que distingue a resposta de uma execução da abertura de uma
+    /// inspeção: as duas chegam pelo mesmo caminho, mas uma troca o que a árvore
+    /// mostra e a outra não pode trocar.
+    inspection_run: Option<InspectionRun>,
     open_project_requested: bool,
     open_settings_requested: bool,
     build_project_requested: bool,
@@ -753,6 +776,7 @@ impl IdeShell {
                 .with_command("inspect.run"),
             inspection_focus: InspectionFocus::Tree,
             inspection_message: None,
+            inspection_run: None,
             open_project_requested: false,
             open_settings_requested: false,
             build_project_requested: false,
@@ -889,6 +913,37 @@ impl IdeShell {
     pub fn set_completions(&mut self, items: Vec<CompletionItem>) {
         self.completion_items = items;
         self.completion_selected = 0;
+    }
+
+    /// A lista de completação está à mostra.
+    #[must_use]
+    pub fn completion_open(&self) -> bool {
+        !self.completion_items.is_empty()
+    }
+
+    pub fn clear_completions(&mut self) {
+        self.completion_items.clear();
+        self.completion_selected = 0;
+    }
+
+    /// O que o texto recém-digitado faz com a lista já aberta.
+    ///
+    /// Devolve `true` quando a lista precisa ser pedida de novo: cada letra
+    /// digitada encurta o que ainda serve, e é isso que faz a lista **acompanhar
+    /// o nome sendo escrito** em vez de congelar no que valia quando ela abriu.
+    ///
+    /// Um caractere que não faz parte de um nome encerra o nome, e a lista sai.
+    /// Chamar com a lista fechada não abre nada: abrir é papel do caractere de
+    /// disparo da linguagem, ou do `Ctrl+Space`.
+    pub fn completion_follow_up(&mut self, typed: &str) -> bool {
+        if !self.completion_open() {
+            return false;
+        }
+        if !typed.is_empty() && typed.chars().all(is_identifier_character) {
+            return true;
+        }
+        self.clear_completions();
+        false
     }
     /// Mensagem atual da barra de estado.
     #[must_use]
@@ -2406,7 +2461,13 @@ impl IdeShell {
         if self.settings_modal.is_open() {
             return false;
         }
-        if let Some(target) = self.scrollbar_drag {
+        // Com a inspeção aberta, o gesto é dela: o resto da janela está atrás do
+        // painel, e arrastar sobre o que não se vê seria o gesto indo parar no
+        // lugar errado.
+        let inspecting = self.inspection_modal.is_open();
+        if !inspecting
+            && let Some(target) = self.scrollbar_drag
+        {
             self.sync_scrollbar(target, size);
             self.scrollbar_mut(target).event(
                 &mut EventContext::default(),
@@ -2416,12 +2477,14 @@ impl IdeShell {
             return true;
         }
         // O arraste no editor é do painel, que sabe se um gesto começou nele.
-        let bounds = self.editor_view_rect(size);
-        self.editor_pane.set_bounds(bounds);
-        if let Some(document) = self.editor.active()
-            && self.editor_pane.pointer_move(&document.buffer, point)
+        self.place_focused_editor(size);
+        if let Some((pane, buffer)) = self.focused_editor()
+            && pane.pointer_move(buffer, point)
         {
             return true;
+        }
+        if inspecting {
+            return false;
         }
         if self.terminal_selecting {
             let position = self.terminal_position_at(point, size);
@@ -2451,6 +2514,7 @@ impl IdeShell {
     pub fn pointer_up(&mut self) {
         // Encerrar o gesto é do painel, que sabe se ele virou seleção.
         self.editor_pane.pointer_up();
+        self.inspection_editor.pointer_up();
         let event = UiEvent::PointerUp(primary_pointer(Point::ZERO));
         self.sidebar_splitter
             .event(&mut EventContext::default(), &event);
@@ -2700,23 +2764,8 @@ impl IdeShell {
             }
             return;
         }
-        if !self.completion_items.is_empty() {
-            match key.to_ascii_lowercase().as_str() {
-                "arrowdown" => {
-                    self.completion_selected =
-                        (self.completion_selected + 1).min(self.completion_items.len() - 1);
-                    return;
-                }
-                "arrowup" => {
-                    self.completion_selected = self.completion_selected.saturating_sub(1);
-                    return;
-                }
-                "enter" | "tab" => {
-                    self.accept_completion();
-                    return;
-                }
-                _ => {}
-            }
+        if self.completion_key(key) {
+            return;
         }
         if key.eq_ignore_ascii_case("backspace") {
             match self.focus {
@@ -2763,16 +2812,118 @@ impl IdeShell {
 
     /// Seleciona a palavra sob o ponteiro. É o que o duplo clique pede.
     pub fn select_word_at_point(&mut self, point: Point, size: Size) {
-        let bounds = self.editor_view_rect(size);
-        self.editor_pane.set_bounds(bounds);
-        if !bounds.contains(point) {
+        self.place_focused_editor(size);
+        let inside = self
+            .focused_editor_ref()
+            .is_some_and(|(pane, _)| pane.bounds().contains(point));
+        if !inside {
             return;
         }
-        self.focus = ShellFocus::Editor;
-        let Some(document) = self.editor.active() else {
+        // O gesto também leva o foco, como no clique simples.
+        if self.inspection_modal.is_open() {
+            self.inspection_focus = InspectionFocus::Source;
+        } else {
+            self.focus = ShellFocus::Editor;
+        }
+        if let Some((pane, buffer)) = self.focused_editor() {
+            pane.select_word_at(buffer, point);
+        }
+    }
+
+    /// Recebe uma avaliação vinda do depurador e decide o que ela significa.
+    ///
+    /// Abrir a inspeção e executar código dentro dela chegam pelo mesmo evento,
+    /// mas pedem coisas opostas: a primeira monta a árvore, a segunda **não pode
+    /// desmontá-la**. Quem executa `m.setId(4L)` quer continuar olhando `m`, e não
+    /// trocar a árvore pelo `void` que o método devolveu.
+    pub fn inspection_result(
+        &mut self,
+        expression: String,
+        value: DebugVariableView,
+        fields: Vec<DebugVariableView>,
+    ) {
+        if self
+            .inspection_run
+            .as_ref()
+            .is_some_and(|run| run.current == expression)
+        {
+            self.advance_inspection_run(&expression, &value.value);
+            return;
+        }
+        // A mesma raiz chegando de novo é a releitura pedida depois de uma
+        // execução: os valores mudam, o que estava aberto continua aberto.
+        let same_root = self
+            .inspection
+            .as_ref()
+            .is_some_and(|inspection| inspection.expression == expression);
+        if same_root && self.inspection_modal.is_open() {
+            self.refresh_inspection(value, fields);
+            return;
+        }
+        self.show_inspection(expression, value, fields);
+    }
+
+    /// Uma instrução terminou: manda a próxima, ou fecha a execução.
+    fn advance_inspection_run(&mut self, expression: &str, value: &str) {
+        let Some(run) = self.inspection_run.as_mut() else {
             return;
         };
-        self.editor_pane.select_word_at(&document.buffer, point);
+        let total = run.total;
+        if run.remaining.is_empty() {
+            self.inspection_run = None;
+            // Com uma instrução só, o relato é o retorno dela; com várias, o que
+            // interessa é que todas passaram e o que a última respondeu.
+            self.inspection_message = Some(if total > 1 {
+                format!("{total} instruções executadas — {expression} → {value}")
+            } else {
+                format!("{expression} → {value}")
+            });
+            self.reload_inspection();
+            return;
+        }
+        let next = run.remaining.remove(0);
+        run.position += 1;
+        run.current.clone_from(&next);
+        let position = run.position;
+        self.status_message = format!("Executando {next} ({position} de {total})");
+        self.debug_requests.push(DebugRequest::Evaluate(next));
+    }
+
+    /// Pede ao depurador o valor atual da raiz da árvore.
+    fn reload_inspection(&mut self) {
+        let Some(inspection) = self.inspection.as_ref() else {
+            return;
+        };
+        self.debug_requests
+            .push(DebugRequest::Evaluate(inspection.expression.clone()));
+    }
+
+    /// Troca os valores da árvore sem mexer no que está aberto nem no que está
+    /// selecionado.
+    fn refresh_inspection(&mut self, value: DebugVariableView, fields: Vec<DebugVariableView>) {
+        let Some(inspection) = self.inspection.as_mut() else {
+            return;
+        };
+        let expression = inspection.expression.clone();
+        inspection.root.variable = value;
+        inspection.root.loaded = true;
+        inspection.root.children = fields
+            .into_iter()
+            .map(|field| InspectionNode::new(format!("{expression}.{}", field.name), field))
+            .collect();
+        // Só a raiz veio com campos; os níveis abertos abaixo dela precisam ser
+        // relidos, ou mostrariam o valor de antes da execução.
+        let deeper: Vec<String> = inspection
+            .expanded
+            .iter()
+            .filter(|path| **path != expression)
+            .cloned()
+            .collect();
+        self.sync_inspection_tree();
+        for path in deeper {
+            self.debug_requests
+                .push(DebugRequest::ExpandInspection(path));
+        }
     }
 
     /// Abre a janela de inspeção com o valor avaliado e seus campos.
@@ -2850,8 +3001,32 @@ impl IdeShell {
     /// Enquanto a janela está aberta ela cobre a barra de estado, então é aqui
     /// que a resposta precisa aparecer.
     pub fn set_inspection_message(&mut self, message: impl Into<String>) {
-        if self.inspection_modal.is_open() {
-            self.inspection_message = Some(message.into());
+        let message = message.into();
+        // A avaliação responde com o valor ou com este relato, nunca com os dois:
+        // chegar aqui encerra a execução que estava em curso.
+        let interrupted = self.inspection_run.take();
+        if !self.inspection_modal.is_open() {
+            return;
+        }
+        let Some(run) = interrupted else {
+            self.inspection_message = Some(message);
+            return;
+        };
+        // As instruções seguintes não rodam: cada uma esperava o estado que a
+        // anterior deixaria, e ele não existe.
+        self.inspection_message = Some(if run.total > 1 {
+            format!(
+                "parou na instrução {} de {}: {message}",
+                run.position, run.total
+            )
+        } else {
+            message
+        });
+        // O que rodou antes da falha teve efeito, e a árvore precisa mostrá-lo.
+        // Só aqui: relê a cada relato qualquer e uma releitura que falhasse
+        // pediria outra, sem fim.
+        if run.position > 1 {
+            self.reload_inspection();
         }
     }
 
@@ -2872,14 +3047,131 @@ impl IdeShell {
                 Some("A sessão de depuração terminou; reconecte para executar".to_owned());
             return;
         }
-        let code = self.inspection_source.text().trim().to_owned();
-        if code.is_empty() {
+        let mut statements = inspection_statements(self.inspection_source.text());
+        if statements.is_empty() {
             self.status_message = "Escreva a expressão a executar".to_owned();
             return;
         }
-        self.status_message = format!("Executando {code}");
+        let total = statements.len();
+        let first = statements.remove(0);
+        self.status_message = if total > 1 {
+            format!("Executando {first} (1 de {total})")
+        } else {
+            format!("Executando {first}")
+        };
         self.inspection_message = None;
-        self.debug_requests.push(DebugRequest::Evaluate(code));
+        self.inspection_run = Some(InspectionRun {
+            current: first.clone(),
+            remaining: statements,
+            position: 1,
+            total,
+        });
+        self.debug_requests.push(DebugRequest::Evaluate(first));
+    }
+
+    /// Painel de edição que está na frente, com o texto que ele edita.
+    ///
+    /// A janela de inspeção cobre o editor principal, então **qual é "o editor"
+    /// depende do que está na frente**. Responder isso num lugar só é o que
+    /// impede cada gesto — arraste, duplo clique, copiar, colar — de escolher por
+    /// conta própria e um dia escolher diferente do vizinho.
+    fn focused_editor(&mut self) -> Option<(&mut EditorPane, &mut TextBuffer)> {
+        if self.inspection_modal.is_open() {
+            return Some((&mut self.inspection_editor, &mut self.inspection_source));
+        }
+        let document = self.editor.active_mut()?;
+        Some((&mut self.editor_pane, &mut document.buffer))
+    }
+
+    /// Tipo e filtro pedidos pelo ponto digitado no editor da inspeção.
+    ///
+    /// Ali não existe arquivo, então a completação comum — que descobre o tipo
+    /// pela declaração — não tem de onde partir. O tipo do receptor vem de duas
+    /// origens, nesta ordem: o que está parado no depurador, que é a única fonte
+    /// para uma variável de quadro como `m`; e, se o nome não for uma delas, o
+    /// próprio texto digitado, que passa a ser lido como nome de tipo. É o que
+    /// faz uma classe alheia ao código depurado ser reconhecida como as outras —
+    /// quem responde pelos membros é o índice do projeto, não o processo.
+    #[must_use]
+    pub fn inspection_member_request(&self) -> Option<(String, String)> {
+        if !self.inspection_modal.is_open() {
+            return None;
+        }
+        let access = member_access(
+            self.inspection_source.text(),
+            self.inspection_editor.cursor(),
+        )?;
+        let type_name = self
+            .debug_type_of(&access.receiver)
+            .unwrap_or_else(|| access.receiver.clone());
+        Some((type_name, access.prefix))
+    }
+
+    /// Tipo em execução de um nome visível no quadro parado.
+    ///
+    /// A árvore de inspeção vem primeiro porque é o objeto que o usuário mandou
+    /// inspecionar; as variáveis do quadro cobrem o resto do que está no escopo.
+    fn debug_type_of(&self, name: &str) -> Option<String> {
+        if let Some(inspection) = self.inspection.as_ref() {
+            if inspection.expression == name {
+                return inspection.root.variable.type_name.clone();
+            }
+            if let Some(field) = inspection
+                .root
+                .children
+                .iter()
+                .find(|child| child.variable.name == name)
+            {
+                return field.variable.type_name.clone();
+            }
+        }
+        self.debug
+            .variables
+            .iter()
+            .find(|variable| variable.name == name)
+            .and_then(|variable| variable.type_name.clone())
+    }
+
+    /// Canto onde a lista nasce dentro da janela de inspeção.
+    fn inspection_completion_anchor(&self) -> Option<Point> {
+        if self.completion_items.is_empty() {
+            return None;
+        }
+        let bounds = self.inspection_editor.bounds();
+        let (line, column) = line_column(
+            self.inspection_source.text(),
+            self.inspection_editor.cursor(),
+        );
+        Some(Point::new(
+            (bounds.origin.x + EDITOR_GUTTER + column as f32 * EDITOR_CHAR_WIDTH)
+                .min(bounds.origin.x + bounds.size.width - COMPLETION_POPUP_WIDTH)
+                .max(bounds.origin.x),
+            bounds.origin.y
+                + (line.saturating_sub(self.inspection_editor.scroll_line()) + 1) as f32
+                    * EDITOR_LINE_HEIGHT,
+        ))
+    }
+
+    /// O mesmo, para quem só precisa ler.
+    fn focused_editor_ref(&self) -> Option<(&EditorPane, &TextBuffer)> {
+        if self.inspection_modal.is_open() {
+            return Some((&self.inspection_editor, &self.inspection_source));
+        }
+        let document = self.editor.active()?;
+        Some((&self.editor_pane, &document.buffer))
+    }
+
+    /// Põe o painel da frente na área que ele ocupa agora.
+    ///
+    /// Converter ponto em posição do texto depende de saber onde o painel está, e
+    /// as duas áreas mudam com o tamanho da janela.
+    fn place_focused_editor(&mut self, size: Size) {
+        if self.inspection_modal.is_open() {
+            self.layout_inspection_editor(size);
+            return;
+        }
+        let bounds = self.editor_view_rect(size);
+        self.editor_pane.set_bounds(bounds);
     }
 
     /// Digitação dentro da janela de inspeção. Devolve `true` quando consumiu.
@@ -2902,6 +3194,10 @@ impl IdeShell {
             self.run_inspection_source();
             return true;
         }
+        // A lista aberta tem precedência sobre o texto, como no editor da janela.
+        if self.completion_key(key) {
+            return true;
+        }
         self.inspection_editor.key(
             &mut self.inspection_source,
             key,
@@ -2921,6 +3217,7 @@ impl IdeShell {
 
     pub fn close_inspection(&mut self) {
         self.inspection_message = None;
+        self.inspection_run = None;
         self.inspection_modal.close();
         self.inspection = None;
     }
@@ -2954,14 +3251,12 @@ impl IdeShell {
 
     /// Copia o trecho selecionado para a área de transferência do sistema.
     pub fn copy_selection(&mut self) -> bool {
-        let Some(range) = self.editor_pane.selection_range() else {
+        let selected = self
+            .focused_editor_ref()
+            .and_then(|(pane, buffer)| pane.selected_text(buffer))
+            .map(str::to_owned);
+        let Some(text) = selected else {
             self.status_message = "Nada selecionado".to_owned();
-            return false;
-        };
-        let Some(text) = self
-            .active_text()
-            .and_then(|text| text.get(range).map(str::to_owned))
-        else {
             return false;
         };
         let Some(clipboard) = self.clipboard.as_ref() else {
@@ -2991,7 +3286,7 @@ impl IdeShell {
         };
         match clipboard.get_text() {
             Ok(Some(text)) if !text.is_empty() => {
-                self.edit_active(&text);
+                self.edit_focused(&text);
                 true
             }
             Ok(_) => {
@@ -3005,6 +3300,19 @@ impl IdeShell {
         }
     }
 
+
+    /// Escreve no painel que está na frente.
+    ///
+    /// Marcar o documento como modificado e fechar o autocomplete são efeitos do
+    /// editor de arquivos; o rascunho da inspeção não tem nenhum dos dois.
+    fn edit_focused(&mut self, text: &str) {
+        if self.inspection_modal.is_open() {
+            self.inspection_editor
+                .insert(&mut self.inspection_source, text);
+            return;
+        }
+        self.edit_active(text);
+    }
 
     /// Escreve no documento ativo pelo painel de edição.
     fn edit_active(&mut self, text: &str) {
@@ -3032,16 +3340,48 @@ impl IdeShell {
         }
     }
 
+    /// Tecla dirigida à lista de completação aberta. `true` quando ela consumiu.
+    ///
+    /// Com a lista à mostra, as setas andam nela e não no texto — é o que se
+    /// espera de qualquer editor, e vale igual nos dois editores da IDE.
+    fn completion_key(&mut self, key: &str) -> bool {
+        if self.completion_items.is_empty() {
+            return false;
+        }
+        match key.to_ascii_lowercase().as_str() {
+            "arrowdown" => {
+                self.completion_selected =
+                    (self.completion_selected + 1).min(self.completion_items.len() - 1);
+                true
+            }
+            "arrowup" => {
+                self.completion_selected = self.completion_selected.saturating_sub(1);
+                true
+            }
+            "enter" | "tab" => {
+                self.accept_completion();
+                true
+            }
+            "escape" => {
+                self.completion_items.clear();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn accept_completion(&mut self) {
         let Some(item) = self.completion_items.get(self.completion_selected).cloned() else {
             return;
         };
-        if let Some(document) = self.editor.active_mut() {
-            let cursor = self.editor_pane.cursor().min(document.buffer.text().len());
-            let prefix = identifier_prefix(document.buffer.text(), cursor);
+        // Trocar o que já foi digitado pelo item escolhido é a mesma operação nos
+        // dois editores; o que muda é qual deles está na frente.
+        if let Some((pane, buffer)) = self.focused_editor() {
+            let cursor = pane.cursor().min(buffer.text().len());
+            let prefix = identifier_prefix(buffer.text(), cursor);
             let start = cursor.saturating_sub(prefix.len());
-            if document.buffer.replace(start..cursor, &item.label).is_ok() {
-                self.editor_pane.set_cursor(start + item.label.len());
+            if buffer.replace(start..cursor, &item.label).is_ok() {
+                pane.set_cursor(start + item.label.len());
                 self.status_message = format!("Completed {}", item.label);
             }
         }
@@ -3301,7 +3641,7 @@ impl IdeShell {
                 13.0,
             ));
         }
-        if !self.completion_items.is_empty()
+        if !self.inspection_modal.is_open()
             && self.focus == ShellFocus::Editor
             && let Some(text) = self.active_text()
         {
@@ -3313,35 +3653,7 @@ impl IdeShell {
                 + 36.0
                 + line.saturating_sub(self.editor_pane.scroll_line()) as f32 * EDITOR_LINE_HEIGHT)
                 .min(geo.editor_bottom - 190.0);
-            // Superfície flutuante e lista são da biblioteca: a IDE só diz onde
-            // ancorar, o que listar e o que está selecionado.
-            let visible = self.completion_items.len().min(COMPLETION_VISIBLE_ROWS);
-            let mut surface = Popup::new(COMPLETION_POPUP_ID).with_padding(4.0);
-            surface.set_content_size(Size::new(
-                COMPLETION_POPUP_WIDTH,
-                visible as f32 * COMPLETION_ROW_HEIGHT,
-            ));
-            surface.layout(
-                &self.layout_context(),
-                Rect::new(0.0, 0.0, size.width, size.height),
-            );
-            surface.open_at(Point::new(popup_x, popup_y));
-            let mut popup_paint = self.paint_context();
-            surface.paint(&mut popup_paint);
-            if let Some(content) = surface.content_rect() {
-                let mut list = ListView::new(
-                    COMPLETION_LIST_ID,
-                    self.completion_items
-                        .iter()
-                        .map(|item| item.label.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .with_row_height(COMPLETION_ROW_HEIGHT);
-                list.set_selected(Some(self.completion_selected));
-                list.layout(&self.layout_context(), content);
-                list.paint(&mut popup_paint);
-            }
-            commands.extend(popup_paint.into_commands());
+            self.paint_completion(&mut commands, size, Point::new(popup_x, popup_y));
         }
         if self.focus == ShellFocus::Search {
             // Também da biblioteca: a caixa é um campo de texto sobre uma
@@ -3513,6 +3825,12 @@ impl IdeShell {
         // A janela de criação cobre o conteúdo, e o menu de contexto cobre ela.
         self.paint_new_item_dialog(&mut commands, size);
         self.paint_inspection(&mut commands, size);
+        // Depois da janela de inspeção, ou a lista ficaria atrás dela.
+        if self.inspection_modal.is_open()
+            && let Some(anchor) = self.inspection_completion_anchor()
+        {
+            self.paint_completion(&mut commands, size, anchor);
+        }
         // O menu de contexto é desenhado por último: ele cobre tudo, inclusive
         // o painel de onde foi aberto.
         if self.context_menu.is_open() {
@@ -3533,6 +3851,47 @@ impl IdeShell {
     /// A lista mostra o valor pedido e os campos dele; o painel direito descreve
     /// a entrada destacada. O valor completo cabe ali, e não numa linha de lista,
     /// que o recorte cortaria justamente onde está a informação.
+    /// Desenha a lista de completação ancorada num ponto da tela.
+    ///
+    /// Superfície flutuante e lista são da biblioteca: a IDE só diz onde ancorar,
+    /// o que listar e o que está selecionado. Quem chama decide o ponto, e é isso
+    /// que permite a mesma lista servir ao editor da janela e ao do depurador,
+    /// que estão em lugares diferentes.
+    fn paint_completion(&self, commands: &mut Vec<PaintCommand>, size: Size, anchor: Point) {
+        if self.completion_items.is_empty() {
+            return;
+        }
+        let visible = self.completion_items.len().min(COMPLETION_VISIBLE_ROWS);
+        let mut surface = Popup::new(COMPLETION_POPUP_ID).with_padding(4.0);
+        surface.set_content_size(Size::new(
+            COMPLETION_POPUP_WIDTH,
+            visible as f32 * COMPLETION_ROW_HEIGHT,
+        ));
+        surface.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        surface.open_at(anchor);
+        let mut popup_paint = self.paint_context();
+        surface.paint(&mut popup_paint);
+        if let Some(content) = surface.content_rect() {
+            let mut list = ListView::new(
+                COMPLETION_LIST_ID,
+                self.completion_items
+                    .iter()
+                    .map(|item| item.label.clone())
+                    .collect::<Vec<_>>(),
+            )
+            // Sem cor própria: o texto do tema é o escolhido para se ler sobre a
+            // superfície, e é o mesmo em toda a interface.
+            .with_row_height(COMPLETION_ROW_HEIGHT);
+            list.set_selected(Some(self.completion_selected));
+            list.layout(&self.layout_context(), content);
+            list.paint(&mut popup_paint);
+        }
+        commands.extend(popup_paint.into_commands());
+    }
+
     fn paint_inspection(&self, commands: &mut Vec<PaintCommand>, size: Size) {
         let Some(inspection) = self.inspection.as_ref() else {
             return;
@@ -3636,12 +3995,22 @@ impl IdeShell {
     }
 
     /// Roteia o clique dentro da janela de inspeção.
-    fn inspection_pointer_down(&mut self, point: Point, size: Size) {
+    /// Põe o painel de edição da inspeção na área que ele ocupa agora.
+    ///
+    /// O painel só sabe converter ponto em posição do texto depois de saber onde
+    /// está, e a janela é centrada: a área muda com o tamanho da tela.
+    fn layout_inspection_editor(&mut self, size: Size) -> InspectionGeometry {
         self.inspection_modal.layout(
             &self.layout_context(),
             Rect::new(0.0, 0.0, size.width, size.height),
         );
         let geometry = inspection_geometry(self.inspection_modal.panel_bounds());
+        self.inspection_editor.set_bounds(geometry.source);
+        geometry
+    }
+
+    fn inspection_pointer_down(&mut self, point: Point, size: Size) {
+        let geometry = self.layout_inspection_editor(size);
         if geometry.close.contains(point) {
             self.close_inspection();
             return;
@@ -3652,7 +4021,6 @@ impl IdeShell {
         }
         if geometry.source.contains(point) {
             // O editor cuida do próprio cursor e da própria seleção.
-            self.inspection_editor.set_bounds(geometry.source);
             self.inspection_editor
                 .pointer_down(&self.inspection_source, point, false);
             self.inspection_focus = InspectionFocus::Source;
@@ -4279,6 +4647,48 @@ fn inspection_id(path: &str) -> u64 {
     hasher.finish()
 }
 
+/// Separa o texto do editor nas instruções que o compõem.
+///
+/// O `;` e a quebra de linha terminam uma instrução, mas **não dentro de aspas**:
+/// `setNome("a; b")` é uma instrução só, e partir no ponto e vírgula do meio
+/// entregaria duas metades sem sentido ao alvo.
+fn inspection_statements(source: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for character in source.chars() {
+        if quoted {
+            current.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => {
+                quoted = true;
+                current.push(character);
+            }
+            ';' | '\n' | '\r' => {
+                if !current.trim().is_empty() {
+                    statements.push(current.trim().to_owned());
+                }
+                current.clear();
+            }
+            _ => current.push(character),
+        }
+    }
+    if !current.trim().is_empty() {
+        statements.push(current.trim().to_owned());
+    }
+    statements
+}
+
 /// Converte um nó carregado em item da biblioteca.
 ///
 /// Um valor expansível ainda sem campos recebe um filho de espera: é o que faz a
@@ -4677,6 +5087,7 @@ fn position_in_range(line: usize, column: usize, range: ide_domain::TextRange) -
 fn is_identifier_character(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
 }
+
 
 fn fill(rect: Rect, color: Color) -> PaintCommand {
     PaintCommand::FillRect(FillRectCommand { rect, color })
@@ -6951,6 +7362,15 @@ mod tests {
         ]
     }
 
+    fn inspection_void() -> DebugVariableView {
+        DebugVariableView {
+            name: "retorno".to_owned(),
+            value: "void".to_owned(),
+            type_name: None,
+            expandable: false,
+        }
+    }
+
     /// A janela abre com o objeto na lista e o detalhe do item destacado.
     #[test]
     fn the_inspection_window_lists_the_object_and_details_the_selection() {
@@ -7105,6 +7525,409 @@ mod tests {
             shell.take_debug_requests(),
             vec![DebugRequest::Evaluate("pedido.cliente.nome".to_owned())]
         );
+    }
+
+    /// O resultado da execução não toma o lugar da árvore.
+    ///
+    /// Executar `pedido.pagar()` devolve `void`; trocar a árvore por isso apagaria
+    /// justamente o objeto que se queria ver mudar.
+    #[test]
+    fn running_keeps_the_tree_and_only_refreshes_its_values() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.debug.attached = true;
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        // Um nível mais fundo fica aberto, para conferir que ele é relido.
+        let geometry = inspection_layout(&mut shell, size);
+        shell.pointer_down(
+            Point::new(
+                geometry.list.origin.x + 30.0,
+                geometry.list.origin.y + INSPECTION_ROW_HEIGHT * 2.0 + 4.0,
+            ),
+            size,
+        );
+        let _ = shell.take_debug_requests();
+
+        shell.inspection_source = TextBuffer::new("pedido.pagar()");
+        shell.run_inspection_source();
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("pedido.pagar()".to_owned())]
+        );
+
+        // Chega o retorno da chamada: nada de árvore nova.
+        shell.inspection_result(
+            "pedido.pagar()".to_owned(),
+            inspection_void(),
+            Vec::new(),
+        );
+        assert_eq!(shell.inspected_expression(), Some("pedido"));
+        let texts = painted_texts(&mut shell, size);
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("pedido = (br.com.exemplo.Pedido) Pedido@1a2b")),
+            "a árvore deveria continuar mostrando o objeto: {texts:?}"
+        );
+        assert_eq!(
+            shell.inspection_message.as_deref(),
+            Some("pedido.pagar() → void"),
+            "o retorno aparece na linha de mensagem, não na árvore"
+        );
+
+        // A releitura da raiz foi pedida.
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("pedido".to_owned())]
+        );
+
+        // E ela troca os valores sem fechar o que estava aberto.
+        shell.inspection_result(
+            "pedido".to_owned(),
+            inspection_value(),
+            vec![
+                DebugVariableView {
+                    name: "total".to_owned(),
+                    value: "0".to_owned(),
+                    type_name: Some("int".to_owned()),
+                    expandable: false,
+                },
+                DebugVariableView {
+                    name: "cliente".to_owned(),
+                    value: "Cliente@3c4d".to_owned(),
+                    type_name: Some("br.com.exemplo.Cliente".to_owned()),
+                    expandable: true,
+                },
+            ],
+        );
+        let texts = painted_texts(&mut shell, size);
+        assert!(
+            texts.iter().any(|text| text.contains("total = (int) 0")),
+            "o valor deveria ser o de depois da execução: {texts:?}"
+        );
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::ExpandInspection("pedido.cliente".to_owned())],
+            "o nível aberto abaixo da raiz também precisa ser relido"
+        );
+    }
+
+    /// Os nomes da lista saem na cor de texto do tema.
+    ///
+    /// É a cor escolhida para se ler sobre a superfície, e a mesma do resto da
+    /// interface — trocar o tema troca também o que a lista mostra.
+    #[test]
+    fn the_completion_list_paints_its_names_with_the_theme_text() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.focus = ShellFocus::Editor;
+        shell.set_completions(vec![CompletionItem {
+            label: "getAluno()".to_owned(),
+            detail: None,
+            kind: ide_domain::CompletionKind::Method,
+        }]);
+        let colors: Vec<Color> = shell
+            .paint(size)
+            .into_iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) if text.text == "getAluno()" => Some(text.color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            colors,
+            vec![Theme::dark().colors.text],
+            "o nome sai na cor de texto do tema"
+        );
+    }
+
+    /// A lista acompanha o nome sendo digitado, e não só o ponto que a abriu.
+    ///
+    /// Sem isto, ela mostrava o que valia no instante em que abriu e só se
+    /// atualizava com `Ctrl+Space` — digitar `se` depois de `a.` deixava a lista
+    /// parada.
+    #[test]
+    fn typing_after_the_dot_asks_for_the_list_again() {
+        let mut shell = shell_editing("int total = 10;");
+        let item = |label: &str| CompletionItem {
+            label: label.to_owned(),
+            detail: None,
+            kind: ide_domain::CompletionKind::Method,
+        };
+
+        // Fechada, digitar não abre nada: abrir é do ponto ou do Ctrl+Space.
+        assert!(!shell.completion_follow_up("s"));
+
+        shell.set_completions(vec![item("setId()"), item("setNome()")]);
+        assert!(
+            shell.completion_follow_up("s"),
+            "cada letra refaz o filtro"
+        );
+        assert!(shell.completion_open(), "e a lista continua à mostra");
+
+        // O que não faz parte de um nome encerra o nome.
+        assert!(!shell.completion_follow_up("("));
+        assert!(!shell.completion_open(), "a lista sai junto com o nome");
+
+        // A resposta vazia do provider também fecha: nada casa com o prefixo.
+        shell.set_completions(vec![item("setId()")]);
+        shell.set_completions(Vec::new());
+        assert!(!shell.completion_open());
+    }
+
+    /// O ponto no editor do depurador pergunta por um tipo, não por uma posição.
+    ///
+    /// O tipo de `m` só existe no quadro parado — não há fonte que o declare —,
+    /// mas quem responde pelos membros é o índice do projeto. Por isso a pergunta
+    /// é o nome do tipo.
+    #[test]
+    fn a_dot_in_the_inspection_editor_asks_for_the_members_of_a_type() {
+        let mut shell = shell_editing("int total = 10;");
+        shell.debug.attached = true;
+        shell.show_inspection("m", inspection_value(), inspection_fields());
+        shell.inspection_source = TextBuffer::new("m.");
+        shell.inspection_editor.set_cursor(2);
+        assert_eq!(
+            shell.inspection_member_request(),
+            Some(("br.com.exemplo.Pedido".to_owned(), String::new())),
+            "o tipo vem do objeto parado, e não de declaração nenhuma"
+        );
+
+        // O que se digita depois do ponto vira filtro.
+        shell.inspection_source = TextBuffer::new("m.getCli");
+        shell.inspection_editor.set_cursor(8);
+        assert_eq!(
+            shell.inspection_member_request(),
+            Some(("br.com.exemplo.Pedido".to_owned(), "getCli".to_owned()))
+        );
+
+        // Um campo da árvore também é receptor conhecido.
+        shell.inspection_source = TextBuffer::new("cliente.");
+        shell.inspection_editor.set_cursor(8);
+        assert_eq!(
+            shell.inspection_member_request(),
+            Some(("br.com.exemplo.Cliente".to_owned(), String::new()))
+        );
+
+        // Um nome que não está no depurado é lido como nome de tipo: a classe
+        // pode existir no projeto sem participar do que está sendo depurado.
+        shell.inspection_source = TextBuffer::new("Relatorio.");
+        shell.inspection_editor.set_cursor(10);
+        assert_eq!(
+            shell.inspection_member_request(),
+            Some(("Relatorio".to_owned(), String::new())),
+            "classe de fora do código depurado precisa ser perguntável"
+        );
+
+        // Sem ponto não há pergunta.
+        shell.inspection_source = TextBuffer::new("m");
+        shell.inspection_editor.set_cursor(1);
+        assert_eq!(shell.inspection_member_request(), None);
+    }
+
+    /// Com a lista aberta na inspeção, as setas andam nela e Enter aceita.
+    #[test]
+    fn the_completion_list_takes_the_keys_inside_the_inspection() {
+        let mut shell = shell_editing("int total = 10;");
+        shell.debug.attached = true;
+        shell.show_inspection("m", inspection_value(), inspection_fields());
+        shell.inspection_focus = InspectionFocus::Source;
+        shell.inspection_source = TextBuffer::new("m.");
+        shell.inspection_editor.set_cursor(2);
+        shell.set_completions(vec![
+            CompletionItem {
+                label: "getCliente()".to_owned(),
+                detail: None,
+                kind: ide_domain::CompletionKind::Method,
+            },
+            CompletionItem {
+                label: "total".to_owned(),
+                detail: None,
+                kind: ide_domain::CompletionKind::Field,
+            },
+        ]);
+
+        shell.key_down("ArrowDown");
+        assert_eq!(shell.inspection_source(), "m.", "a seta andou na lista");
+        shell.key_down("Enter");
+        assert_eq!(
+            shell.inspection_source(),
+            "m.total",
+            "aceitar escreve no editor da inspeção"
+        );
+        assert_eq!(
+            shell.active_text(),
+            Some("int total = 10;"),
+            "o documento atrás da janela não é tocado"
+        );
+    }
+
+    /// Seleção e área de transferência valem no editor da inspeção.
+    ///
+    /// O painel é o mesmo da janela principal e sempre soube selecionar; o que
+    /// faltava era a janela encaminhar os gestos até ele.
+    #[test]
+    fn the_inspection_editor_selects_and_uses_the_clipboard() {
+        let mut shell = shell_editing("int total = 10;");
+        let clipboard = Arc::new(FakeClipboard::default());
+        shell.set_clipboard(clipboard.clone());
+        let size = Size::new(1280.0, 800.0);
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        shell.inspection_source = TextBuffer::new("pedido.total");
+        let geometry = inspection_layout(&mut shell, size);
+        let column = |index: usize| {
+            Point::new(
+                geometry.source.origin.x
+                    + CodeEditor::gutter_width()
+                    + index as f32 * CodeEditor::default_char_width(),
+                geometry.source.origin.y + 4.0,
+            )
+        };
+
+        // Arrastar marca o trecho.
+        shell.pointer_down(column(0), size);
+        shell.pointer_move(column(6), size);
+        shell.pointer_up();
+        assert_eq!(
+            shell
+                .inspection_editor
+                .selected_text(&shell.inspection_source),
+            Some("pedido")
+        );
+
+        // Copiar leva o que está selecionado ali, e não o documento de trás.
+        assert!(shell.copy_selection());
+        assert_eq!(
+            clipboard.get_text().unwrap_or_default(),
+            Some("pedido".to_owned())
+        );
+
+        // Colar escreve no editor da inspeção, substituindo o trecho marcado.
+        assert!(clipboard.set_text("m.id").is_ok());
+        assert!(shell.paste_clipboard());
+        assert_eq!(shell.inspection_source(), "m.id.total");
+        assert_eq!(
+            shell.active_text(),
+            Some("int total = 10;"),
+            "o documento aberto atrás da janela não pode ser tocado"
+        );
+
+        // Duplo clique seleciona a palavra sob o ponteiro.
+        shell.select_word_at_point(column(1), size);
+        assert_eq!(
+            shell
+                .inspection_editor
+                .selected_text(&shell.inspection_source),
+            Some("m")
+        );
+
+        // Shift com as setas também marca, como no editor principal.
+        shell.inspection_editor.set_cursor(0);
+        for _ in 0..4 {
+            shell.key_down_with_modifiers("ArrowRight", Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            });
+        }
+        assert_eq!(
+            shell
+                .inspection_editor
+                .selected_text(&shell.inspection_source),
+            Some("m.id")
+        );
+    }
+
+    /// Várias instruções rodam em sequência, uma esperando a outra.
+    ///
+    /// Cada uma executa dentro do processo depurado e pode mudar o que a seguinte
+    /// vai encontrar; mandá-las juntas, ou em paralelo, perderia essa ordem.
+    #[test]
+    fn several_statements_run_one_after_the_other() {
+        let mut shell = shell_editing("int total = 10;");
+        shell.debug.attached = true;
+        shell.show_inspection("m", inspection_value(), inspection_fields());
+        shell.inspection_source =
+            TextBuffer::new("m.setId(5L);\nm.setNome(\"Mario\");\nm.somar(1, 2)");
+        shell.run_inspection_source();
+
+        // Só a primeira vai ao alvo.
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("m.setId(5L)".to_owned())]
+        );
+        shell.inspection_result("m.setId(5L)".to_owned(), inspection_void(), Vec::new());
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("m.setNome(\"Mario\")".to_owned())]
+        );
+        shell.inspection_result(
+            "m.setNome(\"Mario\")".to_owned(),
+            inspection_void(),
+            Vec::new(),
+        );
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("m.somar(1, 2)".to_owned())]
+        );
+
+        // A última fecha a execução e dispara a releitura da árvore.
+        shell.inspection_result(
+            "m.somar(1, 2)".to_owned(),
+            DebugVariableView {
+                name: "m.somar(1, 2)".to_owned(),
+                value: "3".to_owned(),
+                type_name: Some("int".to_owned()),
+                expandable: false,
+            },
+            Vec::new(),
+        );
+        assert_eq!(
+            shell.inspection_message.as_deref(),
+            Some("3 instruções executadas — m.somar(1, 2) → 3")
+        );
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("m".to_owned())]
+        );
+    }
+
+    /// Uma instrução que falha interrompe as seguintes e diz onde parou.
+    #[test]
+    fn a_failing_statement_stops_the_rest_and_says_where() {
+        let mut shell = shell_editing("int total = 10;");
+        shell.debug.attached = true;
+        shell.show_inspection("m", inspection_value(), inspection_fields());
+        shell.inspection_source = TextBuffer::new("m.setId(5L);\nm.naoExiste();\nm.setId(6L);");
+        shell.run_inspection_source();
+        let _ = shell.take_debug_requests();
+        shell.inspection_result("m.setId(5L)".to_owned(), inspection_void(), Vec::new());
+        let _ = shell.take_debug_requests();
+
+        shell.set_inspection_message("m.naoExiste(): método não encontrado");
+        assert_eq!(
+            shell.inspection_message.as_deref(),
+            Some("parou na instrução 2 de 3: m.naoExiste(): método não encontrado")
+        );
+        // A terceira não foi pedida; a releitura, sim, porque a primeira teve
+        // efeito.
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::Evaluate("m".to_owned())]
+        );
+    }
+
+    /// O ponto e vírgula dentro de aspas não termina instrução.
+    #[test]
+    fn statements_are_split_outside_quoted_text() {
+        assert_eq!(inspection_statements("a(); b()"), vec!["a()", "b()"]);
+        assert_eq!(inspection_statements("a(\"x; y\")"), vec!["a(\"x; y\")"]);
+        assert_eq!(
+            inspection_statements("a(\"x\\\"; y\")"),
+            vec!["a(\"x\\\"; y\")"],
+            "aspas escapadas não fecham o texto"
+        );
+        assert_eq!(inspection_statements("  ;\n \n a() ;"), vec!["a()"]);
+        assert!(inspection_statements("  \n ; ").is_empty());
     }
 
     /// Sem nada escrito, Executar avisa em vez de pedir a avaliação do vazio.

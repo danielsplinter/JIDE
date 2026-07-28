@@ -276,6 +276,188 @@ async fn debugs_a_real_jvm_end_to_end() {
     let _ = fs::remove_dir_all(root);
 }
 
+const BOXED_PROGRAM: &str = r#"package com.example;
+
+public class Boxed {
+    Long id = 1L;
+    String nome = null;
+
+    void setId(Long id) { this.id = id; }
+    void setNome(String nome) { this.nome = nome; }
+    long dobro(long value) { return value * 2; }
+
+    public static void main(String[] args) throws Exception {
+        Boxed m = new Boxed();
+        for (int index = 0; index < 200; index++) {
+            Thread.sleep(50);
+        }
+        System.out.println(m.id);
+    }
+}
+"#;
+
+/// Linha 14 do arquivo, 0-based: `Thread.sleep(50);`
+const BOXED_BREAKPOINT_LINE: u32 = 13;
+
+/// Cenário relatado: `m.setId(4L)` num campo `java.lang.Long`.
+///
+/// O alvo não confere o tipo do argumento antes de repassá-lo à chamada; enviar
+/// o `long` cru onde se espera uma referência fazia a JVM ler o número como
+/// endereço e morrer. Este teste vale por isso: ele afirma que a chamada tem
+/// efeito **e** que o processo continua de pé depois dela.
+#[tokio::test]
+#[ignore = "requires a JDK"]
+async fn invoking_with_a_boxed_parameter_changes_the_object_and_keeps_the_target_alive() {
+    let (Some(javac), Some(java)) = (jdk_executable("javac"), jdk_executable("java")) else {
+        eprintln!("nenhum JDK encontrado; teste ignorado");
+        return;
+    };
+
+    let root = std::env::temp_dir().join(format!("er-ide-boxed-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let source_root = root.join("src/main/java");
+    let package = source_root.join("com/example");
+    assert!(fs::create_dir_all(&package).is_ok());
+    let source = package.join("Boxed.java");
+    assert!(fs::write(&source, BOXED_PROGRAM).is_ok());
+    let classes = root.join("classes");
+
+    match Command::new(&javac)
+        .arg("-g")
+        .arg("-d")
+        .arg(&classes)
+        .arg(&source)
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => panic!("javac falhou: {}", String::from_utf8_lossy(&output.stderr)),
+        Err(error) => panic!("javac não pôde ser executado: {error}"),
+    }
+
+    let port = free_port().await;
+    let process = Command::new(&java)
+        .arg(format!(
+            "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:{port}"
+        ))
+        .arg("-cp")
+        .arg(&classes)
+        .arg("com.example.Boxed")
+        .spawn();
+    let _jvm = match process {
+        Ok(process) => Jvm { process },
+        Err(error) => panic!("a JVM não pôde ser iniciada: {error}"),
+    };
+
+    let sink = Arc::new(RecordingSink::default());
+    let adapter = JavaDebugAdapter::new();
+    let mut attached = None;
+    for _ in 0..40 {
+        let request = DebugSessionRequest::new(DebugTarget::new("127.0.0.1", port))
+            .with_source_roots(vec![source_root.clone()]);
+        match adapter
+            .attach(request, Arc::clone(&sink) as Arc<dyn DebugEventSink>)
+            .await
+        {
+            Ok(session) => {
+                attached = Some(session);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    }
+    let Some(session) = attached else {
+        panic!("não foi possível conectar à JVM em 127.0.0.1:{port}");
+    };
+
+    assert!(
+        session
+            .set_breakpoints(
+                &source,
+                &[SourceBreakpoint::new(&source, BOXED_BREAKPOINT_LINE)]
+            )
+            .await
+            .is_ok()
+    );
+    assert!(session.resume(None).await.is_ok());
+
+    let stopped = sink
+        .wait_for(|event| matches!(event, DebugEvent::Stopped { .. }))
+        .await;
+    let Some(DebugEvent::Stopped { thread, .. }) = stopped else {
+        panic!("a JVM não parou no breakpoint: {:?}", sink.events());
+    };
+    let frames = match session.stack_trace(thread).await {
+        Ok(frames) => frames,
+        Err(error) => panic!("stack_trace falhou: {error}"),
+    };
+    let Some(frame) = frames.first().map(|frame| frame.id) else {
+        panic!("pilha vazia");
+    };
+
+    // A chamada que derrubava o processo.
+    if let Err(error) = session.evaluate(thread, frame, "m.setId(4L);").await {
+        panic!("setId(Long) falhou: {error}");
+    }
+    // Se a JVM tivesse morrido, esta leitura voltaria `Detached`.
+    let id = match session.evaluate(thread, frame, "m.id.value").await {
+        Ok(id) => id,
+        Err(error) => panic!("a sessão não sobreviveu à chamada: {error}"),
+    };
+    assert_eq!(id.value, "4", "o campo deveria ter o valor atribuído");
+
+    // Texto vira uma `String` criada no alvo.
+    if let Err(error) = session.evaluate(thread, frame, r#"m.setNome("oi")"#).await {
+        panic!("setNome(String) falhou: {error}");
+    }
+    let nome = match session.evaluate(thread, frame, "m.nome").await {
+        Ok(nome) => nome,
+        Err(error) => panic!("leitura do nome falhou: {error}"),
+    };
+    assert_eq!(nome.value, "\"oi\"");
+
+    // Um parâmetro primitivo continua indo direto, e o retorno é lido.
+    let dobro = match session.evaluate(thread, frame, "m.dobro(21L)").await {
+        Ok(dobro) => dobro,
+        Err(error) => panic!("dobro(long) falhou: {error}"),
+    };
+    assert_eq!(dobro.value, "42");
+
+    // Instruções em sequência se acumulam no mesmo objeto: a segunda encontra o
+    // que a primeira deixou.
+    for instrucao in ["m.setId(7L)", "m.setNome(\"Mario\")"] {
+        if let Err(error) = session.evaluate(thread, frame, instrucao).await {
+            panic!("`{instrucao}` falhou: {error}");
+        }
+    }
+    let acumulado = match session.evaluate(thread, frame, "m.id.value").await {
+        Ok(valor) => valor,
+        Err(error) => panic!("leitura após a sequência falhou: {error}"),
+    };
+    assert_eq!(acumulado.value, "7");
+    assert_eq!(
+        session
+            .evaluate(thread, frame, "m.nome")
+            .await
+            .map(|nome| nome.value)
+            .unwrap_or_default(),
+        "\"Mario\""
+    );
+
+    // Argumento que não cabe é recusado aqui, sem chegar ao alvo.
+    let recusada = session.evaluate(thread, frame, "m.dobro(true)").await;
+    assert!(
+        recusada.is_err(),
+        "um booleano não deveria ser enviado onde se espera um long"
+    );
+    assert!(
+        session.evaluate(thread, frame, "m.id.value").await.is_ok(),
+        "a recusa não pode ter custado a sessão"
+    );
+
+    assert!(session.detach().await.is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Cenário relatado: subir um Spring Boot em depuração, marcar breakpoint num
 /// controller e chamar o endpoint.
 ///

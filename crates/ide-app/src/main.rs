@@ -390,6 +390,26 @@ impl NativeIde {
         let Some(language_host) = &self.language_host else {
             return;
         };
+        // Com a inspeção aberta, a pergunta é sobre um tipo, e não sobre uma
+        // posição num arquivo: ali não existe arquivo.
+        if let Some(shell) = self.shell.as_ref()
+            && let Some((type_name, prefix)) = shell.inspection_member_request()
+            && let Some(document_id) = shell.active_document()
+        {
+            let answered = pollster::block_on(language_host.type_members(
+                language_host.request_context(),
+                document_id,
+                type_name,
+                prefix,
+            ));
+            if let Some(shell) = self.shell.as_mut() {
+                match answered {
+                    Ok(items) => shell.set_completions(items),
+                    Err(error) => shell.set_inspection_message(error.to_string()),
+                }
+            }
+            return;
+        }
         let Some(request) = self.shell.as_ref().and_then(IdeShell::completion_request) else {
             return;
         };
@@ -1054,7 +1074,7 @@ impl NativeIde {
                     fields,
                 } => {
                     if let Some(shell) = self.shell.as_mut() {
-                        shell.show_inspection(expression, value, fields);
+                        shell.inspection_result(expression, value, fields);
                     }
                 }
                 debug::DebugUiEvent::InspectionFields { path, fields } => {
@@ -1673,6 +1693,9 @@ impl ApplicationHandler for NativeIde {
                         Key::Named(NamedKey::Backspace) => {
                             if let Some(shell) = self.shell.as_mut() {
                                 shell.key_down("Backspace");
+                                // Apagar encurta o nome, e a lista volta a ter
+                                // o que o prefixo menor alcança.
+                                completion_requested |= shell.completion_open();
                             }
                         }
                         Key::Named(NamedKey::Enter) => {
@@ -1741,6 +1764,9 @@ impl ApplicationHandler for NativeIde {
                                     completion_requested |=
                                         text.chars().any(|typed| triggers.contains(&typed));
                                 }
+                                // Com a lista aberta, cada letra digitada refaz o
+                                // filtro, e o que não é nome fecha a lista.
+                                completion_requested |= shell.completion_follow_up(&text);
                                 shell.text_input(&text);
                             }
                         }
