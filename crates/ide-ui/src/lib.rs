@@ -80,6 +80,18 @@ const NEW_ITEM_NAME_CAPTION_ID: WidgetId = WidgetId(10_042);
 const NEW_ITEM_MESSAGE_ID: WidgetId = WidgetId(10_043);
 /// A janela é pequena de propósito: dois campos e duas ações.
 const NEW_ITEM_PANEL_SIZE: Size = Size::new(460.0, 230.0);
+const INSPECTION_MODAL_ID: WidgetId = WidgetId(10_044);
+const INSPECTION_LIST_ID: WidgetId = WidgetId(10_045);
+const INSPECTION_CLOSE_ID: WidgetId = WidgetId(10_046);
+const INSPECTION_NAME_ID: WidgetId = WidgetId(10_047);
+const INSPECTION_TYPE_ID: WidgetId = WidgetId(10_048);
+const INSPECTION_VALUE_ID: WidgetId = WidgetId(10_049);
+const INSPECTION_EMPTY_ID: WidgetId = WidgetId(10_050);
+/// A janela é larga porque o valor de um objeto costuma ser longo.
+const INSPECTION_PANEL_SIZE: Size = Size::new(720.0, 420.0);
+const INSPECTION_ROW_HEIGHT: f32 = 26.0;
+/// Fatia da janela ocupada pela lista, à esquerda.
+const INSPECTION_LIST_FRACTION: f32 = 0.42;
 const DEBUG_HOST_ID: WidgetId = WidgetId(10_006);
 const DEBUG_PORT_ID: WidgetId = WidgetId(10_007);
 const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
@@ -270,6 +282,16 @@ pub struct NewItemRequest {
     pub source_root: PathBuf,
 }
 
+/// Valor sendo inspecionado e seus campos.
+///
+/// O primeiro item é o próprio valor pedido; os seguintes são os campos que ele
+/// revela. Um valor simples fica sozinho, e é a resposta completa.
+struct InspectionView {
+    expression: String,
+    entries: Vec<DebugVariableView>,
+    selected: usize,
+}
+
 /// Janela de criação enquanto está aberta.
 struct NewItemDialog {
     kind: NewItemKind,
@@ -391,6 +413,11 @@ pub struct IdeShell {
     new_item_create_button: Button,
     new_item_cancel_button: Button,
     new_item_request: Option<NewItemRequest>,
+    /// Janela de inspeção de um valor durante a depuração.
+    inspection_modal: ModalHost,
+    inspection: Option<InspectionView>,
+    inspection_list: ListView,
+    inspection_close_button: Button,
     open_project_requested: bool,
     open_settings_requested: bool,
     build_project_requested: bool,
@@ -628,6 +655,17 @@ impl IdeShell {
             new_item_cancel_button: Button::new(NEW_ITEM_CANCEL_ID, "Cancelar")
                 .with_command("new.cancel"),
             new_item_request: None,
+            inspection_modal: ModalHost::new(
+                INSPECTION_MODAL_ID,
+                "Inspecionar",
+                INSPECTION_PANEL_SIZE,
+            ),
+            inspection: None,
+            inspection_list: ListView::new(INSPECTION_LIST_ID, Vec::<String>::new())
+                .with_row_height(INSPECTION_ROW_HEIGHT)
+                .with_selection(ListSelection::Marker),
+            inspection_close_button: Button::new(INSPECTION_CLOSE_ID, "Fechar")
+                .with_command("inspect.close"),
             open_project_requested: false,
             open_settings_requested: false,
             build_project_requested: false,
@@ -1804,6 +1842,10 @@ impl IdeShell {
         if self.context_menu_key("Escape", Modifiers::default()) {
             return;
         }
+        if self.inspection_modal.is_open() {
+            self.close_inspection();
+            return;
+        }
         if self.new_item_modal.is_open() {
             self.close_new_item_dialog();
             return;
@@ -2071,6 +2113,10 @@ impl IdeShell {
         // O menu aberto tem a primeira palavra: escolher uma ação ou dispensá-lo
         // é o que este clique significa, e não o que está embaixo dele.
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
+            return;
+        }
+        if self.inspection_modal.is_open() {
+            self.inspection_pointer_down(point, size);
             return;
         }
         if self.new_item_modal.is_open() {
@@ -2710,6 +2756,49 @@ impl IdeShell {
         self.editor_selection = Some((start, end));
         self.editor_selecting = false;
         self.cursor_offset = end;
+    }
+
+    /// Abre a janela de inspeção com o valor avaliado e seus campos.
+    pub fn show_inspection(
+        &mut self,
+        expression: impl Into<String>,
+        entries: Vec<DebugVariableView>,
+    ) {
+        let expression = expression.into();
+        self.inspection_list
+            .set_items(entries.iter().map(inspection_label).collect::<Vec<_>>());
+        self.inspection_list.set_selected(Some(0));
+        self.inspection_modal
+            .set_title(format!("Inspecionar — {expression}"));
+        self.inspection_modal.open();
+        self.inspection = Some(InspectionView {
+            expression,
+            entries,
+            selected: 0,
+        });
+    }
+
+    pub const fn inspection_open(&self) -> bool {
+        self.inspection_modal.is_open()
+    }
+
+    /// Expressão que está sendo inspecionada.
+    #[must_use]
+    pub fn inspected_expression(&self) -> Option<&str> {
+        self.inspection
+            .as_ref()
+            .map(|inspection| inspection.expression.as_str())
+    }
+
+    pub fn close_inspection(&mut self) {
+        self.inspection_modal.close();
+        self.inspection = None;
+    }
+
+    /// Entrada destacada na lista, que é a detalhada no painel direito.
+    fn inspection_selected(&self) -> Option<&DebugVariableView> {
+        let inspection = self.inspection.as_ref()?;
+        inspection.entries.get(inspection.selected)
     }
 
     /// Pede a avaliação do trecho marcado no quadro atual da depuração.
@@ -3480,6 +3569,7 @@ impl IdeShell {
         }
         // A janela de criação cobre o conteúdo, e o menu de contexto cobre ela.
         self.paint_new_item_dialog(&mut commands, size);
+        self.paint_inspection(&mut commands, size);
         // O menu de contexto é desenhado por último: ele cobre tudo, inclusive
         // o painel de onde foi aberto.
         if self.context_menu.is_open() {
@@ -3493,6 +3583,102 @@ impl IdeShell {
             commands.extend(menu_paint.into_commands());
         }
         commands
+    }
+
+    /// Desenha a janela de inspeção: lista à esquerda, detalhe à direita.
+    ///
+    /// A lista mostra o valor pedido e os campos dele; o painel direito descreve
+    /// a entrada destacada. O valor completo cabe ali, e não numa linha de lista,
+    /// que o recorte cortaria justamente onde está a informação.
+    fn paint_inspection(&self, commands: &mut Vec<PaintCommand>, size: Size) {
+        let Some(inspection) = self.inspection.as_ref() else {
+            return;
+        };
+        let mut modal = self.inspection_modal.clone();
+        modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = inspection_geometry(modal.panel_bounds());
+        let mut paint = self.paint_context();
+        modal.paint(&mut paint);
+
+        let mut list = self.inspection_list.clone();
+        list.set_selected(Some(inspection.selected));
+        list.layout(&self.layout_context(), geometry.list);
+        list.paint(&mut paint);
+
+        let detail = geometry.detail;
+        match self.inspection_selected() {
+            Some(entry) => {
+                self.paint_settings_text(
+                    &mut paint,
+                    INSPECTION_NAME_ID,
+                    &entry.name,
+                    Point::new(detail.origin.x, detail.origin.y),
+                    17.0,
+                    IconTint::Text,
+                );
+                self.paint_settings_text(
+                    &mut paint,
+                    INSPECTION_TYPE_ID,
+                    entry.type_name.as_deref().unwrap_or("tipo desconhecido"),
+                    Point::new(detail.origin.x, detail.origin.y + 26.0),
+                    13.0,
+                    IconTint::Muted,
+                );
+                self.paint_settings_text(
+                    &mut paint,
+                    INSPECTION_VALUE_ID,
+                    &entry.value,
+                    Point::new(detail.origin.x, detail.origin.y + 56.0),
+                    14.0,
+                    IconTint::Text,
+                );
+            }
+            None => self.paint_settings_text(
+                &mut paint,
+                INSPECTION_EMPTY_ID,
+                "Sem valor para mostrar",
+                Point::new(detail.origin.x, detail.origin.y),
+                14.0,
+                IconTint::Muted,
+            ),
+        }
+
+        let mut close = self.inspection_close_button.clone();
+        close.layout(&self.layout_context(), geometry.close);
+        close.paint(&mut paint);
+        commands.extend(paint.into_commands());
+    }
+
+    /// Roteia o clique dentro da janela de inspeção.
+    fn inspection_pointer_down(&mut self, point: Point, size: Size) {
+        self.inspection_modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = inspection_geometry(self.inspection_modal.panel_bounds());
+        if geometry.close.contains(point) {
+            self.close_inspection();
+            return;
+        }
+        if !geometry.list.contains(point) {
+            return;
+        }
+        // Qual linha foi clicada é a lista quem sabe: altura de linha e rolagem
+        // são dela.
+        let mut list = self.inspection_list.clone();
+        list.layout(&self.layout_context(), geometry.list);
+        list.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        if let (Some(selected), Some(inspection)) = (list.selected(), self.inspection.as_mut())
+            && selected < inspection.entries.len()
+        {
+            inspection.selected = selected;
+        }
     }
 
     /// Desenha a janela de criação por cima de tudo.
@@ -4041,6 +4227,42 @@ fn click_widget(widget: &mut dyn Widget, point: Point) -> EventResult {
     let pointer = primary_pointer(point);
     let _ = widget.event(&mut context, &UiEvent::PointerDown(pointer));
     widget.event(&mut context, &UiEvent::PointerUp(pointer))
+}
+
+/// Rótulo de uma entrada na lista da inspeção.
+fn inspection_label(entry: &DebugVariableView) -> String {
+    format!("{} = {}", entry.name, entry.value)
+}
+
+/// Os dois painéis da janela de inspeção e o botão de fechar.
+struct InspectionGeometry {
+    list: Rect,
+    detail: Rect,
+    close: Rect,
+}
+
+fn inspection_geometry(panel: Rect) -> InspectionGeometry {
+    let top = panel.origin.y + 56.0;
+    let height = (panel.size.height - 112.0).max(80.0);
+    let list_width = (panel.size.width - 32.0) * INSPECTION_LIST_FRACTION;
+    let list = Rect::new(panel.origin.x + 16.0, top, list_width, height);
+    let detail = Rect::new(
+        list.origin.x + list.size.width + 16.0,
+        top,
+        (panel.size.width - list_width - 48.0).max(80.0),
+        height,
+    );
+    let close = Rect::new(
+        panel.origin.x + panel.size.width - 104.0,
+        panel.origin.y + panel.size.height - 48.0,
+        88.0,
+        34.0,
+    );
+    InspectionGeometry {
+        list,
+        detail,
+        close,
+    }
 }
 
 /// Onde cada peça da janela de criação fica dentro do painel.
@@ -6584,6 +6806,103 @@ mod tests {
         shell.editor_selection = Some((0, 5));
         shell.secondary_pointer_down(editor_column(&shell, size, 2), size);
         assert!(copy_enabled(shell.context_menu.entries()));
+    }
+
+    fn inspection_entries() -> Vec<DebugVariableView> {
+        vec![
+            DebugVariableView {
+                name: "pedido".to_owned(),
+                value: "Pedido@1a2b".to_owned(),
+                type_name: Some("br.com.exemplo.Pedido".to_owned()),
+            },
+            DebugVariableView {
+                name: "total".to_owned(),
+                value: "42".to_owned(),
+                type_name: Some("int".to_owned()),
+            },
+        ]
+    }
+
+    /// A janela abre com o objeto na lista e o detalhe do item destacado.
+    #[test]
+    fn the_inspection_window_lists_the_object_and_details_the_selection() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.show_inspection("pedido", inspection_entries());
+        assert!(shell.inspection_open());
+        assert_eq!(shell.inspected_expression(), Some("pedido"));
+
+        let texts: Vec<String> = shell
+            .paint(size)
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect();
+        // Painel esquerdo: o valor pedido e os campos dele.
+        assert!(
+            texts.iter().any(|text| text.contains("pedido = Pedido@1a2b")),
+            "a lista precisa mostrar o objeto: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("total = 42")),
+            "a lista precisa mostrar os campos: {texts:?}"
+        );
+        // Painel direito: detalhe da primeira entrada, que abre destacada.
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == "br.com.exemplo.Pedido"),
+            "o detalhe precisa mostrar o tipo: {texts:?}"
+        );
+    }
+
+    /// Clicar em um campo troca o que o painel direito detalha.
+    #[test]
+    fn clicking_a_field_changes_the_detail_panel() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.show_inspection("pedido", inspection_entries());
+        shell.inspection_modal.layout(
+            &LayoutContext::default(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = inspection_geometry(shell.inspection_modal.panel_bounds());
+        // Segunda linha da lista.
+        shell.pointer_down(
+            Point::new(
+                geometry.list.origin.x + 10.0,
+                geometry.list.origin.y + INSPECTION_ROW_HEIGHT + 4.0,
+            ),
+            size,
+        );
+        assert_eq!(
+            shell.inspection_selected().map(|entry| entry.name.clone()),
+            Some("total".to_owned())
+        );
+    }
+
+    /// Esc e o botão Fechar dispensam a janela.
+    #[test]
+    fn the_inspection_window_closes() {
+        let mut shell = shell_editing("int total = 10;");
+        shell.show_inspection("pedido", inspection_entries());
+        shell.escape();
+        assert!(!shell.inspection_open());
+
+        let size = Size::new(1280.0, 800.0);
+        shell.show_inspection("pedido", inspection_entries());
+        shell.inspection_modal.layout(
+            &LayoutContext::default(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = inspection_geometry(shell.inspection_modal.panel_bounds());
+        shell.pointer_down(
+            Point::new(geometry.close.origin.x + 10.0, geometry.close.origin.y + 10.0),
+            size,
+        );
+        assert!(!shell.inspection_open());
     }
 
     /// Sem depuração em curso o menu do editor não oferece Inspecionar.

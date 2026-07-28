@@ -1039,6 +1039,14 @@ impl NativeIde {
                         shell.set_verified_breakpoints(&path, &verified);
                     }
                 }
+                debug::DebugUiEvent::Inspection {
+                    expression,
+                    entries,
+                } => {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.show_inspection(expression, entries);
+                    }
+                }
                 debug::DebugUiEvent::Status(status) => {
                     if let Some(shell) = self.shell.as_mut() {
                         shell.set_status_message(status);

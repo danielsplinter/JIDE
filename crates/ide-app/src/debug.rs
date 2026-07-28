@@ -67,6 +67,11 @@ pub(crate) enum DebugUiEvent {
         variables: Vec<DebugVariableView>,
         selected: usize,
     },
+    /// Resultado de uma inspeção: o valor pedido e os campos que ele revela.
+    Inspection {
+        expression: String,
+        entries: Vec<DebugVariableView>,
+    },
     Status(String),
 }
 
@@ -240,12 +245,15 @@ async fn worker(mut commands: UnboundedReceiver<DebugCommand>, ui: Sender<DebugU
                 let Some(active) = session.as_ref() else {
                     continue;
                 };
-                let message =
+                let event =
                     match evaluate_in_frame(active.as_ref(), thread, frame, &expression).await {
-                        Ok(value) => value,
-                        Err(error) => error,
+                        Ok(entries) => DebugUiEvent::Inspection {
+                            expression,
+                            entries,
+                        },
+                        Err(error) => DebugUiEvent::Status(error),
                     };
-                let _ = ui.send(DebugUiEvent::Status(message));
+                let _ = ui.send(event);
             }
             DebugCommand::Refresh { thread, frame } => {
                 let Some(active) = session.as_ref() else {
@@ -277,7 +285,7 @@ async fn evaluate_in_frame(
     thread: ThreadId,
     frame: usize,
     expression: &str,
-) -> Result<String, String> {
+) -> Result<Vec<DebugVariableView>, String> {
     let frames = session
         .stack_trace(thread)
         .await
@@ -289,10 +297,29 @@ async fn evaluate_in_frame(
         .evaluate(thread, selected.id, expression)
         .await
         .map_err(|error| format!("{expression}: {error}"))?;
-    Ok(match value.type_name {
-        Some(type_name) => format!("{expression} = {} ({type_name})", value.value),
-        None => format!("{expression} = {}", value.value),
-    })
+    // O primeiro item é o próprio valor pedido; os seguintes são os campos que
+    // ele revela. Um valor simples fica sozinho, e é a resposta completa.
+    let mut entries = vec![variable_view(expression, &value)];
+    if value.expandable {
+        let fields = session
+            .expand(thread, selected.id, expression)
+            .await
+            .unwrap_or_default();
+        entries.extend(
+            fields
+                .iter()
+                .map(|field| variable_view(&field.name, field)),
+        );
+    }
+    Ok(entries)
+}
+
+fn variable_view(name: &str, value: &ide_debug_api::Variable) -> DebugVariableView {
+    DebugVariableView {
+        name: name.to_owned(),
+        value: value.value.clone(),
+        type_name: value.type_name.clone(),
+    }
 }
 
 /// Registra os breakpoints de um arquivo e informa o resultado à interface.
