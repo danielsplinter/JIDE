@@ -128,6 +128,11 @@ const SEARCH_INPUT_ID: WidgetId = WidgetId(10_029);
 const COMPLETION_VISIBLE_ROWS: usize = 8;
 const COMPLETION_ROW_HEIGHT: f32 = 24.0;
 const COMPLETION_POPUP_WIDTH: f32 = 260.0;
+/// Folga entre a borda da superfície flutuante e a lista dentro dela.
+///
+/// Entra na conta da área ocupada, e é por isso que é uma constante: o clique
+/// precisa acertar a mesma área que a pintura desenhou, incluindo a moldura.
+const COMPLETION_POPUP_PADDING: f32 = 4.0;
 const SEARCH_BOX_WIDTH: f32 = 380.0;
 const SEARCH_BOX_HEIGHT: f32 = 42.0;
 
@@ -1734,6 +1739,9 @@ impl IdeShell {
         let bounds = self.editor_view_rect(size);
         let context = self.layout_context();
         self.editor_pane.set_bounds(bounds);
+        // Qual documento o painel edita: trocar de aba precisa jogar fora a cópia
+        // de desenho, o desfazer e as marcas, que falam do texto anterior.
+        self.editor_pane.set_source(id.0);
         let Some(document) = self.editor.active() else {
             return;
         };
@@ -1957,6 +1965,13 @@ impl IdeShell {
             self.completion_items.clear();
             return;
         }
+        // Desistir da edição múltipla vem antes de largar a busca: são as marcas
+        // que estão na frente do usuário, e o texto volta ao que era.
+        if let Some(document) = self.editor.active_mut()
+            && self.editor_pane.cancel_occurrences(&mut document.buffer)
+        {
+            return;
+        }
         if self.focus == ShellFocus::Search {
             self.search_query.clear();
             self.focus = ShellFocus::Editor;
@@ -1975,6 +1990,8 @@ impl IdeShell {
     pub fn secondary_pointer_down(&mut self, point: Point, size: Size) {
         self.context_menu.close();
         self.context_menu_target = None;
+        // O clique secundário nunca escolhe da lista, então ele só a dispensa.
+        self.clear_completions();
         if self.settings_modal.is_open() {
             return;
         }
@@ -2210,6 +2227,11 @@ impl IdeShell {
         // O menu aberto tem a primeira palavra: escolher uma ação ou dispensá-lo
         // é o que este clique significa, e não o que está embaixo dele.
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
+            return;
+        }
+        // A lista de completação vem antes do resto: ela está por cima, e clicar
+        // em outro lugar significa desistir dela.
+        if self.completion_pointer_down(point, size) {
             return;
         }
         if self.inspection_modal.is_open() {
@@ -3132,6 +3154,72 @@ impl IdeShell {
             .and_then(|variable| variable.type_name.clone())
     }
 
+    /// Canto onde a lista de completação nasce, seja qual for o editor da frente.
+    ///
+    /// Um lugar só, porque a pintura e o clique precisam concordar: se o desenho
+    /// e o teste de acerto calculassem a área cada um por si, clicar na borda da
+    /// lista faria uma coisa e ver a lista mostraria outra.
+    fn completion_anchor(&self, size: Size) -> Option<Point> {
+        if self.completion_items.is_empty() {
+            return None;
+        }
+        if self.inspection_modal.is_open() {
+            return self.inspection_completion_anchor();
+        }
+        if self.focus != ShellFocus::Editor {
+            return None;
+        }
+        let text = self.active_text()?;
+        let geo = self.geometry(size);
+        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        let (line, column) = line_column(text, self.editor_pane.cursor());
+        Some(Point::new(
+            (editor_x + EDITOR_GUTTER + column as f32 * EDITOR_CHAR_WIDTH)
+                .min(size.width - 270.0)
+                .max(editor_x + EDITOR_GUTTER),
+            (geo.content_top
+                + 36.0
+                + line.saturating_sub(self.editor_pane.scroll_line()) as f32 * EDITOR_LINE_HEIGHT)
+                .min(geo.editor_bottom - 190.0),
+        ))
+    }
+
+    /// Área ocupada pela lista de completação na tela.
+    fn completion_rect(&self, size: Size) -> Option<Rect> {
+        let anchor = self.completion_anchor(size)?;
+        let rows = self.completion_items.len().min(COMPLETION_VISIBLE_ROWS);
+        Some(Rect::new(
+            anchor.x,
+            anchor.y,
+            COMPLETION_POPUP_WIDTH + COMPLETION_POPUP_PADDING * 2.0,
+            rows as f32 * COMPLETION_ROW_HEIGHT + COMPLETION_POPUP_PADDING * 2.0,
+        ))
+    }
+
+    /// Clique com a lista aberta. Devolve `true` quando ela consumiu o clique.
+    ///
+    /// Fora dela, o clique a dispensa: o usuário foi olhar outra coisa, e uma
+    /// lista que sobrevive a isso fica pairando sobre um cursor que já se moveu.
+    /// Dentro dela, escolhe a linha — e precisa consumir o clique de qualquer
+    /// forma, ou ele atravessaria a lista e moveria o cursor no editor de baixo.
+    fn completion_pointer_down(&mut self, point: Point, size: Size) -> bool {
+        let Some(rect) = self.completion_rect(size) else {
+            return false;
+        };
+        if !rect.contains(point) {
+            self.clear_completions();
+            return false;
+        }
+        let row = ((point.y - rect.origin.y - COMPLETION_POPUP_PADDING) / COMPLETION_ROW_HEIGHT)
+            .floor()
+            .max(0.0) as usize;
+        if row < self.completion_items.len() {
+            self.completion_selected = row;
+            self.accept_completion();
+        }
+        true
+    }
+
     /// Canto onde a lista nasce dentro da janela de inspeção.
     fn inspection_completion_anchor(&self) -> Option<Point> {
         if self.completion_items.is_empty() {
@@ -3642,18 +3730,9 @@ impl IdeShell {
             ));
         }
         if !self.inspection_modal.is_open()
-            && self.focus == ShellFocus::Editor
-            && let Some(text) = self.active_text()
+            && let Some(anchor) = self.completion_anchor(size)
         {
-            let (line, column) = line_column(text, self.editor_pane.cursor());
-            let popup_x = (editor_x + EDITOR_GUTTER + column as f32 * EDITOR_CHAR_WIDTH)
-                .min(size.width - 270.0)
-                .max(editor_x + EDITOR_GUTTER);
-            let popup_y = (geo.content_top
-                + 36.0
-                + line.saturating_sub(self.editor_pane.scroll_line()) as f32 * EDITOR_LINE_HEIGHT)
-                .min(geo.editor_bottom - 190.0);
-            self.paint_completion(&mut commands, size, Point::new(popup_x, popup_y));
+            self.paint_completion(&mut commands, size, anchor);
         }
         if self.focus == ShellFocus::Search {
             // Também da biblioteca: a caixa é um campo de texto sobre uma
@@ -3862,7 +3941,7 @@ impl IdeShell {
             return;
         }
         let visible = self.completion_items.len().min(COMPLETION_VISIBLE_ROWS);
-        let mut surface = Popup::new(COMPLETION_POPUP_ID).with_padding(4.0);
+        let mut surface = Popup::new(COMPLETION_POPUP_ID).with_padding(COMPLETION_POPUP_PADDING);
         surface.set_content_size(Size::new(
             COMPLETION_POPUP_WIDTH,
             visible as f32 * COMPLETION_ROW_HEIGHT,
@@ -7609,6 +7688,92 @@ mod tests {
             shell.take_debug_requests(),
             vec![DebugRequest::ExpandInspection("pedido.cliente".to_owned())],
             "o nível aberto abaixo da raiz também precisa ser relido"
+        );
+    }
+
+    /// Clicar fora dispensa a lista; clicar dentro escolhe a linha.
+    ///
+    /// Uma lista que sobrevive ao clique fica pairando sobre um cursor que já se
+    /// moveu. E o clique dentro dela precisa ser consumido de qualquer forma, ou
+    /// atravessaria a lista e moveria o cursor no editor de baixo.
+    #[test]
+    fn clicking_outside_the_completion_list_dismisses_it() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        let item = |label: &str| CompletionItem {
+            label: label.to_owned(),
+            detail: None,
+            kind: ide_domain::CompletionKind::Method,
+        };
+        shell.focus = ShellFocus::Editor;
+        shell.set_completions(vec![item("getAluno()"), item("getId()")]);
+        let rect = shell
+            .completion_rect(size)
+            .unwrap_or_else(|| panic!("a lista aberta precisa ocupar uma área"));
+
+        // Um ponto claramente fora: o canto oposto da janela.
+        shell.pointer_down(Point::new(rect.origin.x - 40.0, rect.origin.y - 40.0), size);
+        assert!(!shell.completion_open(), "a lista sai com o clique de fora");
+
+        // Reaberta, o clique na segunda linha escolhe aquele item.
+        shell.editor_pane.set_cursor(0);
+        shell.set_completions(vec![item("getAluno()"), item("getId()")]);
+        let rect = shell
+            .completion_rect(size)
+            .unwrap_or_else(|| panic!("a lista aberta precisa ocupar uma área"));
+        shell.pointer_down(
+            Point::new(
+                rect.origin.x + 20.0,
+                rect.origin.y + COMPLETION_POPUP_PADDING + COMPLETION_ROW_HEIGHT + 4.0,
+            ),
+            size,
+        );
+        assert!(!shell.completion_open(), "escolher também fecha a lista");
+        assert_eq!(
+            shell.active_text(),
+            Some("getId()int total = 10;"),
+            "o item clicado é o que entra no texto"
+        );
+    }
+
+    /// A sequência real: `Ctrl+D` pela shell e depois digitar.
+    ///
+    /// O teste do painel passava e a IDE não, então o caminho que o app percorre
+    /// é que precisa ser exercido — do atalho à digitação, pelas mesmas portas.
+    #[test]
+    fn marking_and_typing_through_the_shell_edits_every_occurrence() {
+        let mut shell = shell_editing("nome = nome + nome");
+        shell.focus = ShellFocus::Editor;
+        // Cursor no fim do trecho, como fica ao selecionar arrastando.
+        shell.editor_pane.set_cursor(4);
+        shell.editor_pane.set_selection(Some((0, 4)));
+
+        shell.key_down_with_modifiers("d", Modifiers {
+            control: true,
+            ..Modifiers::default()
+        });
+        assert_eq!(
+            shell.editor_pane.occurrences(),
+            vec![(0, 4), (7, 11)],
+            "o atalho precisa marcar pela shell, não só pelo painel"
+        );
+
+        // Cada marca é um cursor: o que estava lá permanece, e a letra digitada
+        // entra em todas as ocorrências.
+        shell.text_input("s");
+        assert_eq!(shell.active_text(), Some("nomes = nomes + nome"));
+        shell.text_input("!");
+        assert_eq!(
+            shell.active_text(),
+            Some("nomes! = nomes! + nome"),
+            "a segunda letra também é replicada"
+        );
+        shell.key_down("Backspace");
+        shell.key_down("Backspace");
+        assert_eq!(
+            shell.active_text(),
+            Some("nome = nome + nome"),
+            "apagar tira uma letra de cada, voltando ao começo"
         );
     }
 

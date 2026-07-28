@@ -1630,6 +1630,26 @@ impl ApplicationHandler for NativeIde {
                 {
                     build_requested = true;
                 } else if self.control_pressed
+                    && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("z"))
+                {
+                    // Desfazer e marcar ocorrências são do editor: o shell só
+                    // encaminha a tecla com o modificador.
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.key_down_with_modifiers("z", Modifiers {
+                            control: true,
+                            ..Modifiers::default()
+                        });
+                    }
+                } else if self.control_pressed
+                    && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("d"))
+                {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.key_down_with_modifiers("d", Modifiers {
+                            control: true,
+                            ..Modifiers::default()
+                        });
+                    }
+                } else if self.control_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("c"))
                 {
                     if let Some(shell) = self.shell.as_mut() {

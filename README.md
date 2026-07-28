@@ -33,6 +33,10 @@ normalmente; `Backspace`, `Enter` e as quatro setas estão disponíveis — as
 verticais movem entre linhas preservando a coluna, e param no fim de uma linha
 mais curta em vez de num ponto que não existe.
 
+`Enter` abre a linha nova já com a **indentação da linha anterior**, de modo que
+escrever dentro de um bloco não exige reindentar a cada linha. A regra é do editor
+do ERLibUi, e vale igual no editor da janela de inspeção do depurador.
+
 Arraste para selecionar um trecho, dê **duplo clique** para selecionar a palavra
 sob o ponteiro, ou use as setas com `Shift`; mover sem `Shift` desfaz a seleção.
 Digitar ou apagar com um trecho marcado age sobre ele. `Ctrl+C` copia e `Ctrl+V`
@@ -46,6 +50,28 @@ bloco** e mantêm a seleção, para indentar vários níveis sem remarcar; recol
 para quando alguma linha já está na margem, preservando a relação entre elas. A
 indentação usa espaços, porque o editor mede o texto por coluna de largura fixa e
 um `\t` ocuparia uma coluna no texto e várias na tela.
+
+`Ctrl+Z` desfaz, voltando **até dez ações** — cada alteração conta como uma, e a
+mais antiga sai quando a décima primeira entra. O teto existe porque cada passo
+guarda o texto inteiro.
+
+`Ctrl+D` marca a **próxima ocorrência do trecho selecionado**, e repetir vai
+somando ocorrências; a busca dá a volta no arquivo, então nada fica de fora por
+estar acima do cursor. **Todas as ocorrências marcadas ficam destacadas**, numa
+cor própria, diferente da seleção: elas não são seleção, e copiar ou `Tab` não
+agem sobre elas. Com as marcas
+de pé, **cada marca é um cursor**: o texto que já estava lá permanece, e cada
+caractere digitado ou apagado é replicado em todas as ocorrências, letra a letra —
+dá para ver a alteração acontecer nas várias posições antes de confirmar. Marcar
+não substitui a palavra: mudar uma letra é mudar uma letra, e `Backspace` tira uma
+de cada.
+
+A alteração acontece **onde o cursor está** dentro do trecho, e não no fim dele:
+quem põe o cursor no meio da palavra quer alterar ali. As setas movem esse ponto
+em todas as ocorrências ao mesmo tempo e param nas bordas da marca — sair dela
+acabaria com a correspondência entre os pontos. `Enter` confirma e solta as marcas; `Esc` desiste e
+devolve o texto ao que era antes da primeira marca, de uma vez, sem gastar os
+passos do desfazer.
 
 `Ctrl+S` grava a aba ativa, o mesmo que `Arquivo → Salvar`.
 Pressione `F3` para abrir a busca e `Esc` para fechá-la.
@@ -85,7 +111,8 @@ Digitar `.` depois de uma variável, parâmetro, campo ou nome de tipo abre a li
 com os **membros públicos** daquele tipo. Cada letra digitada em seguida refaz o
 filtro, então a lista acompanha o nome sendo escrito; apagar a alarga de volta, e
 um caractere que não faz parte de um nome — um parêntese, um espaço — a fecha,
-assim como `Esc`. As setas navegam e `Enter` ou `Tab` aceitam. `Ctrl+Space` abre a
+assim como `Esc` e um clique em qualquer lugar fora dela. Clicar **dentro** escolhe
+a linha, como `Enter`. As setas navegam e `Enter` ou `Tab` aceitam. `Ctrl+Space` abre a
 lista a qualquer momento, mas não é mais preciso repetir a cada letra. O tipo vem da declaração no arquivo
 aberto, e os membros vêm de três origens somadas: o próprio arquivo, que responde
 pelo tipo ainda não compilado; os **demais fontes do projeto**, porque uma classe
