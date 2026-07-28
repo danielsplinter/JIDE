@@ -19,13 +19,21 @@ use crate::{
     connection::Connection,
     resolve::{self, LineEntry},
     values::{self, type_name},
-    wire::{JdwpLocation, Value, command, command_set, event_kind, modifier, step, suspend_policy},
+    wire::{
+        Encoder, JdwpLocation, Value, command, command_set, event_kind, invoke, modifier, step,
+        suspend_policy,
+    },
 };
 
 #[derive(Clone, Debug)]
 struct MethodInfo {
     id: u64,
     name: String,
+    /// Assinatura JNI, que diz quantos argumentos o método recebe.
+    ///
+    /// Sobrecarga é a regra em Java, e o nome sozinho não escolhe qual método
+    /// chamar: a quantidade de argumentos separa a maioria dos casos.
+    signature: String,
 }
 
 #[derive(Clone, Debug)]
@@ -158,9 +166,13 @@ impl Session {
         for _ in 0..count {
             let id = decoder.method_id()?;
             let name = decoder.string()?;
-            let _signature = decoder.string()?;
+            let signature = decoder.string()?;
             let _modifiers = decoder.i32()?;
-            methods.push(MethodInfo { id, name });
+            methods.push(MethodInfo {
+                id,
+                name,
+                signature,
+            });
         }
         let methods = Arc::new(methods);
         self.cache
@@ -643,6 +655,119 @@ impl Session {
         (format!("{name}@{id}"), Some(name), true)
     }
 
+    /// Executa um método do objeto endereçado pelo caminho.
+    ///
+    /// A chamada roda **dentro do processo depurado**, com a mesma thread que
+    /// está parada — e é essa a diferença entre inspecionar e executar. A thread
+    /// escolhida é a única a rodar durante a chamada: retomar a VM inteira faria
+    /// o resto do programa avançar enquanto o usuário olha o estado parado.
+    async fn invoke(
+        &self,
+        thread: u64,
+        frame: u64,
+        call: &values::MethodCall,
+    ) -> Result<Value, DebugError> {
+        let receiver = if call.receiver.is_empty() {
+            self.this_object(thread, frame).await?.ok_or_else(|| {
+                DebugError::Unsupported("quadro estático não tem `this`".to_owned())
+            })?
+        } else {
+            match self.resolve_path(thread, frame, &call.receiver).await? {
+                Value::Object { id, .. } if id != 0 => id,
+                Value::Object { .. } => {
+                    return Err(DebugError::Unsupported(format!(
+                        "{} é null",
+                        call.receiver.join(".")
+                    )));
+                }
+                _ => {
+                    return Err(DebugError::Unsupported(
+                        "só objetos recebem chamada de método".to_owned(),
+                    ));
+                }
+            }
+        };
+        let class_id = self.object_class(receiver).await?;
+        let (declaring, method) = self
+            .find_method(class_id, &call.method, call.arguments.len())
+            .await?;
+
+        let mut encoder = self.connection.encoder();
+        encoder.object_id(receiver);
+        encoder.object_id(thread);
+        encoder.reference_type_id(declaring);
+        encoder.method_id(method);
+        encoder.i32(call.arguments.len() as i32);
+        for argument in &call.arguments {
+            encode_literal(&mut encoder, argument);
+        }
+        encoder.i32(invoke::SINGLE_THREADED);
+        let payload = self
+            .connection
+            .request(
+                command_set::OBJECT_REFERENCE,
+                command::OBJECT_INVOKE_METHOD,
+                encoder.finish(),
+            )
+            .await?;
+        let mut decoder = self.connection.decoder(&payload);
+        let returned = decoder.tagged_value()?;
+        // A exceção vem junto do retorno, e não como erro do protocolo: sem
+        // olhá-la, um método que falhou pareceria ter devolvido `null`.
+        if let Ok(Value::Object { id, .. }) = decoder.tagged_value()
+            && id != 0
+        {
+            let (text, type_name, _) = self.describe(&Value::Object { tag: b'L', id }).await;
+            let nome = type_name.unwrap_or_else(|| "exceção".to_owned());
+            return Err(DebugError::Protocol(format!("{nome} lançada: {text}")));
+        }
+        Ok(returned)
+    }
+
+    /// Procura o método pelo nome e pela quantidade de argumentos, subindo a
+    /// hierarquia.
+    ///
+    /// Herdar é a regra: `toString` costuma estar em `Object`, não na classe do
+    /// objeto. Sobrecarga com a mesma aridade não é resolvida — nesse caso a
+    /// primeira encontrada vence, e o alvo recusa se os tipos não baterem.
+    async fn find_method(
+        &self,
+        class_id: u64,
+        name: &str,
+        arity: usize,
+    ) -> Result<(u64, u64), DebugError> {
+        let mut current = class_id;
+        for _ in 0..8 {
+            let methods = self.methods(current).await?;
+            if let Some(found) = methods
+                .iter()
+                .find(|method| method.name == name && signature_arity(&method.signature) == arity)
+            {
+                return Ok((current, found.id));
+            }
+            let mut encoder = self.connection.encoder();
+            encoder.reference_type_id(current);
+            let Ok(payload) = self
+                .connection
+                .request(
+                    command_set::CLASS_TYPE,
+                    command::CLASS_TYPE_SUPERCLASS,
+                    encoder.finish(),
+                )
+                .await
+            else {
+                break;
+            };
+            match self.connection.decoder(&payload).reference_type_id() {
+                Ok(0) | Err(_) => break,
+                Ok(super_class) => current = super_class,
+            }
+        }
+        Err(DebugError::Unsupported(format!(
+            "método {name} com {arity} argumento(s) não encontrado"
+        )))
+    }
+
     /// Campos de instância da classe e de suas superclasses.
     async fn fields_of(&self, object_id: u64) -> Result<Vec<(String, String, u64)>, DebugError> {
         let mut class_id = self.object_class(object_id).await?;
@@ -1117,9 +1242,15 @@ impl DebugSession for Session {
         expression: &str,
     ) -> Result<Variable, DebugError> {
         self.ensure_attached().await?;
+        // Uma chamada executa no alvo; um caminho apenas lê. A expressão diz qual
+        // das duas coisas o usuário pediu.
+        if let Some(call) = values::parse_call(expression) {
+            let value = self.invoke(thread.0, frame.0, &call).await?;
+            return Ok(self.present(expression, &value).await);
+        }
         let Some(segments) = values::parse_path(expression) else {
             return Err(DebugError::Unsupported(
-                "somente variáveis, `this` e campos podem ser inspecionados".to_owned(),
+                "escreva um caminho — `pedido.cliente.nome` — ou uma chamada de método".to_owned(),
             ));
         };
         let value = self.resolve_path(thread.0, frame.0, &segments).await?;
@@ -1208,5 +1339,57 @@ impl DebugSession for Session {
         self.connection.dispose().await;
         self.events.emit(DebugEvent::Detached { reason: None });
         Ok(())
+    }
+}
+
+/// Quantidade de argumentos de uma assinatura JNI.
+fn signature_arity(signature: &str) -> usize {
+    let Some(inside) = signature
+        .strip_prefix('(')
+        .and_then(|rest| rest.split(')').next())
+    else {
+        return 0;
+    };
+    let mut count = 0;
+    let mut rest = inside;
+    while !rest.is_empty() {
+        let arrays = rest.len() - rest.trim_start_matches('[').len();
+        let body = &rest[arrays..];
+        let consumed = if body.starts_with('L') {
+            body.find(';').map_or(body.len(), |index| index + 1)
+        } else {
+            1
+        };
+        count += 1;
+        rest = &rest[arrays + consumed..];
+    }
+    count
+}
+
+/// Escreve um literal como valor etiquetado do protocolo.
+fn encode_literal(encoder: &mut Encoder, literal: &values::Literal) {
+    match literal {
+        values::Literal::Null | values::Literal::Text(_) => {
+            // Texto exigiria criar uma `String` no alvo por
+            // `VirtualMachine.CreateString`, que é outra ida ao processo.
+            encoder.u8(b'L');
+            encoder.object_id(0);
+        }
+        values::Literal::Bool(value) => {
+            encoder.u8(b'Z');
+            encoder.u8(u8::from(*value));
+        }
+        values::Literal::Int(value) => {
+            encoder.u8(b'I');
+            encoder.i32(*value);
+        }
+        values::Literal::Long(value) => {
+            encoder.u8(b'J');
+            encoder.i64(*value);
+        }
+        values::Literal::Double(value) => {
+            encoder.u8(b'D');
+            encoder.i64(value.to_bits() as i64);
+        }
     }
 }

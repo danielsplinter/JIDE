@@ -87,6 +87,92 @@ pub(crate) fn parse_path(expression: &str) -> Option<Vec<String>> {
     Some(segments)
 }
 
+/// Chamada de método reconhecida numa expressão.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MethodCall {
+    /// Caminho até o objeto que recebe a chamada; vazio quer dizer `this`.
+    pub(crate) receiver: Vec<String>,
+    pub(crate) method: String,
+    pub(crate) arguments: Vec<Literal>,
+}
+
+/// Argumento aceito numa chamada.
+///
+/// Só literais: aceitar expressões exigiria avaliá-las antes, e cada avaliação é
+/// outra ida ao alvo. Literais cobrem o que se digita numa inspeção — trocar um
+/// id, ligar um sinalizador, passar um nome.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Literal {
+    Null,
+    Bool(bool),
+    Int(i32),
+    Long(i64),
+    Double(f64),
+    Text(String),
+}
+
+/// Reconhece `caminho.metodo(arg, arg)` numa expressão.
+///
+/// Devolve `None` quando não é chamada — aí a expressão é tratada como caminho de
+/// leitura, que continua sendo o caso comum.
+pub(crate) fn parse_call(expression: &str) -> Option<MethodCall> {
+    let trimmed = expression.trim().trim_end_matches(';').trim();
+    let open = trimmed.find('(')?;
+    if !trimmed.ends_with(')') {
+        return None;
+    }
+    let target = trimmed[..open].trim();
+    let inside = trimmed[open + 1..trimmed.len() - 1].trim();
+    let mut segments: Vec<String> = target
+        .split('.')
+        .map(|part| part.trim().to_owned())
+        .collect();
+    let method = segments.pop()?;
+    if !is_identifier(&method) || segments.iter().any(|segment| !is_identifier(segment)) {
+        return None;
+    }
+    let arguments = if inside.is_empty() {
+        Vec::new()
+    } else {
+        inside
+            .split(',')
+            .map(|argument| parse_literal(argument.trim()))
+            .collect::<Option<Vec<_>>>()?
+    };
+    Some(MethodCall {
+        receiver: segments,
+        method,
+        arguments,
+    })
+}
+
+fn parse_literal(value: &str) -> Option<Literal> {
+    if value == "null" {
+        return Some(Literal::Null);
+    }
+    if value == "true" || value == "false" {
+        return Some(Literal::Bool(value == "true"));
+    }
+    if let Some(text) = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return Some(Literal::Text(text.to_owned()));
+    }
+    // O sufixo é o que distingue `4` de `4L` em Java, e o alvo recusa a chamada
+    // quando o tipo do argumento não bate com o do parâmetro.
+    if let Some(number) = value.strip_suffix(['L', 'l']) {
+        return number.parse().ok().map(Literal::Long);
+    }
+    if let Some(number) = value.strip_suffix(['D', 'd', 'F', 'f']) {
+        return number.parse().ok().map(Literal::Double);
+    }
+    if value.contains('.') {
+        return value.parse().ok().map(Literal::Double);
+    }
+    value.parse().ok().map(Literal::Int)
+}
+
 fn is_identifier(value: &str) -> bool {
     let mut characters = value.chars();
     characters
@@ -99,6 +185,45 @@ fn is_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Uma chamada é reconhecida com receptor, nome e argumentos.
+    #[test]
+    fn a_call_is_told_apart_from_a_path() {
+        let Some(call) = parse_call("m.setId(4L);") else {
+            panic!("deveria reconhecer a chamada");
+        };
+        assert_eq!(call.receiver, vec!["m".to_owned()]);
+        assert_eq!(call.method, "setId");
+        assert_eq!(call.arguments, vec![Literal::Long(4)]);
+
+        // Sem receptor, a chamada é sobre `this`.
+        let Some(proprio) = parse_call("executar()") else {
+            panic!("deveria reconhecer a chamada sem receptor");
+        };
+        assert!(proprio.receiver.is_empty());
+        assert!(proprio.arguments.is_empty());
+
+        // Caminho não é chamada, e continua sendo leitura.
+        assert_eq!(parse_call("pedido.cliente.nome"), None);
+    }
+
+    /// O sufixo do literal decide o tipo, como em Java.
+    #[test]
+    fn literal_suffixes_choose_the_argument_type() {
+        let Some(call) = parse_call("a.b(1, 2L, 3.5, true, null)") else {
+            panic!("deveria reconhecer a chamada");
+        };
+        assert_eq!(
+            call.arguments,
+            vec![
+                Literal::Int(1),
+                Literal::Long(2),
+                Literal::Double(3.5),
+                Literal::Bool(true),
+                Literal::Null,
+            ]
+        );
+    }
 
     #[test]
     fn signatures_become_readable_type_names() {

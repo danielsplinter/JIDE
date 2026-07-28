@@ -1064,6 +1064,9 @@ impl NativeIde {
                 }
                 debug::DebugUiEvent::Status(status) => {
                     if let Some(shell) = self.shell.as_mut() {
+                        // Com a inspeção aberta, ela cobre a barra de estado: a
+                        // resposta precisa aparecer dentro da janela.
+                        shell.set_inspection_message(status.clone());
                         shell.set_status_message(status);
                     }
                 }

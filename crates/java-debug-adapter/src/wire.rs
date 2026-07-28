@@ -43,6 +43,7 @@ pub(crate) mod command {
 
     pub(crate) const OBJECT_REFERENCE_TYPE: u8 = 1;
     pub(crate) const OBJECT_GET_VALUES: u8 = 2;
+    pub(crate) const OBJECT_INVOKE_METHOD: u8 = 6;
 
     pub(crate) const STRING_VALUE: u8 = 1;
 
@@ -61,6 +62,16 @@ pub(crate) mod command {
     pub(crate) const STACK_FRAME_THIS_OBJECT: u8 = 3;
 
     pub(crate) const EVENT_COMPOSITE: u8 = 100;
+}
+
+/// Opções de `InvokeMethod`, pela especificação do JDWP.
+pub(crate) mod invoke {
+    /// Só a thread escolhida roda durante a chamada.
+    ///
+    /// Retomar a VM inteira para executar um método faria o resto do programa
+    /// avançar enquanto o usuário inspeciona — e o estado que ele está olhando
+    /// deixaria de ser o estado em que a execução parou.
+    pub(crate) const SINGLE_THREADED: i32 = 0x01;
 }
 
 pub(crate) mod event_kind {

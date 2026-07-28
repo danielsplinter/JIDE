@@ -91,6 +91,7 @@ const INSPECTION_VALUE_ID: WidgetId = WidgetId(10_049);
 const INSPECTION_EMPTY_ID: WidgetId = WidgetId(10_050);
 const INSPECTION_RUN_ID: WidgetId = WidgetId(10_052);
 const INSPECTION_SOURCE_CAPTION_ID: WidgetId = WidgetId(10_053);
+const INSPECTION_MESSAGE_ID: WidgetId = WidgetId(10_054);
 /// A janela é larga porque o valor de um objeto costuma ser longo.
 const INSPECTION_PANEL_SIZE: Size = Size::new(720.0, 420.0);
 const INSPECTION_ROW_HEIGHT: f32 = 26.0;
@@ -497,6 +498,11 @@ pub struct IdeShell {
     inspection_source: TextBuffer,
     inspection_run_button: Button,
     inspection_focus: InspectionFocus,
+    /// Resposta da última execução, mostrada dentro da janela.
+    ///
+    /// A barra de estado fica atrás do painel: um erro relatado só lá deixa o
+    /// usuário sem saber por que nada aconteceu.
+    inspection_message: Option<String>,
     open_project_requested: bool,
     open_settings_requested: bool,
     build_project_requested: bool,
@@ -744,6 +750,7 @@ impl IdeShell {
             inspection_run_button: Button::new(INSPECTION_RUN_ID, "Executar")
                 .with_command("inspect.run"),
             inspection_focus: InspectionFocus::Tree,
+            inspection_message: None,
             open_project_requested: false,
             open_settings_requested: false,
             build_project_requested: false,
@@ -2836,6 +2843,16 @@ impl IdeShell {
         self.inspection_tree.set_selected(Some(selected));
     }
 
+    /// Relata na janela o que a última execução respondeu.
+    ///
+    /// Enquanto a janela está aberta ela cobre a barra de estado, então é aqui
+    /// que a resposta precisa aparecer.
+    pub fn set_inspection_message(&mut self, message: impl Into<String>) {
+        if self.inspection_modal.is_open() {
+            self.inspection_message = Some(message.into());
+        }
+    }
+
     pub const fn inspection_open(&self) -> bool {
         self.inspection_modal.is_open()
     }
@@ -2854,6 +2871,7 @@ impl IdeShell {
             return;
         }
         self.status_message = format!("Executando {code}");
+        self.inspection_message = None;
         self.debug_requests.push(DebugRequest::Evaluate(code));
     }
 
@@ -2895,6 +2913,7 @@ impl IdeShell {
     }
 
     pub fn close_inspection(&mut self) {
+        self.inspection_message = None;
         self.inspection_modal.close();
         self.inspection = None;
     }
@@ -3584,6 +3603,16 @@ impl IdeShell {
         );
         editor.paint(&mut paint);
 
+        if let Some(message) = self.inspection_message.as_ref() {
+            self.paint_settings_text(
+                &mut paint,
+                INSPECTION_MESSAGE_ID,
+                message,
+                Point::new(geometry.source.origin.x, geometry.run.origin.y + 8.0),
+                13.0,
+                IconTint::Danger,
+            );
+        }
         let mut run = self.inspection_run_button.clone();
         run.layout(&self.layout_context(), geometry.run);
         run.paint(&mut paint);
