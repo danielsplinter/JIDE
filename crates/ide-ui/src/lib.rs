@@ -92,6 +92,8 @@ const INSPECTION_EMPTY_ID: WidgetId = WidgetId(10_050);
 const INSPECTION_RUN_ID: WidgetId = WidgetId(10_052);
 const INSPECTION_SOURCE_CAPTION_ID: WidgetId = WidgetId(10_053);
 const INSPECTION_MESSAGE_ID: WidgetId = WidgetId(10_054);
+/// Largura média de caractere na fonte da mensagem, para saber onde cortar.
+const INSPECTION_MESSAGE_CHAR_WIDTH: f32 = 6.6;
 /// A janela é larga porque o valor de um objeto costuma ser longo.
 const INSPECTION_PANEL_SIZE: Size = Size::new(720.0, 420.0);
 const INSPECTION_ROW_HEIGHT: f32 = 26.0;
@@ -2865,6 +2867,11 @@ impl IdeShell {
 
     /// Executa o que está escrito no editor, no quadro atual.
     pub fn run_inspection_source(&mut self) {
+        if !self.debug.attached {
+            self.inspection_message =
+                Some("A sessão de depuração terminou; reconecte para executar".to_owned());
+            return;
+        }
         let code = self.inspection_source.text().trim().to_owned();
         if code.is_empty() {
             self.status_message = "Escreva a expressão a executar".to_owned();
@@ -3604,16 +3611,22 @@ impl IdeShell {
         editor.paint(&mut paint);
 
         if let Some(message) = self.inspection_message.as_ref() {
+            // A mensagem tem a linha inteira, acima dos botões: dividir a linha
+            // com eles a fazia passar por baixo do Executar, ilegível justamente
+            // quando é ela que explica por que o clique não fez nada.
             self.paint_settings_text(
                 &mut paint,
                 INSPECTION_MESSAGE_ID,
-                message,
-                Point::new(geometry.source.origin.x, geometry.run.origin.y + 8.0),
+                &clipped_message(message, geometry.message.size.width),
+                geometry.message.origin,
                 13.0,
                 IconTint::Danger,
             );
         }
         let mut run = self.inspection_run_button.clone();
+        // Sem sessão viva não há quadro onde executar: o botão apagado diz isso
+        // antes do clique, em vez de a mensagem dizer depois.
+        run.set_disabled(!self.debug.attached);
         run.layout(&self.layout_context(), geometry.run);
         run.paint(&mut paint);
         let mut close = self.inspection_close_button.clone();
@@ -4294,6 +4307,8 @@ struct InspectionGeometry {
     detail: Rect,
     /// Editor de expressões, na parte de baixo do painel direito.
     source: Rect,
+    /// Linha da resposta da última execução, acima dos botões.
+    message: Rect,
     run: Rect,
     close: Rect,
 }
@@ -4322,13 +4337,33 @@ fn inspection_geometry(panel: Rect) -> InspectionGeometry {
         34.0,
     );
     let run = Rect::new(close.origin.x - 108.0, close.origin.y, 98.0, 34.0);
+    let message = Rect::new(
+        panel.origin.x + 16.0,
+        close.origin.y - 22.0,
+        (panel.size.width - 32.0).max(80.0),
+        18.0,
+    );
     InspectionGeometry {
         list,
         detail,
         source,
+        message,
         run,
         close,
     }
+}
+
+/// Encurta a mensagem para caber na largura disponível.
+///
+/// Sem isso ela sai pela borda da janela e o fim — que costuma ser a causa —
+/// desaparece.
+fn clipped_message(message: &str, width: f32) -> String {
+    let limit = (width / INSPECTION_MESSAGE_CHAR_WIDTH).floor().max(8.0) as usize;
+    if message.chars().count() <= limit {
+        return message.to_owned();
+    }
+    let head: String = message.chars().take(limit.saturating_sub(1)).collect();
+    format!("{head}…")
 }
 
 /// Onde cada peça da janela de criação fica dentro do painel.
@@ -7006,6 +7041,24 @@ mod tests {
         );
     }
 
+    /// Sem sessão viva não há onde executar, e a janela diz isso.
+    ///
+    /// A árvore continua mostrando o que foi lido enquanto a execução estava
+    /// parada, então sem esse aviso o usuário clicaria em Executar achando que a
+    /// sessão ainda está de pé.
+    #[test]
+    fn running_without_a_live_session_explains_itself() {
+        let mut shell = shell_editing("int total = 10;");
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        shell.inspection_source = TextBuffer::new("m.setId(4L);");
+        shell.run_inspection_source();
+        assert!(shell.take_debug_requests().is_empty());
+        assert_eq!(
+            shell.inspection_message.as_deref(),
+            Some("A sessão de depuração terminou; reconecte para executar")
+        );
+    }
+
     /// O painel direito reusa o editor, com os comportamentos de arquivo
     /// desligados: escrever ali não é editar um arquivo do projeto.
     #[test]
@@ -7035,6 +7088,7 @@ mod tests {
     #[test]
     fn running_the_inspection_source_asks_for_its_evaluation() {
         let mut shell = shell_editing("int total = 10;");
+        shell.debug.attached = true;
         let size = Size::new(1280.0, 800.0);
         shell.show_inspection("pedido", inspection_value(), inspection_fields());
         let geometry = inspection_layout(&mut shell, size);
@@ -7057,6 +7111,7 @@ mod tests {
     #[test]
     fn running_an_empty_source_asks_nothing() {
         let mut shell = shell_editing("int total = 10;");
+        shell.debug.attached = true;
         shell.show_inspection("pedido", inspection_value(), inspection_fields());
         shell.run_inspection_source();
         assert!(shell.take_debug_requests().is_empty());

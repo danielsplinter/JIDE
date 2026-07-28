@@ -244,7 +244,7 @@ pub enum DebugError {
     NotSuspended,
     #[error("operation is not supported: {0}")]
     Unsupported(String),
-    #[error("the debug session is no longer attached")]
+    #[error("a sessão de depuração terminou; a aplicação não está mais parada")]
     Detached,
 }
 

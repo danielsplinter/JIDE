@@ -178,8 +178,12 @@ do nó destacado.
 
 O painel direito tem, abaixo do detalhe, um **editor de código**: escreva uma
 expressão e clique em **Executar** — ou `Ctrl+Enter` — para avaliá-la no quadro
-atual. O resultado passa a ser o que a árvore mostra, e a resposta aparece na
-própria janela, que cobre a barra de estado.
+atual. O resultado passa a ser o que a árvore mostra, e a resposta aparece numa
+linha própria acima dos botões, dentro da janela — ela cobre a barra de estado.
+
+O botão fica apagado quando não há sessão de depuração de pé. A árvore continua
+mostrando o que foi lido enquanto a execução estava parada, e sem esse aviso o
+clique pareceria não fazer nada.
 
 Duas coisas podem ser escritas ali. Um **caminho** — `pedido.cliente.nome` — é
 lido, sem executar nada no alvo. Uma **chamada de método** — `m.setId(4L)` — roda
