@@ -168,8 +168,7 @@ sua linha.
 
 `F8` continua, `F10` passa sobre a linha, `F11` entra no método e `Shift+F11`
 sai dele. `Depurar → Desconectar` encerra a sessão e o processo segue rodando
-normalmente. Inspecionar valores nunca executa código no alvo: variáveis,
-`this` e campos são lidos, mas chamadas de método são recusadas.
+normalmente.
 
 Com a sessão de pé, selecionar uma variável no editor e clicar com o **botão
 direito** oferece **Inspecionar**, que avalia o trecho marcado no quadro
@@ -179,7 +178,20 @@ do nó destacado.
 
 O painel direito tem, abaixo do detalhe, um **editor de código**: escreva uma
 expressão e clique em **Executar** — ou `Ctrl+Enter` — para avaliá-la no quadro
-atual. O resultado passa a ser o que a árvore mostra.
+atual. O resultado passa a ser o que a árvore mostra, e a resposta aparece na
+própria janela, que cobre a barra de estado.
+
+Duas coisas podem ser escritas ali. Um **caminho** — `pedido.cliente.nome` — é
+lido, sem executar nada no alvo. Uma **chamada de método** — `m.setId(4L)` — roda
+de verdade dentro do processo depurado, na thread que está parada e só nela: se o
+método altera o objeto, a alteração vale a partir dali. Exceção lançada lá dentro
+volta como mensagem, em vez de virar um retorno vazio.
+
+Os argumentos são literais, com o sufixo decidindo o tipo como em Java: `4L`,
+`2.5`, `true`, `false`, `null`. Texto ainda não passa — criar uma `String` no
+alvo é outra ida ao processo. O método é escolhido pelo nome e pela quantidade de
+argumentos, subindo a hierarquia; sobrecargas com a mesma quantidade não são
+distinguidas, e nesse caso o alvo recusa se os tipos não baterem.
 
 Esse editor é o mesmo painel da janela principal, com os comportamentos que não
 fazem sentido ali desligados por configuração: não há arquivo para salvar,
