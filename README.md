@@ -173,10 +173,15 @@ normalmente. Inspecionar valores nunca executa código no alvo: variáveis,
 
 Com a sessão de pé, selecionar uma variável no editor e clicar com o **botão
 direito** oferece **Inspecionar**, que avalia o trecho marcado no quadro
-selecionado e mostra o valor e o tipo na barra de estado. O item só aparece
-durante a depuração — fora dela não há quadro que dê valor ao nome — e fica
-desabilitado sem seleção. O quadro é o que estiver escolhido no painel: o mesmo
-nome vale coisas diferentes em quadros diferentes.
+selecionado e abre uma janela com dois painéis: à esquerda, a lista com o valor
+pedido e os campos que ele revela; à direita, o nome, o tipo e o valor completo da
+entrada destacada. Clicar em um campo troca o que o painel direito detalha, e
+`Esc` ou `Fechar` dispensam a janela. Um valor simples aparece sozinho na lista, e
+é a resposta completa.
+
+O item só aparece durante a depuração — fora dela não há quadro que dê valor ao
+nome — e fica desabilitado sem seleção. O quadro é o que estiver escolhido no
+painel: o mesmo nome vale coisas diferentes em quadros diferentes.
 
 ## Verificação
 
