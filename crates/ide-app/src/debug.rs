@@ -52,6 +52,12 @@ pub(crate) enum DebugCommand {
         frame: usize,
         expression: String,
     },
+    /// Revela os campos de um valor já inspecionado.
+    ExpandInspection {
+        thread: ThreadId,
+        frame: usize,
+        path: String,
+    },
 }
 
 pub(crate) enum DebugUiEvent {
@@ -67,10 +73,16 @@ pub(crate) enum DebugUiEvent {
         variables: Vec<DebugVariableView>,
         selected: usize,
     },
-    /// Resultado de uma inspeção: o valor pedido e os campos que ele revela.
+    /// Resultado de uma inspeção: o valor pedido e os campos do primeiro nível.
     Inspection {
         expression: String,
-        entries: Vec<DebugVariableView>,
+        value: DebugVariableView,
+        fields: Vec<DebugVariableView>,
+    },
+    /// Campos revelados para um caminho já presente na árvore de inspeção.
+    InspectionFields {
+        path: String,
+        fields: Vec<DebugVariableView>,
     },
     Status(String),
 }
@@ -247,12 +259,27 @@ async fn worker(mut commands: UnboundedReceiver<DebugCommand>, ui: Sender<DebugU
                 };
                 let event =
                     match evaluate_in_frame(active.as_ref(), thread, frame, &expression).await {
-                        Ok(entries) => DebugUiEvent::Inspection {
+                        Ok((value, fields)) => DebugUiEvent::Inspection {
                             expression,
-                            entries,
+                            value,
+                            fields,
                         },
                         Err(error) => DebugUiEvent::Status(error),
                     };
+                let _ = ui.send(event);
+            }
+            DebugCommand::ExpandInspection {
+                thread,
+                frame,
+                path,
+            } => {
+                let Some(active) = session.as_ref() else {
+                    continue;
+                };
+                let event = match expand_inspection(active.as_ref(), thread, frame, &path).await {
+                    Ok(fields) => DebugUiEvent::InspectionFields { path, fields },
+                    Err(error) => DebugUiEvent::Status(error),
+                };
                 let _ = ui.send(event);
             }
             DebugCommand::Refresh { thread, frame } => {
@@ -285,7 +312,7 @@ async fn evaluate_in_frame(
     thread: ThreadId,
     frame: usize,
     expression: &str,
-) -> Result<Vec<DebugVariableView>, String> {
+) -> Result<(DebugVariableView, Vec<DebugVariableView>), String> {
     let frames = session
         .stack_trace(thread)
         .await
@@ -297,21 +324,47 @@ async fn evaluate_in_frame(
         .evaluate(thread, selected.id, expression)
         .await
         .map_err(|error| format!("{expression}: {error}"))?;
-    // O primeiro item é o próprio valor pedido; os seguintes são os campos que
-    // ele revela. Um valor simples fica sozinho, e é a resposta completa.
-    let mut entries = vec![variable_view(expression, &value)];
-    if value.expandable {
-        let fields = session
-            .expand(thread, selected.id, expression)
-            .await
-            .unwrap_or_default();
-        entries.extend(
-            fields
-                .iter()
-                .map(|field| variable_view(&field.name, field)),
-        );
-    }
-    Ok(entries)
+    // O primeiro nível vem junto: pedir para inspecionar um objeto e receber só
+    // ele fechado seria uma resposta pela metade. Os níveis seguintes esperam a
+    // expansão, porque o grafo de um objeto pode ser fundo e cíclico.
+    let fields = if value.expandable {
+        expand_fields(session, thread, selected.id, expression).await
+    } else {
+        Vec::new()
+    };
+    Ok((variable_view(expression, &value), fields))
+}
+
+/// Campos de um valor endereçado pelo caminho, no quadro pedido.
+async fn expand_inspection(
+    session: &dyn DebugSession,
+    thread: ThreadId,
+    frame: usize,
+    path: &str,
+) -> Result<Vec<DebugVariableView>, String> {
+    let frames = session
+        .stack_trace(thread)
+        .await
+        .map_err(|error| error.to_string())?;
+    let selected = frames
+        .get(frame.min(frames.len().saturating_sub(1)))
+        .ok_or_else(|| "Nenhum quadro para inspecionar".to_owned())?;
+    Ok(expand_fields(session, thread, selected.id, path).await)
+}
+
+async fn expand_fields(
+    session: &dyn DebugSession,
+    thread: ThreadId,
+    frame: ide_debug_api::FrameId,
+    path: &str,
+) -> Vec<DebugVariableView> {
+    session
+        .expand(thread, frame, path)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|field| variable_view(&field.name, field))
+        .collect()
 }
 
 fn variable_view(name: &str, value: &ide_debug_api::Variable) -> DebugVariableView {
@@ -319,6 +372,7 @@ fn variable_view(name: &str, value: &ide_debug_api::Variable) -> DebugVariableVi
         name: name.to_owned(),
         value: value.value.clone(),
         type_name: value.type_name.clone(),
+        expandable: value.expandable,
     }
 }
 
@@ -420,6 +474,7 @@ async fn collect_view(
                 name: variable.name,
                 value: variable.value,
                 type_name: variable.type_name,
+                expandable: variable.expandable,
             })
             .collect(),
         selected,

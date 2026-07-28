@@ -173,11 +173,15 @@ normalmente. Inspecionar valores nunca executa código no alvo: variáveis,
 
 Com a sessão de pé, selecionar uma variável no editor e clicar com o **botão
 direito** oferece **Inspecionar**, que avalia o trecho marcado no quadro
-selecionado e abre uma janela com dois painéis: à esquerda, a lista com o valor
-pedido e os campos que ele revela; à direita, o nome, o tipo e o valor completo da
-entrada destacada. Clicar em um campo troca o que o painel direito detalha, e
-`Esc` ou `Fechar` dispensam a janela. Um valor simples aparece sozinho na lista, e
-é a resposta completa.
+selecionado e abre uma janela com dois painéis: à esquerda, uma **árvore** com o
+valor pedido e os campos dentro dele; à direita, o nome, o tipo e o valor completo
+do nó destacado.
+
+A árvore abre já com o primeiro nível à mostra. Clicar em um campo que também é
+objeto revela os campos dele, um nível por vez — pedir tudo de uma vez percorreria
+o grafo inteiro, que pode ser fundo e cíclico. Clicar de novo fecha. `Esc` ou
+`Fechar` dispensam a janela, e um valor simples aparece sozinho, sem triângulo,
+porque não há o que abrir.
 
 O item só aparece durante a depuração — fora dela não há quadro que dê valor ao
 nome — e fica desabilitado sem seleção. O quadro é o que estiver escolhido no

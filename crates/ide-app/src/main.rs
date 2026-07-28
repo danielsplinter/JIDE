@@ -905,6 +905,15 @@ impl NativeIde {
                         });
                     }
                 }
+                DebugRequest::ExpandInspection(path) => {
+                    if let Some(thread) = self.debug_thread {
+                        self.send_debug(debug::DebugCommand::ExpandInspection {
+                            thread,
+                            frame: self.debug_view.selected_frame,
+                            path,
+                        });
+                    }
+                }
                 DebugRequest::Evaluate(expression) => {
                     // A avaliação acontece no quadro que o usuário está olhando:
                     // o mesmo nome vale coisas diferentes em quadros diferentes.
@@ -1041,10 +1050,16 @@ impl NativeIde {
                 }
                 debug::DebugUiEvent::Inspection {
                     expression,
-                    entries,
+                    value,
+                    fields,
                 } => {
                     if let Some(shell) = self.shell.as_mut() {
-                        shell.show_inspection(expression, entries);
+                        shell.show_inspection(expression, value, fields);
+                    }
+                }
+                debug::DebugUiEvent::InspectionFields { path, fields } => {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.add_inspection_fields(&path, fields);
                     }
                 }
                 debug::DebugUiEvent::Status(status) => {

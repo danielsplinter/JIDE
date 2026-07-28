@@ -81,7 +81,7 @@ const NEW_ITEM_MESSAGE_ID: WidgetId = WidgetId(10_043);
 /// A janela é pequena de propósito: dois campos e duas ações.
 const NEW_ITEM_PANEL_SIZE: Size = Size::new(460.0, 230.0);
 const INSPECTION_MODAL_ID: WidgetId = WidgetId(10_044);
-const INSPECTION_LIST_ID: WidgetId = WidgetId(10_045);
+const INSPECTION_TREE_ID: WidgetId = WidgetId(10_045);
 const INSPECTION_CLOSE_ID: WidgetId = WidgetId(10_046);
 const INSPECTION_NAME_ID: WidgetId = WidgetId(10_047);
 const INSPECTION_TYPE_ID: WidgetId = WidgetId(10_048);
@@ -159,6 +159,12 @@ pub enum DebugRequest {
     /// nome só existe com a execução parada, e é o quadro atual que lhe dá
     /// sentido.
     Evaluate(String),
+    /// Revela os campos de um valor já inspecionado, endereçado pelo caminho.
+    ///
+    /// Os campos são pedidos ao abrir o nó, e não de uma vez: percorrer o grafo
+    /// inteiro de um objeto para mostrar o primeiro nível seria caro e, em
+    /// estruturas cíclicas, infinito.
+    ExpandInspection(String),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -172,6 +178,11 @@ pub struct DebugVariableView {
     pub name: String,
     pub value: String,
     pub type_name: Option<String>,
+    /// O valor tem campos que podem ser revelados.
+    ///
+    /// Sem isso a inspeção não teria como oferecer o triângulo de expansão só
+    /// onde há o que abrir, e um número simples pareceria esconder algo.
+    pub expandable: bool,
 }
 
 /// Estado da depuração apresentado pela interface.
@@ -282,14 +293,66 @@ pub struct NewItemRequest {
     pub source_root: PathBuf,
 }
 
-/// Valor sendo inspecionado e seus campos.
+/// Um valor na árvore de inspeção, com os campos já revelados.
 ///
-/// O primeiro item é o próprio valor pedido; os seguintes são os campos que ele
-/// revela. Um valor simples fica sozinho, e é a resposta completa.
+/// O caminho é a expressão que endereça o valor a partir da raiz —
+/// `pedido.cliente.nome` — e é ele que o alvo entende ao ser perguntado pelos
+/// campos. Também é a identidade do nó: o índice mudaria a cada expansão.
+#[derive(Clone, Debug)]
+struct InspectionNode {
+    path: String,
+    variable: DebugVariableView,
+    children: Vec<InspectionNode>,
+    /// Os campos já foram pedidos ao alvo.
+    ///
+    /// Um objeto sem campos carregados e um sem campos nenhum se pareceriam,
+    /// e o segundo pedido de expansão nunca chegaria.
+    loaded: bool,
+}
+
+impl InspectionNode {
+    fn new(path: String, variable: DebugVariableView) -> Self {
+        Self {
+            path,
+            variable,
+            children: Vec::new(),
+            loaded: false,
+        }
+    }
+
+    /// Encontra o nó de um caminho, em profundidade.
+    fn find_mut(&mut self, path: &str) -> Option<&mut Self> {
+        if self.path == path {
+            return Some(self);
+        }
+        // Só desce por onde o caminho passa: os demais ramos não o contêm.
+        if !path.starts_with(&self.path) {
+            return None;
+        }
+        self.children
+            .iter_mut()
+            .find_map(|child| child.find_mut(path))
+    }
+
+    fn find(&self, path: &str) -> Option<&Self> {
+        if self.path == path {
+            return Some(self);
+        }
+        if !path.starts_with(&self.path) {
+            return None;
+        }
+        self.children.iter().find_map(|child| child.find(path))
+    }
+}
+
+/// Valor sendo inspecionado, com a árvore de campos revelados até agora.
 struct InspectionView {
     expression: String,
-    entries: Vec<DebugVariableView>,
-    selected: usize,
+    root: InspectionNode,
+    /// Caminhos abertos na árvore.
+    expanded: HashSet<String>,
+    /// Caminho do nó destacado, detalhado no painel direito.
+    selected: String,
 }
 
 /// Janela de criação enquanto está aberta.
@@ -416,7 +479,7 @@ pub struct IdeShell {
     /// Janela de inspeção de um valor durante a depuração.
     inspection_modal: ModalHost,
     inspection: Option<InspectionView>,
-    inspection_list: ListView,
+    inspection_tree: TreeView,
     inspection_close_button: Button,
     open_project_requested: bool,
     open_settings_requested: bool,
@@ -661,9 +724,8 @@ impl IdeShell {
                 INSPECTION_PANEL_SIZE,
             ),
             inspection: None,
-            inspection_list: ListView::new(INSPECTION_LIST_ID, Vec::<String>::new())
-                .with_row_height(INSPECTION_ROW_HEIGHT)
-                .with_selection(ListSelection::Marker),
+            inspection_tree: TreeView::new(INSPECTION_TREE_ID, Vec::new())
+                .with_row_height(INSPECTION_ROW_HEIGHT),
             inspection_close_button: Button::new(INSPECTION_CLOSE_ID, "Fechar")
                 .with_command("inspect.close"),
             open_project_requested: false,
@@ -2762,20 +2824,70 @@ impl IdeShell {
     pub fn show_inspection(
         &mut self,
         expression: impl Into<String>,
-        entries: Vec<DebugVariableView>,
+        value: DebugVariableView,
+        fields: Vec<DebugVariableView>,
     ) {
         let expression = expression.into();
-        self.inspection_list
-            .set_items(entries.iter().map(inspection_label).collect::<Vec<_>>());
-        self.inspection_list.set_selected(Some(0));
+        let mut root = InspectionNode::new(expression.clone(), value);
+        root.loaded = true;
+        root.children = fields
+            .into_iter()
+            .map(|field| InspectionNode::new(format!("{expression}.{}", field.name), field))
+            .collect();
+        // A raiz nasce aberta quando tem campos: quem manda inspecionar um objeto
+        // quer ver o que há dentro, não um triângulo para clicar.
+        let mut expanded = HashSet::new();
+        if !root.children.is_empty() {
+            expanded.insert(expression.clone());
+        }
         self.inspection_modal
             .set_title(format!("Inspecionar — {expression}"));
         self.inspection_modal.open();
         self.inspection = Some(InspectionView {
+            selected: expression.clone(),
             expression,
-            entries,
-            selected: 0,
+            root,
+            expanded,
         });
+        self.sync_inspection_tree();
+    }
+
+    /// Acrescenta os campos que o alvo revelou para um caminho.
+    pub fn add_inspection_fields(&mut self, path: &str, fields: Vec<DebugVariableView>) {
+        let Some(inspection) = self.inspection.as_mut() else {
+            return;
+        };
+        let Some(node) = inspection.root.find_mut(path) else {
+            return;
+        };
+        node.loaded = true;
+        node.children = fields
+            .into_iter()
+            .map(|field| InspectionNode::new(format!("{path}.{}", field.name), field))
+            .collect();
+        // Sem campos não há o que abrir; manter aberto deixaria um triângulo
+        // apontando para nada.
+        if node.children.is_empty() {
+            inspection.expanded.remove(path);
+        }
+        self.sync_inspection_tree();
+    }
+
+    /// Reconstrói os itens da árvore a partir dos nós carregados.
+    fn sync_inspection_tree(&mut self) {
+        let Some(inspection) = self.inspection.as_ref() else {
+            return;
+        };
+        let roots = vec![inspection_items(&inspection.root)];
+        let expanded: Vec<u64> = inspection
+            .expanded
+            .iter()
+            .map(|path| inspection_id(path))
+            .collect();
+        let selected = inspection_id(&inspection.selected);
+        self.inspection_tree.set_roots(roots);
+        self.inspection_tree.set_expanded(expanded);
+        self.inspection_tree.set_selected(Some(selected));
     }
 
     pub const fn inspection_open(&self) -> bool {
@@ -2795,10 +2907,13 @@ impl IdeShell {
         self.inspection = None;
     }
 
-    /// Entrada destacada na lista, que é a detalhada no painel direito.
+    /// Entrada destacada na árvore, que é a detalhada no painel direito.
     fn inspection_selected(&self) -> Option<&DebugVariableView> {
         let inspection = self.inspection.as_ref()?;
-        inspection.entries.get(inspection.selected)
+        inspection
+            .root
+            .find(&inspection.selected)
+            .map(|node| &node.variable)
     }
 
     /// Pede a avaliação do trecho marcado no quadro atual da depuração.
@@ -3603,10 +3718,10 @@ impl IdeShell {
         let mut paint = self.paint_context();
         modal.paint(&mut paint);
 
-        let mut list = self.inspection_list.clone();
-        list.set_selected(Some(inspection.selected));
-        list.layout(&self.layout_context(), geometry.list);
-        list.paint(&mut paint);
+        let mut tree = self.inspection_tree.clone();
+        tree.set_selected(Some(inspection_id(&inspection.selected)));
+        tree.layout(&self.layout_context(), geometry.list);
+        tree.paint(&mut paint);
 
         let detail = geometry.detail;
         match self.inspection_selected() {
@@ -3666,19 +3781,45 @@ impl IdeShell {
         if !geometry.list.contains(point) {
             return;
         }
-        // Qual linha foi clicada é a lista quem sabe: altura de linha e rolagem
-        // são dela.
-        let mut list = self.inspection_list.clone();
-        list.layout(&self.layout_context(), geometry.list);
-        list.event(
+        // Qual nó foi clicado é a árvore quem sabe: recuo, marcador de expansão e
+        // rolagem são dela.
+        let mut tree = self.inspection_tree.clone();
+        tree.layout(&self.layout_context(), geometry.list);
+        tree.event(
             &mut EventContext::default(),
             &UiEvent::PointerDown(primary_pointer(point)),
         );
-        if let (Some(selected), Some(inspection)) = (list.selected(), self.inspection.as_mut())
-            && selected < inspection.entries.len()
-        {
-            inspection.selected = selected;
+        let Some(id) = tree.selected() else {
+            return;
+        };
+        let Some(inspection) = self.inspection.as_mut() else {
+            return;
+        };
+        let Some(path) = inspection_path_of(&inspection.root, id) else {
+            return;
+        };
+        inspection.selected = path.clone();
+        let expandable = inspection
+            .root
+            .find(&path)
+            .is_some_and(|node| node.variable.expandable);
+        if expandable {
+            // Clicar em um valor com campos abre e fecha, como no Explorer.
+            if !inspection.expanded.remove(&path) {
+                inspection.expanded.insert(path.clone());
+                let pending = inspection
+                    .root
+                    .find(&path)
+                    .is_some_and(|node| !node.loaded);
+                if pending {
+                    // Os campos só são pedidos ao abrir: perguntar por tudo de
+                    // uma vez percorreria o grafo inteiro do objeto.
+                    self.debug_requests
+                        .push(DebugRequest::ExpandInspection(path));
+                }
+            }
         }
+        self.sync_inspection_tree();
     }
 
     /// Desenha a janela de criação por cima de tudo.
@@ -4231,7 +4372,52 @@ fn click_widget(widget: &mut dyn Widget, point: Point) -> EventResult {
 
 /// Rótulo de uma entrada na lista da inspeção.
 fn inspection_label(entry: &DebugVariableView) -> String {
-    format!("{} = {}", entry.name, entry.value)
+    match entry.type_name.as_deref() {
+        Some(type_name) => format!("{} = ({type_name}) {}", entry.name, entry.value),
+        None => format!("{} = {}", entry.name, entry.value),
+    }
+}
+
+/// Caminho do nó com aquela identidade, procurando em profundidade.
+fn inspection_path_of(node: &InspectionNode, id: u64) -> Option<String> {
+    if inspection_id(&node.path) == id {
+        return Some(node.path.clone());
+    }
+    node.children
+        .iter()
+        .find_map(|child| inspection_path_of(child, id))
+}
+
+/// Identidade de um nó da árvore, derivada do caminho.
+///
+/// O caminho sobrevive à chegada de campos novos; um índice mudaria a cada
+/// expansão, e a árvore perderia o que estava aberto.
+fn inspection_id(path: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Converte um nó carregado em item da biblioteca.
+///
+/// Um valor expansível ainda sem campos recebe um filho de espera: é o que faz a
+/// árvore desenhar o triângulo antes de o alvo ter respondido, e é onde o clique
+/// de expansão acontece.
+fn inspection_items(node: &InspectionNode) -> TreeItem {
+    let children = if node.children.is_empty() && node.variable.expandable && !node.loaded {
+        vec![TreeItem::new(
+            inspection_id(&format!("{}.\u{2026}", node.path)),
+            "carregando…",
+            Vec::new(),
+        )]
+    } else {
+        node.children.iter().map(inspection_items).collect()
+    };
+    TreeItem::new(
+        inspection_id(&node.path),
+        inspection_label(&node.variable),
+        children,
+    )
 }
 
 /// Os dois painéis da janela de inspeção e o botão de fechar.
@@ -5276,6 +5462,7 @@ mod tests {
                 name: "total".to_owned(),
                 value: "1".to_owned(),
                 type_name: None,
+                expandable: false,
             }],
         });
 
@@ -6808,17 +6995,29 @@ mod tests {
         assert!(copy_enabled(shell.context_menu.entries()));
     }
 
-    fn inspection_entries() -> Vec<DebugVariableView> {
+    /// O objeto inspecionado: um `Pedido` com um campo simples e outro objeto.
+    fn inspection_value() -> DebugVariableView {
+        DebugVariableView {
+            name: "pedido".to_owned(),
+            value: "Pedido@1a2b".to_owned(),
+            type_name: Some("br.com.exemplo.Pedido".to_owned()),
+            expandable: true,
+        }
+    }
+
+    fn inspection_fields() -> Vec<DebugVariableView> {
         vec![
-            DebugVariableView {
-                name: "pedido".to_owned(),
-                value: "Pedido@1a2b".to_owned(),
-                type_name: Some("br.com.exemplo.Pedido".to_owned()),
-            },
             DebugVariableView {
                 name: "total".to_owned(),
                 value: "42".to_owned(),
                 type_name: Some("int".to_owned()),
+                expandable: false,
+            },
+            DebugVariableView {
+                name: "cliente".to_owned(),
+                value: "Cliente@3c4d".to_owned(),
+                type_name: Some("br.com.exemplo.Cliente".to_owned()),
+                expandable: true,
             },
         ]
     }
@@ -6828,32 +7027,25 @@ mod tests {
     fn the_inspection_window_lists_the_object_and_details_the_selection() {
         let mut shell = shell_editing("int total = 10;");
         let size = Size::new(1280.0, 800.0);
-        shell.show_inspection("pedido", inspection_entries());
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
         assert!(shell.inspection_open());
         assert_eq!(shell.inspected_expression(), Some("pedido"));
 
-        let texts: Vec<String> = shell
-            .paint(size)
-            .iter()
-            .filter_map(|command| match command {
-                PaintCommand::DrawText(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect();
-        // Painel esquerdo: o valor pedido e os campos dele.
+        let texts = painted_texts(&mut shell, size);
+        // Painel esquerdo: a raiz aberta, com os campos abaixo dela.
         assert!(
-            texts.iter().any(|text| text.contains("pedido = Pedido@1a2b")),
-            "a lista precisa mostrar o objeto: {texts:?}"
+            texts.iter().any(|text| {
+                text.contains("pedido = (br.com.exemplo.Pedido) Pedido@1a2b")
+            }),
+            "a árvore precisa mostrar o objeto: {texts:?}"
         );
         assert!(
-            texts.iter().any(|text| text.contains("total = 42")),
-            "a lista precisa mostrar os campos: {texts:?}"
+            texts.iter().any(|text| text.contains("total = (int) 42")),
+            "a árvore precisa mostrar os campos: {texts:?}"
         );
-        // Painel direito: detalhe da primeira entrada, que abre destacada.
+        // Painel direito: detalhe da raiz, que abre destacada.
         assert!(
-            texts
-                .iter()
-                .any(|text| text == "br.com.exemplo.Pedido"),
+            texts.iter().any(|text| text == "br.com.exemplo.Pedido"),
             "o detalhe precisa mostrar o tipo: {texts:?}"
         );
     }
@@ -6863,16 +7055,12 @@ mod tests {
     fn clicking_a_field_changes_the_detail_panel() {
         let mut shell = shell_editing("int total = 10;");
         let size = Size::new(1280.0, 800.0);
-        shell.show_inspection("pedido", inspection_entries());
-        shell.inspection_modal.layout(
-            &LayoutContext::default(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        let geometry = inspection_geometry(shell.inspection_modal.panel_bounds());
-        // Segunda linha da lista.
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        let geometry = inspection_layout(&mut shell, size);
+        // Segunda linha da árvore: o primeiro campo, com a raiz já aberta.
         shell.pointer_down(
             Point::new(
-                geometry.list.origin.x + 10.0,
+                geometry.list.origin.x + 30.0,
                 geometry.list.origin.y + INSPECTION_ROW_HEIGHT + 4.0,
             ),
             size,
@@ -6883,26 +7071,85 @@ mod tests {
         );
     }
 
+    /// Abrir um campo que é objeto pede os campos dele ao alvo.
+    ///
+    /// Os níveis seguintes não vêm juntos: o grafo de um objeto pode ser fundo e
+    /// cíclico, e percorrê-lo inteiro para mostrar o primeiro nível travaria.
+    #[test]
+    fn expanding_a_nested_object_asks_the_target_for_its_fields() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        let geometry = inspection_layout(&mut shell, size);
+        // Terceira linha: `cliente`, que é objeto.
+        shell.pointer_down(
+            Point::new(
+                geometry.list.origin.x + 30.0,
+                geometry.list.origin.y + INSPECTION_ROW_HEIGHT * 2.0 + 4.0,
+            ),
+            size,
+        );
+        assert_eq!(
+            shell.take_debug_requests(),
+            vec![DebugRequest::ExpandInspection("pedido.cliente".to_owned())]
+        );
+
+        // Os campos chegam e passam a aparecer sob o nó aberto.
+        shell.add_inspection_fields(
+            "pedido.cliente",
+            vec![DebugVariableView {
+                name: "nome".to_owned(),
+                value: "João da Silva".to_owned(),
+                type_name: Some("String".to_owned()),
+                expandable: false,
+            }],
+        );
+        assert!(
+            painted_texts(&mut shell, size)
+                .iter()
+                .any(|text| text.contains("nome = (String) João da Silva")),
+            "o campo do objeto aninhado precisa aparecer"
+        );
+    }
+
     /// Esc e o botão Fechar dispensam a janela.
     #[test]
     fn the_inspection_window_closes() {
         let mut shell = shell_editing("int total = 10;");
-        shell.show_inspection("pedido", inspection_entries());
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
         shell.escape();
         assert!(!shell.inspection_open());
 
         let size = Size::new(1280.0, 800.0);
-        shell.show_inspection("pedido", inspection_entries());
+        shell.show_inspection("pedido", inspection_value(), inspection_fields());
+        let geometry = inspection_layout(&mut shell, size);
+        shell.pointer_down(
+            Point::new(
+                geometry.close.origin.x + 10.0,
+                geometry.close.origin.y + 10.0,
+            ),
+            size,
+        );
+        assert!(!shell.inspection_open());
+    }
+
+    fn inspection_layout(shell: &mut IdeShell, size: Size) -> InspectionGeometry {
         shell.inspection_modal.layout(
             &LayoutContext::default(),
             Rect::new(0.0, 0.0, size.width, size.height),
         );
-        let geometry = inspection_geometry(shell.inspection_modal.panel_bounds());
-        shell.pointer_down(
-            Point::new(geometry.close.origin.x + 10.0, geometry.close.origin.y + 10.0),
-            size,
-        );
-        assert!(!shell.inspection_open());
+        inspection_geometry(shell.inspection_modal.panel_bounds())
+    }
+
+    fn painted_texts(shell: &mut IdeShell, size: Size) -> Vec<String> {
+        shell
+            .paint(size)
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Sem depuração em curso o menu do editor não oferece Inspecionar.
