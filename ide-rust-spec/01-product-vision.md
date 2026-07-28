@@ -101,6 +101,18 @@ traduz o comando que o componente emite. Como o widget é reconstruído a cada
 quadro a partir dessa verdade, nenhuma abertura, gravação ou fechamento precisa
 lembrar de sincronizar a barra de abas.
 
+A seleção do editor é da IDE, que é dona do texto, mas a **regra do que é uma
+palavra** é do componente: o duplo clique pergunta ao `CodeEditor` qual palavra
+contém aquele deslocamento, em vez de a IDE reimplementar a definição e divergir
+dela. A IDE guarda a seleção em bytes, o componente conta caracteres, e a
+conversão fica nessa borda.
+
+Copiar e colar falam com a área de transferência **do sistema**, pela porta
+`ClipboardService` da ERLibUi e o adaptador `ui-clipboard-arboard`. Uma cópia que
+não sai do processo não é cópia: quem copia da IDE espera colar no navegador e no
+terminal. Ambiente sem área de transferência não impede a IDE de abrir — copiar e
+colar ficam desligados e dizem isso na barra de estado.
+
 A fonte de código é monoespaçada, e isso é uma decisão assumida da IDE, não um
 detalhe de implementação: o editor localiza coluna, seleção e cursor por
 contagem de colunas, como qualquer editor de código. Trocar por fonte

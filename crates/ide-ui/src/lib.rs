@@ -31,6 +31,7 @@ use ui_core::{
     PointerEvent, Rect, Size, TextInputEvent, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_render_api::{DrawTextCommand, FillRectCommand, PaintCommand, StrokeRectCommand};
+use ui_window_api::ClipboardService;
 
 const ACTIVITY_WIDTH: f32 = 48.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
@@ -321,6 +322,11 @@ pub struct IdeShell {
     /// um pergunta à fonte que vai desenhar. A IDE não constrói o mecanismo:
     /// ela recebe a porta e a repassa aos widgets.
     text_metrics: Option<Arc<dyn TextMetrics>>,
+    /// Área de transferência do sistema, quando o ambiente oferece uma.
+    ///
+    /// Sem ela copiar e colar ficam desligados e dizem isso na barra de estado,
+    /// em vez de a IDE não abrir.
+    clipboard: Option<Arc<dyn ClipboardService>>,
     /// Linha alcançada pela última navegação, com o cursor que ela deixou.
     ///
     /// O destaque vale enquanto o cursor continuar onde a navegação o pôs. Não
@@ -338,6 +344,14 @@ pub struct IdeShell {
     /// O texto continua sendo do `EditorSession`; o editor da biblioteca é
     /// quem o desenha, e é reconstruído só quando a revisão muda.
     editor_view: Option<(DocumentId, u64, CodeEditor)>,
+    /// Seleção do editor em bytes: âncora e foco.
+    ///
+    /// A IDE conta bytes e o editor da biblioteca conta caracteres, então a
+    /// conversão fica na borda entre os dois — guardar em caracteres faria toda
+    /// edição converter de volta.
+    editor_selection: Option<(usize, usize)>,
+    /// Arraste de seleção em curso no editor.
+    editor_selecting: bool,
     /// Divisores redimensionáveis do layout, com limites em pontos.
     ///
     /// Eles guardam o arraste entre um evento e o seguinte; a posição e os
@@ -526,9 +540,12 @@ impl IdeShell {
             terminal_last_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_minimized: false,
             text_metrics: None,
+            clipboard: None,
             navigated: None,
             pending_reveal: None,
             editor_view: None,
+            editor_selection: None,
+            editor_selecting: false,
             sidebar_splitter: Splitter::new(SIDEBAR_SPLITTER_ID, SplitOrientation::Horizontal),
             terminal_splitter: Splitter::new(TERMINAL_SPLITTER_ID, SplitOrientation::Vertical),
             scrollbar_drag: None,
@@ -653,6 +670,10 @@ impl IdeShell {
     }
 
     /// Recebe o mecanismo que mede o texto que a janela desenha.
+    pub fn set_clipboard(&mut self, clipboard: Arc<dyn ClipboardService>) {
+        self.clipboard = Some(clipboard);
+    }
+
     pub fn set_text_metrics(&mut self, metrics: Arc<dyn TextMetrics>) {
         self.text_metrics = Some(metrics);
     }
@@ -1540,6 +1561,16 @@ impl IdeShell {
             .unwrap_or(text)
             .chars()
             .count();
+        // A seleção também vai em caracteres, e por isso é convertida aqui.
+        let selection = self.editor_selection_range().map(|range| {
+            let chars = |offset: usize| {
+                text.get(..offset.min(text.len()))
+                    .unwrap_or(text)
+                    .chars()
+                    .count()
+            };
+            EditorRange::new(chars(range.start), chars(range.end))
+        });
         let scroll_line = self.editor_scroll_line;
         let reveal = self.pending_reveal;
         let bounds = self.editor_view_rect(size);
@@ -1552,6 +1583,9 @@ impl IdeShell {
         editor.set_decorations(decorations);
         editor.set_focused(focused);
         editor.set_cursor(cursor);
+        // Depois do cursor: `set_cursor` significa "cursor movido, sem seleção" e
+        // limpa a âncora, então a ordem inversa apagaria a seleção todo quadro.
+        editor.set_selection(selection);
         editor.set_scroll_line(scroll_line);
         if let Some(line) = reveal {
             editor.reveal_line(line);
@@ -1799,7 +1833,25 @@ impl IdeShell {
         if self.settings_modal.is_open() {
             return;
         }
+        let geometry = self.geometry(size);
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        // No editor o menu fala do texto: copiar e colar.
+        if point.x >= editor_x
+            && point.x < editor_x + geometry.editor_width
+            && point.y >= geometry.content_top
+            && point.y < geometry.editor_bottom
+        {
+            self.focus = ShellFocus::Editor;
+            self.context_menu.set_entries(editor_menu_entries(
+                self.editor_selection_range().is_some(),
+            ));
+            self.context_menu.layout(
+                &self.layout_context(),
+                Rect::new(0.0, 0.0, size.width, size.height),
+            );
+            self.context_menu.open_at(point);
+            return;
+        }
         if point.x < ACTIVITY_WIDTH || point.x >= editor_x || point.y < EXPLORER_TOP {
             return;
         }
@@ -1886,6 +1938,17 @@ impl IdeShell {
     }
 
     fn run_explorer_command(&mut self, command: &str) {
+        match command {
+            "editor.copy" => {
+                self.copy_selection();
+                return;
+            }
+            "editor.paste" => {
+                self.paste_clipboard();
+                return;
+            }
+            _ => {}
+        }
         let Some(target) = self.context_menu_target.clone() else {
             return;
         };
@@ -2163,6 +2226,10 @@ impl IdeShell {
         {
             self.focus = ShellFocus::Editor;
             self.cursor_offset = self.offset_at_point(point, editor_x, geometry.content_top);
+            // Pressionar fixa a âncora; o movimento seguinte decide se o gesto
+            // virou seleção.
+            self.editor_selection = Some((self.cursor_offset, self.cursor_offset));
+            self.editor_selecting = true;
             if control
                 && let (Some(document_id), Some(token)) = (
                     self.editor.active_id(),
@@ -2236,6 +2303,16 @@ impl IdeShell {
             self.apply_scrollbar(target);
             return true;
         }
+        if self.editor_selecting {
+            let geometry = self.geometry(size);
+            let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+            let focus = self.offset_at_point(point, editor_x, geometry.content_top);
+            self.cursor_offset = focus;
+            if let Some((anchor, _)) = self.editor_selection {
+                self.editor_selection = Some((anchor, focus));
+            }
+            return true;
+        }
         if self.terminal_selecting {
             let position = self.terminal_position_at(point, size);
             if let Some(selection) = self.terminal_selection.as_mut() {
@@ -2262,6 +2339,14 @@ impl IdeShell {
     }
 
     pub fn pointer_up(&mut self) {
+        self.editor_selecting = false;
+        // Pressionar e soltar no mesmo ponto é um clique, não uma seleção vazia.
+        if self
+            .editor_selection
+            .is_some_and(|(anchor, focus)| anchor == focus)
+        {
+            self.editor_selection = None;
+        }
         let event = UiEvent::PointerUp(primary_pointer(Point::ZERO));
         self.sidebar_splitter
             .event(&mut EventContext::default(), &event);
@@ -2548,22 +2633,174 @@ impl IdeShell {
                 "tab" if modifiers.shift => self.unindent(),
                 "tab" => self.indent(),
                 "arrowleft" => {
-                    self.cursor_offset = previous_boundary(
+                    let target = previous_boundary(
                         self.active_text().unwrap_or_default(),
                         self.cursor_offset,
-                    )
+                    );
+                    self.move_editor_cursor(target, modifiers.shift);
                 }
                 "arrowright" => {
-                    self.cursor_offset =
-                        next_boundary(self.active_text().unwrap_or_default(), self.cursor_offset)
+                    let target =
+                        next_boundary(self.active_text().unwrap_or_default(), self.cursor_offset);
+                    self.move_editor_cursor(target, modifiers.shift);
                 }
                 _ => {}
             }
         }
     }
 
+    /// Seleciona a palavra sob o ponteiro. É o que o duplo clique pede.
+    ///
+    /// A regra do que é palavra é do editor da biblioteca, que já a tem para o
+    /// próprio uso — reimplementá-la aqui daria duas definições que divergiriam.
+    /// A conversão entre caracteres e bytes fica nesta borda.
+    pub fn select_word_at_point(&mut self, point: Point, size: Size) {
+        let geometry = self.geometry(size);
+        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        if point.x < editor_x
+            || point.x >= editor_x + geometry.editor_width
+            || point.y < geometry.content_top
+            || point.y >= geometry.editor_bottom
+        {
+            return;
+        }
+        self.focus = ShellFocus::Editor;
+        let offset = self.offset_at_point(point, editor_x, geometry.content_top);
+        self.cursor_offset = offset;
+        self.refresh_editor_view(size);
+        let Some(text) = self.active_text().map(str::to_owned) else {
+            return;
+        };
+        let chars_before = text
+            .get(..offset.min(text.len()))
+            .unwrap_or(&text)
+            .chars()
+            .count();
+        let Some((_, _, editor)) = self.editor_view.as_mut() else {
+            return;
+        };
+        editor.select_word_at(chars_before);
+        let Some(word) = editor.selection() else {
+            return;
+        };
+        // De volta para bytes, que é como a IDE conta.
+        let bytes_at = |chars: usize| {
+            text.char_indices()
+                .nth(chars)
+                .map_or(text.len(), |(index, _)| index)
+        };
+        let (start, end) = (bytes_at(word.start), bytes_at(word.end));
+        self.editor_selection = Some((start, end));
+        self.editor_selecting = false;
+        self.cursor_offset = end;
+    }
+
+    /// Copia o trecho selecionado para a área de transferência do sistema.
+    pub fn copy_selection(&mut self) -> bool {
+        let Some(range) = self.editor_selection_range() else {
+            self.status_message = "Nada selecionado".to_owned();
+            return false;
+        };
+        let Some(text) = self
+            .active_text()
+            .and_then(|text| text.get(range).map(str::to_owned))
+        else {
+            return false;
+        };
+        let Some(clipboard) = self.clipboard.as_ref() else {
+            self.status_message = "Área de transferência indisponível".to_owned();
+            return false;
+        };
+        match clipboard.set_text(&text) {
+            Ok(()) => {
+                self.status_message = format!("Copiado {} caractere(s)", text.chars().count());
+                true
+            }
+            Err(error) => {
+                self.status_message = error.to_string();
+                false
+            }
+        }
+    }
+
+    /// Cola o conteúdo da área de transferência no cursor.
+    ///
+    /// Havendo trecho selecionado, ele é substituído — colar sobre uma seleção é
+    /// trocar aquele texto, e é o que qualquer editor faz.
+    pub fn paste_clipboard(&mut self) -> bool {
+        let Some(clipboard) = self.clipboard.as_ref() else {
+            self.status_message = "Área de transferência indisponível".to_owned();
+            return false;
+        };
+        match clipboard.get_text() {
+            Ok(Some(text)) if !text.is_empty() => {
+                self.edit_active(&text);
+                true
+            }
+            Ok(_) => {
+                self.status_message = "Área de transferência vazia".to_owned();
+                false
+            }
+            Err(error) => {
+                self.status_message = error.to_string();
+                false
+            }
+        }
+    }
+
+    /// Move o cursor, estendendo a seleção quando `selecting`.
+    ///
+    /// Sem `Shift` o movimento desfaz a seleção: mover é escolher outro ponto, e
+    /// manter o trecho marcado faria a próxima digitação apagar o que o usuário
+    /// não estava mais olhando.
+    fn move_editor_cursor(&mut self, target: usize, selecting: bool) {
+        if selecting {
+            let anchor = self
+                .editor_selection
+                .map_or(self.cursor_offset, |(anchor, _)| anchor);
+            self.editor_selection = Some((anchor, target));
+        } else {
+            self.editor_selection = None;
+        }
+        self.cursor_offset = target;
+    }
+
+    /// Intervalo selecionado no editor, em ordem crescente.
+    fn editor_selection_range(&self) -> Option<std::ops::Range<usize>> {
+        let (anchor, focus) = self.editor_selection?;
+        let (start, end) = if anchor <= focus {
+            (anchor, focus)
+        } else {
+            (focus, anchor)
+        };
+        (start < end).then_some(start..end)
+    }
+
+    /// Apaga o trecho selecionado. Devolve `true` quando havia algo para apagar.
+    ///
+    /// Digitar ou apagar com um trecho marcado age sobre ele — é para isso que
+    /// selecionar serve.
+    fn delete_editor_selection(&mut self) -> bool {
+        let Some(range) = self.editor_selection_range() else {
+            return false;
+        };
+        self.editor_selection = None;
+        let start = range.start;
+        let Some(document) = self.editor.active_mut() else {
+            return false;
+        };
+        if document.buffer.replace(range, "").is_ok() {
+            self.cursor_offset = start;
+            self.status_message = "Modified".to_owned();
+            return true;
+        }
+        false
+    }
+
     fn edit_active(&mut self, text: &str) {
         self.completion_items.clear();
+        // O que estava selecionado sai antes de o novo texto entrar.
+        self.delete_editor_selection();
         if let Some(document) = self.editor.active_mut() {
             let cursor = self.cursor_offset.min(document.buffer.text().len());
             if document.buffer.replace(cursor..cursor, text).is_ok() {
@@ -2613,6 +2850,10 @@ impl IdeShell {
 
     fn backspace(&mut self) {
         self.completion_items.clear();
+        // Com trecho marcado, apagar é apagar o trecho.
+        if self.delete_editor_selection() {
+            return;
+        }
         if let Some(document) = self.editor.active_mut() {
             let previous = previous_boundary(document.buffer.text(), self.cursor_offset);
             if previous < self.cursor_offset
@@ -4113,6 +4354,22 @@ fn compact_package_chain(node: &FileNode) -> (&FileNode, String) {
         current = only_child;
     }
     (current, label)
+}
+
+/// Ações do menu de contexto do editor.
+///
+/// Copiar sem seleção não tem o que copiar, então aparece desabilitado em vez de
+/// sumir: um item que troca de lugar entre duas aberturas faz o usuário procurar
+/// a ação onde ela não está mais.
+fn editor_menu_entries(has_selection: bool) -> Vec<MenuEntry> {
+    let copy = MenuItem::new("Copiar", CommandId("editor.copy".to_owned()));
+    vec![
+        MenuEntry::Item(if has_selection { copy } else { copy.disabled() }),
+        MenuEntry::Item(MenuItem::new(
+            "Colar",
+            CommandId("editor.paste".to_owned()),
+        )),
+    ]
 }
 
 /// Ações que fazem sentido no diretório clicado.
@@ -6085,6 +6342,184 @@ mod tests {
                 source_root: PathBuf::from("demo/src/main/java"),
             })
         );
+    }
+
+    /// Prepara um shell com arquivo aberto e foco no editor.
+    fn shell_editing(text: &str) -> IdeShell {
+        let mut shell = test_shell();
+        shell.editor.open_memory("Pedido.java", text);
+        shell.focus = ShellFocus::Editor;
+        shell.cursor_offset = 0;
+        shell
+    }
+
+    /// Coluna do editor em coordenadas de tela.
+    fn editor_column(shell: &IdeShell, size: Size, index: usize) -> Point {
+        let geometry = shell.geometry(size);
+        let editor_x = ACTIVITY_WIDTH + shell.sidebar_width(size);
+        Point::new(
+            editor_x + EDITOR_GUTTER + index as f32 * EDITOR_CHAR_WIDTH,
+            geometry.content_top + 20.0,
+        )
+    }
+
+    /// Área de transferência de teste, sem depender do sistema.
+    #[derive(Default)]
+    struct FakeClipboard {
+        text: std::sync::Mutex<Option<String>>,
+    }
+
+    impl ClipboardService for FakeClipboard {
+        fn get_text(&self) -> Result<Option<String>, ui_window_api::ClipboardError> {
+            Ok(self.text.lock().ok().and_then(|text| text.clone()))
+        }
+
+        fn set_text(&self, value: &str) -> Result<(), ui_window_api::ClipboardError> {
+            if let Ok(mut text) = self.text.lock() {
+                *text = Some(value.to_owned());
+            }
+            Ok(())
+        }
+    }
+
+    /// O duplo clique seleciona a palavra, e a regra vem do editor da biblioteca.
+    #[test]
+    fn a_double_click_selects_the_word_under_the_pointer() {
+        let mut shell = shell_editing("int total = 10;");
+        let size = Size::new(1280.0, 800.0);
+        // Coluna 6 cai no meio de `total`.
+        shell.select_word_at_point(editor_column(&shell, size, 6), size);
+        assert_eq!(shell.editor_selection_range(), Some(4..9));
+        assert_eq!(
+            shell
+                .active_text()
+                .and_then(|text| text.get(4..9))
+                .map(str::to_owned),
+            Some("total".to_owned())
+        );
+    }
+
+    /// Copiar leva o trecho para a área de transferência; colar o traz de volta.
+    #[test]
+    fn copying_and_pasting_go_through_the_clipboard() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let mut shell = shell_editing("total");
+        shell.set_clipboard(clipboard.clone());
+        shell.editor_selection = Some((0, 5));
+        shell.cursor_offset = 5;
+        assert!(shell.copy_selection());
+        assert_eq!(
+            clipboard.get_text().unwrap_or_default(),
+            Some("total".to_owned())
+        );
+
+        shell.editor_selection = None;
+        shell.cursor_offset = 5;
+        assert!(shell.paste_clipboard());
+        assert_eq!(shell.active_text(), Some("totaltotal"));
+    }
+
+    /// Colar sobre uma seleção troca o trecho marcado.
+    #[test]
+    fn pasting_over_a_selection_replaces_it() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        assert!(clipboard.set_text("novo").is_ok());
+        let mut shell = shell_editing("abcdef");
+        shell.set_clipboard(clipboard);
+        shell.editor_selection = Some((1, 4));
+        shell.cursor_offset = 4;
+        assert!(shell.paste_clipboard());
+        assert_eq!(shell.active_text(), Some("anovoef"));
+    }
+
+    /// Sem área de transferência, copiar avisa em vez de fingir que copiou.
+    #[test]
+    fn copying_without_a_clipboard_reports_it() {
+        let mut shell = shell_editing("total");
+        shell.editor_selection = Some((0, 5));
+        assert!(!shell.copy_selection());
+        assert_eq!(shell.status_message(), "Área de transferência indisponível");
+    }
+
+    /// O clique direito no editor abre o menu de copiar e colar; sem seleção,
+    /// copiar aparece desabilitado.
+    #[test]
+    fn the_editor_context_menu_offers_copy_and_paste() {
+        let mut shell = shell_editing("total");
+        let size = Size::new(1280.0, 800.0);
+        shell.secondary_pointer_down(editor_column(&shell, size, 2), size);
+        assert!(shell.context_menu_open());
+        let entries = shell.context_menu.entries();
+        assert_eq!(entry_labels(entries), vec!["Copiar", "Colar"]);
+        let copy_enabled = |entries: &[MenuEntry]| match &entries[0] {
+            MenuEntry::Item(item) => item.enabled,
+            MenuEntry::Separator => false,
+        };
+        assert!(!copy_enabled(entries), "sem seleção não há o que copiar");
+
+        shell.editor_selection = Some((0, 5));
+        shell.secondary_pointer_down(editor_column(&shell, size, 2), size);
+        assert!(copy_enabled(shell.context_menu.entries()));
+    }
+
+    /// Arrastar no editor seleciona, e digitar substitui o trecho marcado.
+    #[test]
+    fn dragging_in_the_editor_selects_and_typing_replaces() {
+        let mut shell = shell_editing("abcdef");
+        let size = Size::new(1280.0, 800.0);
+        shell.pointer_down(editor_column(&shell, size, 1), size);
+        shell.pointer_move(editor_column(&shell, size, 4), size);
+        shell.pointer_up();
+        assert_eq!(shell.editor_selection_range(), Some(1..4));
+
+        shell.text_input("Z");
+        assert_eq!(shell.active_text(), Some("aZef"));
+        assert_eq!(shell.editor_selection_range(), None);
+    }
+
+    /// A seleção chega ao editor da biblioteca, que é quem a desenha.
+    #[test]
+    fn the_selection_is_painted_by_the_library_editor() {
+        let mut shell = shell_editing("abcdef");
+        let size = Size::new(1280.0, 800.0);
+        shell.pointer_down(editor_column(&shell, size, 1), size);
+        shell.pointer_move(editor_column(&shell, size, 4), size);
+        shell.pointer_up();
+        let selection = shell.theme.colors.selection;
+        assert!(
+            shell.paint(size).iter().any(|command| matches!(
+                command,
+                PaintCommand::FillRect(fill) if fill.color == selection
+            )),
+            "o trecho selecionado precisa aparecer pintado"
+        );
+    }
+
+    /// Shift+setas estende a seleção; sem Shift, mover desfaz.
+    #[test]
+    fn shift_arrows_extend_the_selection() {
+        let mut shell = shell_editing("abcdef");
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        shell.key_down_with_modifiers("ArrowRight", shift);
+        shell.key_down_with_modifiers("ArrowRight", shift);
+        assert_eq!(shell.editor_selection_range(), Some(0..2));
+
+        shell.key_down("ArrowRight");
+        assert_eq!(shell.editor_selection_range(), None);
+    }
+
+    /// Backspace com trecho marcado apaga o trecho, não um caractere.
+    #[test]
+    fn backspace_removes_the_selection() {
+        let mut shell = shell_editing("abcdef");
+        shell.editor_selection = Some((1, 4));
+        shell.cursor_offset = 4;
+        shell.key_down("Backspace");
+        assert_eq!(shell.active_text(), Some("aef"));
+        assert_eq!(shell.cursor_offset, 1);
     }
 
     /// Salvar grava o conteúdo da aba e limpa a marca de modificado.

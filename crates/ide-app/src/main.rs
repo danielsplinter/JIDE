@@ -49,6 +49,15 @@ use winit::{
     window::{CursorIcon, WindowId as WinitWindowId},
 };
 
+/// Janela de tempo em que dois cliques contam como um duplo.
+///
+/// É o mesmo intervalo padrão do Windows. Mais curto, quem clica devagar nunca
+/// consegue selecionar a palavra; mais longo, dois cliques deliberados em pontos
+/// diferentes viram um duplo por acidente.
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+/// Distância máxima entre os dois cliques, em pontos.
+const DOUBLE_CLICK_SLACK: f32 = 4.0;
+
 #[derive(Default)]
 struct NativeIde {
     window: Option<WinitWindow>,
@@ -56,6 +65,8 @@ struct NativeIde {
     shell: Option<IdeShell>,
     startup_error: Option<String>,
     cursor: Point,
+    /// Instante e posição do último clique simples, para detectar o duplo.
+    last_click: Option<(Instant, Point)>,
     control_pressed: bool,
     shift_pressed: bool,
     navigation_requests: Vec<NavigationRequest>,
@@ -128,6 +139,13 @@ impl NativeIde {
         // Os componentes medem o texto pela mesma fonte que vai desenhá-lo. Quem
         // constrói o mecanismo é a aplicação; a interface só recebe a porta.
         shell.set_text_metrics(Arc::new(ui_text_cosmic::CosmicTextEngine::new()));
+        // Copiar e colar falam com o sistema, não com uma cópia interna. Sem área
+        // de transferência no ambiente a IDE segue funcionando, e é a barra de
+        // estado que conta isso quando alguém tenta copiar.
+        match ui_clipboard_arboard::SystemClipboard::new() {
+            Ok(clipboard) => shell.set_clipboard(Arc::new(clipboard)),
+            Err(error) => tracing::warn!(%error, "área de transferência indisponível"),
+        }
         // As abas do último uso voltam com o projeto: quem reabre a IDE espera
         // continuar de onde parou, e um arquivo que sumiu é ignorado em
         // silêncio, como um projeto inexistente.
@@ -1410,6 +1428,26 @@ impl ApplicationHandler for NativeIde {
                 button: MouseButton::Left,
                 ..
             } => {
+                // O winit não entrega duplo clique: quem decide é o app, por
+                // tempo entre os dois cliques e distância entre eles. Sem a
+                // distância, mover o ponteiro entre cliques distantes ainda
+                // contaria como duplo.
+                let now = Instant::now();
+                let double = self.last_click.is_some_and(|(instant, point)| {
+                    now.duration_since(instant) <= DOUBLE_CLICK_INTERVAL
+                        && (point.x - self.cursor.x).abs() <= DOUBLE_CLICK_SLACK
+                        && (point.y - self.cursor.y).abs() <= DOUBLE_CLICK_SLACK
+                });
+                // Um duplo clique encerra a contagem: três cliques seguidos não
+                // são dois duplos.
+                self.last_click = (!double).then_some((now, self.cursor));
+                if double {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.select_word_at_point(self.cursor, window.logical_size());
+                    }
+                    window.request_redraw();
+                    return;
+                }
                 if let Some(shell) = self.shell.as_mut() {
                     shell.pointer_down_with_modifiers(
                         self.cursor,
@@ -1532,6 +1570,18 @@ impl ApplicationHandler for NativeIde {
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("b"))
                 {
                     build_requested = true;
+                } else if self.control_pressed
+                    && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("c"))
+                {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.copy_selection();
+                    }
+                } else if self.control_pressed
+                    && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("v"))
+                {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.paste_clipboard();
+                    }
                 } else if self.control_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("s"))
                 {

@@ -30,7 +30,12 @@ Clique em diretórios
 para expandir ou recolher e em arquivos de texto para abri-los. Clique nas abas
 para alternar documentos. Clique no editor para posicionar o cursor e digite
 normalmente; `Backspace`, `Enter`, `Tab` e as setas esquerda/direita estão
-disponíveis. `Tab` indenta até a próxima parada de quatro colunas e `Shift+Tab`
+disponíveis. Arraste para selecionar um trecho, dê **duplo clique** para
+selecionar a palavra sob o ponteiro, ou use as setas com `Shift`; mover sem
+`Shift` desfaz a seleção. Digitar ou apagar com um trecho marcado age sobre ele.
+`Ctrl+C` copia e `Ctrl+V` cola, usando a área de transferência **do sistema** — o
+mesmo que o clique com o botão direito sobre o editor oferece em Copiar e Colar.
+Sem seleção, Copiar aparece desabilitado em vez de sumir do menu. `Tab` indenta até a próxima parada de quatro colunas e `Shift+Tab`
 recolhe a indentação da linha — a indentação usa espaços, porque o editor mede o
 texto por coluna de largura fixa e um `	` ocuparia uma coluna no texto e várias
 na tela. `Ctrl+S` grava a aba ativa, o mesmo que `Arquivo → Salvar`.
