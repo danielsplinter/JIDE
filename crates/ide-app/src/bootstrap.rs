@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ide_core::{AppConfig, init_logging};
 use ide_domain::DocumentSnapshot;
 use ide_project::model::{ProjectDescriptor, ProjectModel};
-use ide_ui::{NewItemKind, NewItemRequest};
+use ide_ui::NewItemRequest;
 use java_gradle_adapter::GRADLE_BUILD_SYSTEM_ID;
 use java_maven_adapter::MAVEN_BUILD_SYSTEM_ID;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -64,9 +64,9 @@ pub(super) fn java_source(request: &NewItemRequest, name: &str) -> String {
     } else {
         format!("package {};\n\n", request.package)
     };
-    let keyword = match request.kind {
-        NewItemKind::Interface => "interface",
-        NewItemKind::Class | NewItemKind::Package => "class",
+    let keyword = match request.template_id.as_str() {
+        "java.interface" => "interface",
+        _ => "class",
     };
     format!("{declaration}public {keyword} {name} {{\n}}\n")
 }

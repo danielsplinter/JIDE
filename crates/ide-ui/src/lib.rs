@@ -12,7 +12,7 @@ mod terminal;
 pub use debugging::{DebugFrameView, DebugVariableView, DebugView};
 pub use editor::{EditorAction, EditorCapabilities, EditorPane};
 pub use ide_application::{
-    ApplicationCommand, DebugRequest, NavigationRequest, NewItemKind, NewItemRequest,
+    ApplicationCommand, DebugRequest, NavigationRequest, NewItemRequest, NewItemTemplateId,
     OpenDocumentRequest, SaveDocumentRequest,
 };
 pub use search::{ContentSearchHit, TypeSearchHit};
@@ -272,27 +272,37 @@ struct InspectionView {
 
 /// Janela de criação enquanto está aberta.
 struct NewItemDialog {
-    kind: NewItemKind,
+    template_id: NewItemTemplateId,
     source_root: PathBuf,
     message: Option<String>,
     /// Campo com o foco: `false` é o pacote, `true` é o nome.
     naming: bool,
 }
 
-const fn new_item_title(kind: NewItemKind) -> &'static str {
-    match kind {
-        NewItemKind::Package => "Novo pacote",
-        NewItemKind::Class => "Nova classe",
-        NewItemKind::Interface => "Nova interface",
+const PACKAGE_TEMPLATE: &str = "java.package";
+const CLASS_TEMPLATE: &str = "java.class";
+const INTERFACE_TEMPLATE: &str = "java.interface";
+
+fn new_item_title(template_id: &NewItemTemplateId) -> &'static str {
+    match template_id.as_str() {
+        PACKAGE_TEMPLATE => "Novo pacote",
+        CLASS_TEMPLATE => "Nova classe",
+        INTERFACE_TEMPLATE => "Nova interface",
+        _ => "Novo item",
     }
 }
 
-const fn new_item_name_caption(kind: NewItemKind) -> &'static str {
-    match kind {
-        NewItemKind::Package => "Classe (opcional)",
-        NewItemKind::Class => "Nome da classe",
-        NewItemKind::Interface => "Nome da interface",
+fn new_item_name_caption(template_id: &NewItemTemplateId) -> &'static str {
+    match template_id.as_str() {
+        PACKAGE_TEMPLATE => "Classe (opcional)",
+        CLASS_TEMPLATE => "Nome da classe",
+        INTERFACE_TEMPLATE => "Nome da interface",
+        _ => "Nome",
     }
+}
+
+fn is_package_template(template_id: &NewItemTemplateId) -> bool {
+    template_id.as_str() == PACKAGE_TEMPLATE
 }
 
 pub struct IdeShell {
@@ -907,22 +917,26 @@ impl IdeShell {
     pub fn set_status_message(&mut self, message: impl Into<String>) {
         self.status_message = message.into();
     }
-    pub fn open_settings_dialog(&mut self, jdk_items: Vec<String>, selected_jdk: usize) {
+    pub fn open_settings_dialog(
+        &mut self,
+        toolchain_items: Vec<String>,
+        selected_toolchain: usize,
+    ) {
         self.jdk_combo.set_items(
-            jdk_items
+            toolchain_items
                 .into_iter()
                 .enumerate()
                 .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
                 .collect(),
         );
-        self.jdk_combo.set_selected(selected_jdk);
+        self.jdk_combo.set_selected(selected_toolchain);
         self.settings_modal.open();
         // Reabrir a janela recomeça a transação: o que ficou pendente de uma
         // abertura anterior foi descartado com ela.
         self.settings_dialog = Some(SettingsDialog {
             message: None,
             pending_jdk: None,
-            original_jdk: Some(selected_jdk),
+            original_jdk: Some(selected_toolchain),
             original_debug_host: self.debug_host.value().to_owned(),
             original_debug_port: self.debug_port.value().to_owned(),
         });
@@ -933,9 +947,9 @@ impl IdeShell {
     /// É o que o `Procurar...` precisa: a instalação apontada entra na lista e
     /// fica pendente como qualquer escolha feita no combo. Reabrir a janela
     /// recomeçaria a transação e apagaria o que já estava pendente.
-    pub fn set_jdk_options(&mut self, jdk_items: Vec<String>, pending: usize) {
+    pub fn set_toolchain_options(&mut self, toolchain_items: Vec<String>, pending: usize) {
         self.jdk_combo.set_items(
-            jdk_items
+            toolchain_items
                 .into_iter()
                 .enumerate()
                 .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
@@ -1167,23 +1181,23 @@ impl IdeShell {
         self.terminals[active].follow_output = true;
         self.terminals[active].scroll_line = self.terminals[active].session.line_count();
     }
-    pub fn java_source_files(&self) -> Vec<PathBuf> {
-        fn collect(node: &FileNode, output: &mut Vec<PathBuf>) {
+    pub fn source_files(&self, expected_extension: &str) -> Vec<PathBuf> {
+        fn collect(node: &FileNode, expected_extension: &str, output: &mut Vec<PathBuf>) {
             if node.is_directory {
                 for child in &node.children {
-                    collect(child, output);
+                    collect(child, expected_extension, output);
                 }
             } else if node
                 .path
                 .extension()
                 .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("java"))
+                .is_some_and(|extension| extension.eq_ignore_ascii_case(expected_extension))
             {
                 output.push(node.path.clone());
             }
         }
         let mut files = Vec::new();
-        collect(&self.workspace, &mut files);
+        collect(&self.workspace, expected_extension, &mut files);
         files
     }
     pub fn navigation_hover(&self, point: Point, size: Size, control: bool) -> bool {
@@ -2209,17 +2223,17 @@ impl IdeShell {
         let Some(target) = self.context_menu_target.clone() else {
             return;
         };
-        let kind = match command {
-            "explorer.new.package" => NewItemKind::Package,
-            "explorer.new.class" => NewItemKind::Class,
-            "explorer.new.interface" => NewItemKind::Interface,
+        let template_id = match command {
+            "explorer.new.package" => NewItemTemplateId::new(PACKAGE_TEMPLATE),
+            "explorer.new.class" => NewItemTemplateId::new(CLASS_TEMPLATE),
+            "explorer.new.interface" => NewItemTemplateId::new(INTERFACE_TEMPLATE),
             "explorer.new.folder" => {
                 self.status_message = format!("Nova pasta em {}", target.display());
                 return;
             }
             _ => return,
         };
-        self.open_new_item_dialog(kind, &target);
+        self.open_new_item_dialog(template_id, &target);
     }
 
     /// Abre a janela de criação com o pacote do alvo já preenchido.
@@ -2228,7 +2242,7 @@ impl IdeShell {
     /// no Explorer e o que ele vai editar para criar um pacote abaixo. Sem raiz de
     /// fontes não há pacote, e a janela não abre — o menu que oferece essas ações
     /// só aparece dentro dela.
-    fn open_new_item_dialog(&mut self, kind: NewItemKind, target: &Path) {
+    fn open_new_item_dialog(&mut self, template_id: NewItemTemplateId, target: &Path) {
         let Some(source_root) = target
             .ancestors()
             .find(|ancestor| is_java_source_root(ancestor))
@@ -2249,17 +2263,17 @@ impl IdeShell {
             .unwrap_or_default();
         self.new_item_package.set_value(package);
         self.new_item_name.set_value(String::new());
-        self.new_item_modal.set_title(new_item_title(kind));
+        self.new_item_modal.set_title(new_item_title(&template_id));
         self.new_item_modal.open();
         self.new_item_dialog = Some(NewItemDialog {
-            kind,
+            template_id: template_id.clone(),
             source_root,
             message: None,
             naming: false,
         });
         // O pacote já vem preenchido, então o que falta digitar é o nome —
         // exceto ao criar pacote, em que o nome é justamente o que se edita.
-        self.focus_new_item_field(kind != NewItemKind::Package);
+        self.focus_new_item_field(!is_package_template(&template_id));
     }
 
     pub const fn new_item_dialog_open(&self) -> bool {
@@ -2287,7 +2301,7 @@ impl IdeShell {
         let Some(dialog) = self.new_item_dialog.as_ref() else {
             return;
         };
-        let kind = dialog.kind;
+        let template_id = dialog.template_id.clone();
         let source_root = dialog.source_root.clone();
         let package = self.new_item_package.value().trim().to_owned();
         let name = self.new_item_name.value().trim().to_owned();
@@ -2295,13 +2309,13 @@ impl IdeShell {
             self.set_new_item_message("Informe o pacote.");
             return;
         }
-        if name.is_empty() && kind != NewItemKind::Package {
+        if name.is_empty() && !is_package_template(&template_id) {
             self.set_new_item_message("Informe o nome.");
             return;
         }
         self.commands
             .push(ApplicationCommand::CreateItem(NewItemRequest {
-                kind,
+                template_id,
                 package,
                 name,
                 source_root,
@@ -4584,7 +4598,7 @@ impl IdeShell {
         self.paint_settings_text(
             &mut paint,
             NEW_ITEM_NAME_CAPTION_ID,
-            new_item_name_caption(dialog.kind),
+            new_item_name_caption(&dialog.template_id),
             Point::new(geometry.name.origin.x, geometry.name.origin.y - 18.0),
             13.0,
             IconTint::Muted,
@@ -7472,12 +7486,12 @@ mod tests {
             ("explorer.new.interface", "Nova interface"),
         ] {
             shell.run_explorer_command(command);
-            let kind = shell
+            let template_id = shell
                 .new_item_dialog
                 .as_ref()
-                .map(|dialog| dialog.kind)
-                .unwrap_or(NewItemKind::Package);
-            assert_eq!(new_item_title(kind), title);
+                .map(|dialog| dialog.template_id.clone())
+                .unwrap_or_else(|| NewItemTemplateId::new(PACKAGE_TEMPLATE));
+            assert_eq!(new_item_title(&template_id), title);
             assert_eq!(shell.new_item_package.value(), "br.com");
         }
     }
@@ -7495,7 +7509,7 @@ mod tests {
         assert_eq!(
             request,
             Some(NewItemRequest {
-                kind: NewItemKind::Package,
+                template_id: NewItemTemplateId::new(PACKAGE_TEMPLATE),
                 package: "br.com.exemplo".to_owned(),
                 name: String::new(),
                 source_root: PathBuf::from("demo/src/main/java"),
@@ -9013,7 +9027,7 @@ tres"
         assert_eq!(
             shell.take_new_item_request(),
             Some(NewItemRequest {
-                kind: NewItemKind::Interface,
+                template_id: NewItemTemplateId::new(INTERFACE_TEMPLATE),
                 package: "br.com".to_owned(),
                 name: "Repositorio".to_owned(),
                 source_root: PathBuf::from("demo/src/main/java"),
@@ -9035,7 +9049,7 @@ tres"
         assert_eq!(
             shell.take_new_item_request(),
             Some(NewItemRequest {
-                kind: NewItemKind::Class,
+                template_id: NewItemTemplateId::new(CLASS_TEMPLATE),
                 package: "br.com.exemplo".to_owned(),
                 name: "Pedido".to_owned(),
                 source_root: PathBuf::from("demo/src/main/java"),

@@ -27,6 +27,7 @@ use ide_domain::{
     DefinitionRequest, DocumentId, DocumentSnapshot, LanguageId, ProviderId, SymbolKind,
     TextPosition, TextRange,
 };
+use ide_language_api::LanguageContribution;
 use ide_language_host::{LanguageHost, LanguageToolchainConfig};
 use ide_process::{NativeProcessSupervisor, ProcessSupervisor};
 use ide_project::{
@@ -147,7 +148,9 @@ impl NativeIde {
             .ok_or_else(|| "não foi possível determinar o diretório do projeto".to_owned())?;
         let language_host = LanguageHost::new(&root);
         language_host
-            .register(Arc::new(JavaLanguageProvider::new()))
+            .register_contribution(LanguageContribution::new(Arc::new(
+                JavaLanguageProvider::new(),
+            )))
             .map_err(|error| error.to_string())?;
         self.language_host = Some(language_host);
         let tree = self
@@ -564,7 +567,7 @@ impl NativeIde {
             .map(|project| project.model.source_roots())
             .unwrap_or_default();
         let found = self.shell.as_ref().map_or_else(Vec::new, |shell| {
-            self.workspace.search_java_content(
+            self.workspace.search_content(
                 shell.workspace_tree(),
                 &source_roots,
                 query,
@@ -740,7 +743,7 @@ impl NativeIde {
                 let index = self.java_toolchains.add(installation);
                 let labels = self.jdk_labels();
                 if let Some(shell) = self.shell.as_mut() {
-                    shell.set_jdk_options(labels, index);
+                    shell.set_toolchain_options(labels, index);
                     shell.set_status_message(format!("JDK a salvar: {}", home.display()));
                 }
             }
@@ -1489,7 +1492,7 @@ impl NativeIde {
             return;
         };
         let workspace = shell.workspace_path().to_path_buf();
-        let source_files = project_sources(shell.java_source_files(), model.as_ref());
+        let source_files = project_sources(shell.source_files("java"), model.as_ref());
         if source_files.is_empty() {
             shell.set_status_message("No Java source files found");
             return;
@@ -2153,7 +2156,9 @@ mod tests {
         let language_host = LanguageHost::new(&root);
         assert!(
             language_host
-                .register(Arc::new(JavaLanguageProvider::new()))
+                .register_contribution(LanguageContribution::new(Arc::new(
+                    JavaLanguageProvider::new()
+                )))
                 .is_ok()
         );
         let mut ide = NativeIde {
@@ -2207,7 +2212,9 @@ mod tests {
         let language_host = LanguageHost::new(&root);
         assert!(
             language_host
-                .register(Arc::new(JavaLanguageProvider::new()))
+                .register_contribution(LanguageContribution::new(Arc::new(
+                    JavaLanguageProvider::new()
+                )))
                 .is_ok()
         );
 

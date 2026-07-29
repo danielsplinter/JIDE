@@ -180,13 +180,39 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
         .map(|workspace_crate| workspace_crate.name.clone())
         .collect::<BTreeSet<_>>();
     let allowed = BTreeMap::from([
+        (
+            "ide-app",
+            BTreeSet::from([
+                "ide-application",
+                "ide-core",
+                "ide-debug-api",
+                "ide-domain",
+                "ide-language-api",
+                "ide-language-host",
+                "ide-process",
+                "ide-project",
+                "ide-terminal",
+                "ide-toolchain-api",
+                "ide-ui",
+                "ide-workspace",
+                "java-debug-adapter",
+                "java-gradle-adapter",
+                "java-maven-adapter",
+                "java-toolchain",
+                "language-java",
+            ]),
+        ),
         ("ide-domain", BTreeSet::new()),
         ("ide-application", BTreeSet::from(["ide-domain"])),
+        ("ide-core", BTreeSet::from(["ide-domain"])),
         ("ide-language-api", BTreeSet::from(["ide-domain"])),
         (
             "ide-language-host",
             BTreeSet::from(["ide-domain", "ide-language-api"]),
         ),
+        ("ide-process", BTreeSet::from(["ide-domain"])),
+        ("ide-project", BTreeSet::new()),
+        ("ide-terminal", BTreeSet::new()),
         ("ide-toolchain-api", BTreeSet::from(["ide-domain"])),
         ("ide-debug-api", BTreeSet::from(["ide-domain"])),
         (
@@ -202,11 +228,35 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
                 "ide-workspace",
             ]),
         ),
+        ("java-classfile", BTreeSet::new()),
+        (
+            "java-debug-adapter",
+            BTreeSet::from(["ide-debug-api", "ide-domain"]),
+        ),
+        (
+            "java-gradle-adapter",
+            BTreeSet::from(["ide-process", "ide-project"]),
+        ),
+        (
+            "java-maven-adapter",
+            BTreeSet::from(["ide-process", "ide-project"]),
+        ),
+        (
+            "java-toolchain",
+            BTreeSet::from(["ide-domain", "ide-process", "ide-toolchain-api"]),
+        ),
+        (
+            "language-java",
+            BTreeSet::from(["ide-domain", "ide-language-api", "java-classfile"]),
+        ),
     ]);
+    assert_eq!(
+        allowed.keys().copied().collect::<BTreeSet<_>>(),
+        internal.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+        "toda crate do workspace precisa participar do mapa arquitetural"
+    );
     for workspace_crate in &crates {
-        let Some(allowed_dependencies) = allowed.get(workspace_crate.name.as_str()) else {
-            continue;
-        };
+        let allowed_dependencies = &allowed[workspace_crate.name.as_str()];
         let actual = dependency_names(&workspace_crate.manifest, false)
             .into_iter()
             .filter(|name| internal.contains(name))
@@ -221,6 +271,88 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
             workspace_crate.name
         );
     }
+}
+
+#[test]
+fn concrete_java_crates_stay_behind_the_composition_root() {
+    let root_manifest = manifest(&workspace_root().join("Cargo.toml"));
+    let crates = workspace_crates(&root_manifest);
+    let concrete_java_crates = BTreeSet::from([
+        "java-classfile",
+        "java-debug-adapter",
+        "java-gradle-adapter",
+        "java-maven-adapter",
+        "java-toolchain",
+        "language-java",
+    ]);
+    let expected_consumers = BTreeMap::from([
+        ("java-classfile", BTreeSet::from(["language-java"])),
+        ("java-debug-adapter", BTreeSet::from(["ide-app"])),
+        ("java-gradle-adapter", BTreeSet::from(["ide-app"])),
+        ("java-maven-adapter", BTreeSet::from(["ide-app"])),
+        ("java-toolchain", BTreeSet::from(["ide-app"])),
+        ("language-java", BTreeSet::from(["ide-app"])),
+    ]);
+
+    let mut actual_consumers = concrete_java_crates
+        .iter()
+        .map(|name| (*name, BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for workspace_crate in &crates {
+        for dependency in dependency_names(&workspace_crate.manifest, false) {
+            if let Some(consumers) = actual_consumers.get_mut(dependency.as_str()) {
+                consumers.insert(workspace_crate.name.as_str());
+            }
+        }
+    }
+
+    assert_eq!(
+        actual_consumers, expected_consumers,
+        "implementações Java concretas só podem ser ligadas no composition root; \
+         java-classfile é detalhe interno do provider Java"
+    );
+}
+
+#[test]
+fn neutral_crates_expose_no_language_specific_public_api() {
+    let root = workspace_root();
+    let sources = [
+        "crates/ide-application/src/commands.rs",
+        "crates/ide-ui/src/lib.rs",
+        "crates/ide-workspace/src/lib.rs",
+    ];
+    let language_terms = ["java", "jdk", "jvm", "maven", "gradle"];
+    let mut actual_debt = BTreeSet::new();
+
+    for relative in sources {
+        let source = fs::read_to_string(root.join(relative))
+            .unwrap_or_else(|error| panic!("não foi possível ler {relative}: {error}"));
+        for line in source.lines().map(str::trim) {
+            let public_symbol = line
+                .strip_prefix("pub fn ")
+                .or_else(|| line.strip_prefix("pub struct "))
+                .or_else(|| line.strip_prefix("pub enum "))
+                .or_else(|| line.strip_prefix("pub trait "))
+                .or_else(|| line.strip_prefix("pub type "))
+                .and_then(|rest| {
+                    rest.split(|character: char| {
+                        !(character.is_ascii_alphanumeric() || character == '_')
+                    })
+                    .next()
+                });
+            if let Some(symbol) = public_symbol {
+                let declaration = line.to_ascii_lowercase();
+                if language_terms.iter().any(|term| declaration.contains(term)) {
+                    actual_debt.insert(format!("{relative}:{symbol}"));
+                }
+            }
+        }
+    }
+
+    assert!(
+        actual_debt.is_empty(),
+        "APIs públicas das crates neutras não podem expor conceitos de linguagem: {actual_debt:?}"
+    );
 }
 
 fn visit(

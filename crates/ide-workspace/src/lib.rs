@@ -77,14 +77,14 @@ impl WorkspaceService {
     }
 
     #[must_use]
-    pub fn search_java_content(
+    pub fn search_content(
         &self,
         root: &FileNode,
         source_roots: &[PathBuf],
         query: &str,
         limit: usize,
     ) -> Vec<SearchMatch> {
-        search::search_java_content(self.filesystem.as_ref(), root, source_roots, query, limit)
+        search::search_content(self.filesystem.as_ref(), root, source_roots, query, limit)
     }
 }
 
@@ -134,12 +134,8 @@ mod tests {
         let Ok(tree) = tree else {
             return;
         };
-        let found = service.search_java_content(
-            &tree,
-            &[root.join("modulo/src/main/java")],
-            "CONTEUDO",
-            20,
-        );
+        let found =
+            service.search_content(&tree, &[root.join("modulo/src/main/java")], "CONTEUDO", 20);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].line, 2);
         let _ = fs::remove_dir_all(root);

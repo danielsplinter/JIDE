@@ -90,16 +90,24 @@ pub enum DebugRequest {
     ExpandInspection(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NewItemKind {
-    Package,
-    Class,
-    Interface,
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct NewItemTemplateId(pub String);
+
+impl NewItemTemplateId {
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewItemRequest {
-    pub kind: NewItemKind,
+    pub template_id: NewItemTemplateId,
     pub package: String,
     pub name: String,
     pub source_root: PathBuf,

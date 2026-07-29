@@ -6,7 +6,7 @@ pub mod workspace;
 
 pub use commands::{
     ApplicationCommand, Command, CommandError, CommandRegistry, DebugRequest, NavigationRequest,
-    NewItemKind, NewItemRequest, OpenDocumentRequest, SaveDocumentRequest,
+    NewItemRequest, NewItemTemplateId, OpenDocumentRequest, SaveDocumentRequest,
 };
 pub use events::{EventBus, IdeEvent, PublishError};
 pub use workspace::{WorkspaceEntry, WorkspacePort, WorkspacePortError};

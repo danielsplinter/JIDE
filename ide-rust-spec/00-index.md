@@ -62,6 +62,7 @@ Este é um requisito arquitetural obrigatório.
 - [10 — Roadmap](10-roadmap.md)
 - [11 — Decisões arquiteturais](11-architecture-decisions.md)
 - [12 — Consolidação de crates e módulos](12-crate-consolidation.md)
+- [13 — Desacoplamento da aplicação e da apresentação](13-application-ui-decoupling.md)
 
 ## Escopo inicial
 

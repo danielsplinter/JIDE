@@ -14,7 +14,7 @@ pub struct SearchMatch {
     pub preview: String,
 }
 
-pub(crate) fn search_java_content(
+pub(crate) fn search_content(
     filesystem: &dyn WorkspacePort,
     root: &FileNode,
     source_roots: &[PathBuf],

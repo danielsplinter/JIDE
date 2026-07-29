@@ -19,8 +19,8 @@ use ide_domain::{
 pub use ide_language_api::LanguageToolchainConfig;
 use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
-    LanguageError, LanguageMetadata, LanguageProvider, LanguageRequestContext, MemberAccess,
-    ProviderState,
+    LanguageContribution, LanguageError, LanguageMetadata, LanguageProvider,
+    LanguageRequestContext, MemberAccess, ProviderState,
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -256,6 +256,13 @@ impl LanguageHost {
             },
         );
         Ok(())
+    }
+
+    pub fn register_contribution(
+        &self,
+        contribution: LanguageContribution,
+    ) -> Result<(), LanguageHostError> {
+        self.register(contribution.provider)
     }
 
     pub fn configure_selection(

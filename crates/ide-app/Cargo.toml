@@ -11,6 +11,7 @@ ide-core = { path = "../ide-core" }
 ide-debug-api = { path = "../ide-debug-api" }
 ide-project = { path = "../ide-project" }
 ide-domain = { path = "../ide-domain" }
+ide-language-api = { path = "../ide-language-api" }
 ide-language-host = { path = "../ide-language-host" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }
 java-debug-adapter = { path = "../java-debug-adapter" }
@@ -34,6 +35,9 @@ ui-text-cosmic.workspace = true
 ui-window-api.workspace = true
 ui-window-winit.workspace = true
 winit.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
 
 [lints]
 workspace = true
