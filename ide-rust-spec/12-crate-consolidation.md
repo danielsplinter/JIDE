@@ -219,15 +219,36 @@ Validação da fase: testes direcionados de `ide-ui`, `ide-app`,
 `language-java` e `ide-language-host`, `cargo test --workspace`, Clippy
 estrito sem warnings e build release de `ide-app`.
 
-### Fase 6 — Neutralidade dos contratos
+### Fase 6 — Neutralidade dos contratos ✅ Concluída
 
-- [ ] substituir `jdk_home` no contexto de linguagem por configuração de
+**Estado: concluída em 29/07/2026.**
+
+O contexto de linguagem passou a transportar `LanguageToolchainConfig`
+associada por `LanguageId`, além das `source_roots` do modelo. O host mantém
+essas configurações sem conhecer JDK, e o provider Java interpreta somente a
+entrada da linguagem `java`.
+
+As requisições genéricas de build agora recebem um mapa de ambiente; `JAVA_HOME`
+é preenchido apenas na integração Java. Os contratos de toolchain usam
+`entry_point`, `runtime_args`, `additional_args` e `targets`, retirando nomes e
+opções próprios da JVM.
+
+A análise de acesso por ponto saiu de `ide-domain` e de `ide-ui`: o host a
+roteia pelo documento e `language-java::navigation` implementa a sintaxe Java.
+As buscas por tipos e conteúdo usam as `source_roots` de `ProjectModel`; o
+fallback estrutural existe somente antes de um modelo ser importado.
+
+- [x] substituir `jdk_home` no contexto de linguagem por configuração de
   toolchain associada a `LanguageId`;
-- [ ] remover `java_home` dos contratos genéricos de build;
-- [ ] retirar `main_class`, `jvm_args`, `source_level`, `target_level` e
+- [x] remover `java_home` dos contratos genéricos de build;
+- [x] retirar `main_class`, `jvm_args`, `source_level`, `target_level` e
   `test_classes` dos contratos genéricos;
-- [ ] mover análise de acesso por ponto para providers de linguagem;
-- [ ] usar source roots do `ProjectModel` como escopo de busca.
+- [x] mover análise de acesso por ponto para providers de linguagem;
+- [x] usar source roots do `ProjectModel` como escopo de busca.
+
+Validação da fase: testes direcionados dos contratos e consumidores afetados,
+`cargo test --workspace`, Clippy estrito sem warnings e build release de
+`ide-app`.
 
 ### Fase 7 — Portabilidade e fiscalização
 

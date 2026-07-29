@@ -12,16 +12,18 @@ use completion::{finish_member_list, member_name};
 use ide_domain::{
     CompletionItem, CompletionKind, CompletionRequest, DefinitionRequest, Diagnostic,
     DiagnosticSeverity, DocumentChange, DocumentId, DocumentSnapshot, ImportItem, LanguageId,
-    Location, MemberAccess, OutlineItem, OutlineKind, ProviderId, ReferencesRequest, SemanticScope,
+    Location, OutlineItem, OutlineKind, ProviderId, ReferencesRequest, SemanticScope,
     SemanticSnapshot, SemanticSymbol, SymbolKind, SyntaxHighlight, SyntaxHighlightKind, SyntaxNode,
-    SyntaxSnapshot, TextPosition, TextRange, TypeDescriptor, member_access,
+    SyntaxSnapshot, TextPosition, TextRange, TypeDescriptor,
 };
+#[cfg(test)]
+use ide_language_api::LanguageToolchainConfig;
 use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
-    LanguageError, LanguageMetadata, LanguageProvider,
+    LanguageError, LanguageMetadata, LanguageProvider, MemberAccess,
 };
 use index::collect_workspace_paths;
-use navigation::{token_at_position, within};
+use navigation::{member_access, token_at_position, within};
 use parser::JavaParser;
 use semantics::receiver_type;
 use symbols::simple_class_name;
@@ -67,9 +69,14 @@ impl LanguageProvider for JavaLanguageProvider {
         &self,
         context: LanguageActivationContext,
     ) -> Result<Box<dyn ActiveLanguage>, LanguageError> {
+        let language_id = LanguageId(JAVA_LANGUAGE_ID.to_owned());
+        let toolchain_root = context
+            .toolchain(&language_id)
+            .map(|toolchain| toolchain.installation_root.as_path());
         Ok(Box::new(JavaLanguage::new(
             &context.workspace_root,
-            context.jdk_home.as_deref(),
+            &context.source_roots,
+            toolchain_root,
         )?))
     }
 }
@@ -187,10 +194,15 @@ impl JavaLanguage {
         items
     }
 
-    fn new(workspace_root: &Path, jdk_home: Option<&Path>) -> Result<Self, LanguageError> {
+    fn new(
+        workspace_root: &Path,
+        source_roots: &[PathBuf],
+        toolchain_root: Option<&Path>,
+    ) -> Result<Self, LanguageError> {
         let parser = JavaParser::new()?;
-        let workspace_index =
-            parser.with_mut(|parser| WorkspaceIndex::scan(workspace_root, jdk_home, parser))?;
+        let workspace_index = parser.with_mut(|parser| {
+            WorkspaceIndex::scan(workspace_root, source_roots, toolchain_root, parser)
+        })?;
         Ok(Self {
             language_id: LanguageId(JAVA_LANGUAGE_ID.to_owned()),
             parser,
@@ -221,6 +233,14 @@ impl JavaLanguage {
 impl ActiveLanguage for JavaLanguage {
     fn language_id(&self) -> &LanguageId {
         &self.language_id
+    }
+
+    async fn member_access(
+        &self,
+        text: &str,
+        offset: usize,
+    ) -> Result<Option<MemberAccess>, LanguageError> {
+        Ok(member_access(text, offset))
     }
 
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {
@@ -616,19 +636,29 @@ impl ExternalClass {
 }
 
 impl WorkspaceIndex {
-    fn scan(root: &Path, jdk_home: Option<&Path>, parser: &mut Parser) -> Self {
+    fn scan(
+        root: &Path,
+        source_roots: &[PathBuf],
+        toolchain_root: Option<&Path>,
+        parser: &mut Parser,
+    ) -> Self {
         let mut paths = Vec::new();
         collect_workspace_paths(root, &mut paths, 600);
         let mut index = Self::default();
         // A biblioteca padrão vem antes do workspace: `String` e `System` são
         // do JDK, e um tipo do projeto com o mesmo nome simples é a exceção,
         // não a regra.
-        index.scan_jdk(jdk_home);
+        index.scan_jdk(toolchain_root);
         let mut java_count = 0;
         let mut archive_count = 0;
         for path in paths {
             match path.extension().and_then(|extension| extension.to_str()) {
-                Some(extension) if extension.eq_ignore_ascii_case("java") && java_count < 500 => {
+                Some(extension)
+                    if extension.eq_ignore_ascii_case("java")
+                        && java_count < 500
+                        && (source_roots.is_empty()
+                            || source_roots.iter().any(|root| path.starts_with(root))) =>
+                {
                     if let Ok(text) = fs::read_to_string(&path)
                         && let Some(tree) = parser.parse(&text, None)
                     {
@@ -1470,10 +1500,19 @@ mod tests {
     }
 
     fn active_with_jdk(jdk_home: Option<PathBuf>) -> Box<dyn ActiveLanguage> {
+        let toolchains = jdk_home
+            .map(|installation_root| LanguageToolchainConfig {
+                language_id: LanguageId(JAVA_LANGUAGE_ID.to_owned()),
+                installation_root,
+                properties: Default::default(),
+            })
+            .into_iter()
+            .collect();
         match pollster::block_on(
             JavaLanguageProvider::new().activate(LanguageActivationContext {
                 workspace_root: ".".into(),
-                jdk_home,
+                source_roots: Vec::new(),
+                toolchains,
             }),
         ) {
             Ok(active) => active,
@@ -1646,7 +1685,8 @@ mod tests {
         let active = match pollster::block_on(JavaLanguageProvider::new().activate(
             LanguageActivationContext {
                 workspace_root: root.clone(),
-                jdk_home: None,
+                source_roots: vec![root.clone()],
+                toolchains: Vec::new(),
             },
         )) {
             Ok(active) => active,
@@ -1719,7 +1759,8 @@ mod tests {
         let active = match pollster::block_on(JavaLanguageProvider::new().activate(
             LanguageActivationContext {
                 workspace_root: root.clone(),
-                jdk_home: None,
+                source_roots: vec![root.clone()],
+                toolchains: Vec::new(),
             },
         )) {
             Ok(active) => active,
@@ -1785,7 +1826,8 @@ mod tests {
         let active = match pollster::block_on(JavaLanguageProvider::new().activate(
             LanguageActivationContext {
                 workspace_root: root.clone(),
-                jdk_home: None,
+                source_roots: vec![root.clone()],
+                toolchains: Vec::new(),
             },
         )) {
             Ok(active) => active,
@@ -2178,7 +2220,8 @@ mod tests {
         let provider = JavaLanguageProvider::new();
         let active = match pollster::block_on(provider.activate(LanguageActivationContext {
             workspace_root: root.clone(),
-            jdk_home: None,
+            source_roots: vec![root.clone()],
+            toolchains: Vec::new(),
         })) {
             Ok(active) => active,
             Err(error) => panic!("provider activation failed: {error}"),

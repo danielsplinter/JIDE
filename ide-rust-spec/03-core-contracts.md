@@ -53,24 +53,28 @@ pub struct LanguageMetadata {
 }
 ```
 
-O contexto de ativação carrega, além da raiz do workspace, a **raiz do toolchain
-escolhido na IDE**:
+O contexto de ativação é neutro em relação à linguagem. Ele carrega as raízes
+de código do modelo do projeto e configurações de toolchain associadas por
+`LanguageId`:
 
 ```rust
+pub struct LanguageToolchainConfig {
+    pub language_id: LanguageId,
+    pub installation_root: PathBuf,
+    pub properties: BTreeMap<String, String>,
+}
+
 pub struct LanguageActivationContext {
     pub workspace_root: PathBuf,
-    pub jdk_home: Option<PathBuf>,
+    pub source_roots: Vec<PathBuf>,
+    pub toolchains: Vec<LanguageToolchainConfig>,
 }
 ```
 
-A biblioteca padrão que a completação conhece vem dessa instalação, não de uma
-variável de ambiente: trocar de JDK pelo menu tem que trocar as classes que a
-completação enxerga. Como o provider indexa a biblioteca padrão na ativação,
-mudar a escolha exige derrubar os providers ativos — o host expõe `set_jdk_home`,
-que informa se houve troca, e `reactivate`, que faz a próxima requisição subir um
-provider novo com o contexto atual. As rotas de documento permanecem, mas os
-documentos abertos não: o provider novo nasce sem nenhum, e quem sincroniza
-precisa reabri-los.
+O host expõe `set_toolchain(LanguageId, ...)` e `set_source_roots`. Quando uma
+dessas entradas muda, `reactivate` faz a próxima requisição subir um provider
+novo com o contexto atual. O provider Java interpreta a instalação associada a
+`java` como JDK; o contrato não conhece JDK, SDK ou runtime concreto.
 
 ## Instância ativa de linguagem
 
@@ -78,6 +82,12 @@ precisa reabri-los.
 #[async_trait::async_trait]
 pub trait ActiveLanguage: Send + Sync {
     fn language_id(&self) -> &LanguageId;
+
+    async fn member_access(
+        &self,
+        text: &str,
+        offset: usize,
+    ) -> Result<Option<MemberAccess>, LanguageError>;
 
     async fn open_document(
         &self,
@@ -280,7 +290,9 @@ pub trait TestAdapter: Send + Sync {
 ```
 
 `CompilationRequest`, `ExecutionRequest` e `TestRequest` carregam explicitamente
-a instalação selecionada, diretório de trabalho, classpath e argumentos. Os
+a instalação selecionada, diretório de trabalho, classpath, argumentos, ponto
+de entrada e alvos. Os nomes do contrato são neutros: opções como níveis de
+fonte Java são `additional_args`, e opções de uma VM são `runtime_args`. Os
 resultados preservam código de saída, `stdout` e `stderr`, sem depender de texto
 renderizado na interface.
 
@@ -307,6 +319,10 @@ pub trait BuildSystemAdapter: Send + Sync {
     ) -> Result<BuildCommandResult, BuildError>;
 }
 ```
+
+As requisições de importação e build possuem um mapa genérico de ambiente. A
+integração Java pode preencher `JAVA_HOME`, mas `ide-project` não declara nem
+interpreta essa variável.
 
 ## Contrato de depuração
 

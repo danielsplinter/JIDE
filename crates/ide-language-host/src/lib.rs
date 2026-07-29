@@ -1,6 +1,7 @@
 #![doc = "Registro, ciclo de vida e isolamento dos providers de linguagem."]
 
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
@@ -15,9 +16,11 @@ use ide_domain::{
     DocumentSnapshot, LanguageId, Location, ProviderId, ReferencesRequest, RequestId,
     SemanticSnapshot, SemanticSymbol, SyntaxSnapshot,
 };
+pub use ide_language_api::LanguageToolchainConfig;
 use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
-    LanguageError, LanguageMetadata, LanguageProvider, LanguageRequestContext, ProviderState,
+    LanguageError, LanguageMetadata, LanguageProvider, LanguageRequestContext, MemberAccess,
+    ProviderState,
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -110,7 +113,8 @@ impl From<LanguageError> for LanguageHostError {
 pub struct LanguageHost {
     workspace_root: RwLock<PathBuf>,
     /// JDK escolhido na IDE, repassado a cada ativação.
-    jdk_home: RwLock<Option<PathBuf>>,
+    source_roots: RwLock<Vec<PathBuf>>,
+    toolchains: RwLock<HashMap<LanguageId, LanguageToolchainConfig>>,
     config: LanguageHostConfig,
     registry: Mutex<Registry>,
     next_request_id: AtomicU64,
@@ -126,7 +130,8 @@ impl LanguageHost {
     pub fn with_config(workspace_root: impl Into<PathBuf>, config: LanguageHostConfig) -> Self {
         Self {
             workspace_root: RwLock::new(workspace_root.into()),
-            jdk_home: RwLock::new(None),
+            source_roots: RwLock::new(Vec::new()),
+            toolchains: RwLock::new(HashMap::new()),
             config: LanguageHostConfig {
                 worker_queue_capacity: config.worker_queue_capacity.max(1),
                 max_active_providers: config.max_active_providers.max(1),
@@ -150,15 +155,45 @@ impl LanguageHost {
     /// Mudar não basta para os providers já ativos: eles indexaram a biblioteca
     /// padrão do JDK anterior. Quem troca é responsável por chamar
     /// [`LanguageHost::reactivate`] em seguida.
-    pub fn set_jdk_home(&self, home: Option<PathBuf>) -> Result<bool, LanguageHostError> {
-        let mut jdk_home = self
-            .jdk_home
+    pub fn set_toolchain(
+        &self,
+        language_id: LanguageId,
+        toolchain: Option<LanguageToolchainConfig>,
+    ) -> Result<bool, LanguageHostError> {
+        let mut toolchains = self
+            .toolchains
             .write()
             .map_err(|_| LanguageHostError::WorkerStopped)?;
-        if *jdk_home == home {
+        if let Some(config) = &toolchain
+            && config.language_id != language_id
+        {
+            return Err(LanguageHostError::InvalidMetadata(
+                "toolchain language does not match its registry key".to_owned(),
+            ));
+        }
+        if toolchains.get(&language_id) == toolchain.as_ref() {
             return Ok(false);
         }
-        *jdk_home = home;
+        match toolchain {
+            Some(config) => {
+                toolchains.insert(language_id, config);
+            }
+            None => {
+                toolchains.remove(&language_id);
+            }
+        }
+        Ok(true)
+    }
+
+    pub fn set_source_roots(&self, roots: Vec<PathBuf>) -> Result<bool, LanguageHostError> {
+        let mut source_roots = self
+            .source_roots
+            .write()
+            .map_err(|_| LanguageHostError::WorkerStopped)?;
+        if *source_roots == roots {
+            return Ok(false);
+        }
+        *source_roots = roots;
         Ok(true)
     }
 
@@ -405,6 +440,17 @@ impl LanguageHost {
         worker.completion(context, request).await
     }
 
+    pub async fn member_access(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        text: String,
+        offset: usize,
+    ) -> Result<Option<MemberAccess>, LanguageHostError> {
+        let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
+        worker.member_access(context, text, offset).await
+    }
+
     /// Membros de um tipo, para telas que não têm documento.
     ///
     /// O roteamento é pelo documento aberto porque é ele que diz de qual
@@ -601,18 +647,26 @@ impl LanguageHost {
                 .clone();
             (Arc::clone(&entry.provider), entry.metadata.clone(), root)
         };
-        let jdk_home = self
-            .jdk_home
+        let source_roots = self
+            .source_roots
             .read()
             .map_err(|_| LanguageHostError::WorkerStopped)?
             .clone();
+        let toolchains = self
+            .toolchains
+            .read()
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+            .values()
+            .cloned()
+            .collect();
 
         let worker = ProviderWorker::spawn(
             provider,
             metadata.clone(),
             LanguageActivationContext {
                 workspace_root,
-                jdk_home,
+                source_roots,
+                toolchains,
             },
             self.config.worker_queue_capacity,
         );
@@ -875,6 +929,25 @@ impl ProviderWorker {
             .map_err(|_| LanguageHostError::WorkerStopped)?
     }
 
+    async fn member_access(
+        &self,
+        context: LanguageRequestContext,
+        text: String,
+        offset: usize,
+    ) -> Result<Option<MemberAccess>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::MemberAccess {
+            context,
+            text,
+            offset,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
     async fn type_members(
         &self,
         context: LanguageRequestContext,
@@ -1079,6 +1152,21 @@ fn run_worker(
                 };
                 let _ = response.send(result);
             }
+            WorkerRequest::MemberAccess {
+                context,
+                text,
+                offset,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.member_access(&text, offset))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
             WorkerRequest::TypeMembers {
                 context,
                 type_name,
@@ -1162,7 +1250,8 @@ mod tests {
     use ide_domain::{DocumentId, DocumentSnapshot, LanguageId, ProviderId, SemanticSymbol};
     use ide_language_api::{
         ActiveLanguage, ApiVersion, LANGUAGE_API_VERSION, LanguageActivationContext,
-        LanguageCapabilities, LanguageError, LanguageMetadata, LanguageProvider, ProviderState,
+        LanguageCapabilities, LanguageError, LanguageMetadata, LanguageProvider,
+        LanguageToolchainConfig, ProviderState,
     };
 
     use super::{LanguageHost, LanguageHostError, ProviderSelection};
@@ -1171,6 +1260,14 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("expected success, got {error:?}"),
+        }
+    }
+
+    fn java_toolchain(path: &str) -> LanguageToolchainConfig {
+        LanguageToolchainConfig {
+            language_id: LanguageId("java".to_owned()),
+            installation_root: PathBuf::from(path),
+            properties: Default::default(),
         }
     }
 
@@ -1437,9 +1534,15 @@ mod tests {
             LanguageCapabilities::SYNTAX | LanguageCapabilities::COMPLETION,
         ));
         success(host.register(provider.clone()));
-        assert!(success(host.set_jdk_home(Some(PathBuf::from("jdk-17")))));
+        assert!(success(host.set_toolchain(
+            LanguageId("java".to_owned()),
+            Some(java_toolchain("jdk-17")),
+        )));
         // O mesmo JDK não é uma troca.
-        assert!(!success(host.set_jdk_home(Some(PathBuf::from("jdk-17")))));
+        assert!(!success(host.set_toolchain(
+            LanguageId("java".to_owned()),
+            Some(java_toolchain("jdk-17")),
+        )));
 
         let document = DocumentSnapshot {
             id: DocumentId(1),
@@ -1452,7 +1555,10 @@ mod tests {
         ));
         assert_eq!(provider.activations.load(Ordering::Relaxed), 1);
 
-        assert!(success(host.set_jdk_home(Some(PathBuf::from("jdk-21")))));
+        assert!(success(host.set_toolchain(
+            LanguageId("java".to_owned()),
+            Some(java_toolchain("jdk-21")),
+        )));
         success(pollster::block_on(host.reactivate()));
         // A rota do documento fica: a próxima requisição sobe um provider novo.
         // O resultado da operação não interessa aqui — este provider de teste não

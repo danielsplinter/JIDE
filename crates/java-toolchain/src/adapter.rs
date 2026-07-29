@@ -65,12 +65,6 @@ impl CompilerAdapter for JavaToolchainAdapter {
             request.output_directory.to_string_lossy().into_owned(),
         ];
         append_classpath(&mut args, &request.classpath)?;
-        if let Some(source) = &request.source_level {
-            args.extend(["-source".to_owned(), source.clone()]);
-        }
-        if let Some(target) = &request.target_level {
-            args.extend(["-target".to_owned(), target.clone()]);
-        }
         args.extend(request.additional_args);
         args.extend(
             request
@@ -109,14 +103,14 @@ impl RuntimeAdapter for JavaToolchainAdapter {
     }
 
     async fn run(&self, request: ExecutionRequest) -> Result<ExecutionResult, ToolchainError> {
-        if request.main_class.trim().is_empty() {
+        if request.entry_point.trim().is_empty() {
             return Err(ToolchainError::Operation(
                 "main class is required".to_owned(),
             ));
         }
-        let mut args = request.jvm_args;
+        let mut args = request.runtime_args;
         append_classpath(&mut args, &request.classpath)?;
-        args.push(request.main_class);
+        args.push(request.entry_point);
         args.extend(request.args);
         let output = self
             .processes
@@ -158,14 +152,14 @@ impl TestAdapter for JavaToolchainAdapter {
         let compilation = self.compile(request.compilation).await?;
         let mut cases = Vec::new();
         if compilation.success {
-            for class_name in request.test_classes {
+            for class_name in request.targets {
                 let execution = self
                     .run(ExecutionRequest {
                         installation: installation.clone(),
-                        main_class: class_name.clone(),
+                        entry_point: class_name.clone(),
                         classpath: classpath.clone(),
                         args: request.args.clone(),
-                        jvm_args: Vec::new(),
+                        runtime_args: Vec::new(),
                         working_directory: working_directory.clone(),
                     })
                     .await?;
@@ -260,20 +254,23 @@ mod tests {
             classpath: Classpath {
                 entries: vec![output.clone()],
             },
-            source_level: Some("8".to_owned()),
-            target_level: Some("8".to_owned()),
-            additional_args: Vec::new(),
+            additional_args: vec![
+                "-source".to_owned(),
+                "8".to_owned(),
+                "-target".to_owned(),
+                "8".to_owned(),
+            ],
             working_directory: root.clone(),
         }));
         assert!(compilation.is_ok_and(|result| result.success));
         let execution = runtime.block_on(adapter.run(ExecutionRequest {
             installation: installation(&root),
-            main_class: "Main".to_owned(),
+            entry_point: "Main".to_owned(),
             classpath: Classpath {
                 entries: vec![output],
             },
             args: Vec::new(),
-            jvm_args: Vec::new(),
+            runtime_args: Vec::new(),
             working_directory: root.clone(),
         }));
         assert!(execution.is_ok_and(|result| result.success));
@@ -317,12 +314,10 @@ mod tests {
                 classpath: Classpath {
                     entries: vec![output],
                 },
-                source_level: None,
-                target_level: None,
                 additional_args: Vec::new(),
                 working_directory: root.clone(),
             },
-            test_classes: vec!["ExampleTest".to_owned()],
+            targets: vec!["ExampleTest".to_owned()],
             args: vec!["--quiet".to_owned()],
         }));
 

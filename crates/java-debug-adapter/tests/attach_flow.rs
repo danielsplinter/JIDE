@@ -8,7 +8,10 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -26,6 +29,7 @@ use tokio::{
 const HANDSHAKE: &[u8] = b"JDWP-Handshake";
 const THREAD: u64 = 500;
 const CLASS: u64 = 100;
+static NEXT_WORKSPACE: AtomicUsize = AtomicUsize::new(1);
 const METHOD: u64 = 200;
 const FRAME: u64 = 300;
 
@@ -231,7 +235,11 @@ async fn fake_vm(listener: TcpListener, mut trigger: oneshot::Receiver<()>) {
 }
 
 fn workspace() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("er-ide-jdwp-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "er-ide-jdwp-{}-{}",
+        std::process::id(),
+        NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = fs::remove_dir_all(&root);
     let package = root.join("src/main/java/com/example");
     assert!(fs::create_dir_all(&package).is_ok());

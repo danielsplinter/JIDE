@@ -24,10 +24,10 @@ use ide_application::{
 use ide_core::{AppConfig, config_path};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
-    DefinitionRequest, DocumentId, DocumentSnapshot, ProviderId, SymbolKind, TextPosition,
-    TextRange,
+    DefinitionRequest, DocumentId, DocumentSnapshot, LanguageId, ProviderId, SymbolKind,
+    TextPosition, TextRange,
 };
-use ide_language_host::LanguageHost;
+use ide_language_host::{LanguageHost, LanguageToolchainConfig};
 use ide_process::{NativeProcessSupervisor, ProcessSupervisor};
 use ide_project::{
     build::{BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry, ProjectImportRequest},
@@ -336,6 +336,7 @@ impl NativeIde {
                 if let Some(language_host) = &self.language_host {
                     if let Err(error) = pollster::block_on(language_host.shutdown())
                         .and_then(|()| language_host.set_workspace_root(&folder))
+                        .and_then(|()| language_host.set_source_roots(Vec::new()).map(|_| ()))
                         .and_then(|()| {
                             language_host.enable(&ProviderId(JAVA_PROVIDER_ID.to_owned()))
                         })
@@ -557,9 +558,18 @@ impl NativeIde {
     /// O serviço de workspace conhece o limite estrutural: somente arquivos sob
     /// diretórios chamados `java` podem produzir ocorrências.
     fn answer_content_search(&mut self, query: &str) {
+        let source_roots = self
+            .project
+            .as_ref()
+            .map(|project| project.model.source_roots())
+            .unwrap_or_default();
         let found = self.shell.as_ref().map_or_else(Vec::new, |shell| {
-            self.workspace
-                .search_java_content(shell.workspace_tree(), query, TYPE_SEARCH_LIMIT)
+            self.workspace.search_java_content(
+                shell.workspace_tree(),
+                &source_roots,
+                query,
+                TYPE_SEARCH_LIMIT,
+            )
         });
         if let Some(shell) = self.shell.as_mut() {
             shell.set_content_search_results(
@@ -593,9 +603,29 @@ impl NativeIde {
         // Com a inspeção aberta, a pergunta é sobre um tipo, e não sobre uma
         // posição num arquivo: ali não existe arquivo.
         if let Some(shell) = self.shell.as_ref()
-            && let Some((type_name, prefix)) = shell.inspection_member_request()
+            && let Some((text, offset)) = shell.inspection_member_context()
             && let Some(document_id) = shell.active_document()
         {
+            let access = match pollster::block_on(language_host.member_access(
+                language_host.request_context(),
+                document_id,
+                text,
+                offset,
+            )) {
+                Ok(Some(access)) => access,
+                Ok(None) => return,
+                Err(error) => {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.set_inspection_message(error.to_string());
+                    }
+                    return;
+                }
+            };
+            let (type_name, prefix) = self
+                .shell
+                .as_ref()
+                .map(|shell| shell.inspection_member_target(&access.receiver, access.prefix))
+                .unwrap_or_default();
             let answered = pollster::block_on(language_host.type_members(
                 language_host.request_context(),
                 document_id,
@@ -794,11 +824,16 @@ impl NativeIde {
         let Some(language_host) = &self.language_host else {
             return;
         };
-        let home = self
-            .java_toolchains
-            .selected()
-            .map(|installation| installation.home.clone());
-        match language_host.set_jdk_home(home) {
+        let language_id = LanguageId("java".to_owned());
+        let toolchain =
+            self.java_toolchains
+                .selected()
+                .map(|installation| LanguageToolchainConfig {
+                    language_id: language_id.clone(),
+                    installation_root: installation.home.clone(),
+                    properties: Default::default(),
+                });
+        match language_host.set_toolchain(language_id, toolchain) {
             Ok(true) => {
                 if pollster::block_on(language_host.reactivate()).is_ok() {
                     self.language_documents.clear();
@@ -806,6 +841,26 @@ impl NativeIde {
             }
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "não foi possível registrar o JDK escolhido"),
+        }
+    }
+
+    fn apply_project_roots_to_languages(&mut self) {
+        let Some(language_host) = &self.language_host else {
+            return;
+        };
+        let roots = self
+            .project
+            .as_ref()
+            .map(|project| project.model.source_roots())
+            .unwrap_or_default();
+        match language_host.set_source_roots(roots) {
+            Ok(true) => {
+                if pollster::block_on(language_host.reactivate()).is_ok() {
+                    self.language_documents.clear();
+                }
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "não foi possível registrar source roots"),
         }
     }
 
@@ -851,8 +906,11 @@ impl NativeIde {
         let Some((adapter, descriptor)) = detected else {
             return;
         };
-        let request = ProjectImportRequest::new(descriptor.clone())
-            .with_java_home(self.java_toolchains.selected().map(|jdk| jdk.home.clone()));
+        let mut request = ProjectImportRequest::new(descriptor.clone());
+        if let Some(jdk) = self.java_toolchains.selected() {
+            request = request
+                .with_environment_variable("JAVA_HOME", jdk.home.to_string_lossy().into_owned());
+        }
         match pollster::block_on(adapter.import_project(request)) {
             Ok(model) => {
                 let summary = model.summary();
@@ -866,6 +924,7 @@ impl NativeIde {
                     descriptor,
                     model,
                 });
+                self.apply_project_roots_to_languages();
                 if let Some(shell) = self.shell.as_mut() {
                     shell.set_project_summary(Some(summary.clone()));
                     shell.set_status_message(format!("Projeto importado: {summary}"));
@@ -1348,11 +1407,14 @@ impl NativeIde {
             return;
         };
         let adapter = project.adapter.clone();
-        let request = BuildCommandRequest::new(
+        let mut request = BuildCommandRequest::new(
             project.descriptor.clone(),
             default_goals(&project.descriptor),
-        )
-        .with_java_home(self.java_toolchains.selected().map(|jdk| jdk.home.clone()));
+        );
+        if let Some(jdk) = self.java_toolchains.selected() {
+            request = request
+                .with_environment_variable("JAVA_HOME", jdk.home.to_string_lossy().into_owned());
+        }
         let label = format!(
             "[{}] {}",
             project.descriptor.build_system.label(),
@@ -1456,9 +1518,12 @@ impl NativeIde {
             source_files,
             output_directory: output_directory.clone(),
             classpath: classpath.clone(),
-            source_level: Some("8".to_owned()),
-            target_level: Some("8".to_owned()),
-            additional_args: Vec::new(),
+            additional_args: vec![
+                "-source".to_owned(),
+                "8".to_owned(),
+                "-target".to_owned(),
+                "8".to_owned(),
+            ],
             working_directory: workspace.clone(),
         };
         shell.append_tool_output(
@@ -1492,7 +1557,7 @@ impl NativeIde {
                         let tested = test_adapter
                             .run_tests(TestRequest {
                                 compilation,
-                                test_classes: vec![main_class.unwrap_or_default()],
+                                targets: vec![main_class.unwrap_or_default()],
                                 args: Vec::new(),
                             })
                             .await?;
@@ -1535,10 +1600,10 @@ impl NativeIde {
                     let executed = runtime_adapter
                         .run(ExecutionRequest {
                             installation,
-                            main_class: main_class.unwrap_or_default(),
+                            entry_point: main_class.unwrap_or_default(),
                             classpath: run_classpath,
                             args: Vec::new(),
-                            jvm_args: Vec::new(),
+                            runtime_args: Vec::new(),
                             working_directory: workspace,
                         })
                         .await?;

@@ -3,7 +3,7 @@ use ide_domain::{
     DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot, SemanticSymbol,
     SyntaxSnapshot,
 };
-use ide_language_api::LanguageRequestContext;
+use ide_language_api::{LanguageRequestContext, MemberAccess};
 use tokio::sync::oneshot;
 
 use super::LanguageHostError;
@@ -43,6 +43,12 @@ pub(super) enum WorkerRequest {
         context: LanguageRequestContext,
         request: CompletionRequest,
         response: oneshot::Sender<Result<Vec<CompletionItem>, LanguageHostError>>,
+    },
+    MemberAccess {
+        context: LanguageRequestContext,
+        text: String,
+        offset: usize,
+        response: oneshot::Sender<Result<Option<MemberAccess>, LanguageHostError>>,
     },
     TypeMembers {
         context: LanguageRequestContext,

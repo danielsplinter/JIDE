@@ -1,6 +1,6 @@
 //! Contratos para sistemas de build externos.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -11,7 +11,7 @@ use crate::model::{BuildSystemId, ModuleId, ProjectDescriptor, ProjectModel};
 pub struct ProjectImportRequest {
     pub descriptor: ProjectDescriptor,
     /// JDK selecionado, repassado às ferramentas externas quando necessário.
-    pub java_home: Option<PathBuf>,
+    pub environment: BTreeMap<String, String>,
     pub offline: bool,
 }
 
@@ -20,14 +20,18 @@ impl ProjectImportRequest {
     pub const fn new(descriptor: ProjectDescriptor) -> Self {
         Self {
             descriptor,
-            java_home: None,
+            environment: BTreeMap::new(),
             offline: false,
         }
     }
 
     #[must_use]
-    pub fn with_java_home(mut self, java_home: Option<PathBuf>) -> Self {
-        self.java_home = java_home;
+    pub fn with_environment_variable(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.environment.insert(name.into(), value.into());
         self
     }
 }
@@ -38,7 +42,7 @@ pub struct BuildCommandRequest {
     /// Metas do Maven ou tarefas do Gradle, na ordem informada.
     pub goals: Vec<String>,
     pub module: Option<ModuleId>,
-    pub java_home: Option<PathBuf>,
+    pub environment: BTreeMap<String, String>,
     pub offline: bool,
     pub extra_args: Vec<String>,
 }
@@ -50,15 +54,19 @@ impl BuildCommandRequest {
             descriptor,
             goals,
             module: None,
-            java_home: None,
+            environment: BTreeMap::new(),
             offline: false,
             extra_args: Vec::new(),
         }
     }
 
     #[must_use]
-    pub fn with_java_home(mut self, java_home: Option<PathBuf>) -> Self {
-        self.java_home = java_home;
+    pub fn with_environment_variable(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.environment.insert(name.into(), value.into());
         self
     }
 

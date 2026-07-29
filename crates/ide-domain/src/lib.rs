@@ -217,52 +217,6 @@ pub struct CompletionRequest {
     pub prefix: String,
 }
 
-/// Acesso a membro sendo digitado: `pedido.` ou `pedido.get`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MemberAccess {
-    /// Expressão à esquerda do ponto.
-    pub receiver: String,
-    /// O que já foi digitado depois do ponto.
-    pub prefix: String,
-}
-
-/// Lê para trás a partir do cursor procurando um acesso por ponto.
-///
-/// Só o identificador imediatamente antes do ponto conta. Encadeamento
-/// (`a.b().c.`) exigiria saber o tipo de retorno de cada elo.
-///
-/// Mora aqui, e não na linguagem, porque quem pergunta não é sempre um arquivo:
-/// o editor de expressões do depurador faz a mesma leitura sobre um texto que
-/// não é documento nenhum, e as duas precisam concordar sobre onde o receptor
-/// termina e o filtro começa.
-#[must_use]
-pub fn member_access(text: &str, offset: usize) -> Option<MemberAccess> {
-    let head = &text[..offset.min(text.len())];
-    let prefix_start = head
-        .char_indices()
-        .rev()
-        .find(|(_, value)| !is_identifier_char(*value))
-        .map_or(0, |(index, value)| index + value.len_utf8());
-    let prefix = head[prefix_start..].to_owned();
-    let before = head[..prefix_start].trim_end();
-    let receiver_end = before.strip_suffix('.')?.trim_end();
-    let receiver_start = receiver_end
-        .char_indices()
-        .rev()
-        .find(|(_, value)| !is_identifier_char(*value))
-        .map_or(0, |(index, value)| index + value.len_utf8());
-    let receiver = receiver_end[receiver_start..].to_owned();
-    // Ponto sem identificador à esquerda é literal decimal ou erro de digitação,
-    // não acesso a membro.
-    (!receiver.is_empty() && !receiver.starts_with(|value: char| value.is_ascii_digit()))
-        .then_some(MemberAccess { receiver, prefix })
-}
-
-#[must_use]
-pub fn is_identifier_char(value: char) -> bool {
-    value.is_alphanumeric() || value == '_' || value == '$'
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefinitionRequest {
     pub document_id: DocumentId,

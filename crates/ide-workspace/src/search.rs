@@ -17,6 +17,7 @@ pub struct SearchMatch {
 pub(crate) fn search_java_content(
     filesystem: &dyn WorkspacePort,
     root: &FileNode,
+    source_roots: &[PathBuf],
     query: &str,
     limit: usize,
 ) -> Vec<SearchMatch> {
@@ -24,13 +25,22 @@ pub(crate) fn search_java_content(
         return Vec::new();
     }
     let mut matches = Vec::new();
-    search_java_node(filesystem, root, query, limit, false, &mut matches);
+    search_java_node(
+        filesystem,
+        root,
+        source_roots,
+        query,
+        limit,
+        false,
+        &mut matches,
+    );
     matches
 }
 
 fn search_java_node(
     filesystem: &dyn WorkspacePort,
     node: &FileNode,
+    source_roots: &[PathBuf],
     query: &str,
     limit: usize,
     inside_java: bool,
@@ -46,14 +56,23 @@ fn search_java_node(
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("java"));
         for child in &node.children {
-            search_java_node(filesystem, child, query, limit, inside_java, output);
+            search_java_node(
+                filesystem,
+                child,
+                source_roots,
+                query,
+                limit,
+                inside_java,
+                output,
+            );
             if output.len() >= limit {
                 break;
             }
         }
         return;
     }
-    if !inside_java {
+    let in_source_root = source_roots.iter().any(|root| node.path.starts_with(root));
+    if (!source_roots.is_empty() && !in_source_root) || (source_roots.is_empty() && !inside_java) {
         return;
     }
     let Ok(content) = filesystem.read_text(&node.path) else {

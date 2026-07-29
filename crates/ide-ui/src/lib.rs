@@ -34,7 +34,7 @@ use explorer::{
 use ide_domain::Location;
 use ide_domain::{
     CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, OutlineItem,
-    SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition, member_access,
+    SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition,
 };
 use ide_terminal::{ShellKind, TerminalSession};
 use ide_workspace::{EditorSession, FileNode, TextBuffer};
@@ -3446,18 +3446,22 @@ impl IdeShell {
     /// faz uma classe alheia ao código depurado ser reconhecida como as outras —
     /// quem responde pelos membros é o índice do projeto, não o processo.
     #[must_use]
-    pub fn inspection_member_request(&self) -> Option<(String, String)> {
+    pub fn inspection_member_context(&self) -> Option<(String, usize)> {
         if !self.inspection_modal.is_open() {
             return None;
         }
-        let access = member_access(
-            self.inspection_source.text(),
+        Some((
+            self.inspection_source.text().to_owned(),
             self.inspection_editor.cursor(),
-        )?;
+        ))
+    }
+
+    #[must_use]
+    pub fn inspection_member_target(&self, receiver: &str, prefix: String) -> (String, String) {
         let type_name = self
-            .debug_type_of(&access.receiver)
-            .unwrap_or_else(|| access.receiver.clone());
-        Some((type_name, access.prefix))
+            .debug_type_of(receiver)
+            .unwrap_or_else(|| receiver.to_owned());
+        (type_name, prefix)
     }
 
     /// Tipo em execução de um nome visível no quadro parado.
@@ -8326,41 +8330,29 @@ mod tests {
         shell.inspection_source = TextBuffer::new("m.");
         shell.inspection_editor.set_cursor(2);
         assert_eq!(
-            shell.inspection_member_request(),
-            Some(("br.com.exemplo.Pedido".to_owned(), String::new())),
+            shell.inspection_member_context(),
+            Some(("m.".to_owned(), 2)),
+            "a shell entrega texto e cursor sem interpretar a sintaxe"
+        );
+        assert_eq!(
+            shell.inspection_member_target("m", String::new()),
+            ("br.com.exemplo.Pedido".to_owned(), String::new()),
             "o tipo vem do objeto parado, e não de declaração nenhuma"
         );
 
-        // O que se digita depois do ponto vira filtro.
-        shell.inspection_source = TextBuffer::new("m.getCli");
-        shell.inspection_editor.set_cursor(8);
         assert_eq!(
-            shell.inspection_member_request(),
-            Some(("br.com.exemplo.Pedido".to_owned(), "getCli".to_owned()))
+            shell.inspection_member_target("m", "getCli".to_owned()),
+            ("br.com.exemplo.Pedido".to_owned(), "getCli".to_owned())
         );
-
-        // Um campo da árvore também é receptor conhecido.
-        shell.inspection_source = TextBuffer::new("cliente.");
-        shell.inspection_editor.set_cursor(8);
         assert_eq!(
-            shell.inspection_member_request(),
-            Some(("br.com.exemplo.Cliente".to_owned(), String::new()))
+            shell.inspection_member_target("cliente", String::new()),
+            ("br.com.exemplo.Cliente".to_owned(), String::new())
         );
-
-        // Um nome que não está no depurado é lido como nome de tipo: a classe
-        // pode existir no projeto sem participar do que está sendo depurado.
-        shell.inspection_source = TextBuffer::new("Relatorio.");
-        shell.inspection_editor.set_cursor(10);
         assert_eq!(
-            shell.inspection_member_request(),
-            Some(("Relatorio".to_owned(), String::new())),
+            shell.inspection_member_target("Relatorio", String::new()),
+            ("Relatorio".to_owned(), String::new()),
             "classe de fora do código depurado precisa ser perguntável"
         );
-
-        // Sem ponto não há pergunta.
-        shell.inspection_source = TextBuffer::new("m");
-        shell.inspection_editor.set_cursor(1);
-        assert_eq!(shell.inspection_member_request(), None);
     }
 
     /// Com a lista aberta na inspeção, as setas andam nela e Enter aceita.

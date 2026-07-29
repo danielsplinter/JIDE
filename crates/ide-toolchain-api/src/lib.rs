@@ -46,8 +46,6 @@ pub struct CompilationRequest {
     pub source_files: Vec<PathBuf>,
     pub output_directory: PathBuf,
     pub classpath: Classpath,
-    pub source_level: Option<String>,
-    pub target_level: Option<String>,
     pub additional_args: Vec<String>,
     pub working_directory: PathBuf,
 }
@@ -64,10 +62,10 @@ pub struct CompilationResult {
 #[derive(Clone, Debug)]
 pub struct ExecutionRequest {
     pub installation: ToolchainInstallation,
-    pub main_class: String,
+    pub entry_point: String,
     pub classpath: Classpath,
     pub args: Vec<String>,
-    pub jvm_args: Vec<String>,
+    pub runtime_args: Vec<String>,
     pub working_directory: PathBuf,
 }
 
@@ -82,7 +80,7 @@ pub struct ExecutionResult {
 #[derive(Clone, Debug)]
 pub struct TestRequest {
     pub compilation: CompilationRequest,
-    pub test_classes: Vec<String>,
+    pub targets: Vec<String>,
     pub args: Vec<String>,
 }
 

@@ -1,6 +1,31 @@
 //! Utilitários de navegação por posição e token.
 
 use ide_domain::{TextPosition, TextRange};
+use ide_language_api::MemberAccess;
+
+pub(super) fn member_access(text: &str, offset: usize) -> Option<MemberAccess> {
+    let head = &text[..offset.min(text.len())];
+    let prefix_start = head
+        .char_indices()
+        .rev()
+        .find(|(_, value)| !is_identifier_char(*value))
+        .map_or(0, |(index, value)| index + value.len_utf8());
+    let prefix = head[prefix_start..].to_owned();
+    let before = head[..prefix_start].trim_end();
+    let receiver_end = before.strip_suffix('.')?.trim_end();
+    let receiver_start = receiver_end
+        .char_indices()
+        .rev()
+        .find(|(_, value)| !is_identifier_char(*value))
+        .map_or(0, |(index, value)| index + value.len_utf8());
+    let receiver = receiver_end[receiver_start..].to_owned();
+    (!receiver.is_empty() && !receiver.starts_with(|value: char| value.is_ascii_digit()))
+        .then_some(MemberAccess { receiver, prefix })
+}
+
+fn is_identifier_char(value: char) -> bool {
+    value.is_alphanumeric() || value == '_' || value == '$'
+}
 
 pub(super) fn within(range: &TextRange, position: TextPosition) -> bool {
     let point = (position.line, position.column);

@@ -1,9 +1,13 @@
 #![doc = "Contratos versionados e independentes de linguagem."]
 
 use async_trait::async_trait;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use ide_domain::{
@@ -13,7 +17,7 @@ use ide_domain::{
 };
 use thiserror::Error;
 
-pub const LANGUAGE_API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 1 };
+pub const LANGUAGE_API_VERSION: ApiVersion = ApiVersion { major: 2, minor: 0 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ApiVersion {
@@ -54,16 +58,37 @@ pub struct LanguageMetadata {
     pub trigger_characters: Vec<char>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LanguageToolchainConfig {
+    pub language_id: LanguageId,
+    pub installation_root: PathBuf,
+    pub properties: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct LanguageActivationContext {
-    pub workspace_root: std::path::PathBuf,
-    /// Raiz do JDK que o usuário escolheu na IDE.
+    pub workspace_root: PathBuf,
+    pub source_roots: Vec<PathBuf>,
+    /// Toolchains selecionadas, associadas à linguagem que as interpreta.
     ///
-    /// A biblioteca padrão de uma linguagem vem da instalação escolhida, não de
-    /// uma variável de ambiente: trocar de JDK pelo menu tem que trocar as
-    /// classes que a completação conhece. `None` quando nenhuma instalação foi
-    /// detectada ainda.
-    pub jdk_home: Option<std::path::PathBuf>,
+    /// O contrato não conhece JDK, SDK ou runtime concreto. Cada provider usa a
+    /// instalação da sua linguagem e interpreta propriedades próprias.
+    pub toolchains: Vec<LanguageToolchainConfig>,
+}
+
+impl LanguageActivationContext {
+    #[must_use]
+    pub fn toolchain(&self, language_id: &LanguageId) -> Option<&LanguageToolchainConfig> {
+        self.toolchains
+            .iter()
+            .find(|toolchain| &toolchain.language_id == language_id)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberAccess {
+    pub receiver: String,
+    pub prefix: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -121,6 +146,13 @@ pub trait ActiveLanguage: Send + Sync {
         _request: CompletionRequest,
     ) -> Result<Vec<CompletionItem>, LanguageError> {
         Err(LanguageError::Unsupported("completion".to_owned()))
+    }
+    async fn member_access(
+        &self,
+        _text: &str,
+        _offset: usize,
+    ) -> Result<Option<MemberAccess>, LanguageError> {
+        Err(LanguageError::Unsupported("member access".to_owned()))
     }
     /// Membros públicos de um tipo nomeado, sem documento nem posição.
     ///

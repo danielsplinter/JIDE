@@ -199,13 +199,7 @@ impl BuildSystemAdapter for GradleAdapter {
         }));
         args.extend(request.extra_args.iter().cloned());
         let command_line = format!("{} {}", program.display(), args.join(" "));
-        let mut environment = Vec::new();
-        if let Some(java_home) = &request.java_home {
-            environment.push((
-                "JAVA_HOME".to_owned(),
-                java_home.to_string_lossy().into_owned(),
-            ));
-        }
+        let environment = request.environment.into_iter().collect();
         let output = self
             .processes
             .execute(ProcessRequest {
@@ -517,7 +511,7 @@ mod tests {
             adapter.execute(
                 BuildCommandRequest::new(descriptor, vec!["build".to_owned()])
                     .with_module(Some(ModuleId("app".to_owned())))
-                    .with_java_home(Some(PathBuf::from("/jdk"))),
+                    .with_environment_variable("JAVA_HOME", "/jdk"),
             ),
         );
         assert!(matches!(result, Ok(result) if result.success));
