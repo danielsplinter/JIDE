@@ -79,6 +79,23 @@ fn dependency_names(manifest: &toml::Value, include_dev: bool) -> BTreeSet<Strin
     names
 }
 
+fn rust_sources(directory: &Path) -> Vec<PathBuf> {
+    let entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("não foi possível listar {}: {error}", directory.display()));
+    let mut sources = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.unwrap_or_else(|error| panic!("não foi possível ler item do diretório: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            sources.extend(rust_sources(&path));
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            sources.push(path);
+        }
+    }
+    sources
+}
+
 #[test]
 fn ui_dependencies_are_relative_centralized_and_versioned() {
     let root = workspace_root();
@@ -325,16 +342,20 @@ fn concrete_java_crates_stay_behind_the_composition_root() {
 fn neutral_crates_expose_no_language_specific_public_api() {
     let root = workspace_root();
     let sources = [
-        "crates/ide-application/src/commands.rs",
-        "crates/ide-ui/src/lib.rs",
-        "crates/ide-workspace/src/lib.rs",
-    ];
+        "crates/ide-application/src",
+        "crates/ide-ui/src",
+        "crates/ide-workspace/src",
+    ]
+    .into_iter()
+    .flat_map(|relative| rust_sources(&root.join(relative)))
+    .collect::<Vec<_>>();
     let language_terms = ["java", "jdk", "jvm", "maven", "gradle"];
     let mut actual_debt = BTreeSet::new();
 
-    for relative in sources {
-        let source = fs::read_to_string(root.join(relative))
-            .unwrap_or_else(|error| panic!("não foi possível ler {relative}: {error}"));
+    for path in sources {
+        let relative = path.strip_prefix(&root).unwrap_or(&path);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("não foi possível ler {}: {error}", relative.display()));
         for line in source.lines().map(str::trim) {
             let public_symbol = line
                 .strip_prefix("pub fn ")
@@ -342,6 +363,10 @@ fn neutral_crates_expose_no_language_specific_public_api() {
                 .or_else(|| line.strip_prefix("pub enum "))
                 .or_else(|| line.strip_prefix("pub trait "))
                 .or_else(|| line.strip_prefix("pub type "))
+                .or_else(|| line.strip_prefix("pub const "))
+                .or_else(|| line.strip_prefix("pub static "))
+                .or_else(|| line.strip_prefix("pub mod "))
+                .or_else(|| line.strip_prefix("pub use "))
                 .and_then(|rest| {
                     rest.split(|character: char| {
                         !(character.is_ascii_alphanumeric() || character == '_')
@@ -351,7 +376,7 @@ fn neutral_crates_expose_no_language_specific_public_api() {
             if let Some(symbol) = public_symbol {
                 let declaration = line.to_ascii_lowercase();
                 if language_terms.iter().any(|term| declaration.contains(term)) {
-                    actual_debt.insert(format!("{relative}:{symbol}"));
+                    actual_debt.insert(format!("{}:{symbol}", relative.display()));
                 }
             }
         }
@@ -738,5 +763,76 @@ fn phase_seven_keeps_language_state_in_its_owning_modules() {
             && registry.contains("fn route(")
             && routing.contains("struct ProviderSelection"),
         "registry e routing devem possuir registro, seleção e rotas"
+    );
+}
+
+#[test]
+fn phase_eight_preserves_the_final_architecture_metrics() {
+    let root = workspace_root();
+    let root_manifest = manifest(&root.join("Cargo.toml"));
+    let crates = workspace_crates(&root_manifest);
+    let internal = crates
+        .iter()
+        .map(|workspace_crate| workspace_crate.name.clone())
+        .collect::<BTreeSet<_>>();
+    let graph = crates
+        .iter()
+        .map(|workspace_crate| {
+            let dependencies = dependency_names(&workspace_crate.manifest, true)
+                .into_iter()
+                .filter(|name| internal.contains(name))
+                .collect::<BTreeSet<_>>();
+            (workspace_crate.name.clone(), dependencies)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let edge_count = graph.values().map(BTreeSet::len).sum::<usize>();
+    let app_fan_out = graph.get("ide-app").map_or(0, BTreeSet::len);
+    let domain_fan_in = graph
+        .values()
+        .filter(|dependencies| dependencies.contains("ide-domain"))
+        .count();
+
+    assert_eq!(crates.len(), 19, "a refatoração não deve pulverizar crates");
+    assert!(
+        edge_count <= 49,
+        "o grafo interno ultrapassou a linha final de 49 arestas: {edge_count}"
+    );
+    assert!(
+        app_fan_out <= 17,
+        "ide-app ultrapassou o fan-out final de 17: {app_fan_out}"
+    );
+    assert!(
+        domain_fan_in >= 13,
+        "contratos deixaram de convergir para ide-domain: fan-in {domain_fan_in}"
+    );
+
+    let line_limits = [
+        ("crates/ide-app/src/main.rs", 15),
+        ("crates/ide-ui/src/lib.rs", 30),
+        ("crates/language-java/src/lib.rs", 12),
+        ("crates/ide-language-host/src/lib.rs", 10),
+    ];
+    for (relative, limit) in line_limits {
+        let source = fs::read_to_string(root.join(relative))
+            .unwrap_or_else(|error| panic!("não foi possível ler {relative}: {error}"));
+        assert!(
+            source.lines().count() <= limit,
+            "{relative} ultrapassou a linha final de {limit} linhas"
+        );
+    }
+
+    let native = fs::read_to_string(root.join("crates/ide-app/src/native_ide.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler NativeIde: {error}"));
+    let shell = fs::read_to_string(root.join("crates/ide-ui/src/ide_shell.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler IdeShell: {error}"));
+    assert_eq!(
+        struct_field_count(&native, "NativeIde"),
+        9,
+        "NativeIde divergiu da linha final"
+    );
+    assert_eq!(
+        struct_field_count(&shell, "IdeShell"),
+        10,
+        "IdeShell divergiu da linha final"
     );
 }

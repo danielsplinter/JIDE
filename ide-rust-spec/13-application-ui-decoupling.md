@@ -447,15 +447,63 @@ Implementação concluída em 29/07/2026:
 - `cargo test --workspace`, Clippy estrito e o build release de `ide-app` foram
   executados sem falhas.
 
-### Fase 8 — Validação final
+### Fase 8 — Validação final ✅ Concluída
 
-- [ ] registrar uma linguagem falsa sem alterar `ide-app`, `ide-ui`,
+- [x] registrar uma linguagem falsa sem alterar `ide-app`, `ide-ui`,
   controllers ou comandos;
-- [ ] executar uma tarefa falsa e exibir seu estado por modelos genéricos;
-- [ ] verificar ausência de nomes Java nas APIs neutras;
-- [ ] comparar grafo, fan-in, fan-out, linhas e campos com a linha de base;
-- [ ] executar testes, Clippy estrito e build release;
-- [ ] atualizar esta especificação com o estado efetivamente entregue.
+- [x] executar uma tarefa falsa e exibir seu estado por modelos genéricos;
+- [x] verificar ausência de nomes Java nas APIs neutras;
+- [x] comparar grafo, fan-in, fan-out, linhas e campos com a linha de base;
+- [x] executar testes, Clippy estrito e build release;
+- [x] atualizar esta especificação com o estado efetivamente entregue.
+
+Implementação concluída em 29/07/2026:
+
+- o teste de integração `fake_language` registra uma contribuição fictícia
+  somente pelos contratos públicos, ativa seu provider pelo
+  `ide-language-host`, abre um documento `.fake`, executa `fake.run` pelo
+  `TaskController` e entrega o `TaskExecutionResult` à shell;
+- catálogo, tarefa, saída e estado da contribuição fictícia atravessam apenas
+  `UiContributionCatalog`, `TaskDescriptor` e `TaskExecutionResult`. O teste
+  executa a pintura da shell e confirma que `Run fake completed` está
+  efetivamente visível, sem ramo, comando ou controller específico;
+- o guardrail de APIs neutras passou a percorrer recursivamente todos os
+  arquivos Rust de `ide-application`, `ide-ui` e `ide-workspace`, cobrindo
+  funções, estruturas, enums, traits, aliases, constantes, módulos e reexports
+  públicos. Não há API pública Java, JDK, JVM, Maven ou Gradle nessas crates;
+- o teste arquitetural
+  `phase_eight_preserves_the_final_architecture_metrics` fixa os limites finais
+  do grafo e das estruturas centrais.
+
+Comparação final com a linha de base:
+
+| Métrica | Linha de base | Estado final |
+|---|---:|---:|
+| Crates / ciclos | 19 / 0 | 19 / 0 |
+| Arestas internas | não registrada | 49 |
+| Fan-in de `ide-domain` | 13 | 15 |
+| Fan-out de `ide-app` | 16 | 17 |
+| Dependências Java concretas diretas de `ide-app` | 5 | 5 |
+| Campos de `NativeIde` | 29 | 9 |
+| Campos de `IdeShell` | 83 | 10 |
+| Linhas de `ide-app/src/main.rs` | ~2.400 | 15 |
+| Linhas de `ide-ui/src/lib.rs` | ~9.100 | 30 |
+| Linhas de `language-java/src/lib.rs` | ~2.250 | 12 |
+| Linhas de `ide-language-host/src/lib.rs` | ~1.640 | 10 |
+
+O aumento de uma dependência no fan-out de `ide-app` corresponde ao contrato
+genérico `ide-application`; as cinco implementações Java permanecem restritas ao
+composition root e são fiscalizadas pelo teste arquitetural. O aumento do
+fan-in de `ide-domain` representa maior convergência das crates para o núcleo
+neutro, sem dependências de saída no domínio.
+
+Validação final:
+
+- `cargo test --workspace`: 274 testes aprovados, nenhuma falha e 7 ignorados;
+- `cargo clippy --workspace --all-targets -- -D warnings`: limpo;
+- `cargo build --release -p ide-app`: concluído;
+- grafo acíclico, limites estruturais e contratos falsos cobertos pelos testes
+  arquiteturais ativos.
 
 ## Testes arquiteturais obrigatórios
 

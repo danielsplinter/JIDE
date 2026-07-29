@@ -18,6 +18,10 @@ use ide_language_api::{
 };
 use ide_language_host::LanguageHost;
 use ide_toolchain_api::{ToolchainId, ToolchainInstallation};
+use ide_ui::IdeShell;
+use ide_workspace::FileNode;
+use ui_core::Size;
+use ui_render_api::PaintCommand;
 
 fn success<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     match result {
@@ -211,4 +215,34 @@ fn application_contracts_accept_a_fake_language_without_java_dependencies() {
     assert!(task_result.success);
     assert_eq!(task_result.status, "Run fake completed");
     assert_eq!(task_executions.load(Ordering::Relaxed), 1);
+
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: "fake-workspace".into(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    shell.set_ui_catalog(contributions.ui_catalog());
+    assert!(
+        shell
+            .ui_catalog()
+            .tasks
+            .iter()
+            .any(|task| task.id == TaskId("fake.run".to_owned()))
+    );
+    shell.append_tool_output(&task_result.stdout, false);
+    shell.append_tool_output(&task_result.stderr, true);
+    shell.set_status_message(task_result.status);
+
+    let visible_text = shell
+        .paint(Size::new(1_000.0, 700.0))
+        .into_iter()
+        .filter_map(|command| match command {
+            PaintCommand::DrawText(text) => Some(text.text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        visible_text.iter().any(|text| text == "Run fake completed"),
+        "o estado da tarefa falsa deve atravessar o modelo genérico e ser exibido pela shell"
+    );
 }
