@@ -7,9 +7,9 @@ ide/
 ├── Cargo.toml
 ├── crates/
 │   ├── ide-app/
+│   ├── ide-application/
 │   ├── ide-core/
 │   ├── ide-domain/
-│   ├── ide-events/
 │   ├── ide-text/
 │   ├── ide-ui/
 │   ├── ide-workspace/
@@ -42,6 +42,10 @@ ide/
 ```text
 ide-domain
     não depende de infraestrutura
+
+ide-application
+    depende de ide-domain e reúne comandos, eventos e, gradualmente, os casos
+    de uso coordenados pela aplicação
 
 ide-language-api
     depende de ide-domain

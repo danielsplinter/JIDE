@@ -1,5 +1,5 @@
 [package]
-name = "ide-events"
+name = "ide-application"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 ide-domain = { path = "../ide-domain" }
+thiserror.workspace = true
 
 [lints]
 workspace = true
-

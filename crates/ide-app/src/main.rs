@@ -12,6 +12,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use ide_application::{
+    ApplicationCommand, DebugRequest, EventBus, IdeEvent, NavigationRequest, NewItemKind,
+    NewItemRequest,
+};
 use ide_build_api::{
     BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry, ProjectImportRequest,
 };
@@ -29,8 +33,7 @@ use ide_toolchain_api::{
     TestAdapter, TestRequest, ToolchainProvider,
 };
 use ide_ui::{
-    ContentSearchHit, DebugRequest, DebugView, IdeShell, NavigationRequest, NewItemKind,
-    NewItemRequest, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
+    ContentSearchHit, DebugView, IdeShell, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
 };
 use java_gradle_adapter::{GRADLE_BUILD_SYSTEM_ID, GradleAdapter};
 use java_javac_adapter::JavaJavacAdapter;
@@ -71,8 +74,10 @@ struct NativeIde {
     control_pressed: bool,
     shift_pressed: bool,
     navigation_requests: Vec<NavigationRequest>,
+    application_events: EventBus,
     language_host: Option<LanguageHost>,
     language_documents: HashMap<DocumentId, DocumentSnapshot>,
+    application_documents: HashMap<DocumentId, DocumentSnapshot>,
     java_toolchains: JavaToolchainSelection,
     java_adapter: Option<Arc<JavaJavacAdapter>>,
     build_systems: BuildSystemRegistry,
@@ -129,6 +134,7 @@ impl NativeIde {
                 }
             }
         }
+        self.application_events = EventBus::bounded(self.config.event_capacity.max(1));
         let root = startup_root(&self.config, std::env::current_dir().ok())
             .ok_or_else(|| "não foi possível determinar o diretório do projeto".to_owned())?;
         let language_host = LanguageHost::new(&root);
@@ -162,6 +168,7 @@ impl NativeIde {
         }
         self.remembered_documents = shell.open_document_paths();
         self.shell = Some(shell);
+        self.publish_event(IdeEvent::WorkspaceOpened { root: root.clone() });
         let processes: Arc<dyn ProcessSupervisor> = Arc::new(NativeProcessSupervisor::default());
         self.java_adapter = Some(Arc::new(JavaJavacAdapter::new(processes.clone())));
         self.build_systems
@@ -221,6 +228,23 @@ impl NativeIde {
         renderer.end_frame().map_err(|error| error.to_string())
     }
 
+    fn publish_event(&self, event: IdeEvent) {
+        if let Err(error) = self.application_events.publish(event) {
+            tracing::warn!(?error, "evento da aplicação descartado");
+        }
+    }
+
+    fn drain_application_events(&self) {
+        match self.application_events.drain() {
+            Ok(events) => {
+                for event in events {
+                    tracing::debug!(?event, "evento da aplicação");
+                }
+            }
+            Err(error) => tracing::warn!(?error, "barramento de eventos indisponível"),
+        }
+    }
+
     fn choose_project(&mut self) {
         let Some(current) = self
             .shell
@@ -250,7 +274,11 @@ impl NativeIde {
                     }
                 }
                 self.language_documents.clear();
+                self.application_documents.clear();
                 self.shell = Some(shell);
+                self.publish_event(IdeEvent::WorkspaceOpened {
+                    root: folder.clone(),
+                });
                 self.remember_project(&folder);
                 self.detect_java_toolchains(&folder);
                 self.import_project(&folder);
@@ -272,14 +300,15 @@ impl NativeIde {
     }
 
     fn sync_languages(&mut self) {
-        let Some(language_host) = &self.language_host else {
-            return;
-        };
         let snapshots = self
             .shell
             .as_ref()
             .map(IdeShell::document_snapshots)
             .unwrap_or_default();
+        self.sync_document_events(&snapshots);
+        let Some(language_host) = &self.language_host else {
+            return;
+        };
         let open_ids = snapshots
             .iter()
             .map(|snapshot| snapshot.id)
@@ -306,6 +335,10 @@ impl NativeIde {
             {
                 continue;
             }
+            let changed = self
+                .language_documents
+                .get(&snapshot.id)
+                .is_none_or(|previous| previous.version != snapshot.version);
             let result = match self.language_documents.get(&snapshot.id) {
                 None => pollster::block_on(
                     language_host.open_document(language_host.request_context(), snapshot.clone()),
@@ -323,10 +356,6 @@ impl NativeIde {
                 tracing::warn!(%error, document_id = snapshot.id.0, "Java syntax update failed");
                 continue;
             }
-            let changed = self
-                .language_documents
-                .get(&snapshot.id)
-                .is_none_or(|previous| previous.version != snapshot.version);
             self.language_documents
                 .insert(snapshot.id, snapshot.clone());
             if changed {
@@ -346,6 +375,43 @@ impl NativeIde {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    fn sync_document_events(&mut self, snapshots: &[DocumentSnapshot]) {
+        let open_ids = snapshots
+            .iter()
+            .map(|snapshot| snapshot.id)
+            .collect::<std::collections::HashSet<_>>();
+        let closed = self
+            .application_documents
+            .keys()
+            .filter(|id| !open_ids.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for document_id in closed {
+            self.application_documents.remove(&document_id);
+            self.publish_event(IdeEvent::DocumentClosed(document_id));
+        }
+        for snapshot in snapshots {
+            let event = match self.application_documents.get(&snapshot.id) {
+                None => Some(IdeEvent::DocumentOpened {
+                    document_id: snapshot.id,
+                    path: snapshot.path.clone(),
+                }),
+                Some(previous) if previous.version != snapshot.version => {
+                    Some(IdeEvent::DocumentChanged {
+                        document_id: snapshot.id,
+                        version: snapshot.version,
+                    })
+                }
+                Some(_) => None,
+            };
+            self.application_documents
+                .insert(snapshot.id, snapshot.clone());
+            if let Some(event) = event {
+                self.publish_event(event);
             }
         }
     }
@@ -391,14 +457,7 @@ impl NativeIde {
     ///
     /// A tela guarda o que foi digitado e pede uma vez; quem tem o provedor de
     /// linguagem é o app, e é aqui que a pergunta vira resposta.
-    fn answer_type_search(&mut self) {
-        let Some(query) = self
-            .shell
-            .as_mut()
-            .and_then(IdeShell::take_type_search_request)
-        else {
-            return;
-        };
+    fn answer_type_search(&mut self, query: String) {
         let Some(host) = self.language_host.as_ref() else {
             return;
         };
@@ -431,16 +490,9 @@ impl NativeIde {
     ///
     /// O serviço de workspace conhece o limite estrutural: somente arquivos sob
     /// diretórios chamados `java` podem produzir ocorrências.
-    fn answer_content_search(&mut self) {
-        let Some(query) = self
-            .shell
-            .as_mut()
-            .and_then(IdeShell::take_content_search_request)
-        else {
-            return;
-        };
+    fn answer_content_search(&mut self, query: &str) {
         let found = self.shell.as_ref().map_or_else(Vec::new, |shell| {
-            ide_workspace::search_java_content(shell.workspace_tree(), &query, TYPE_SEARCH_LIMIT)
+            ide_workspace::search_java_content(shell.workspace_tree(), query, TYPE_SEARCH_LIMIT)
         });
         if let Some(shell) = self.shell.as_mut() {
             shell.set_content_search_results(
@@ -733,6 +785,10 @@ impl NativeIde {
         match pollster::block_on(adapter.import_project(request)) {
             Ok(model) => {
                 let summary = model.summary();
+                let event = IdeEvent::ProjectImported {
+                    root: descriptor.root.clone(),
+                    build_system: descriptor.build_system.0.clone(),
+                };
                 self.project = Some(ImportedProject {
                     adapter,
                     manifest_modified: modified_at(&descriptor.manifest),
@@ -743,6 +799,7 @@ impl NativeIde {
                     shell.set_project_summary(Some(summary.clone()));
                     shell.set_status_message(format!("Projeto importado: {summary}"));
                 }
+                self.publish_event(event);
             }
             Err(error) => {
                 // O último modelo válido continua valendo, e o carimbo do
@@ -967,86 +1024,112 @@ impl NativeIde {
         }
     }
 
-    fn handle_debug_requests(&mut self) {
-        let requests = self
-            .shell
-            .as_mut()
-            .map(IdeShell::take_debug_requests)
-            .unwrap_or_default();
-        for request in requests {
-            match request {
-                DebugRequest::Attach { host, port } => {
-                    self.remember_debug_target(&host, port);
-                    let source_roots = self.debug_source_roots();
-                    self.send_debug(debug::DebugCommand::Attach {
-                        host,
-                        port,
-                        source_roots,
-                        attempts: 1,
+    fn handle_debug_request(&mut self, request: DebugRequest) {
+        match request {
+            DebugRequest::Attach { host, port } => {
+                self.remember_debug_target(&host, port);
+                let source_roots = self.debug_source_roots();
+                self.send_debug(debug::DebugCommand::Attach {
+                    host,
+                    port,
+                    source_roots,
+                    attempts: 1,
+                });
+            }
+            DebugRequest::RunAndAttach { host, port } => self.run_and_attach(&host, port),
+            DebugRequest::Continue => self.send_debug(debug::DebugCommand::Continue),
+            DebugRequest::Pause => self.send_debug(debug::DebugCommand::Pause),
+            DebugRequest::StepOver => {
+                self.send_debug(debug::DebugCommand::Step(StepKind::Over));
+            }
+            DebugRequest::StepInto => {
+                self.send_debug(debug::DebugCommand::Step(StepKind::Into));
+            }
+            DebugRequest::StepOut => {
+                self.send_debug(debug::DebugCommand::Step(StepKind::Out));
+            }
+            DebugRequest::Detach => self.send_debug(debug::DebugCommand::Detach),
+            DebugRequest::SelectFrame(index) => {
+                if let Some(thread) = self.debug_thread {
+                    self.send_debug(debug::DebugCommand::Refresh {
+                        thread,
+                        frame: index,
                     });
                 }
-                DebugRequest::RunAndAttach { host, port } => self.run_and_attach(&host, port),
-                DebugRequest::Continue => self.send_debug(debug::DebugCommand::Continue),
-                DebugRequest::Pause => self.send_debug(debug::DebugCommand::Pause),
-                DebugRequest::StepOver => {
-                    self.send_debug(debug::DebugCommand::Step(StepKind::Over));
+            }
+            DebugRequest::ExpandInspection(path) => {
+                if let Some(thread) = self.debug_thread {
+                    self.send_debug(debug::DebugCommand::ExpandInspection {
+                        thread,
+                        frame: self.debug_view.selected_frame,
+                        path,
+                    });
                 }
-                DebugRequest::StepInto => {
-                    self.send_debug(debug::DebugCommand::Step(StepKind::Into));
-                }
-                DebugRequest::StepOut => {
-                    self.send_debug(debug::DebugCommand::Step(StepKind::Out));
-                }
-                DebugRequest::Detach => self.send_debug(debug::DebugCommand::Detach),
-                DebugRequest::SelectFrame(index) => {
-                    if let Some(thread) = self.debug_thread {
-                        self.send_debug(debug::DebugCommand::Refresh {
-                            thread,
-                            frame: index,
-                        });
-                    }
-                }
-                DebugRequest::ExpandInspection(path) => {
-                    if let Some(thread) = self.debug_thread {
-                        self.send_debug(debug::DebugCommand::ExpandInspection {
-                            thread,
-                            frame: self.debug_view.selected_frame,
-                            path,
-                        });
-                    }
-                }
-                DebugRequest::Evaluate(expression) => {
-                    // A avaliação acontece no quadro que o usuário está olhando:
-                    // o mesmo nome vale coisas diferentes em quadros diferentes.
-                    if let Some(thread) = self.debug_thread {
-                        self.send_debug(debug::DebugCommand::Evaluate {
-                            thread,
-                            frame: self.debug_view.selected_frame,
-                            expression,
-                        });
-                    } else if let Some(shell) = self.shell.as_mut() {
-                        shell.set_status_message("Nenhuma thread parada para inspecionar");
-                    }
+            }
+            DebugRequest::Evaluate(expression) => {
+                if let Some(thread) = self.debug_thread {
+                    self.send_debug(debug::DebugCommand::Evaluate {
+                        thread,
+                        frame: self.debug_view.selected_frame,
+                        expression,
+                    });
+                } else if let Some(shell) = self.shell.as_mut() {
+                    shell.set_status_message("Nenhuma thread parada para inspecionar");
                 }
             }
         }
-        if self.shell.as_mut().is_some_and(IdeShell::take_run_request) {
-            self.run_application();
-        }
-        if self.shell.as_mut().is_some_and(IdeShell::take_stop_request) {
-            self.stop_application();
-        }
-        if let Some(path) = self
+    }
+
+    fn sync_breakpoints(&mut self, path: PathBuf) {
+        let lines = self
             .shell
-            .as_mut()
-            .and_then(IdeShell::take_breakpoints_dirty)
-        {
-            let lines = self
-                .shell
-                .as_ref()
-                .map(|shell| shell.breakpoints_for(&path))
-                .unwrap_or_default();
-            self.send_debug(debug::DebugCommand::SetBreakpoints { path, lines });
+            .as_ref()
+            .map(|shell| shell.breakpoints_for(&path))
+            .unwrap_or_default();
+        self.send_debug(debug::DebugCommand::SetBreakpoints { path, lines });
+    }
+
+    fn dispatch_application_commands(&mut self, mut direct: Vec<ApplicationCommand>) {
+        if let Some(shell) = self.shell.as_mut() {
+            direct.extend(shell.drain_application_commands());
+        }
+        for command in direct {
+            match command {
+                ApplicationCommand::OpenProject => self.choose_project(),
+                ApplicationCommand::OpenSettings => self.open_jdk_selector(),
+                ApplicationCommand::OpenCompilerSettings => {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.set_settings_page(SettingsPage::Compiler);
+                    }
+                    self.open_jdk_selector();
+                }
+                ApplicationCommand::BrowseToolchain => self.choose_jdk_home(),
+                ApplicationCommand::SelectToolchain(index) => self.select_jdk(index),
+                ApplicationCommand::BuildProject => self.start_project_build(),
+                ApplicationCommand::ReimportProject => self.reimport_project(),
+                ApplicationCommand::CompileProject => {
+                    self.start_java_task(JavaTask::Compile);
+                }
+                ApplicationCommand::RunProject => self.run_application(),
+                ApplicationCommand::RunActiveFile => self.start_java_task(JavaTask::Run),
+                ApplicationCommand::TestProject => self.start_java_task(JavaTask::Test),
+                ApplicationCommand::StopProject => self.stop_application(),
+                ApplicationCommand::Navigate(request) => {
+                    tracing::info!(
+                        token = request.token,
+                        byte_offset = request.byte_offset,
+                        "definition navigation requested"
+                    );
+                    self.navigation_requests.push(request.clone());
+                    self.navigate_to_definition(request);
+                    self.sync_languages();
+                }
+                ApplicationCommand::CreateItem(request) => self.create_new_item(request),
+                ApplicationCommand::BreakpointsChanged(path) => self.sync_breakpoints(path),
+                ApplicationCommand::Debug(request) => self.handle_debug_request(request),
+                ApplicationCommand::SearchTypes(query) => self.answer_type_search(query),
+                ApplicationCommand::SearchContent(query) => self.answer_content_search(&query),
+            }
         }
         self.remember_documents();
     }
@@ -1485,7 +1568,8 @@ impl ApplicationHandler for NativeIde {
         }
         changed |= self.watch_manifest();
         changed |= self.drain_debug_events();
-        self.handle_debug_requests();
+        self.dispatch_application_commands(Vec::new());
+        self.drain_application_events();
         if let (Some(window), Some(shell)) = (self.window.as_ref(), self.shell.as_mut()) {
             changed |= shell.update_terminals(window.logical_size());
             if changed {
@@ -1516,13 +1600,8 @@ impl ApplicationHandler for NativeIde {
             return;
         }
         let mut sync_languages = false;
-        let mut pending_definition = None;
         let mut completion_requested = false;
-        let mut build_requested = false;
-        let mut project_build_requested = false;
-        let mut run_requested = false;
-        let mut test_requested = false;
-        let mut select_jdk_requested = false;
+        let mut direct_commands = Vec::new();
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -1594,25 +1673,9 @@ impl ApplicationHandler for NativeIde {
                         window.logical_size(),
                         self.control_pressed,
                     );
-                    if let Some(request) = shell.take_navigation_request() {
-                        tracing::info!(
-                            token = request.token,
-                            byte_offset = request.byte_offset,
-                            "definition navigation requested"
-                        );
-                        self.navigation_requests.push(request.clone());
-                        pending_definition = Some(request);
-                    }
                 }
                 sync_languages = true;
-                let open_project = self
-                    .shell
-                    .as_mut()
-                    .is_some_and(IdeShell::take_open_project_request);
                 window.request_redraw();
-                if open_project {
-                    self.choose_project();
-                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -1695,21 +1758,21 @@ impl ApplicationHandler for NativeIde {
                     && self.shift_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("j"))
                 {
-                    select_jdk_requested = true;
+                    direct_commands.push(ApplicationCommand::OpenCompilerSettings);
                 } else if self.control_pressed
                     && self.shift_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("t"))
                 {
-                    test_requested = true;
+                    direct_commands.push(ApplicationCommand::TestProject);
                 } else if self.control_pressed
                     && self.shift_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("b"))
                 {
-                    project_build_requested = true;
+                    direct_commands.push(ApplicationCommand::BuildProject);
                 } else if self.control_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("b"))
                 {
-                    build_requested = true;
+                    direct_commands.push(ApplicationCommand::CompileProject);
                 } else if self.control_pressed
                     && self.shift_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("l"))
@@ -1783,7 +1846,7 @@ impl ApplicationHandler for NativeIde {
                             }
                         }
                         Key::Named(NamedKey::F5) => {
-                            run_requested = true;
+                            direct_commands.push(ApplicationCommand::RunActiveFile);
                         }
                         Key::Named(NamedKey::F8) => {
                             if let Some(shell) = self.shell.as_mut() {
@@ -1906,78 +1969,11 @@ impl ApplicationHandler for NativeIde {
         if sync_languages {
             self.sync_languages();
         }
-        if let Some(request) = pending_definition {
-            self.navigate_to_definition(request);
-            self.sync_languages();
-        }
         if completion_requested {
             self.request_completion();
         }
-        // A busca de tipo responde a cada tecla: quem digita refina a lista, e a
-        // tela só sabe pedir.
-        self.answer_type_search();
-        self.answer_content_search();
-        if select_jdk_requested {
-            // `Ctrl+Shift+J` promete a página do compilador, qualquer que tenha
-            // sido a última página aberta.
-            if let Some(shell) = self.shell.as_mut() {
-                shell.set_settings_page(SettingsPage::Compiler);
-            }
-            self.open_jdk_selector();
-        }
-        let open_settings = self
-            .shell
-            .as_mut()
-            .is_some_and(IdeShell::take_open_settings_request);
-        if open_settings {
-            self.open_jdk_selector();
-        }
-        if let Some(request) = self
-            .shell
-            .as_mut()
-            .and_then(IdeShell::take_new_item_request)
-        {
-            self.create_new_item(request);
-        }
-        let configured_jdk = self
-            .shell
-            .as_mut()
-            .and_then(IdeShell::take_settings_jdk_result);
-        if let Some(index) = configured_jdk {
-            self.select_jdk(index);
-        }
-        let browse_jdk = self
-            .shell
-            .as_mut()
-            .is_some_and(IdeShell::take_browse_jdk_request);
-        if browse_jdk {
-            self.choose_jdk_home();
-        }
-        if self
-            .shell
-            .as_mut()
-            .is_some_and(IdeShell::take_reimport_project_request)
-        {
-            self.reimport_project();
-        }
-        if project_build_requested
-            || self
-                .shell
-                .as_mut()
-                .is_some_and(IdeShell::take_build_project_request)
-        {
-            self.start_project_build();
-        }
-        self.handle_debug_requests();
-        if build_requested {
-            self.start_java_task(JavaTask::Compile);
-        }
-        if run_requested {
-            self.start_java_task(JavaTask::Run);
-        }
-        if test_requested {
-            self.start_java_task(JavaTask::Test);
-        }
+        self.dispatch_application_commands(direct_commands);
+        self.drain_application_events();
     }
 }
 

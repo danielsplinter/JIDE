@@ -61,6 +61,7 @@ Este é um requisito arquitetural obrigatório.
 - [09 — Estrutura inicial do workspace Rust](09-rust-workspace.md)
 - [10 — Roadmap](10-roadmap.md)
 - [11 — Decisões arquiteturais](11-architecture-decisions.md)
+- [12 — Consolidação de crates e módulos](12-crate-consolidation.md)
 
 ## Escopo inicial
 

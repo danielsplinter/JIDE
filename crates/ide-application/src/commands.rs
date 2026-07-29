@@ -1,7 +1,73 @@
-#![doc = "Registro de comandos e atalhos da IDE."]
+//! Registro de comandos e atalhos da IDE.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+
+use ide_domain::DocumentId;
 use thiserror::Error;
+
+/// Intenções que atravessam a fronteira entre apresentação e aplicação.
+///
+/// A interface apenas descreve o pedido. Quem conhece providers, adapters,
+/// filesystem e ciclo de vida é a aplicação.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApplicationCommand {
+    OpenProject,
+    OpenSettings,
+    OpenCompilerSettings,
+    BrowseToolchain,
+    SelectToolchain(usize),
+    BuildProject,
+    ReimportProject,
+    CompileProject,
+    RunProject,
+    RunActiveFile,
+    TestProject,
+    StopProject,
+    Navigate(NavigationRequest),
+    CreateItem(NewItemRequest),
+    BreakpointsChanged(PathBuf),
+    Debug(DebugRequest),
+    SearchTypes(String),
+    SearchContent(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationRequest {
+    pub document_id: DocumentId,
+    pub byte_offset: usize,
+    pub token: String,
+}
+
+/// Pedido da interface para a sessão de depuração.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DebugRequest {
+    Attach { host: String, port: u16 },
+    RunAndAttach { host: String, port: u16 },
+    Continue,
+    Pause,
+    StepOver,
+    StepInto,
+    StepOut,
+    Detach,
+    SelectFrame(usize),
+    Evaluate(String),
+    ExpandInspection(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NewItemKind {
+    Package,
+    Class,
+    Interface,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewItemRequest {
+    pub kind: NewItemKind,
+    pub package: String,
+    pub name: String,
+    pub source_root: PathBuf,
+}
 
 pub type CommandHandler = Arc<dyn Fn() -> Result<(), CommandError> + Send + Sync>;
 

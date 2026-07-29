@@ -854,12 +854,11 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 name = "ide-app"
 version = "0.1.0"
 dependencies = [
+ "ide-application",
  "ide-build-api",
- "ide-commands",
  "ide-core",
  "ide-debug-api",
  "ide-domain",
- "ide-events",
  "ide-language-host",
  "ide-process",
  "ide-project-model",
@@ -889,6 +888,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ide-application"
+version = "0.1.0"
+dependencies = [
+ "ide-domain",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "ide-build-api"
 version = "0.1.0"
 dependencies = [
@@ -896,13 +903,6 @@ dependencies = [
  "ide-project-model",
  "thiserror 2.0.19",
  "tokio",
-]
-
-[[package]]
-name = "ide-commands"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -931,13 +931,6 @@ name = "ide-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "ide-events"
-version = "0.1.0"
-dependencies = [
- "ide-domain",
 ]
 
 [[package]]
@@ -1005,6 +998,7 @@ dependencies = [
 name = "ide-ui"
 version = "0.1.0"
 dependencies = [
+ "ide-application",
  "ide-domain",
  "ide-terminal",
  "ide-text",

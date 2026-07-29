@@ -1,18 +1,26 @@
-#![doc = "Barramento tipado e limitado de eventos da aplicação."]
+//! Barramento tipado e limitado de eventos da aplicação.
 
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-use ide_domain::{DocumentId, ProjectId, WorkspaceId};
+use ide_domain::DocumentId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IdeEvent {
-    WorkspaceOpened(WorkspaceId),
-    WorkspaceClosed(WorkspaceId),
-    ProjectImported(ProjectId),
-    DocumentOpened(DocumentId),
+    WorkspaceOpened {
+        root: PathBuf,
+    },
+    ProjectImported {
+        root: PathBuf,
+        build_system: String,
+    },
+    DocumentOpened {
+        document_id: DocumentId,
+        path: PathBuf,
+    },
     DocumentChanged {
         document_id: DocumentId,
         version: u64,
@@ -24,6 +32,12 @@ pub enum IdeEvent {
 pub struct EventBus {
     queue: Arc<Mutex<VecDeque<IdeEvent>>>,
     capacity: usize,
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::bounded(256)
+    }
 }
 
 impl EventBus {
@@ -64,12 +78,30 @@ mod tests {
     fn bounded_bus_applies_backpressure() {
         let bus = EventBus::bounded(1);
         assert_eq!(
-            bus.publish(IdeEvent::WorkspaceOpened(WorkspaceId(1))),
+            bus.publish(IdeEvent::WorkspaceOpened {
+                root: PathBuf::from("/workspace")
+            }),
             Ok(())
         );
         assert_eq!(
-            bus.publish(IdeEvent::WorkspaceClosed(WorkspaceId(1))),
+            bus.publish(IdeEvent::DocumentClosed(DocumentId(1))),
             Err(PublishError::Full)
         );
+    }
+
+    #[test]
+    fn typed_events_preserve_order_and_payload() {
+        let bus = EventBus::bounded(3);
+        let opened = IdeEvent::DocumentOpened {
+            document_id: DocumentId(7),
+            path: PathBuf::from("/workspace/Main.java"),
+        };
+        let changed = IdeEvent::DocumentChanged {
+            document_id: DocumentId(7),
+            version: 2,
+        };
+        assert_eq!(bus.publish(opened.clone()), Ok(()));
+        assert_eq!(bus.publish(changed.clone()), Ok(()));
+        assert_eq!(bus.drain(), Ok(vec![opened, changed]));
     }
 }

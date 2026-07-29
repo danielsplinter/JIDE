@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ide-application = { path = "../ide-application" }
 ide-domain = { path = "../ide-domain" }
 ide-terminal = { path = "../ide-terminal" }
 ide-text = { path = "../ide-text" }

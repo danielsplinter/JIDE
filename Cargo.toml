@@ -2,12 +2,11 @@
 resolver = "3"
 members = [
     "crates/ide-app",
+    "crates/ide-application",
     "crates/ide-build-api",
     "crates/ide-core",
     "crates/ide-debug-api",
-    "crates/ide-commands",
     "crates/ide-domain",
-    "crates/ide-events",
     "crates/ide-language-api",
     "crates/ide-language-host",
     "crates/ide-project-model",

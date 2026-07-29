@@ -2,6 +2,9 @@
 
 mod editor;
 pub use editor::{EditorAction, EditorCapabilities, EditorPane};
+pub use ide_application::{
+    ApplicationCommand, DebugRequest, NavigationRequest, NewItemKind, NewItemRequest,
+};
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -152,42 +155,6 @@ pub enum SettingsPage {
     Debug,
 }
 
-/// Pedido da interface para a sessão de depuração.
-///
-/// A apresentação não conhece protocolo nem servidor: apenas descreve o que o
-/// usuário pediu, e a aplicação traduz para a sessão ativa.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DebugRequest {
-    Attach {
-        host: String,
-        port: u16,
-    },
-    /// Sobe a aplicação do projeto com depuração e conecta nela.
-    RunAndAttach {
-        host: String,
-        port: u16,
-    },
-    Continue,
-    Pause,
-    StepOver,
-    StepInto,
-    StepOut,
-    Detach,
-    SelectFrame(usize),
-    /// Avalia uma expressão no quadro selecionado.
-    ///
-    /// É o que "Inspecionar" pede sobre o trecho marcado no editor: o valor de um
-    /// nome só existe com a execução parada, e é o quadro atual que lhe dá
-    /// sentido.
-    Evaluate(String),
-    /// Revela os campos de um valor já inspecionado, endereçado pelo caminho.
-    ///
-    /// Os campos são pedidos ao abrir o nó, e não de uma vez: percorrer o grafo
-    /// inteiro de um objeto para mostrar o primeiro nível seria caro e, em
-    /// estruturas cíclicas, infinito.
-    ExpandInspection(String),
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DebugFrameView {
     pub name: String,
@@ -258,60 +225,10 @@ pub enum ShellFocus {
     Terminal,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NavigationRequest {
-    pub document_id: DocumentId,
-    pub byte_offset: usize,
-    pub token: String,
-}
-
 struct TerminalTab {
     session: TerminalSession,
     scroll_line: usize,
     follow_output: bool,
-}
-
-/// O que o menu do Explorer pediu para criar.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NewItemKind {
-    Package,
-    Class,
-    Interface,
-}
-
-impl NewItemKind {
-    /// Título da janela.
-    const fn title(self) -> &'static str {
-        match self {
-            Self::Package => "Novo pacote",
-            Self::Class => "Nova classe",
-            Self::Interface => "Nova interface",
-        }
-    }
-
-    /// Legenda do campo de nome.
-    ///
-    /// Criando um pacote, o nome do tipo é opcional: é o que permite criar
-    /// pacote e primeira classe num gesto só.
-    const fn name_caption(self) -> &'static str {
-        match self {
-            Self::Package => "Classe (opcional)",
-            Self::Class => "Nome da classe",
-            Self::Interface => "Nome da interface",
-        }
-    }
-}
-
-/// Pedido de criação, já validado, que o app executa.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NewItemRequest {
-    pub kind: NewItemKind,
-    /// Pacote em notação de ponto, como foi digitado.
-    pub package: String,
-    /// Nome do tipo; vazio quando só o pacote foi pedido.
-    pub name: String,
-    /// Raiz de fontes sob a qual o pacote vive.
-    pub source_root: PathBuf,
 }
 
 /// Para onde vão as teclas dentro da janela de inspeção.
@@ -482,6 +399,22 @@ struct NewItemDialog {
     naming: bool,
 }
 
+const fn new_item_title(kind: NewItemKind) -> &'static str {
+    match kind {
+        NewItemKind::Package => "Novo pacote",
+        NewItemKind::Class => "Nova classe",
+        NewItemKind::Interface => "Nova interface",
+    }
+}
+
+const fn new_item_name_caption(kind: NewItemKind) -> &'static str {
+    match kind {
+        NewItemKind::Package => "Classe (opcional)",
+        NewItemKind::Class => "Nome da classe",
+        NewItemKind::Interface => "Nome da interface",
+    }
+}
+
 /// Estado da janela de configurações enquanto ela está aberta.
 ///
 /// A janela é uma transação: o que se mexe ali só vale quando o usuário salva.
@@ -589,15 +522,12 @@ pub struct IdeShell {
     content_search_results: Vec<ContentSearchHit>,
     type_search_selected: usize,
     type_search_first_visible: usize,
-    /// Consulta cuja resposta ainda não chegou, para a tela pedir uma vez só.
-    type_search_pending: Option<String>,
     new_item_modal: ModalHost,
     new_item_dialog: Option<NewItemDialog>,
     new_item_package: TextInput,
     new_item_name: TextInput,
     new_item_create_button: Button,
     new_item_cancel_button: Button,
-    new_item_request: Option<NewItemRequest>,
     /// Janela de inspeção de um valor durante a depuração.
     inspection_modal: ModalHost,
     inspection: Option<InspectionView>,
@@ -623,23 +553,14 @@ pub struct IdeShell {
     /// inspeção: as duas chegam pelo mesmo caminho, mas uma troca o que a árvore
     /// mostra e a outra não pode trocar.
     inspection_run: Option<InspectionRun>,
-    open_project_requested: bool,
-    open_settings_requested: bool,
-    build_project_requested: bool,
-    reimport_project_requested: bool,
-    run_requested: bool,
-    stop_requested: bool,
     /// Aba de terminal em que a aplicação foi iniciada pela IDE.
     running_terminal: Option<usize>,
     project_summary: Option<String>,
-    browse_jdk_requested: bool,
-    pending_navigation: Option<NavigationRequest>,
     status_message: String,
     syntax_snapshots: HashMap<DocumentId, SyntaxSnapshot>,
     completion_items: Vec<CompletionItem>,
     completion_selected: usize,
     settings_dialog: Option<SettingsDialog>,
-    settings_jdk_result: Option<usize>,
     settings_page: SettingsPage,
     settings_focus: Option<WidgetId>,
     stop_button: Button,
@@ -652,7 +573,6 @@ pub struct IdeShell {
     breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
     /// Linhas que o alvo confirmou, por arquivo.
     verified_breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
-    breakpoints_dirty: Option<PathBuf>,
     debug: DebugView,
     /// Última posição do ponteiro, entregue às abas reconstruídas a cada quadro
     /// para que o botão de fechar apareça sob o cursor.
@@ -661,7 +581,8 @@ pub struct IdeShell {
     /// seleção, recorte e acessibilidade não se reimplementam aqui.
     debug_frames: ListView,
     debug_variables: ListView,
-    debug_requests: Vec<DebugRequest>,
+    /// Fila única de intenções que a camada de aplicação consumirá em ordem.
+    commands: Vec<ApplicationCommand>,
 }
 
 impl IdeShell {
@@ -870,7 +791,6 @@ impl IdeShell {
             content_search_results: Vec::new(),
             type_search_selected: 0,
             type_search_first_visible: 0,
-            type_search_pending: None,
             new_item_modal: ModalHost::new(NEW_ITEM_MODAL_ID, "", NEW_ITEM_PANEL_SIZE),
             new_item_dialog: None,
             new_item_package: TextInput::new(NEW_ITEM_PACKAGE_ID, String::new())
@@ -880,7 +800,6 @@ impl IdeShell {
                 .with_command("new.create"),
             new_item_cancel_button: Button::new(NEW_ITEM_CANCEL_ID, "Cancelar")
                 .with_command("new.cancel"),
-            new_item_request: None,
             inspection_modal: ModalHost::new(
                 INSPECTION_MODAL_ID,
                 "Inspecionar",
@@ -898,22 +817,13 @@ impl IdeShell {
             inspection_focus: InspectionFocus::Tree,
             inspection_message: None,
             inspection_run: None,
-            open_project_requested: false,
-            open_settings_requested: false,
-            build_project_requested: false,
-            reimport_project_requested: false,
-            run_requested: false,
-            stop_requested: false,
             running_terminal: None,
             project_summary: None,
-            browse_jdk_requested: false,
-            pending_navigation: None,
             status_message: "Ready".to_owned(),
             syntax_snapshots: HashMap::new(),
             completion_items: Vec::new(),
             completion_selected: 0,
             settings_dialog: None,
-            settings_jdk_result: None,
             settings_page: SettingsPage::default(),
             settings_focus: None,
             stop_button: Button::icon(STOP_BUTTON_ID, Icon::Stop, "Parar aplicação")
@@ -932,14 +842,13 @@ impl IdeShell {
             theme: Theme::default(),
             breakpoints: BTreeMap::new(),
             verified_breakpoints: BTreeMap::new(),
-            breakpoints_dirty: None,
             debug: DebugView::default(),
             pointer: Point::new(-1.0, -1.0),
             debug_frames: ListView::new(DEBUG_FRAMES_ID, Vec::<String>::new())
                 .with_row_height(DEBUG_ROW_HEIGHT),
             debug_variables: ListView::new(DEBUG_VARIABLES_ID, Vec::<String>::new())
                 .with_row_height(DEBUG_ROW_HEIGHT),
-            debug_requests: Vec::new(),
+            commands: Vec::new(),
         };
         shell.sync_explorer_tree();
         shell
@@ -1095,8 +1004,6 @@ impl IdeShell {
             original_debug_host: self.debug_host.value().to_owned(),
             original_debug_port: self.debug_port.value().to_owned(),
         });
-        self.settings_jdk_result = None;
-        self.browse_jdk_requested = false;
     }
 
     /// Repõe a lista de JDKs e deixa um deles escolhido, sem sair da transação.
@@ -1199,11 +1106,131 @@ impl IdeShell {
     pub const fn settings_page(&self) -> SettingsPage {
         self.settings_page
     }
-    pub fn take_settings_jdk_result(&mut self) -> Option<usize> {
-        self.settings_jdk_result.take()
+    /// Retira, em ordem, todas as intenções produzidas desde a última consulta.
+    pub fn drain_application_commands(&mut self) -> Vec<ApplicationCommand> {
+        std::mem::take(&mut self.commands)
     }
-    pub fn take_browse_jdk_request(&mut self) -> bool {
-        std::mem::take(&mut self.browse_jdk_requested)
+
+    #[cfg(test)]
+    fn take_test_command(
+        &mut self,
+        predicate: impl Fn(&ApplicationCommand) -> bool,
+    ) -> Option<ApplicationCommand> {
+        let index = self.commands.iter().position(predicate)?;
+        Some(self.commands.remove(index))
+    }
+
+    #[cfg(test)]
+    fn take_settings_jdk_result(&mut self) -> Option<usize> {
+        match self
+            .take_test_command(|command| matches!(command, ApplicationCommand::SelectToolchain(_)))
+        {
+            Some(ApplicationCommand::SelectToolchain(index)) => Some(index),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_browse_jdk_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::BrowseToolchain))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_navigation_request(&mut self) -> Option<NavigationRequest> {
+        match self.take_test_command(|command| matches!(command, ApplicationCommand::Navigate(_))) {
+            Some(ApplicationCommand::Navigate(request)) => Some(request),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_open_project_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::OpenProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_breakpoints_dirty(&mut self) -> Option<PathBuf> {
+        match self.take_test_command(|command| {
+            matches!(command, ApplicationCommand::BreakpointsChanged(_))
+        }) {
+            Some(ApplicationCommand::BreakpointsChanged(path)) => Some(path),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_debug_requests(&mut self) -> Vec<DebugRequest> {
+        let mut requests = Vec::new();
+        self.commands.retain(|command| {
+            if let ApplicationCommand::Debug(request) = command {
+                requests.push(request.clone());
+                false
+            } else {
+                true
+            }
+        });
+        requests
+    }
+
+    #[cfg(test)]
+    fn take_build_project_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::BuildProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_reimport_project_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::ReimportProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_run_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::RunProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_stop_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::StopProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_open_settings_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::OpenSettings))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_new_item_request(&mut self) -> Option<NewItemRequest> {
+        match self.take_test_command(|command| matches!(command, ApplicationCommand::CreateItem(_)))
+        {
+            Some(ApplicationCommand::CreateItem(request)) => Some(request),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_type_search_request(&mut self) -> Option<String> {
+        match self
+            .take_test_command(|command| matches!(command, ApplicationCommand::SearchTypes(_)))
+        {
+            Some(ApplicationCommand::SearchTypes(query)) => Some(query),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_content_search_request(&mut self) -> Option<String> {
+        match self
+            .take_test_command(|command| matches!(command, ApplicationCommand::SearchContent(_)))
+        {
+            Some(ApplicationCommand::SearchContent(query)) => Some(query),
+            _ => None,
+        }
     }
     pub fn set_settings_message(&mut self, message: impl Into<String>) {
         if let Some(dialog) = self.settings_dialog.as_mut() {
@@ -1331,12 +1358,6 @@ impl IdeShell {
             .lines()
             .map(|line| line.text.as_str())
     }
-    pub fn take_navigation_request(&mut self) -> Option<NavigationRequest> {
-        self.pending_navigation.take()
-    }
-    pub fn take_open_project_request(&mut self) -> bool {
-        std::mem::take(&mut self.open_project_requested)
-    }
     /// Alterna o breakpoint de uma linha e marca o arquivo para sincronização.
     pub fn toggle_breakpoint(&mut self, path: &Path, line: u32) {
         let lines = self.breakpoints.entry(path.to_path_buf()).or_default();
@@ -1346,7 +1367,8 @@ impl IdeShell {
         if lines.is_empty() {
             self.breakpoints.remove(path);
         }
-        self.breakpoints_dirty = Some(path.to_path_buf());
+        self.commands
+            .push(ApplicationCommand::BreakpointsChanged(path.to_path_buf()));
         self.status_message = format!("Breakpoints: {}", self.breakpoint_count());
     }
 
@@ -1390,17 +1412,8 @@ impl IdeShell {
             .is_some_and(|lines| lines.contains(&line))
     }
 
-    /// Arquivo cujos breakpoints mudaram desde a última consulta.
-    pub fn take_breakpoints_dirty(&mut self) -> Option<PathBuf> {
-        self.breakpoints_dirty.take()
-    }
-
-    pub fn take_debug_requests(&mut self) -> Vec<DebugRequest> {
-        std::mem::take(&mut self.debug_requests)
-    }
-
     pub fn request_debug(&mut self, request: DebugRequest) {
-        self.debug_requests.push(request);
+        self.commands.push(ApplicationCommand::Debug(request));
     }
 
     /// Substitui o estado de depuração apresentado.
@@ -1442,29 +1455,12 @@ impl IdeShell {
         self.debug.attached
     }
 
-    pub fn take_build_project_request(&mut self) -> bool {
-        std::mem::take(&mut self.build_project_requested)
-    }
-    pub fn take_reimport_project_request(&mut self) -> bool {
-        std::mem::take(&mut self.reimport_project_requested)
-    }
-    /// Pedido de executar a aplicação, sem depuração.
-    pub fn take_run_request(&mut self) -> bool {
-        std::mem::take(&mut self.run_requested)
-    }
-    /// Pedido de interromper a aplicação iniciada pela IDE.
-    pub fn take_stop_request(&mut self) -> bool {
-        std::mem::take(&mut self.stop_requested)
-    }
     /// Resumo do projeto importado, apresentado na barra de status.
     pub fn set_project_summary(&mut self, summary: Option<String>) {
         self.project_summary = summary;
     }
     pub fn project_summary(&self) -> Option<&str> {
         self.project_summary.as_deref()
-    }
-    pub fn take_open_settings_request(&mut self) -> bool {
-        std::mem::take(&mut self.open_settings_requested)
     }
     pub fn workspace_path(&self) -> &Path {
         &self.workspace.path
@@ -2056,7 +2052,7 @@ impl IdeShell {
         let geometry = debug_panel_geometry(self.debug_panel_rect(size), self.debug.frames.len());
         for (rect, (_, request)) in geometry.buttons.iter().zip(DEBUG_BUTTONS) {
             if rect.contains(point) {
-                self.debug_requests.push(request);
+                self.commands.push(ApplicationCommand::Debug(request));
                 return;
             }
         }
@@ -2076,7 +2072,8 @@ impl IdeShell {
             return;
         };
         self.debug.selected_frame = row;
-        self.debug_requests.push(DebugRequest::SelectFrame(row));
+        self.commands
+            .push(ApplicationCommand::Debug(DebugRequest::SelectFrame(row)));
         if let Some((path, line)) = self
             .debug
             .frames
@@ -2326,7 +2323,7 @@ impl IdeShell {
             .unwrap_or_default();
         self.new_item_package.set_value(package);
         self.new_item_name.set_value(String::new());
-        self.new_item_modal.set_title(kind.title());
+        self.new_item_modal.set_title(new_item_title(kind));
         self.new_item_modal.open();
         self.new_item_dialog = Some(NewItemDialog {
             kind,
@@ -2337,16 +2334,10 @@ impl IdeShell {
         // O pacote já vem preenchido, então o que falta digitar é o nome —
         // exceto ao criar pacote, em que o nome é justamente o que se edita.
         self.focus_new_item_field(kind != NewItemKind::Package);
-        self.new_item_request = None;
     }
 
     pub const fn new_item_dialog_open(&self) -> bool {
         self.new_item_modal.is_open()
-    }
-
-    /// Pedido de criação pronto para o app executar.
-    pub fn take_new_item_request(&mut self) -> Option<NewItemRequest> {
-        self.new_item_request.take()
     }
 
     /// Relata o que impediu a criação, mantendo a janela aberta.
@@ -2382,12 +2373,13 @@ impl IdeShell {
             self.set_new_item_message("Informe o nome.");
             return;
         }
-        self.new_item_request = Some(NewItemRequest {
-            kind,
-            package,
-            name,
-            source_root,
-        });
+        self.commands
+            .push(ApplicationCommand::CreateItem(NewItemRequest {
+                kind,
+                package,
+                name,
+                source_root,
+            }));
     }
 
     pub fn pointer_down_with_modifiers(&mut self, point: Point, size: Size, control: bool) {
@@ -2431,7 +2423,7 @@ impl IdeShell {
         );
         match menu_result {
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "file.project" => {
-                self.open_project_requested = true;
+                self.commands.push(ApplicationCommand::OpenProject);
                 self.status_message = "Select a project folder".to_owned();
                 return;
             }
@@ -2442,38 +2434,38 @@ impl IdeShell {
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "settings.open" => {
-                self.open_settings_requested = true;
+                self.commands.push(ApplicationCommand::OpenSettings);
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "project.build" => {
-                self.build_project_requested = true;
+                self.commands.push(ApplicationCommand::BuildProject);
                 return;
             }
             EventResult::Action(WidgetAction::Command(command))
                 if command.0 == "project.reimport" =>
             {
-                self.reimport_project_requested = true;
+                self.commands.push(ApplicationCommand::ReimportProject);
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "project.run" => {
-                self.run_requested = true;
+                self.commands.push(ApplicationCommand::RunProject);
                 self.status_message = "Executando a aplicação".to_owned();
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "project.stop" => {
-                self.stop_requested = true;
+                self.commands.push(ApplicationCommand::StopProject);
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "debug.connect" => {
                 self.settings_page = SettingsPage::Debug;
-                self.open_settings_requested = true;
+                self.commands.push(ApplicationCommand::OpenSettings);
                 return;
             }
             EventResult::Action(WidgetAction::Command(command))
                 if command.0.starts_with("debug.") =>
             {
                 if let Some(request) = debug_request_for(&command.0) {
-                    self.debug_requests.push(request);
+                    self.commands.push(ApplicationCommand::Debug(request));
                 }
                 return;
             }
@@ -2613,11 +2605,12 @@ impl IdeShell {
                     self.active_text().and_then(|text| token_at(text, offset)),
                 ) {
                     self.status_message = format!("Go to definition: {token}");
-                    self.pending_navigation = Some(NavigationRequest {
-                        document_id,
-                        byte_offset: offset,
-                        token,
-                    });
+                    self.commands
+                        .push(ApplicationCommand::Navigate(NavigationRequest {
+                            document_id,
+                            byte_offset: offset,
+                            token,
+                        }));
                 }
             }
             EditorAction::ToggleBreakpoint(line) => {
@@ -3129,9 +3122,9 @@ impl IdeShell {
         self.content_search_results.clear();
         self.type_search_selected = 0;
         self.type_search_first_visible = 0;
-        // Consulta vazia pendente: a janela nasce mostrando o que existe, em vez
-        // de um painel em branco esperando a primeira letra.
-        self.type_search_pending = Some(String::new());
+        // A consulta vazia nasce mostrando os tipos existentes.
+        self.commands
+            .push(ApplicationCommand::SearchTypes(String::new()));
         self.type_search_modal.open();
     }
 
@@ -3147,7 +3140,6 @@ impl IdeShell {
         self.content_search_results.clear();
         self.type_search_selected = 0;
         self.type_search_first_visible = 0;
-        self.type_search_pending = None;
         self.type_search_modal.open();
     }
 
@@ -3158,24 +3150,6 @@ impl IdeShell {
 
     pub fn close_type_search(&mut self) {
         self.type_search_modal.close();
-        self.type_search_pending = None;
-    }
-
-    /// Consulta que a tela quer ver respondida, se houver uma esperando.
-    ///
-    /// Sai da mão de quem pergunta: a tela sabe o que foi digitado, e quem tem o
-    /// provedor de linguagem é o app.
-    pub fn take_type_search_request(&mut self) -> Option<String> {
-        (self.workspace_search_mode == WorkspaceSearchMode::Types)
-            .then(|| self.type_search_pending.take())
-            .flatten()
-    }
-
-    /// Consulta textual pedida pelo modo aberto por `Ctrl+Shift+L`.
-    pub fn take_content_search_request(&mut self) -> Option<String> {
-        (self.workspace_search_mode == WorkspaceSearchMode::Content)
-            .then(|| self.type_search_pending.take())
-            .flatten()
     }
 
     /// Entrega o que a linguagem encontrou.
@@ -3205,7 +3179,15 @@ impl IdeShell {
             return false;
         }
         self.type_search_query.push_str(text);
-        self.type_search_pending = Some(self.type_search_query.clone());
+        let command = match self.workspace_search_mode {
+            WorkspaceSearchMode::Types => {
+                ApplicationCommand::SearchTypes(self.type_search_query.clone())
+            }
+            WorkspaceSearchMode::Content => {
+                ApplicationCommand::SearchContent(self.type_search_query.clone())
+            }
+        };
+        self.commands.push(command);
         true
     }
 
@@ -3217,7 +3199,15 @@ impl IdeShell {
         match key.to_ascii_lowercase().as_str() {
             "backspace" => {
                 self.type_search_query.pop();
-                self.type_search_pending = Some(self.type_search_query.clone());
+                let command = match self.workspace_search_mode {
+                    WorkspaceSearchMode::Types => {
+                        ApplicationCommand::SearchTypes(self.type_search_query.clone())
+                    }
+                    WorkspaceSearchMode::Content => {
+                        ApplicationCommand::SearchContent(self.type_search_query.clone())
+                    }
+                };
+                self.commands.push(command);
             }
             "arrowdown" => {
                 self.type_search_selected = (self.type_search_selected + 1)
@@ -3316,7 +3306,8 @@ impl IdeShell {
         run.current.clone_from(&next);
         let position = run.position;
         self.status_message = format!("Executando {next} ({position} de {total})");
-        self.debug_requests.push(DebugRequest::Evaluate(next));
+        self.commands
+            .push(ApplicationCommand::Debug(DebugRequest::Evaluate(next)));
     }
 
     /// Pede ao depurador o valor atual da raiz da árvore.
@@ -3324,8 +3315,10 @@ impl IdeShell {
         let Some(inspection) = self.inspection.as_ref() else {
             return;
         };
-        self.debug_requests
-            .push(DebugRequest::Evaluate(inspection.expression.clone()));
+        self.commands
+            .push(ApplicationCommand::Debug(DebugRequest::Evaluate(
+                inspection.expression.clone(),
+            )));
     }
 
     /// Troca os valores da árvore sem mexer no que está aberto nem no que está
@@ -3351,8 +3344,10 @@ impl IdeShell {
             .collect();
         self.sync_inspection_tree();
         for path in deeper {
-            self.debug_requests
-                .push(DebugRequest::ExpandInspection(path));
+            self.commands
+                .push(ApplicationCommand::Debug(DebugRequest::ExpandInspection(
+                    path,
+                )));
         }
     }
 
@@ -3496,7 +3491,8 @@ impl IdeShell {
             position: 1,
             total,
         });
-        self.debug_requests.push(DebugRequest::Evaluate(first));
+        self.commands
+            .push(ApplicationCommand::Debug(DebugRequest::Evaluate(first)));
     }
 
     /// Painel de edição que está na frente, com o texto que ele edita.
@@ -3742,7 +3738,10 @@ impl IdeShell {
             return;
         };
         self.status_message = format!("Inspecionando {expression}");
-        self.debug_requests.push(DebugRequest::Evaluate(expression));
+        self.commands
+            .push(ApplicationCommand::Debug(DebugRequest::Evaluate(
+                expression,
+            )));
     }
 
     /// Copia o trecho selecionado para a área de transferência do sistema.
@@ -4547,8 +4546,10 @@ impl IdeShell {
                 if pending {
                     // Os campos só são pedidos ao abrir: perguntar por tudo de
                     // uma vez percorreria o grafo inteiro do objeto.
-                    self.debug_requests
-                        .push(DebugRequest::ExpandInspection(path));
+                    self.commands
+                        .push(ApplicationCommand::Debug(DebugRequest::ExpandInspection(
+                            path,
+                        )));
                 }
             }
         }
@@ -4652,7 +4653,7 @@ impl IdeShell {
         self.paint_settings_text(
             &mut paint,
             NEW_ITEM_NAME_CAPTION_ID,
-            dialog.kind.name_caption(),
+            new_item_name_caption(dialog.kind),
             Point::new(geometry.name.origin.x, geometry.name.origin.y - 18.0),
             13.0,
             IconTint::Muted,
@@ -4988,9 +4989,9 @@ impl IdeShell {
         for result in commands {
             if let EventResult::Action(WidgetAction::Command(command)) = result {
                 match command.0.as_str() {
-                    "project.stop" => self.stop_requested = true,
+                    "project.stop" => self.commands.push(ApplicationCommand::StopProject),
                     "project.run" => {
-                        self.run_requested = true;
+                        self.commands.push(ApplicationCommand::RunProject);
                         self.status_message = "Executando a aplicação".to_owned();
                     }
                     "debug.run" => self.request_run_and_attach(),
@@ -5010,12 +5011,15 @@ impl IdeShell {
         }
         match self.debug_target() {
             Some((host, port)) => {
-                self.debug_requests
-                    .push(DebugRequest::RunAndAttach { host, port });
+                self.commands
+                    .push(ApplicationCommand::Debug(DebugRequest::RunAndAttach {
+                        host,
+                        port,
+                    }));
             }
             None => {
                 self.settings_page = SettingsPage::Debug;
-                self.open_settings_requested = true;
+                self.commands.push(ApplicationCommand::OpenSettings);
                 self.status_message = "Informe um host e uma porta de depuração válidos".to_owned();
             }
         }
@@ -5027,10 +5031,11 @@ impl IdeShell {
         let port = self.debug_port.value().trim().parse::<u16>().ok();
         match (host.is_empty(), port) {
             (false, Some(port)) if port > 0 => {
-                self.debug_requests.push(DebugRequest::Attach {
-                    host: host.clone(),
-                    port,
-                });
+                self.commands
+                    .push(ApplicationCommand::Debug(DebugRequest::Attach {
+                        host: host.clone(),
+                        port,
+                    }));
                 self.settings_modal.close();
                 self.settings_dialog = None;
                 self.settings_focus = None;
@@ -5099,7 +5104,7 @@ impl IdeShell {
         }
         match command.0.as_str() {
             "jdk.browse" => {
-                self.browse_jdk_requested = true;
+                self.commands.push(ApplicationCommand::BrowseToolchain);
                 true
             }
             "settings.save" => {
@@ -5124,7 +5129,8 @@ impl IdeShell {
             && let Some(index) = dialog.pending_jdk
             && dialog.original_jdk != Some(index)
         {
-            self.settings_jdk_result = Some(index);
+            self.commands
+                .push(ApplicationCommand::SelectToolchain(index));
         }
         self.settings_modal.close();
         self.settings_dialog = None;
@@ -5139,7 +5145,6 @@ impl IdeShell {
             self.debug_host.set_value(dialog.original_debug_host);
             self.debug_port.set_value(dialog.original_debug_port);
         }
-        self.settings_jdk_result = None;
         self.settings_modal.close();
     }
 }
@@ -7840,7 +7845,7 @@ mod tests {
                 .as_ref()
                 .map(|dialog| dialog.kind)
                 .unwrap_or(NewItemKind::Package);
-            assert_eq!(kind.title(), title);
+            assert_eq!(new_item_title(kind), title);
             assert_eq!(shell.new_item_package.value(), "br.com");
         }
     }
@@ -8320,6 +8325,22 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn application_commands_leave_the_shell_in_one_ordered_queue() {
+        let mut shell = shell_editing("class Uso {}");
+        shell.open_type_search();
+        shell.request_debug(DebugRequest::Continue);
+
+        assert_eq!(
+            shell.drain_application_commands(),
+            vec![
+                ApplicationCommand::SearchTypes(String::new()),
+                ApplicationCommand::Debug(DebugRequest::Continue),
+            ]
+        );
+        assert!(shell.drain_application_commands().is_empty());
     }
 
     fn content_hit(path: &std::path::Path, line: u32, column: u32) -> ContentSearchHit {

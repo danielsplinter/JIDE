@@ -6,13 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ide-application = { path = "../ide-application" }
 ide-build-api = { path = "../ide-build-api" }
 ide-core = { path = "../ide-core" }
-ide-commands = { path = "../ide-commands" }
 ide-debug-api = { path = "../ide-debug-api" }
 ide-project-model = { path = "../ide-project-model" }
 ide-domain = { path = "../ide-domain" }
-ide-events = { path = "../ide-events" }
 ide-language-host = { path = "../ide-language-host" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }
 java-debug-adapter = { path = "../java-debug-adapter" }
