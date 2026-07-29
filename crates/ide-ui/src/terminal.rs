@@ -18,6 +18,9 @@ pub(super) struct TerminalSelection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ScrollTarget {
     Editor,
+    /// Rolagem lateral do editor: uma linha de código não quebra, e o que passa
+    /// da área visível só é alcançável rolando.
+    EditorHorizontal,
     Terminal,
     ExplorerHorizontal,
     ExplorerVertical,

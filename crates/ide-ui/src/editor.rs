@@ -29,9 +29,28 @@ pub(super) struct EditorAreaState {
     pub(super) search_query: String,
     pub(super) navigated: Option<(usize, usize)>,
     pub(super) scrollbar: Scrollbar,
+    /// Barra lateral, para as linhas que passam da área visível.
+    pub(super) horizontal_scrollbar: Scrollbar,
     pub(super) syntax_snapshots: HashMap<DocumentId, SyntaxSnapshot>,
+    /// Realce já convertido de linha/coluna para deslocamentos em caracteres.
+    ///
+    /// A conversão é proporcional ao documento e deve acontecer quando chega
+    /// uma nova revisão, nunca durante cada quadro de pintura.
+    pub(super) syntax_spans: HashMap<DocumentId, CachedSyntax>,
     pub(super) completion_items: Vec<CompletionItem>,
     pub(super) completion_selected: usize,
+}
+
+pub(super) struct CachedSyntax {
+    pub(super) version: u64,
+    pub(super) spans: Vec<CachedSyntaxSpan>,
+}
+
+pub(super) type CachedSyntaxSpan = (usize, usize, ui_editor::TokenKind);
+
+pub struct SyntaxView<'a> {
+    pub(super) version: u64,
+    pub(super) spans: &'a [CachedSyntaxSpan],
 }
 
 impl EditorAreaState {
@@ -123,13 +142,23 @@ pub struct EditorPane {
     /// Âncora e foco da seleção, em bytes.
     selection: Option<(usize, usize)>,
     selecting: bool,
-    scroll_line: usize,
+    /// Rolagem vertical, em pixels.
+    ///
+    /// Em pixels, e não em linhas: rolar de linha em linha faz o texto saltar
+    /// a cada passo, e é isso que se sente como travado.
+    scroll_offset: f32,
+    /// Rolagem lateral, em pixels.
+    scroll_x: f32,
+    /// Cursor cuja coluna já foi trazida à vista.
+    revealed_cursor: Option<usize>,
     /// Editor da biblioteca usado para desenhar, com o texto que ele reflete.
     ///
     /// A chave é a origem **e** a revisão. Só a revisão não bastava: todo buffer
     /// nasce na revisão zero, então abrir um segundo arquivo reaproveitava a view
     /// do primeiro — a aba trocava de nome e o conteúdo não.
     view: Option<(u64, u64, CodeEditor)>,
+    /// Revisão do realce já instalada na view.
+    syntax_key: Option<(u64, u64)>,
     /// Origem que o painel está editando agora.
     source: Option<u64>,
     pending_reveal: Option<usize>,
@@ -180,8 +209,11 @@ impl EditorPane {
             cursor: 0,
             selection: None,
             selecting: false,
-            scroll_line: 0,
+            scroll_offset: 0.0,
+            scroll_x: 0.0,
+            revealed_cursor: None,
             view: None,
+            syntax_key: None,
             source: None,
             pending_reveal: None,
             history: UndoHistory::default(),
@@ -208,6 +240,7 @@ impl EditorPane {
             return;
         }
         self.view = None;
+        self.syntax_key = None;
         self.history.clear();
         self.multi = None;
         self.selection = None;
@@ -244,12 +277,43 @@ impl EditorPane {
     }
 
     #[must_use]
-    pub const fn scroll_line(&self) -> usize {
-        self.scroll_line
+    pub fn scroll_line(&self) -> usize {
+        (self.scroll_offset / CodeEditor::line_height()).round().max(0.0) as usize
     }
 
-    pub const fn set_scroll_line(&mut self, line: usize) {
-        self.scroll_line = line;
+    /// Rolagem vertical em pixels, que é como ela é guardada.
+    #[must_use]
+    pub const fn scroll_offset(&self) -> f32 {
+        self.scroll_offset
+    }
+
+    pub const fn set_scroll_offset(&mut self, scroll_offset: f32) {
+        self.scroll_offset = scroll_offset;
+    }
+
+    /// Rolagem lateral, em pixels.
+    ///
+    /// O painel guarda o valor e o editor da biblioteca o aplica ao desenhar e
+    /// ao converter clique em posição — é lá que a largura do caractere vive.
+    #[must_use]
+    pub fn scroll_x(&self) -> f32 {
+        self.scroll_x
+    }
+
+    pub const fn set_scroll_x(&mut self, scroll_x: f32) {
+        self.scroll_x = scroll_x;
+    }
+
+    /// Largura da linha mais comprida, em pixels.
+    #[must_use]
+    pub fn content_width(&self) -> f32 {
+        self.view
+            .as_ref()
+            .map_or(0.0, |(_, _, view)| view.content_width())
+    }
+
+    pub fn set_scroll_line(&mut self, line: usize) {
+        self.scroll_offset = line as f32 * CodeEditor::line_height();
     }
 
     pub const fn reveal_line(&mut self, line: usize) {
@@ -292,7 +356,16 @@ impl EditorPane {
     #[must_use]
     pub fn offset_at_point(&self, buffer: &TextBuffer, point: Point) -> usize {
         let text = buffer.text();
-        let line_index = self.scroll_line
+        // Converter ponto em posição é do editor da biblioteca: é lá que a
+        // largura do caractere é medida na fonte que vai desenhar, e é lá que a
+        // rolagem lateral existe. Refazer a conta aqui com a largura estimada
+        // errava mais a cada coluna — a alguns caracteres de distância do
+        // clique já no meio de uma linha.
+        if let Some((_, _, view)) = self.view.as_ref() {
+            return byte_at_char(text, view.offset_at_point(point));
+        }
+        // Antes do primeiro desenho não há view, e a estimativa é o que existe.
+        let line_index = self.scroll_line()
             + ((point.y - self.bounds.origin.y) / CodeEditor::line_height())
                 .floor()
                 .max(0.0) as usize;
@@ -316,7 +389,7 @@ impl EditorPane {
             return None;
         }
         (point.x < self.bounds.origin.x + CodeEditor::gutter_width()).then(|| {
-            self.scroll_line
+            self.scroll_line()
                 + ((point.y - self.bounds.origin.y) / CodeEditor::line_height())
                     .floor()
                     .max(0.0) as usize
@@ -857,7 +930,7 @@ impl EditorPane {
         &mut self,
         context: &LayoutContext,
         buffer: &TextBuffer,
-        syntax: &[(usize, usize, ui_editor::TokenKind)],
+        syntax: Option<SyntaxView<'_>>,
         decorations: Vec<LineDecoration>,
         focused: bool,
     ) {
@@ -870,6 +943,7 @@ impl EditorPane {
         );
         if stale {
             self.view = Some((origem, revision, CodeEditor::new(EDITOR_VIEW_ID, text)));
+            self.syntax_key = None;
         }
         // A IDE conta bytes e o editor conta caracteres: sem converter, o cursor
         // sairia do lugar no primeiro acento do arquivo.
@@ -890,32 +964,59 @@ impl EditorPane {
                 EditorRange::new(chars_before(text, *start), chars_before(text, *end))
             })
             .collect();
-        let spans: Vec<SyntaxSpan> = syntax
-            .iter()
-            .map(|(start, end, kind)| SyntaxSpan {
-                range: EditorRange::new(*start, *end),
-                token_kind: *kind,
-            })
-            .collect();
         let bounds = self.bounds;
-        let scroll_line = self.scroll_line;
+        let scroll_offset = self.scroll_offset;
+        let scroll_x = self.scroll_x;
+        // Rolar com a barra não move o cursor; digitar e andar com as setas
+        // movem. É essa diferença que decide se a vista deve segui-lo.
+        let revelar_cursor = self.revealed_cursor != Some(self.cursor);
+        self.revealed_cursor = Some(self.cursor);
         let reveal = self.pending_reveal.take();
         let Some((_, _, editor)) = self.view.as_mut() else {
             return;
         };
         editor.layout(context, bounds);
-        editor.set_syntax(spans);
+        match syntax {
+            Some(SyntaxView {
+                version,
+                spans: syntax,
+            }) if self.syntax_key != Some((origem, version)) => {
+                editor.set_syntax(
+                    syntax
+                        .iter()
+                        .map(|(start, end, kind)| SyntaxSpan {
+                            range: EditorRange::new(*start, *end),
+                            token_kind: *kind,
+                        })
+                        .collect(),
+                );
+                self.syntax_key = Some((origem, version));
+            }
+            None if self.syntax_key.is_some() => {
+                editor.set_syntax(Vec::new());
+                self.syntax_key = None;
+            }
+            _ => {}
+        }
         editor.set_decorations(decorations);
         editor.set_focused(focused);
         editor.set_cursor(cursor);
         // Depois do cursor: `set_cursor` significa "cursor movido, sem seleção".
         editor.set_selection(selection);
         editor.set_extra_selections(extra);
-        editor.set_scroll_line(scroll_line);
+        editor.set_scroll_offset(scroll_offset);
+        editor.set_scroll_x(scroll_x);
         if let Some(line) = reveal {
             editor.reveal_line(line);
         }
-        self.scroll_line = editor.scroll_line();
+        // Só quando o cursor se moveu. Revelar a cada quadro desfaria qualquer
+        // rolagem feita à mão: a barra levaria a vista para um lado e o cursor a
+        // traria de volta no quadro seguinte, como se o arrasto não funcionasse.
+        if revelar_cursor {
+            editor.reveal_cursor_column();
+        }
+        self.scroll_offset = editor.scroll_offset();
+        self.scroll_x = editor.scroll_x();
     }
 
     /// Desenha o painel. Requer um [`EditorPane::sync`] no mesmo quadro.
@@ -1008,6 +1109,37 @@ mod tests {
         let mut pane = EditorPane::new(capabilities);
         pane.set_bounds(Rect::new(0.0, 0.0, 600.0, 400.0));
         (pane, TextBuffer::new("um\ndois\ntres"))
+    }
+
+    /// O clique consulta a view, que mede a largura na fonte de verdade.
+    ///
+    /// O painel refazia a conta com a largura estimada, e o erro se acumula por
+    /// caractere: no meio de uma linha o cursor caía vários caracteres longe do
+    /// clique. Com a rolagem lateral, ele também precisava contar o quanto a
+    /// linha já andou.
+    #[test]
+    fn the_click_asks_the_view_instead_of_estimating() {
+        let (mut pane, _) = pane(EditorCapabilities::plain());
+        let buffer = TextBuffer::new("a".repeat(200));
+        pane.sync(&LayoutContext::default(), &buffer, None, Vec::new(), true);
+
+        let coluna = |indice: usize| {
+            Point::new(
+                CodeEditor::gutter_width() + indice as f32 * CodeEditor::default_char_width(),
+                4.0,
+            )
+        };
+        assert_eq!(pane.offset_at_point(&buffer, coluna(30)), 30);
+
+        // Com a linha rolada, o mesmo ponto da tela é outro caractere — e o
+        // painel precisa saber disso, não só o editor.
+        pane.set_scroll_x(CodeEditor::default_char_width() * 20.0);
+        pane.sync(&LayoutContext::default(), &buffer, None, Vec::new(), true);
+        assert_eq!(
+            pane.offset_at_point(&buffer, coluna(30)),
+            50,
+            "o clique conta a rolagem lateral"
+        );
     }
 
     /// Clicar posiciona o cursor pela coluna, e arrastar marca o trecho.
@@ -1149,7 +1281,7 @@ mod tests {
         );
 
         pane.set_source(1);
-        pane.sync(&LayoutContext::default(), &primeiro, &[], Vec::new(), true);
+        pane.sync(&LayoutContext::default(), &primeiro, None, Vec::new(), true);
         let texto = |pane: &EditorPane| {
             pane.view
                 .as_ref()
@@ -1159,7 +1291,7 @@ mod tests {
         assert_eq!(texto(&pane), "conteúdo do primeiro");
 
         pane.set_source(2);
-        pane.sync(&LayoutContext::default(), &segundo, &[], Vec::new(), true);
+        pane.sync(&LayoutContext::default(), &segundo, None, Vec::new(), true);
         assert_eq!(texto(&pane), "conteúdo do segundo");
     }
 
@@ -1198,7 +1330,7 @@ mod tests {
         pane.select_next_occurrence(&buffer);
         pane.select_next_occurrence(&buffer);
 
-        pane.sync(&LayoutContext::default(), &buffer, &[], Vec::new(), true);
+        pane.sync(&LayoutContext::default(), &buffer, None, Vec::new(), true);
         let Some((_, _, view)) = pane.view.as_ref() else {
             panic!("a view precisa existir depois do sync");
         };
@@ -1240,7 +1372,7 @@ mod tests {
         assert_eq!(buffer.text(), "nomes! = nomes! + nomes!");
 
         // O trecho marcado continua realçado, para se ver onde se está.
-        pane.sync(&LayoutContext::default(), &buffer, &[], Vec::new(), true);
+        pane.sync(&LayoutContext::default(), &buffer, None, Vec::new(), true);
         let Some((_, _, view)) = pane.view.as_ref() else {
             panic!("a view precisa existir depois do sync");
         };

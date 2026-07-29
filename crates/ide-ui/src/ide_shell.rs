@@ -6,7 +6,9 @@ use crate::debugging::{
     DebugPanelState, DebugVariableView, DebugView, InspectionFocus, InspectionNode, InspectionRun,
     InspectionState, InspectionView,
 };
-use crate::editor::{EditorAction, EditorAreaState, EditorCapabilities, EditorPane};
+use crate::editor::{
+    CachedSyntax, EditorAction, EditorAreaState, EditorCapabilities, EditorPane, SyntaxView,
+};
 use crate::explorer::{
     ExplorerState, id as explorer_id, is_source_root, items as explorer_items,
     visible_row as visible_tree_row,
@@ -153,6 +155,7 @@ const STATUS_BAR_ID: WidgetId = WidgetId(10_014);
 const EDITOR_TABS_ID: WidgetId = WidgetId(10_015);
 const TERMINAL_TABS_ID: WidgetId = WidgetId(10_016);
 const EDITOR_SCROLLBAR_ID: WidgetId = WidgetId(10_017);
+const EDITOR_HORIZONTAL_SCROLLBAR_ID: WidgetId = WidgetId(10_063);
 const TERMINAL_SCROLLBAR_ID: WidgetId = WidgetId(10_018);
 const EXPLORER_VERTICAL_SCROLLBAR_ID: WidgetId = WidgetId(10_019);
 const EXPLORER_HORIZONTAL_SCROLLBAR_ID: WidgetId = WidgetId(10_021);
@@ -407,7 +410,12 @@ impl IdeShell {
                 search_query: String::new(),
                 navigated: None,
                 scrollbar: Scrollbar::new(EDITOR_SCROLLBAR_ID, ScrollbarOrientation::Vertical),
+                horizontal_scrollbar: Scrollbar::new(
+                    EDITOR_HORIZONTAL_SCROLLBAR_ID,
+                    ScrollbarOrientation::Horizontal,
+                ),
                 syntax_snapshots: HashMap::new(),
+                syntax_spans: HashMap::new(),
                 completion_items: Vec::new(),
                 completion_selected: 0,
             },
@@ -613,14 +621,10 @@ impl IdeShell {
             .collect()
     }
     pub fn set_syntax_snapshot(&mut self, snapshot: SyntaxSnapshot) {
-        if self
-            .editor_area
-            .session
-            .document(snapshot.document_id)
-            .is_none()
-        {
+        let Some(document) = self.editor_area.session.document(snapshot.document_id) else {
             return;
-        }
+        };
+        let spans = converted_syntax(document.buffer.text(), &snapshot);
         let error_count = snapshot.diagnostics.len();
         let symbol_count = count_outline(&snapshot.outline);
         let import_count = snapshot.imports.len();
@@ -631,6 +635,13 @@ impl IdeShell {
             .map_or("Análise", String::as_str);
         self.context.status_message = format!(
             "{language}: {error_count} error(s), {symbol_count} symbol(s), {import_count} import(s)"
+        );
+        self.editor_area.syntax_spans.insert(
+            snapshot.document_id,
+            CachedSyntax {
+                version: snapshot.version,
+                spans,
+            },
         );
         self.editor_area
             .syntax_snapshots
@@ -1126,7 +1137,7 @@ impl IdeShell {
     pub fn selected_shell(&self) -> ShellKind {
         self.terminal.selected_shell()
     }
-    pub const fn editor_scroll_line(&self) -> usize {
+    pub fn editor_scroll_line(&self) -> usize {
         self.editor_area.pane.scroll_line()
     }
     pub fn terminal_scroll_line(&self) -> usize {
@@ -1395,7 +1406,7 @@ impl IdeShell {
                 self.editor_scrollbar_rect(size),
                 self.active_text().map_or(0, |text| text.lines().count()) as f32,
                 self.editor_visible_lines(size) as f32,
-                self.editor_area.pane.scroll_line() as f32,
+                self.editor_area.pane.scroll_offset() / EDITOR_LINE_HEIGHT,
             ),
             ScrollTarget::Terminal => {
                 let active = &self.terminal.tabs[self.terminal.active];
@@ -1412,6 +1423,15 @@ impl IdeShell {
                 self.explorer_visible_lines(size) as f32,
                 self.explorer.scroll_line as f32,
             ),
+            ScrollTarget::EditorHorizontal => {
+                let track = self.editor_horizontal_scrollbar_rect(size);
+                (
+                    track,
+                    self.editor_area.pane.content_width(),
+                    (track.size.width - 28.0).max(1.0),
+                    self.editor_area.pane.scroll_x(),
+                )
+            }
             ScrollTarget::ExplorerHorizontal => {
                 let track = self.explorer_horizontal_scrollbar_rect(size);
                 (
@@ -1424,11 +1444,32 @@ impl IdeShell {
         }
     }
 
+    /// Há linha passando da área visível, e portanto barra lateral.
+    fn editor_scrolls_sideways(&self, size: Size) -> bool {
+        self.editor_area.pane.content_width() > self.editor_view_rect(size).size.width
+    }
+
+    /// Trilha da barra lateral do editor, rente à borda de baixo da área.
+    ///
+    /// Ela para antes da barra vertical: duas trilhas cruzadas no canto
+    /// disputariam o mesmo clique.
+    fn editor_horizontal_scrollbar_rect(&self, size: Size) -> Rect {
+        let geo = self.geometry(size);
+        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        Rect::new(
+            editor_x,
+            geo.editor_bottom - 10.0,
+            (geo.editor_width - 10.0).max(0.0),
+            10.0,
+        )
+    }
+
     fn scrollbar_mut(&mut self, target: ScrollTarget) -> &mut Scrollbar {
         match target {
             ScrollTarget::Editor => &mut self.editor_area.scrollbar,
             ScrollTarget::Terminal => &mut self.terminal.scrollbar,
             ScrollTarget::ExplorerVertical => &mut self.explorer.vertical_scrollbar,
+            ScrollTarget::EditorHorizontal => &mut self.editor_area.horizontal_scrollbar,
             ScrollTarget::ExplorerHorizontal => &mut self.explorer.horizontal_scrollbar,
         }
     }
@@ -1447,10 +1488,12 @@ impl IdeShell {
     fn apply_scrollbar(&mut self, target: ScrollTarget) {
         let offset = self.scrollbar_mut(target).offset();
         match target {
+            // A barra também fala em pixels: arredondar para linha aqui
+            // devolveria o salto que a rolagem contínua veio tirar.
             ScrollTarget::Editor => self
                 .editor_area
                 .pane
-                .set_scroll_line(offset.round().max(0.0) as usize),
+                .set_scroll_offset((offset * EDITOR_LINE_HEIGHT).max(0.0)),
             ScrollTarget::Terminal => {
                 let maximum = self.terminal.scrollbar.max_offset();
                 let active = self.terminal.active;
@@ -1462,6 +1505,7 @@ impl IdeShell {
             ScrollTarget::ExplorerVertical => {
                 self.explorer.scroll_line = offset.round().max(0.0) as usize;
             }
+            ScrollTarget::EditorHorizontal => self.editor_area.pane.set_scroll_x(offset.max(0.0)),
             ScrollTarget::ExplorerHorizontal => self.explorer.scroll_x = offset.max(0.0),
         }
     }
@@ -1471,10 +1515,17 @@ impl IdeShell {
         for target in [
             ScrollTarget::Terminal,
             ScrollTarget::Editor,
+            ScrollTarget::EditorHorizontal,
             ScrollTarget::ExplorerHorizontal,
             ScrollTarget::ExplorerVertical,
         ] {
             if target == ScrollTarget::Terminal && self.terminal.minimized {
+                continue;
+            }
+            // A barra lateral do editor só existe quando há linha passando da
+            // área. Sem esta guarda ela tomaria o clique da borda do terminal,
+            // que fica na mesma altura, sem sequer estar desenhada.
+            if target == ScrollTarget::EditorHorizontal && !self.editor_scrolls_sideways(size) {
                 continue;
             }
             let (track, ..) = self.scrollbar_range(target, size);
@@ -1501,7 +1552,9 @@ impl IdeShell {
     fn paint_scrollbar(&self, target: ScrollTarget, size: Size) -> Vec<PaintCommand> {
         let (track, content, viewport, offset) = self.scrollbar_range(target, size);
         let orientation = match target {
-            ScrollTarget::ExplorerHorizontal => ScrollbarOrientation::Horizontal,
+            ScrollTarget::EditorHorizontal | ScrollTarget::ExplorerHorizontal => {
+                ScrollbarOrientation::Horizontal
+            }
             _ => ScrollbarOrientation::Vertical,
         };
         let mut bar = Scrollbar::new(WidgetId(0), orientation).with_range(content, viewport);
@@ -1706,50 +1759,29 @@ impl IdeShell {
             document.buffer.revision(),
             document.path.clone(),
         );
-        let syntax = self.editor_syntax(id, revision);
         let decorations = self.editor_decorations(&path);
         let focused = self.context.focus == ShellFocus::Editor;
         let bounds = self.editor_view_rect(size);
         let context = self.layout_context();
-        self.editor_area.pane.set_bounds(bounds);
+        let editor_area = &mut self.editor_area;
+        editor_area.pane.set_bounds(bounds);
         // Qual documento o painel edita: trocar de aba precisa jogar fora a cópia
         // de desenho, o desfazer e as marcas, que falam do texto anterior.
-        self.editor_area.pane.set_source(id.0);
-        let Some(document) = self.editor_area.session.active() else {
+        editor_area.pane.set_source(id.0);
+        let Some(document) = editor_area.session.active() else {
             return;
         };
-        self.editor_area
-            .pane
-            .sync(&context, &document.buffer, &syntax, decorations, focused);
-    }
-
-    /// Converte o realce da IDE, que fala em linha e coluna, para os intervalos
-    /// absolutos que o editor da biblioteca usa.
-    /// Converte o realce, que fala em linha e coluna, para deslocamentos em
-    /// caracteres — que é como o editor da biblioteca conta.
-    fn editor_syntax(&self, id: DocumentId, revision: u64) -> Vec<(usize, usize, TokenKind)> {
-        let Some(snapshot) = self
-            .editor_area
-            .syntax_snapshots
+        let syntax = editor_area
+            .syntax_spans
             .get(&id)
-            .filter(|snapshot| snapshot.version == revision)
-        else {
-            return Vec::new();
-        };
-        let Some(text) = self.active_text() else {
-            return Vec::new();
-        };
-        snapshot
-            .highlights
-            .iter()
-            .map(|highlight| {
-                (
-                    char_offset_of(text, highlight.range.start),
-                    char_offset_of(text, highlight.range.end),
-                    token_kind_for(highlight.kind),
-                )
-            })
-            .collect()
+            .filter(|cached| cached.version == revision)
+            .map(|cached| SyntaxView {
+                version: cached.version,
+                spans: &cached.spans,
+            });
+        editor_area
+            .pane
+            .sync(&context, &document.buffer, syntax, decorations, focused);
     }
 
     /// Pontos de parada e a linha em que a execução parou.
@@ -2364,6 +2396,7 @@ impl IdeShell {
                     let id = DocumentId(id);
                     if self.editor_area.session.close(id).is_ok() {
                         self.editor_area.syntax_snapshots.remove(&id);
+                        self.editor_area.syntax_spans.remove(&id);
                         self.editor_area
                             .pane
                             .set_cursor(self.active_text().map_or(0, str::len));
@@ -2590,7 +2623,7 @@ impl IdeShell {
         self.terminal.selecting = false;
     }
 
-    pub fn scroll(&mut self, point: Point, delta_lines: isize, size: Size) {
+    pub fn scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
         if self.search.modal.is_open() {
             self.type_search_scroll(point, delta_lines, size);
             return;
@@ -2608,22 +2641,23 @@ impl IdeShell {
                 .visible_entries()
                 .len()
                 .saturating_sub(self.explorer_visible_lines(size));
+            // Explorer e terminal são listas de linhas inteiras: aqui a
+            // fração não tem onde aparecer, e o passo volta a ser em linhas.
             self.explorer.scroll_line = self
                 .explorer
                 .scroll_line
-                .saturating_add_signed(delta_lines)
+                .saturating_add_signed(delta_lines.round() as isize)
                 .min(max);
         } else if point.y >= geo.content_top && point.y < geo.editor_bottom {
+            // Em pixels, e por uma fração de linha a cada passo: rolar de linha
+            // inteira faz o texto saltar, que é o que se sente como travado.
             let total = self.active_text().map_or(0, |text| text.lines().count());
             let visible = (geo.editor_height / EDITOR_LINE_HEIGHT).floor().max(1.0) as usize;
-            let max = total.saturating_sub(visible);
-            let scrolled = self
-                .editor_area
-                .pane
-                .scroll_line()
-                .saturating_add_signed(delta_lines)
-                .min(max);
-            self.editor_area.pane.set_scroll_line(scrolled);
+            let maximo = total.saturating_sub(visible) as f32 * EDITOR_LINE_HEIGHT;
+            let passo = delta_lines * EDITOR_LINE_HEIGHT;
+            let destino =
+                (self.editor_area.pane.scroll_offset() + passo).clamp(0.0, maximo.max(0.0));
+            self.editor_area.pane.set_scroll_offset(destino);
         } else if point.y >= geo.editor_bottom && point.y < geo.content_bottom {
             let visible = ((geo.terminal_height - 62.0) / EDITOR_LINE_HEIGHT)
                 .floor()
@@ -2635,7 +2669,7 @@ impl IdeShell {
                 .saturating_sub(visible);
             self.terminal.tabs[active].scroll_line = self.terminal.tabs[active]
                 .scroll_line
-                .saturating_add_signed(delta_lines)
+                .saturating_add_signed(delta_lines.round() as isize)
                 .min(max);
             self.terminal.tabs[active].follow_output =
                 self.terminal.tabs[active].scroll_line >= max;
@@ -2948,7 +2982,7 @@ impl IdeShell {
         }
     }
 
-    fn type_search_scroll(&mut self, point: Point, delta_lines: isize, size: Size) {
+    fn type_search_scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
         let (_, list) = self.type_search_geometry(size);
         if !list.contains(point) {
             return;
@@ -2956,7 +2990,7 @@ impl IdeShell {
         self.search.first_visible = self
             .search
             .first_visible
-            .saturating_add_signed(delta_lines)
+            .saturating_add_signed(delta_lines.round() as isize)
             .min(self.type_search_max_first_visible());
     }
 
@@ -3958,6 +3992,11 @@ impl IdeShell {
             self.editor_area.pane.paint(&mut editor_paint);
             commands.extend(editor_paint.into_commands());
             commands.extend(self.paint_scrollbar(ScrollTarget::Editor, size));
+            // A barra lateral só aparece quando há linha passando da área: uma
+            // trilha permanente ocuparia altura útil sem servir para nada.
+            if self.editor_scrolls_sideways(size) {
+                commands.extend(self.paint_scrollbar(ScrollTarget::EditorHorizontal, size));
+            }
         } else {
             commands.push(label(
                 "Select a file in Explorer",
@@ -4369,7 +4408,7 @@ impl IdeShell {
         editor.sync(
             &self.layout_context(),
             &self.debug_panel.inspection.source,
-            &[],
+            None,
             Vec::new(),
             true,
         );
@@ -5417,18 +5456,38 @@ fn byte_at_column(text: &str, column: usize) -> usize {
         .nth(column)
         .map_or(text.len(), |(index, _)| index)
 }
-/// Deslocamento em caracteres de uma posição em linha e coluna.
+/// Converte todos os realces em uma única passagem pelo texto.
 ///
-/// O realce chega em linha e coluna, e o editor da biblioteca conta caracteres.
-fn char_offset_of(text: &str, position: DomainTextPosition) -> usize {
+/// O snapshot fala em linha/coluna e o editor em caracteres absolutos. Manter
+/// início e tamanho de cada linha transforma cada extremo de token em consulta
+/// O(1); percorrer desde a primeira linha para cada token tornava a pintura
+/// quadrática em classes grandes.
+fn converted_syntax(text: &str, snapshot: &SyntaxSnapshot) -> Vec<(usize, usize, TokenKind)> {
+    let mut starts = Vec::new();
+    let mut lengths = Vec::new();
     let mut offset = 0;
-    for (index, line) in text.lines().enumerate() {
-        if index == position.line as usize {
-            return offset + (position.column as usize).min(line.chars().count());
-        }
-        offset += line.chars().count() + 1;
+    for line in text.split('\n') {
+        starts.push(offset);
+        let length = line.chars().count();
+        lengths.push(length);
+        offset += length + 1;
     }
-    offset
+    let position = |position: DomainTextPosition| {
+        let line = (position.line as usize).min(starts.len().saturating_sub(1));
+        starts.get(line).copied().unwrap_or_default()
+            + (position.column as usize).min(lengths.get(line).copied().unwrap_or_default())
+    };
+    snapshot
+        .highlights
+        .iter()
+        .map(|highlight| {
+            (
+                position(highlight.range.start),
+                position(highlight.range.end),
+                token_kind_for(highlight.kind),
+            )
+        })
+        .collect()
 }
 
 fn line_column(text: &str, cursor: usize) -> (usize, usize) {
@@ -6579,6 +6638,13 @@ mod tests {
         });
 
         assert_eq!(shell.active_outline()[0].name, "Example");
+        let cached = shell
+            .editor_area
+            .syntax_spans
+            .get(&document_id)
+            .unwrap_or_else(|| panic!("o realce convertido precisa ser cacheado"));
+        assert_eq!(cached.spans, vec![(0, 6, TokenKind::Keyword)]);
+        let cached_pointer = cached.spans.as_ptr();
         let colors = Theme::default().colors;
         assert!(shell.paint(Size::new(1280.0, 800.0)).iter().any(|command| {
             matches!(
@@ -6587,6 +6653,12 @@ mod tests {
                     if text.text == "public" && text.color == colors.syntax_keyword
             )
         }));
+        let _ = shell.paint(Size::new(1280.0, 800.0));
+        assert_eq!(
+            shell.editor_area.syntax_spans[&document_id].spans.as_ptr(),
+            cached_pointer,
+            "quadros seguintes devem reutilizar o realce convertido"
+        );
     }
 
     #[test]
@@ -6985,7 +7057,7 @@ mod tests {
         let track = shell.explorer_vertical_scrollbar_rect(size);
         shell.scroll(
             Point::new(ACTIVITY_WIDTH + 40.0, EXPLORER_TOP + 40.0),
-            5,
+            5.0,
             size,
         );
         assert_eq!(shell.explorer.scroll_line, 5);
@@ -7011,7 +7083,7 @@ mod tests {
         );
         let size = Size::new(1280.0, 800.0);
         let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
-        shell.scroll(Point::new(editor_x + 100.0, 200.0), 8, size);
+        shell.scroll(Point::new(editor_x + 100.0, 200.0), 8.0, size);
         assert_eq!(shell.editor_scroll_line(), 8);
         let terminal_y = shell.geometry(size).editor_bottom + 10.0;
         shell.pointer_down(Point::new(editor_x + 115.0, terminal_y), size);
@@ -7154,7 +7226,7 @@ mod tests {
         assert!(bottom > 0);
 
         let content_point = Point::new(editor_x + 100.0, shell.geometry(size).editor_bottom + 90.0);
-        shell.scroll(content_point, -5, size);
+        shell.scroll(content_point, -5.0, size);
         assert!(shell.terminal.tabs[active].scroll_line < bottom);
 
         let track = shell.terminal_scrollbar_rect(size);
@@ -7697,6 +7769,124 @@ mod tests {
         shell.context.focus = ShellFocus::Editor;
         shell.editor_area.pane.set_cursor(0);
         shell
+    }
+
+    /// A rolagem vertical é contínua, e não de linha em linha.
+    ///
+    /// Meio passo de roda — o que um touchpad manda o tempo todo — precisa
+    /// mover meia linha. Arredondar para linha inteira é o que fazia o texto
+    /// saltar a cada passo em vez de deslizar.
+    #[test]
+    fn the_vertical_scroll_moves_by_pixels_instead_of_whole_lines() {
+        let mut shell = test_shell();
+        shell.editor_area.session.open_memory(
+            "long.rs",
+            (0..200)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let size = Size::new(1280.0, 800.0);
+        let ponto = Point::new(ACTIVITY_WIDTH + SIDEBAR_WIDTH + 100.0, 200.0);
+
+        shell.scroll(ponto, 0.5, size);
+        let meia = shell.editor_area.pane.scroll_offset();
+        assert!(
+            (meia - EDITOR_LINE_HEIGHT / 2.0).abs() < 0.01,
+            "meio passo move meia linha, e não uma inteira nem nenhuma: {meia}"
+        );
+
+        // Somando meios passos chega-se a uma linha inteira, sem perder resto.
+        shell.scroll(ponto, 0.5, size);
+        assert!(
+            (shell.editor_area.pane.scroll_offset() - EDITOR_LINE_HEIGHT).abs() < 0.01,
+            "as frações se somam em vez de serem descartadas"
+        );
+        assert_eq!(shell.editor_scroll_line(), 1);
+
+        // Rolar para trás não passa do topo.
+        shell.scroll(ponto, -50.0, size);
+        assert_eq!(shell.editor_area.pane.scroll_offset(), 0.0);
+    }
+
+    /// A barra lateral do editor só existe quando alguma linha passa da área.
+    ///
+    /// Ela fica rente à borda de baixo, onde também está a borda do terminal.
+    /// Uma barra desenhada sempre tomaria aquele clique sem ter o que rolar.
+    #[test]
+    fn the_editor_gets_a_horizontal_scrollbar_only_when_a_line_overflows() {
+        let size = Size::new(1280.0, 800.0);
+        let mut curto = shell_editing("int total = 10;");
+        let _ = curto.paint(size);
+        assert!(
+            !curto.editor_scrolls_sideways(size),
+            "linha curta não pede barra lateral"
+        );
+
+        let mut longo = shell_editing(&"x".repeat(4_000));
+        let comandos = longo.paint(size);
+        assert!(
+            longo.editor_scrolls_sideways(size),
+            "linha comprida precisa de barra lateral"
+        );
+        let trilha = longo.editor_horizontal_scrollbar_rect(size);
+        assert!(
+            comandos.iter().any(|command| matches!(
+                command,
+                PaintCommand::FillRect(fill) if fill.rect.origin.y >= trilha.origin.y
+                    && fill.rect.size.height <= trilha.size.height + 0.01
+            )),
+            "a trilha precisa ser desenhada"
+        );
+
+        // Arrastar a barra rola o editor de lado.
+        let ponto = Point::new(
+            trilha.origin.x + trilha.size.width / 2.0,
+            trilha.origin.y + trilha.size.height / 2.0,
+        );
+        longo.pointer_down(ponto, size);
+        let apos_clique = longo.editor_area.pane.scroll_x();
+        assert!(
+            apos_clique > 0.0,
+            "clicar na trilha leva o editor para o trecho correspondente"
+        );
+
+        // O quadro seguinte não pode desfazer o que a barra fez: revelar o
+        // cursor a cada pintura anulava o clique e o arrasto.
+        let _ = longo.paint(size);
+        assert_eq!(
+            longo.editor_area.pane.scroll_x(),
+            apos_clique,
+            "pintar de novo não devolve a vista ao cursor"
+        );
+
+        // Arrastar continua movendo, e para além do clique.
+        longo.pointer_move(
+            Point::new(ponto.x + trilha.size.width / 4.0, ponto.y),
+            size,
+        );
+        let apos_arrasto = longo.editor_area.pane.scroll_x();
+        assert!(apos_arrasto > apos_clique, "o arrasto continua rolando");
+        longo.pointer_up();
+        let _ = longo.paint(size);
+        assert_eq!(longo.editor_area.pane.scroll_x(), apos_arrasto);
+
+        // Mover o cursor, sim, traz a vista para ele — é o que faz digitar no
+        // fim de uma linha comprida não escrever fora da tela.
+        longo.editor_area.pane.set_cursor(3_900);
+        let _ = longo.paint(size);
+        let no_cursor = longo.editor_area.pane.scroll_x();
+        assert!(
+            no_cursor > apos_arrasto,
+            "a vista acompanha o cursor levado para o fim da linha"
+        );
+        longo.editor_area.pane.set_cursor(0);
+        let _ = longo.paint(size);
+        assert_eq!(
+            longo.editor_area.pane.scroll_x(),
+            0.0,
+            "e volta ao começo quando o cursor volta"
+        );
     }
 
     /// Coluna do editor em coordenadas de tela.
@@ -8386,7 +8576,7 @@ mod tests {
         let (_, list) = shell.type_search_geometry(size);
         shell.scroll(
             Point::new(list.origin.x + 20.0, list.origin.y + 20.0),
-            3,
+            3.0,
             size,
         );
         assert_eq!(

@@ -122,3 +122,35 @@ detalhe de implementação.
 cobrem o comportamento estão marcados como `ignored` apontando para esta decisão,
 em vez de removidos: eles descrevem o comportamento correto e voltam a valer no
 dia em que a interrupção funcionar.
+
+## ADR-014 — O realce sintático é convertido uma vez por revisão
+
+**Situação:** o realce chega do provider em linha e coluna, e o editor endereça o
+texto por caractere absoluto. A conversão acontecia **a cada quadro**, e cada
+extremo de token era localizado percorrendo o arquivo desde a primeira linha.
+
+**Evidência:** numa classe de cerca de 1.300 linhas e 212 KB, com uns 3.600
+identificadores, são mais de 7.000 extremos a converter. Como cada um custa uma
+varredura, o trabalho cresce com o quadrado do tamanho do arquivo — e se repetia a
+cada rolagem, clique ou tecla que provocasse redesenho. O editor da biblioteca não
+era o gargalo: o benchmark virtualizado pinta 100 mil linhas em microssegundos,
+porque ali não há milhares de spans para percorrer.
+
+**Decisão:** a conversão passa a acontecer uma vez por documento e revisão, e o
+resultado fica guardado. Uma tabela com o início e o tamanho de cada linha,
+montada numa única passagem, transforma cada extremo de token em consulta direta.
+A pintura recebe o vetor já pronto **por empréstimo**, sem reconstruí-lo.
+
+O cache é indexado por documento e descartado quando a aba fecha, respeitando o
+anti-padrão de *cache sem limite* de `08-storage-and-memory`: ele é limitado pelo
+que está aberto, não pelo que já foi aberto.
+
+Na mesma linha, a sincronização de linguagens deixa de acontecer em clique comum.
+Ela clona o texto de todas as abas na thread da interface; o que a justifica é o
+**conjunto de documentos mudar** — uma aba aberta ou fechada —, e não o ponteiro
+ter tocado o editor. Mover o cursor não muda documento nenhum.
+
+**Consequência:** o custo do realce passa a ser proporcional ao arquivo, e só
+quando ele muda. Em troca, quem produzir realce por outro caminho precisa invalidar
+a entrada — a revisão do buffer é o que decide, e um realce novo com revisão antiga
+é ignorado em vez de exibido fora de lugar.

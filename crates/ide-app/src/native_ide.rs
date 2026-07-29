@@ -253,14 +253,24 @@ impl NativeIde {
 
     fn open_document(&mut self, request: OpenDocumentRequest) {
         let result = self.workspace.read_document(&request.path);
-        let Some(shell) = self.ui.shell.as_mut() else {
-            return;
-        };
-        match result {
-            Ok(text) => {
-                shell.show_location(&request.path, text, request.line, request.column);
+        let mut opened = false;
+        if let Some(shell) = self.ui.shell.as_mut() {
+            match result {
+                Ok(text) => {
+                    shell.show_location(&request.path, text, request.line, request.column);
+                    opened = true;
+                }
+                Err(error) => shell.set_status_message(error.to_string()),
             }
-            Err(error) => shell.set_status_message(error.to_string()),
+        }
+        // Abrir muda o conjunto de documentos entregue ao host. Cliques comuns
+        // no editor não mudam texto nem abas e, portanto, não devem pagar esta
+        // sincronização.
+        if opened {
+            self.sync_languages();
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_status_message(format!("Opened {}", request.path.display()));
+            }
         }
     }
 
@@ -1586,6 +1596,7 @@ impl ApplicationHandler for NativeIde {
                     window.request_redraw();
                     return;
                 }
+                let tab_count = self.ui.shell.as_ref().map_or(0, IdeShell::tab_count);
                 if let Some(shell) = self.ui.shell.as_mut() {
                     shell.pointer_down_with_modifiers(
                         self.window.cursor,
@@ -1593,7 +1604,11 @@ impl ApplicationHandler for NativeIde {
                         self.window.control_pressed,
                     );
                 }
-                sync_languages = true;
+                sync_languages = self
+                    .ui
+                    .shell
+                    .as_ref()
+                    .is_some_and(|shell| shell.tab_count() != tab_count);
                 window.request_redraw();
             }
             WindowEvent::MouseInput {
@@ -1617,9 +1632,12 @@ impl ApplicationHandler for NativeIde {
                 window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // Sem arredondar: o delta em pixels de um touchpad ou de um mouse
+                // de precisão vem em frações de linha, e arredondá-lo aqui
+                // transformava um deslizar contínuo numa sucessão de saltos.
                 let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -y.round() as isize * 3,
-                    MouseScrollDelta::PixelDelta(position) => -(position.y / 22.0).round() as isize,
+                    MouseScrollDelta::LineDelta(_, y) => -y * 3.0,
+                    MouseScrollDelta::PixelDelta(position) => -(position.y as f32) / 22.0,
                 };
                 if let Some(shell) = self.ui.shell.as_mut() {
                     shell.scroll(self.window.cursor, lines, window.logical_size());

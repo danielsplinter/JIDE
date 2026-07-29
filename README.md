@@ -133,6 +133,17 @@ clicado — e o nome. `Enter` cria o pacote e, quando há nome, o tipo dentro de
 com a declaração `package` deduzida do caminho. `Tab` alterna os campos e `Esc`
 fecha sem criar.
 
+Linhas de código não quebram. Quando alguma passa da largura visível, aparece uma
+**barra de rolagem horizontal** rente à borda de baixo do editor; ela some quando
+não há o que rolar, para não disputar aquele ponto com a borda do terminal.
+Digitar no fim de uma linha comprida traz o cursor de volta à vista sozinho — mas
+só quando o cursor se move: rolar com a barra não o move, e por isso a vista fica
+onde foi posta em vez de saltar de volta no quadro seguinte.
+
+A rolagem vertical do editor é **contínua**: o deslocamento é em pixels e aceita
+fração de linha, então um touchpad ou um mouse de precisão desliza o texto em vez
+de saltar linha a linha. A roda comum continua andando três linhas por passo.
+
 Editor e terminal possuem rolagem independente. No cabeçalho do terminal,
 selecione PowerShell, CMD ou Git Bash; este último aparece quando o Git for
 detectado. Digite o comando e pressione `Enter` para executá-lo no diretório
