@@ -57,7 +57,7 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = NativeIde::default();
     event_loop.run_app(&mut app)?;
-    if let Some(error) = app.startup_error {
+    if let Some(error) = app.take_startup_error() {
         return Err(error.into());
     }
     Ok(())

@@ -366,12 +366,12 @@ fn neutral_crates_expose_no_language_specific_public_api() {
 #[test]
 fn native_ide_has_no_language_specific_fields_or_constructors() {
     let root = workspace_root();
-    let main = fs::read_to_string(root.join("crates/ide-app/src/main.rs"))
-        .unwrap_or_else(|error| panic!("não foi possível ler ide-app/src/main.rs: {error}"));
-    let struct_start = main
+    let native = fs::read_to_string(root.join("crates/ide-app/src/native_ide.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler native_ide.rs: {error}"));
+    let struct_start = native
         .find("struct NativeIde {")
         .unwrap_or_else(|| panic!("NativeIde não foi encontrado"));
-    let struct_body = &main[struct_start..];
+    let struct_body = &native[struct_start..];
     let struct_end = struct_body
         .find("\n}")
         .unwrap_or_else(|| panic!("fim de NativeIde não foi encontrado"));
@@ -389,7 +389,7 @@ fn native_ide_has_no_language_specific_fields_or_constructors() {
         "GradleAdapter::new",
     ] {
         assert!(
-            !main.contains(constructor),
+            !native.contains(constructor),
             "{constructor} precisa permanecer no módulo de composição Java"
         );
     }
@@ -406,8 +406,10 @@ fn native_ide_has_no_language_specific_fields_or_constructors() {
 #[test]
 fn tasks_and_toolchains_are_dispatched_without_java_branches_in_native_ide() {
     let root = workspace_root();
-    let main = fs::read_to_string(root.join("crates/ide-app/src/main.rs"))
-        .unwrap_or_else(|error| panic!("não foi possível ler ide-app/src/main.rs: {error}"));
+    let native = fs::read_to_string(root.join("crates/ide-app/src/native_ide.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler native_ide.rs: {error}"));
+    let controllers = fs::read_to_string(root.join("crates/ide-app/src/controllers.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler controllers.rs: {error}"));
     for forbidden in [
         "enum JavaTask",
         "fn start_java_task",
@@ -418,13 +420,13 @@ fn tasks_and_toolchains_are_dispatched_without_java_branches_in_native_ide() {
         "TestRequest {",
     ] {
         assert!(
-            !main.contains(forbidden),
+            !native.contains(forbidden),
             "{forbidden} precisa pertencer à contribuição, não a NativeIde"
         );
     }
     assert!(
-        main.contains("fn start_task(&mut self, task_id: TaskId)")
-            && main.contains("controller.execute(&task_id, context)"),
+        native.contains("fn start_task(&mut self, task_id: TaskId)")
+            && controllers.contains("controller.execute(&task_id, context)"),
         "NativeIde precisa despachar todas as tarefas pelo TaskController"
     );
 }
@@ -589,4 +591,64 @@ fn phase_five_keeps_ui_state_split_by_feature() {
             );
         }
     }
+}
+
+#[test]
+fn phase_six_keeps_native_application_split_into_controllers() {
+    let root = workspace_root();
+    let app_root = root.join("crates/ide-app/src");
+    let main = fs::read_to_string(app_root.join("main.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ide-app/src/main.rs: {error}"));
+    assert!(
+        main.lines().count() <= 800,
+        "ide-app/src/main.rs deve permanecer com no máximo 800 linhas"
+    );
+
+    let native = fs::read_to_string(app_root.join("native_ide.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler native_ide.rs: {error}"));
+    assert!(
+        struct_field_count(&native, "NativeIde") <= 12,
+        "NativeIde deve possuir no máximo 12 campos de coordenação"
+    );
+    for field_type in [
+        "NativeWindowState",
+        "WorkspaceController",
+        "DocumentController",
+        "LanguageController",
+        "ProjectController",
+        "AppTaskController",
+        "AppDebugController",
+        "UiBridge",
+    ] {
+        assert!(
+            native.contains(field_type),
+            "NativeIde precisa coordenar {field_type}"
+        );
+    }
+
+    let controllers = fs::read_to_string(app_root.join("controllers.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler controllers.rs: {error}"));
+    assert!(
+        !controllers.contains("NativeIde"),
+        "controllers não podem receber ou conhecer NativeIde"
+    );
+    assert!(
+        controllers.contains("fn synchronize_application")
+            && controllers.contains("fn synchronize_documents")
+            && controllers.contains("fn reset_import"),
+        "documentos, linguagem e projeto precisam possuir seus casos de uso"
+    );
+
+    let bridge = fs::read_to_string(app_root.join("ui_bridge.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ui_bridge.rs: {error}"));
+    assert!(
+        bridge.contains("impl From<ApplicationCommand> for UiAction")
+            && bridge.contains("fn actions("),
+        "UiBridge precisa traduzir ApplicationCommand antes do despacho"
+    );
+    assert!(
+        !native.contains("ApplicationCommand::OpenDocument")
+            && !native.contains("ApplicationCommand::SaveDocument"),
+        "NativeIde não pode voltar a traduzir comandos de UI diretamente"
+    );
 }

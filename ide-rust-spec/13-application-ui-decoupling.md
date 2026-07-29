@@ -380,14 +380,40 @@ Implementação concluída em 29/07/2026:
   configurações e depuração. `cargo test --workspace`, Clippy estrito e o build
   release de `ide-app` foram executados sem falhas.
 
-### Fase 6 — Decomposição de `NativeIde`
+### Fase 6 — Decomposição de `NativeIde` ✅ Concluída
 
-- [ ] criar controllers com dependências explícitas;
-- [ ] mover documentos e sincronização de linguagem para controllers próprios;
-- [ ] mover projeto, build e tarefas para controllers próprios;
-- [ ] isolar tradução entre `ApplicationCommand` e casos de uso em `UiBridge`;
-- [ ] reduzir `NativeIde` e `ide-app/src/main.rs` às metas estruturais;
-- [ ] testar controllers sem criar janela nativa.
+- [x] criar controllers com dependências explícitas;
+- [x] mover documentos e sincronização de linguagem para controllers próprios;
+- [x] mover projeto, build e tarefas para controllers próprios;
+- [x] isolar tradução entre `ApplicationCommand` e casos de uso em `UiBridge`;
+- [x] reduzir `NativeIde` e `ide-app/src/main.rs` às metas estruturais;
+- [x] testar controllers sem criar janela nativa.
+
+Implementação concluída em 29/07/2026:
+
+- `NativeIde` passou de 30 campos para 9 objetos coordenadores:
+  `NativeWindowState`, `WorkspaceController`, `DocumentController`,
+  `LanguageController`, `ProjectController`, `TaskController`,
+  `DebugController`, `UiBridge` e `RuntimeState`;
+- `DocumentController` calcula eventos de abertura, alteração e fechamento;
+  `LanguageController` sincroniza o ciclo dos documentos com `LanguageHost` e
+  devolve snapshots de sintaxe; nenhum deles conhece Winit, WGPU ou `NativeIde`;
+- `WorkspaceController` concentra leitura, gravação, varredura e metadados do
+  workspace. `ProjectController` mantém build systems, projeto importado e
+  relógio de reimportação; tarefas e eventos de ferramenta ficam em
+  `TaskController`;
+- `UiBridge` é dona da shell, do barramento de eventos e do histórico de
+  navegação. A conversão exaustiva de `ApplicationCommand` para `UiAction`
+  acontece antes do despacho, removendo a tradução direta de `NativeIde`;
+- a implementação nativa foi movida para `native_ide.rs`; `main.rs` passou de
+  2.395 para 15 linhas e contém somente declaração dos módulos, composição e
+  ponto de entrada. `NativeIde` ficou abaixo do teto de 12 campos;
+- testes unitários exercitam `DocumentController` e `UiBridge` sem criar janela.
+  O teste arquitetural `phase_six_keeps_native_application_split_into_controllers`
+  mede campos e linhas, exige os casos de uso extraídos, impede controllers de
+  conhecerem `NativeIde` e impede a volta da tradução direta;
+- `cargo test --workspace`, Clippy estrito e o build release de `ide-app` foram
+  executados sem falhas.
 
 ### Fase 7 — Fachadas de linguagem e host
 

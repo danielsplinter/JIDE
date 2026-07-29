@@ -1,0 +1,381 @@
+//! Controllers de aplicação com dependências explícitas e sem conhecimento de Winit.
+
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender},
+    },
+    thread,
+    time::{Instant, SystemTime},
+};
+
+use ide_application::{
+    ContributionRegistry, IdeEvent, TaskController as ApplicationTaskController,
+    TaskExecutionContext, TaskId, ToolchainRegistry,
+};
+use ide_domain::{DocumentId, DocumentSnapshot, SyntaxSnapshot};
+use ide_language_host::LanguageHost;
+use ide_project::{
+    build::{BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry},
+    model::{ProjectDescriptor, ProjectModel},
+};
+use ide_ui::DebugView;
+use ide_workspace::{FileNode, WorkspaceError, WorkspaceService};
+use ui_core::Point;
+use ui_render_wgpu::WgpuRenderer;
+use ui_window_winit::WinitWindow;
+
+use crate::{
+    bootstrap::default_goals,
+    bridges::{ToolEvent, document_change},
+    debug,
+    window::ClickTracker,
+};
+
+#[derive(Default)]
+pub(super) struct NativeWindowState {
+    pub(super) window: Option<WinitWindow>,
+    pub(super) renderer: Option<WgpuRenderer>,
+    pub(super) cursor: Point,
+    pub(super) click_tracker: ClickTracker,
+    pub(super) control_pressed: bool,
+    pub(super) shift_pressed: bool,
+}
+
+#[derive(Default)]
+pub(super) struct WorkspaceController {
+    pub(super) service: WorkspaceService,
+}
+
+impl WorkspaceController {
+    pub(super) fn scan(&self, root: &Path) -> Result<FileNode, WorkspaceError> {
+        self.service.scan(root)
+    }
+
+    pub(super) fn read_document(&self, path: &Path) -> Result<String, WorkspaceError> {
+        self.service.read_document(path)
+    }
+
+    pub(super) fn save_document(&self, path: &Path, text: &str) -> Result<(), WorkspaceError> {
+        self.service.save_document(path, text)
+    }
+
+    pub(super) fn modified_at(&self, path: &Path) -> Option<SystemTime> {
+        self.service.modified_at(path)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct DocumentController {
+    pub(super) language: HashMap<DocumentId, DocumentSnapshot>,
+    pub(super) application: HashMap<DocumentId, DocumentSnapshot>,
+    pub(super) remembered: Vec<PathBuf>,
+}
+
+impl DocumentController {
+    pub(super) fn clear(&mut self) {
+        self.language.clear();
+        self.application.clear();
+        self.remembered.clear();
+    }
+
+    pub(super) fn synchronize_application(
+        &mut self,
+        snapshots: &[DocumentSnapshot],
+    ) -> Vec<IdeEvent> {
+        let open_ids = snapshots
+            .iter()
+            .map(|snapshot| snapshot.id)
+            .collect::<std::collections::HashSet<_>>();
+        let closed = self
+            .application
+            .keys()
+            .filter(|id| !open_ids.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for document_id in closed {
+            self.application.remove(&document_id);
+            events.push(IdeEvent::DocumentClosed(document_id));
+        }
+        for snapshot in snapshots {
+            let event = match self.application.get(&snapshot.id) {
+                None => Some(IdeEvent::DocumentOpened {
+                    document_id: snapshot.id,
+                    path: snapshot.path.clone(),
+                }),
+                Some(previous) if previous.version != snapshot.version => {
+                    Some(IdeEvent::DocumentChanged {
+                        document_id: snapshot.id,
+                        version: snapshot.version,
+                    })
+                }
+                Some(_) => None,
+            };
+            self.application.insert(snapshot.id, snapshot.clone());
+            events.extend(event);
+        }
+        events
+    }
+}
+
+#[derive(Default)]
+pub(super) struct LanguageController {
+    pub(super) host: Option<LanguageHost>,
+    pub(super) contributions: ContributionRegistry,
+    pub(super) toolchains: ToolchainRegistry,
+}
+
+impl LanguageController {
+    pub(super) fn synchronize_documents(
+        &self,
+        documents: &mut DocumentController,
+        snapshots: &[DocumentSnapshot],
+    ) -> Vec<SyntaxSnapshot> {
+        let Some(host) = self.host.as_ref() else {
+            return Vec::new();
+        };
+        let open_ids = snapshots
+            .iter()
+            .map(|snapshot| snapshot.id)
+            .collect::<std::collections::HashSet<_>>();
+        let closed = documents
+            .language
+            .keys()
+            .filter(|id| !open_ids.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for document_id in closed {
+            let _ = pollster::block_on(host.close_document(host.request_context(), document_id));
+            documents.language.remove(&document_id);
+        }
+
+        let mut syntax = Vec::new();
+        for snapshot in snapshots {
+            if !snapshot
+                .path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("java"))
+            {
+                continue;
+            }
+            let changed = documents
+                .language
+                .get(&snapshot.id)
+                .is_none_or(|previous| previous.version != snapshot.version);
+            let result = match documents.language.get(&snapshot.id) {
+                None => {
+                    pollster::block_on(host.open_document(host.request_context(), snapshot.clone()))
+                        .map(|_| ())
+                }
+                Some(previous) if previous.version != snapshot.version => {
+                    let change = document_change(previous, snapshot);
+                    pollster::block_on(host.change_document(host.request_context(), change))
+                }
+                Some(_) => Ok(()),
+            };
+            if let Err(error) = result {
+                tracing::warn!(%error, document_id = snapshot.id.0, "syntax update failed");
+                continue;
+            }
+            documents.language.insert(snapshot.id, snapshot.clone());
+            if changed {
+                match pollster::block_on(host.syntax(host.request_context(), snapshot.id)) {
+                    Ok(snapshot) => syntax.push(snapshot),
+                    Err(error) => {
+                        tracing::warn!(%error, document_id = snapshot.id.0, "syntax snapshot failed");
+                    }
+                }
+            }
+        }
+        syntax
+    }
+}
+
+pub(super) struct ImportedProject {
+    pub(super) adapter: Arc<dyn BuildSystemAdapter>,
+    pub(super) descriptor: ProjectDescriptor,
+    pub(super) model: ProjectModel,
+    pub(super) manifest_modified: Option<SystemTime>,
+}
+
+#[derive(Default)]
+pub(super) struct ProjectController {
+    pub(super) build_systems: BuildSystemRegistry,
+    pub(super) imported: Option<ImportedProject>,
+    pub(super) last_manifest_check: Option<Instant>,
+}
+
+impl ProjectController {
+    pub(super) fn reset_import(&mut self) -> Option<ImportedProject> {
+        self.last_manifest_check = None;
+        self.imported.take()
+    }
+
+    pub(super) fn build_plan(
+        &self,
+        java_home: Option<&Path>,
+    ) -> Option<(Arc<dyn BuildSystemAdapter>, BuildCommandRequest, String)> {
+        let project = self.imported.as_ref()?;
+        let mut request = BuildCommandRequest::new(
+            project.descriptor.clone(),
+            default_goals(&project.descriptor),
+        );
+        if let Some(home) = java_home {
+            request =
+                request.with_environment_variable("JAVA_HOME", home.to_string_lossy().into_owned());
+        }
+        let label = format!(
+            "[{}] {}",
+            project.descriptor.build_system.label(),
+            request.goals.join(" ")
+        );
+        Some((project.adapter.clone(), request, label))
+    }
+}
+
+#[derive(Default)]
+pub(super) struct TaskController {
+    pub(super) controller: ApplicationTaskController,
+    pub(super) events: Option<Receiver<ToolEvent>>,
+    pub(super) sender: Option<Sender<ToolEvent>>,
+}
+
+impl TaskController {
+    fn spawn(
+        &self,
+        name: &str,
+        label: String,
+        work: impl FnOnce(&tokio::runtime::Runtime) -> ToolEvent + Send + 'static,
+    ) -> Result<(), String> {
+        let sender = self
+            .sender
+            .clone()
+            .ok_or_else(|| "canal de ferramentas indisponível".to_owned())?;
+        thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = sender.send(ToolEvent {
+                            status: format!("{label} falhou"),
+                            stdout: String::new(),
+                            stderr: error.to_string(),
+                        });
+                        return;
+                    }
+                };
+                let _ = sender.send(work(&runtime));
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(super) fn execute_build(
+        &self,
+        adapter: Arc<dyn BuildSystemAdapter>,
+        request: BuildCommandRequest,
+        label: String,
+    ) -> Result<(), String> {
+        let error_label = label.clone();
+        self.spawn("project-build", label.clone(), move |runtime| match runtime
+            .block_on(adapter.execute(request))
+        {
+            Ok(result) => ToolEvent {
+                status: if result.success {
+                    format!("{label} concluído")
+                } else {
+                    format!("{label} falhou ({})", result.exit_code)
+                },
+                stdout: format!("{}\n{}", result.command_line, result.stdout),
+                stderr: result.stderr,
+            },
+            Err(error) => ToolEvent {
+                status: format!("{error_label} falhou"),
+                stdout: String::new(),
+                stderr: error.to_string(),
+            },
+        })
+    }
+
+    pub(super) fn execute_task(
+        &self,
+        task_id: TaskId,
+        context: TaskExecutionContext,
+        label: String,
+    ) -> Result<(), String> {
+        let controller = self.controller.clone();
+        let error_label = label.clone();
+        self.spawn("language-task", label, move |runtime| {
+            match runtime.block_on(controller.execute(&task_id, context)) {
+                Ok(result) => ToolEvent {
+                    status: result.status,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                },
+                Err(error) => ToolEvent {
+                    status: format!("{error_label} falhou"),
+                    stdout: String::new(),
+                    stderr: error.to_string(),
+                },
+            }
+        })
+    }
+}
+
+#[derive(Default)]
+pub(super) struct DebugController {
+    pub(super) session: Option<debug::DebugController>,
+    pub(super) view: DebugView,
+    pub(super) thread: Option<ide_debug_api::ThreadId>,
+}
+
+#[derive(Default)]
+pub(super) struct RuntimeState {
+    pub(super) startup_error: Option<String>,
+    pub(super) config: ide_core::AppConfig,
+    pub(super) config_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_domain::{DocumentId, DocumentSnapshot};
+
+    fn snapshot(id: u64, version: u64) -> DocumentSnapshot {
+        DocumentSnapshot {
+            id: DocumentId(id),
+            path: PathBuf::from(format!("{id}.java")),
+            version,
+            text: String::new(),
+        }
+    }
+
+    #[test]
+    fn document_controller_reports_open_change_and_close_without_a_window() {
+        let mut controller = DocumentController::default();
+        assert!(matches!(
+            controller
+                .synchronize_application(&[snapshot(1, 0)])
+                .as_slice(),
+            [IdeEvent::DocumentOpened { .. }]
+        ));
+        assert!(matches!(
+            controller
+                .synchronize_application(&[snapshot(1, 1)])
+                .as_slice(),
+            [IdeEvent::DocumentChanged { version: 1, .. }]
+        ));
+        assert!(matches!(
+            controller.synchronize_application(&[]).as_slice(),
+            [IdeEvent::DocumentClosed(DocumentId(1))]
+        ));
+    }
+}
