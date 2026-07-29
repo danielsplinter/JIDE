@@ -18,8 +18,8 @@ use ide_build_api::{
 use ide_core::{AppConfig, config_path, init_logging};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
-    DefinitionRequest, DocumentChange, DocumentId, DocumentSnapshot, ProviderId, TextPosition,
-    TextRange,
+    DefinitionRequest, DocumentChange, DocumentId, DocumentSnapshot, ProviderId, SymbolKind,
+    TextPosition, TextRange,
 };
 use ide_language_host::LanguageHost;
 use ide_process::{NativeProcessSupervisor, ProcessSupervisor};
@@ -29,7 +29,8 @@ use ide_toolchain_api::{
     TestAdapter, TestRequest, ToolchainProvider,
 };
 use ide_ui::{
-    DebugRequest, DebugView, IdeShell, NavigationRequest, NewItemKind, NewItemRequest, SettingsPage,
+    ContentSearchHit, DebugRequest, DebugView, IdeShell, NavigationRequest, NewItemKind,
+    NewItemRequest, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
 };
 use java_gradle_adapter::{GRADLE_BUILD_SYSTEM_ID, GradleAdapter};
 use java_javac_adapter::JavaJavacAdapter;
@@ -383,6 +384,86 @@ impl NativeIde {
                     shell.set_status_message(error.to_string());
                 }
             }
+        }
+    }
+
+    /// Responde à busca de tipo enquanto houver consulta esperando.
+    ///
+    /// A tela guarda o que foi digitado e pede uma vez; quem tem o provedor de
+    /// linguagem é o app, e é aqui que a pergunta vira resposta.
+    fn answer_type_search(&mut self) {
+        let Some(query) = self
+            .shell
+            .as_mut()
+            .and_then(IdeShell::take_type_search_request)
+        else {
+            return;
+        };
+        let Some(host) = self.language_host.as_ref() else {
+            return;
+        };
+        let found = pollster::block_on(host.workspace_types(
+            host.request_context(),
+            "java",
+            query,
+            TYPE_SEARCH_LIMIT,
+        ));
+        if let Some(shell) = self.shell.as_mut() {
+            match found {
+                Ok(symbols) => shell.set_type_search_results(
+                    symbols
+                        .into_iter()
+                        .filter_map(|symbol| {
+                            Some(TypeSearchHit {
+                                name: symbol.name,
+                                kind: type_kind_label(symbol.kind)?.to_owned(),
+                                location: symbol.location,
+                            })
+                        })
+                        .collect(),
+                ),
+                Err(error) => shell.set_status_message(error.to_string()),
+            }
+        }
+    }
+
+    /// Responde à busca textual usando a árvore já carregada no Explorer.
+    ///
+    /// O serviço de workspace conhece o limite estrutural: somente arquivos sob
+    /// diretórios chamados `java` podem produzir ocorrências.
+    fn answer_content_search(&mut self) {
+        let Some(query) = self
+            .shell
+            .as_mut()
+            .and_then(IdeShell::take_content_search_request)
+        else {
+            return;
+        };
+        let found = self.shell.as_ref().map_or_else(Vec::new, |shell| {
+            ide_workspace::search_java_content(shell.workspace_tree(), &query, TYPE_SEARCH_LIMIT)
+        });
+        if let Some(shell) = self.shell.as_mut() {
+            shell.set_content_search_results(
+                found
+                    .into_iter()
+                    .map(|hit| ContentSearchHit {
+                        preview: hit.preview,
+                        location: ide_domain::Location {
+                            path: hit.path,
+                            range: TextRange {
+                                start: TextPosition {
+                                    line: hit.line.saturating_sub(1) as u32,
+                                    column: hit.column.saturating_sub(1) as u32,
+                                },
+                                end: TextPosition {
+                                    line: hit.line.saturating_sub(1) as u32,
+                                    column: hit.column.saturating_sub(1) as u32,
+                                },
+                            },
+                        },
+                    })
+                    .collect(),
+            );
         }
     }
 
@@ -1630,24 +1711,43 @@ impl ApplicationHandler for NativeIde {
                 {
                     build_requested = true;
                 } else if self.control_pressed
+                    && self.shift_pressed
+                    && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("l"))
+                {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.open_content_search();
+                    }
+                } else if self.control_pressed
+                    && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("l"))
+                {
+                    if let Some(shell) = self.shell.as_mut() {
+                        shell.open_type_search();
+                    }
+                } else if self.control_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("z"))
                 {
                     // Desfazer e marcar ocorrências são do editor: o shell só
                     // encaminha a tecla com o modificador.
                     if let Some(shell) = self.shell.as_mut() {
-                        shell.key_down_with_modifiers("z", Modifiers {
-                            control: true,
-                            ..Modifiers::default()
-                        });
+                        shell.key_down_with_modifiers(
+                            "z",
+                            Modifiers {
+                                control: true,
+                                ..Modifiers::default()
+                            },
+                        );
                     }
                 } else if self.control_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("d"))
                 {
                     if let Some(shell) = self.shell.as_mut() {
-                        shell.key_down_with_modifiers("d", Modifiers {
-                            control: true,
-                            ..Modifiers::default()
-                        });
+                        shell.key_down_with_modifiers(
+                            "d",
+                            Modifiers {
+                                control: true,
+                                ..Modifiers::default()
+                            },
+                        );
                     }
                 } else if self.control_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("c"))
@@ -1813,6 +1913,10 @@ impl ApplicationHandler for NativeIde {
         if completion_requested {
             self.request_completion();
         }
+        // A busca de tipo responde a cada tecla: quem digita refina a lista, e a
+        // tela só sabe pedir.
+        self.answer_type_search();
+        self.answer_content_search();
         if select_jdk_requested {
             // `Ctrl+Shift+J` promete a página do compilador, qualquer que tenha
             // sido a última página aberta.
@@ -1828,7 +1932,11 @@ impl ApplicationHandler for NativeIde {
         if open_settings {
             self.open_jdk_selector();
         }
-        if let Some(request) = self.shell.as_mut().and_then(IdeShell::take_new_item_request) {
+        if let Some(request) = self
+            .shell
+            .as_mut()
+            .and_then(IdeShell::take_new_item_request)
+        {
             self.create_new_item(request);
         }
         let configured_jdk = self
@@ -1871,6 +1979,20 @@ impl ApplicationHandler for NativeIde {
             self.start_java_task(JavaTask::Test);
         }
     }
+}
+
+/// Como o tipo é chamado na tela — o que o usuário escreveria.
+///
+/// Devolve `None` para o que não é tipo: a busca fala de classes, e um método
+/// com o mesmo nome só confundiria a lista.
+const fn type_kind_label(kind: SymbolKind) -> Option<&'static str> {
+    Some(match kind {
+        SymbolKind::Class => "classe",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Record => "record",
+        SymbolKind::Enum => "enum",
+        _ => return None,
+    })
 }
 
 fn document_change(previous: &DocumentSnapshot, current: &DocumentSnapshot) -> DocumentChange {
@@ -1972,14 +2094,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let pacote = root.join("src");
         assert!(std::fs::create_dir_all(&pacote).is_ok());
-        assert!(std::fs::write(pacote.join("Pedido.java"), "public record Pedido(String v) {}
-").is_ok());
-        assert!(std::fs::write(pacote.join("Servico.java"), "public interface Servico {}
-").is_ok());
-        assert!(std::fs::write(pacote.join("Estado.java"), "public enum Estado { ATIVO }
-").is_ok());
-        assert!(std::fs::write(pacote.join("Ajuda.java"), "public class Ajuda {}
-").is_ok());
+        assert!(
+            std::fs::write(
+                pacote.join("Pedido.java"),
+                "public record Pedido(String v) {}
+"
+            )
+            .is_ok()
+        );
+        assert!(
+            std::fs::write(
+                pacote.join("Servico.java"),
+                "public interface Servico {}
+"
+            )
+            .is_ok()
+        );
+        assert!(
+            std::fs::write(
+                pacote.join("Estado.java"),
+                "public enum Estado { ATIVO }
+"
+            )
+            .is_ok()
+        );
+        assert!(
+            std::fs::write(
+                pacote.join("Ajuda.java"),
+                "public class Ajuda {}
+"
+            )
+            .is_ok()
+        );
         let uso = pacote.join("Uso.java");
         let texto = "public class Uso { void f() { Pedido p; Servico s; Estado e; Ajuda a; } }
 ";

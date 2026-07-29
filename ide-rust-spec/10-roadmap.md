@@ -51,6 +51,9 @@ com o renderer WGPU do ERLibUi.
 - cada aba do editor possui botão `x` que fecha somente o documento clicado;
 - títulos longos das abas são abreviados e recortados antes do botão `x`, sem
   vazar para abas vizinhas;
+- `Ctrl+Shift+L` reutiliza a janela de `Ctrl+L` para buscar conteúdo somente nos
+  arquivos sob diretórios `java`, mostrando caminho relativo, linha e trecho e
+  abrindo a ocorrência na posição exata;
 - o terminal apresenta abas independentes para PowerShell, CMD e Git Bash;
 - cada aba preserva isoladamente entrada, histórico, saída e posição de rolagem;
 - ao alternar a aba, somente o conteúdo da sessão ativa é exibido;

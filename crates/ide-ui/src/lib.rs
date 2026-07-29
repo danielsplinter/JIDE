@@ -11,28 +11,23 @@ use std::{
 };
 
 use ide_domain::{
-    CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, OutlineItem,
+    CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, Location, OutlineItem,
     SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition, member_access,
 };
 use ide_terminal::{ShellKind, TerminalSession};
 use ide_text::{EditorSession, TextBuffer};
-use ui_editor::{
-    CodeEditor, GutterMark, LineDecoration, TokenKind,
-};
 use ide_workspace::{FileNode, WorkspaceError};
 use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 use ui_components::{
-    Button, ComboBox, ComboBoxItem, ContextMenu, Icon, IconTint, Label, ListSelection,
-    ListView, MenuBar,
-    MenuBarItem,
-    Popup,
-    MenuEntry, MenuItem, ModalHost, Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter,
-    StatusBar, TabItem, Tabs, TextInput, TreeItem, TreeView,
+    Button, ComboBox, ComboBoxItem, ContextMenu, Icon, IconTint, Label, ListSelection, ListView,
+    MenuBar, MenuBarItem, MenuEntry, MenuItem, ModalHost, Popup, Scrollbar, ScrollbarOrientation,
+    SplitOrientation, Splitter, StatusBar, TabItem, Tabs, TextInput, TreeItem, TreeView,
 };
 use ui_core::{
     Color, ColorTokens, CommandId, EventResult, FontId, KeyEvent, Modifiers, Point, PointerButton,
     PointerEvent, Rect, Size, TextInputEvent, Theme, UiEvent, WidgetAction, WidgetId,
 };
+use ui_editor::{CodeEditor, GutterMark, LineDecoration, TokenKind};
 use ui_render_api::{DrawTextCommand, FillRectCommand, PaintCommand, StrokeRectCommand};
 use ui_window_api::ClipboardService;
 
@@ -82,6 +77,19 @@ const NEW_ITEM_NAME_CAPTION_ID: WidgetId = WidgetId(10_042);
 const NEW_ITEM_MESSAGE_ID: WidgetId = WidgetId(10_043);
 /// A janela é pequena de propósito: dois campos e duas ações.
 const NEW_ITEM_PANEL_SIZE: Size = Size::new(460.0, 230.0);
+const TYPE_SEARCH_MODAL_ID: WidgetId = WidgetId(10_060);
+const TYPE_SEARCH_INPUT_ID: WidgetId = WidgetId(10_061);
+const TYPE_SEARCH_LIST_ID: WidgetId = WidgetId(10_062);
+/// Janela larga: o que ela mostra são caminhos, e caminho cortado não localiza.
+const TYPE_SEARCH_PANEL_SIZE: Size = Size::new(760.0, 420.0);
+const TYPE_SEARCH_ROW_HEIGHT: f32 = 26.0;
+/// Linhas que cabem na lista de 302 pontos de altura, incluindo a última parcial.
+const TYPE_SEARCH_VISIBLE_ROWS: usize = 12;
+/// Teto de resultados pedidos à linguagem.
+///
+/// Quem procura por nome refina até achar; uma lista de mil linhas não ajuda a
+/// escolher e custa a montar a cada letra.
+pub const TYPE_SEARCH_LIMIT: usize = 100;
 const INSPECTION_MODAL_ID: WidgetId = WidgetId(10_044);
 const INSPECTION_TREE_ID: WidgetId = WidgetId(10_045);
 const INSPECTION_CLOSE_ID: WidgetId = WidgetId(10_046);
@@ -331,6 +339,78 @@ struct InspectionRun {
     total: usize,
 }
 
+/// Um tipo encontrado pela busca por nome.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeSearchHit {
+    pub name: String,
+    /// `classe`, `interface`, `record`, `enum` — o que o usuário escreveria.
+    pub kind: String,
+    pub location: Location,
+}
+
+/// Uma ocorrência textual encontrada dentro de uma raiz `java`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentSearchHit {
+    /// Linha resumida que permite reconhecer a ocorrência antes de abri-la.
+    pub preview: String,
+    pub location: Location,
+}
+
+impl ContentSearchHit {
+    #[must_use]
+    pub fn label(&self) -> String {
+        let path = type_search_display_path(&self.location.path);
+        format!(
+            "{}:{}  —  {}",
+            path.display(),
+            self.location.range.start.line + 1,
+            self.preview
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceSearchMode {
+    Types,
+    Content,
+}
+
+impl TypeSearchHit {
+    /// Linha mostrada na lista: o nome, o que ele é, e onde está.
+    ///
+    /// O caminho vai junto porque duas classes de mesmo nome em pacotes
+    /// diferentes são o caso que a busca precisa desempatar.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let path = type_search_display_path(&self.location.path);
+        format!("{} ({})  —  {}", self.name, self.kind, path.display())
+    }
+}
+
+/// Caminho apresentado pela busca, relativo à última pasta `java`.
+///
+/// Projetos multimódulo podem possuir mais de uma raiz `src/.../java`; procurar
+/// de trás para frente evita exibir o prefixo de um módulo que também se chame
+/// `java`. Quando a localização não possui essa pasta, mostramos somente o nome
+/// do arquivo em vez de vazar um caminho absoluto.
+fn type_search_display_path(path: &Path) -> PathBuf {
+    let components = path.components().collect::<Vec<_>>();
+    let java = components.iter().rposition(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name)
+                if name.to_string_lossy().eq_ignore_ascii_case("java")
+        )
+    });
+    if let Some(index) = java {
+        let relative = components.iter().skip(index + 1).collect::<PathBuf>();
+        if !relative.as_os_str().is_empty() {
+            return relative;
+        }
+    }
+    path.file_name().map_or_else(PathBuf::new, PathBuf::from)
+}
+
 /// Um valor na árvore de inspeção, com os campos já revelados.
 ///
 /// O caminho é a expressão que endereça o valor a partir da raiz —
@@ -501,6 +581,16 @@ pub struct IdeShell {
     /// Navegação entre as páginas da janela de configurações.
     settings_pages: ListView,
     /// Janela de criação de pacote, classe ou interface.
+    /// Busca no workspace. `Ctrl+L` procura tipos e `Ctrl+Shift+L`, conteúdo.
+    type_search_modal: ModalHost,
+    workspace_search_mode: WorkspaceSearchMode,
+    type_search_query: String,
+    type_search_results: Vec<TypeSearchHit>,
+    content_search_results: Vec<ContentSearchHit>,
+    type_search_selected: usize,
+    type_search_first_visible: usize,
+    /// Consulta cuja resposta ainda não chegou, para a tela pedir uma vez só.
+    type_search_pending: Option<String>,
     new_item_modal: ModalHost,
     new_item_dialog: Option<NewItemDialog>,
     new_item_package: TextInput,
@@ -580,6 +670,19 @@ impl IdeShell {
         Ok(Self::from_tree(workspace))
     }
 
+    /// Raiz atualmente carregada no Explorer.
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace.path
+    }
+
+    /// Árvore já varrida que serviços de workspace podem consultar sem refazer
+    /// I/O a cada tecla.
+    #[must_use]
+    pub fn workspace_tree(&self) -> &FileNode {
+        &self.workspace
+    }
+
     /// Relê a árvore do disco preservando o que está expandido.
     ///
     /// O que nasceu depois da última varredura não existe para o Explorer até ele
@@ -592,7 +695,8 @@ impl IdeShell {
         // A `TreeView` guarda os itens dela: reler o disco sem repô-los deixava a
         // árvore desenhando a varredura anterior. `set_roots` preserva expansão e
         // seleção por identidade, então a posição do usuário não se perde.
-        self.explorer_tree.set_roots(explorer_items(&self.workspace));
+        self.explorer_tree
+            .set_roots(explorer_items(&self.workspace));
         self.sync_explorer_tree();
         Ok(())
     }
@@ -755,6 +859,18 @@ impl IdeShell {
             settings_pages: ListView::new(SETTINGS_PAGES_ID, SETTINGS_PAGE_TITLES)
                 .with_row_height(SETTINGS_PAGE_ROW_HEIGHT)
                 .with_selection(ListSelection::Marker),
+            type_search_modal: ModalHost::new(
+                TYPE_SEARCH_MODAL_ID,
+                "Ir para o tipo",
+                TYPE_SEARCH_PANEL_SIZE,
+            ),
+            workspace_search_mode: WorkspaceSearchMode::Types,
+            type_search_query: String::new(),
+            type_search_results: Vec::new(),
+            content_search_results: Vec::new(),
+            type_search_selected: 0,
+            type_search_first_visible: 0,
+            type_search_pending: None,
             new_item_modal: ModalHost::new(NEW_ITEM_MODAL_ID, "", NEW_ITEM_PANEL_SIZE),
             new_item_dialog: None,
             new_item_package: TextInput::new(NEW_ITEM_PACKAGE_ID, String::new())
@@ -860,6 +976,7 @@ impl IdeShell {
         self.editor_pane.set_cursor(0);
         self.focus = ShellFocus::Editor;
         self.status_message = format!("Opened {}", path.display());
+        self.sync_explorer_to_active();
         Ok(id)
     }
 
@@ -1304,7 +1421,8 @@ impl IdeShell {
                 })
                 .collect::<Vec<_>>(),
         );
-        self.debug_frames.set_selected(Some(self.debug.selected_frame));
+        self.debug_frames
+            .set_selected(Some(self.debug.selected_frame));
         self.debug_variables.set_items(
             self.debug
                 .variables
@@ -1443,7 +1561,10 @@ impl IdeShell {
             .iter()
             .enumerate()
             .map(|(index, terminal)| {
-                TabItem::new(index as u64, terminal.session.selected_profile().kind.label())
+                TabItem::new(
+                    index as u64,
+                    terminal.session.selected_profile().kind.label(),
+                )
             })
             .collect();
         let mut tabs = Tabs::new(TERMINAL_TABS_ID, items).with_tab_width(TERMINAL_TAB_WIDTH);
@@ -1609,6 +1730,42 @@ impl IdeShell {
         self.explorer_tree.set_expanded(ids);
     }
 
+    /// Expande, seleciona e revela no Explorer o arquivo da aba ativa.
+    ///
+    /// A restauração abre as abas antes do primeiro frame. Fazer a reconciliação
+    /// aqui deixa a árvore nascer no mesmo documento do editor, em vez de exigir
+    /// que o usuário repita toda a navegação manualmente.
+    fn sync_explorer_to_active(&mut self) {
+        let Some(path) = self.active_document_path() else {
+            self.explorer_tree.set_selected(None);
+            return;
+        };
+        let target = explorer_id(&path);
+        if self.explorer_path_for(target).is_none() {
+            return;
+        }
+
+        for ancestor in path.ancestors().skip(1) {
+            if !ancestor.starts_with(&self.workspace.path) {
+                break;
+            }
+            self.expanded.insert(ancestor.to_path_buf());
+        }
+        self.sync_explorer_tree();
+        self.explorer_tree.set_selected(Some(target));
+
+        let expanded = self
+            .expanded
+            .iter()
+            .map(|path| explorer_id(path))
+            .collect::<HashSet<_>>();
+        if let Some(row) = visible_tree_row(&explorer_items(&self.workspace), &expanded, target) {
+            // Duas linhas de contexto ajudam a reconhecer o pacote pai. A cópia
+            // da TreeView usada na pintura limita o deslocamento no fim da lista.
+            self.explorer_scroll_line = row.saturating_sub(2);
+        }
+    }
+
     /// Posiciona a árvore de acordo com as barras de rolagem da janela.
     fn explorer_tree_for(&self, size: Size) -> TreeView {
         let mut tree = self.explorer_tree.clone();
@@ -1713,7 +1870,6 @@ impl IdeShell {
             )
     }
 
-
     fn editor_view_rect(&self, size: Size) -> Rect {
         let geometry = self.geometry(size);
         Rect::new(
@@ -1732,7 +1888,11 @@ impl IdeShell {
         let Some(document) = self.editor.active() else {
             return;
         };
-        let (id, revision, path) = (document.id, document.buffer.revision(), document.path.clone());
+        let (id, revision, path) = (
+            document.id,
+            document.buffer.revision(),
+            document.path.clone(),
+        );
         let syntax = self.editor_syntax(id, revision);
         let decorations = self.editor_decorations(&path);
         let focused = self.focus == ShellFocus::Editor;
@@ -1795,11 +1955,12 @@ impl IdeShell {
                 LineDecoration::mark(*line as usize, mark)
             })
             .collect();
-        let destacar = |decorations: &mut Vec<LineDecoration>, line: usize| {
-            match decorations.iter_mut().find(|item| item.line == line) {
-                Some(existing) => *existing = existing.with_highlight(),
-                None => decorations.push(LineDecoration::highlight(line)),
-            }
+        let destacar = |decorations: &mut Vec<LineDecoration>, line: usize| match decorations
+            .iter_mut()
+            .find(|item| item.line == line)
+        {
+            Some(existing) => *existing = existing.with_highlight(),
+            None => decorations.push(LineDecoration::highlight(line)),
         };
         if let Some((_, line)) = self
             .debug
@@ -1902,7 +2063,8 @@ impl IdeShell {
         // A lista resolve qual linha foi clicada; a IDE só reage à escolha.
         // Clicar fora das linhas é ignorado por ela, e é isso que distingue uma
         // escolha de um clique no vazio do painel.
-        self.debug_frames.layout(&self.layout_context(), geometry.frames);
+        self.debug_frames
+            .layout(&self.layout_context(), geometry.frames);
         let result = self.debug_frames.event(
             &mut EventContext::default(),
             &UiEvent::PointerDown(primary_pointer(point)),
@@ -1945,6 +2107,10 @@ impl IdeShell {
         // O menu de contexto é o que está por cima de tudo: é ele que Esc
         // dispensa primeiro.
         if self.context_menu_key("Escape", Modifiers::default()) {
+            return;
+        }
+        if self.type_search_modal.is_open() {
+            self.close_type_search();
             return;
         }
         if self.inspection_modal.is_open() {
@@ -2038,7 +2204,8 @@ impl IdeShell {
         } else {
             path.parent().map(Path::to_path_buf).unwrap_or(path)
         };
-        self.context_menu.set_entries(explorer_menu_entries(&target));
+        self.context_menu
+            .set_entries(explorer_menu_entries(&target));
         self.context_menu.layout(
             &self.layout_context(),
             Rect::new(0.0, 0.0, size.width, size.height),
@@ -2229,6 +2396,10 @@ impl IdeShell {
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
             return;
         }
+        if self.type_search_modal.is_open() {
+            self.type_search_pointer_down(point, size);
+            return;
+        }
         // A lista de completação vem antes do resto: ela está por cima, e clicar
         // em outro lugar significa desistir dela.
         if self.completion_pointer_down(point, size) {
@@ -2343,13 +2514,16 @@ impl IdeShell {
                     let _ = self.editor.activate(DocumentId(id));
                     self.editor_pane.set_cursor(0);
                     self.focus = ShellFocus::Editor;
+                    self.sync_explorer_to_active();
                 }
                 Some(TabCommand::Close(id)) => {
                     let id = DocumentId(id);
                     if self.editor.close(id).is_ok() {
                         self.syntax_snapshots.remove(&id);
-                        self.editor_pane.set_cursor(self.active_text().map_or(0, str::len));
+                        self.editor_pane
+                            .set_cursor(self.active_text().map_or(0, str::len));
                         self.status_message = "Tab closed".to_owned();
+                        self.sync_explorer_to_active();
                     }
                 }
                 None => {}
@@ -2400,7 +2574,9 @@ impl IdeShell {
             let Some(document) = self.editor.active() else {
                 return;
             };
-            let action = self.editor_pane.pointer_down(&document.buffer, point, control);
+            let action = self
+                .editor_pane
+                .pointer_down(&document.buffer, point, control);
             self.handle_editor_action(action);
         } else if point.x >= editor_x && point.y >= geometry.editor_bottom {
             self.focus = ShellFocus::Terminal;
@@ -2464,7 +2640,8 @@ impl IdeShell {
     ) -> Result<DocumentId, String> {
         let id = self.open_file(path)?;
         let text = self.active_text().unwrap_or_default();
-        self.editor_pane.set_cursor(offset_for_line_column(text, line, column));
+        self.editor_pane
+            .set_cursor(offset_for_line_column(text, line, column));
         // Sem revelar a linha, a navegação move o cursor para fora da área
         // visível e parece que nada aconteceu.
         self.editor_pane.reveal_line(line);
@@ -2487,9 +2664,7 @@ impl IdeShell {
         // painel, e arrastar sobre o que não se vê seria o gesto indo parar no
         // lugar errado.
         let inspecting = self.inspection_modal.is_open();
-        if !inspecting
-            && let Some(target) = self.scrollbar_drag
-        {
+        if !inspecting && let Some(target) = self.scrollbar_drag {
             self.sync_scrollbar(target, size);
             self.scrollbar_mut(target).event(
                 &mut EventContext::default(),
@@ -2554,6 +2729,10 @@ impl IdeShell {
     }
 
     pub fn scroll(&mut self, point: Point, delta_lines: isize, size: Size) {
+        if self.type_search_modal.is_open() {
+            self.type_search_scroll(point, delta_lines, size);
+            return;
+        }
         if self.settings_modal.is_open() {
             return;
         }
@@ -2667,7 +2846,6 @@ impl IdeShell {
         self.explorer_tree_for(size).content_size().width
     }
 
-
     fn terminal_position_at(&self, point: Point, size: Size) -> TextPosition {
         let geo = self.geometry(size);
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
@@ -2728,6 +2906,9 @@ impl IdeShell {
     }
 
     pub fn text_input(&mut self, text: &str) {
+        if self.type_search_text_input(text) {
+            return;
+        }
         if self.inspection_text_input(text) {
             return;
         }
@@ -2757,6 +2938,11 @@ impl IdeShell {
     /// sozinho não diz se é para indentar ou recolher.
     pub fn key_down_with_modifiers(&mut self, key: &str, modifiers: Modifiers) {
         if self.context_menu_key(key, modifiers) {
+            return;
+        }
+        // A busca de tipo cobre a janela: enquanto ela está aberta, as teclas são
+        // dela.
+        if self.type_search_key(key) {
             return;
         }
         if self.inspection_key(key, modifiers) {
@@ -2849,6 +3035,228 @@ impl IdeShell {
         }
         if let Some((pane, buffer)) = self.focused_editor() {
             pane.select_word_at(buffer, point);
+        }
+    }
+
+    /// Área do campo e da lista dentro do painel da busca.
+    ///
+    /// Um lugar só, para o clique acertar o que foi desenhado.
+    fn type_search_geometry(&mut self, size: Size) -> (Rect, Rect) {
+        self.type_search_modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let panel = self.type_search_modal.panel_bounds();
+        let input = Rect::new(
+            panel.origin.x + 16.0,
+            panel.origin.y + 56.0,
+            panel.size.width - 32.0,
+            34.0,
+        );
+        let list = Rect::new(
+            panel.origin.x + 16.0,
+            input.origin.y + input.size.height + 12.0,
+            panel.size.width - 32.0,
+            (panel.origin.y + panel.size.height - 16.0)
+                - (input.origin.y + input.size.height + 12.0),
+        );
+        (input, list)
+    }
+
+    fn type_search_pointer_down(&mut self, point: Point, size: Size) {
+        let (_, list) = self.type_search_geometry(size);
+        if !list.contains(point) {
+            // Clicar fora da lista não escolhe nada, e clicar fora do painel
+            // dispensa a janela.
+            if !self.type_search_modal.panel_bounds().contains(point) {
+                self.close_type_search();
+            }
+            return;
+        }
+        let row = self.type_search_first_visible
+            + ((point.y - list.origin.y) / TYPE_SEARCH_ROW_HEIGHT)
+                .floor()
+                .max(0.0) as usize;
+        if row < self.workspace_search_result_len() {
+            self.type_search_selected = row;
+            self.open_selected_type();
+        }
+    }
+
+    fn type_search_scroll(&mut self, point: Point, delta_lines: isize, size: Size) {
+        let (_, list) = self.type_search_geometry(size);
+        if !list.contains(point) {
+            return;
+        }
+        self.type_search_first_visible = self
+            .type_search_first_visible
+            .saturating_add_signed(delta_lines)
+            .min(self.type_search_max_first_visible());
+    }
+
+    fn type_search_max_first_visible(&self) -> usize {
+        self.workspace_search_result_len()
+            .saturating_sub(TYPE_SEARCH_VISIBLE_ROWS)
+    }
+
+    fn workspace_search_result_len(&self) -> usize {
+        match self.workspace_search_mode {
+            WorkspaceSearchMode::Types => self.type_search_results.len(),
+            WorkspaceSearchMode::Content => self.content_search_results.len(),
+        }
+    }
+
+    fn reveal_type_search_selection(&mut self) {
+        if self.type_search_selected < self.type_search_first_visible {
+            self.type_search_first_visible = self.type_search_selected;
+        } else if self.type_search_selected
+            >= self.type_search_first_visible + TYPE_SEARCH_VISIBLE_ROWS
+        {
+            self.type_search_first_visible =
+                self.type_search_selected + 1 - TYPE_SEARCH_VISIBLE_ROWS;
+        }
+        self.type_search_first_visible = self
+            .type_search_first_visible
+            .min(self.type_search_max_first_visible());
+    }
+
+    /// Abre a busca de tipo por nome. É o que `Ctrl+L` pede.
+    pub fn open_type_search(&mut self) {
+        self.workspace_search_mode = WorkspaceSearchMode::Types;
+        self.type_search_modal.set_title("Ir para o tipo");
+        self.type_search_query.clear();
+        self.type_search_results.clear();
+        self.content_search_results.clear();
+        self.type_search_selected = 0;
+        self.type_search_first_visible = 0;
+        // Consulta vazia pendente: a janela nasce mostrando o que existe, em vez
+        // de um painel em branco esperando a primeira letra.
+        self.type_search_pending = Some(String::new());
+        self.type_search_modal.open();
+    }
+
+    /// Abre a mesma janela da busca de tipos no modo de conteúdo.
+    ///
+    /// A consulta vazia não é enviada: ao contrário de uma lista de tipos, cada
+    /// linha vazia de cada arquivo não é um resultado útil.
+    pub fn open_content_search(&mut self) {
+        self.workspace_search_mode = WorkspaceSearchMode::Content;
+        self.type_search_modal.set_title("Buscar conteúdo em Java");
+        self.type_search_query.clear();
+        self.type_search_results.clear();
+        self.content_search_results.clear();
+        self.type_search_selected = 0;
+        self.type_search_first_visible = 0;
+        self.type_search_pending = None;
+        self.type_search_modal.open();
+    }
+
+    #[must_use]
+    pub fn type_search_open(&self) -> bool {
+        self.type_search_modal.is_open()
+    }
+
+    pub fn close_type_search(&mut self) {
+        self.type_search_modal.close();
+        self.type_search_pending = None;
+    }
+
+    /// Consulta que a tela quer ver respondida, se houver uma esperando.
+    ///
+    /// Sai da mão de quem pergunta: a tela sabe o que foi digitado, e quem tem o
+    /// provedor de linguagem é o app.
+    pub fn take_type_search_request(&mut self) -> Option<String> {
+        (self.workspace_search_mode == WorkspaceSearchMode::Types)
+            .then(|| self.type_search_pending.take())
+            .flatten()
+    }
+
+    /// Consulta textual pedida pelo modo aberto por `Ctrl+Shift+L`.
+    pub fn take_content_search_request(&mut self) -> Option<String> {
+        (self.workspace_search_mode == WorkspaceSearchMode::Content)
+            .then(|| self.type_search_pending.take())
+            .flatten()
+    }
+
+    /// Entrega o que a linguagem encontrou.
+    pub fn set_type_search_results(&mut self, results: Vec<TypeSearchHit>) {
+        self.type_search_results = results;
+        self.content_search_results.clear();
+        self.type_search_selected = 0;
+        self.type_search_first_visible = 0;
+    }
+
+    /// Entrega as ocorrências encontradas nos arquivos sob raízes `java`.
+    pub fn set_content_search_results(&mut self, results: Vec<ContentSearchHit>) {
+        self.content_search_results = results;
+        self.type_search_results.clear();
+        self.type_search_selected = 0;
+        self.type_search_first_visible = 0;
+    }
+
+    #[must_use]
+    pub fn type_search_results(&self) -> &[TypeSearchHit] {
+        &self.type_search_results
+    }
+
+    /// Digitação na busca de tipo. Devolve `true` quando consumiu.
+    fn type_search_text_input(&mut self, text: &str) -> bool {
+        if !self.type_search_modal.is_open() {
+            return false;
+        }
+        self.type_search_query.push_str(text);
+        self.type_search_pending = Some(self.type_search_query.clone());
+        true
+    }
+
+    /// Tecla na busca de tipo. Devolve `true` quando consumiu.
+    fn type_search_key(&mut self, key: &str) -> bool {
+        if !self.type_search_modal.is_open() {
+            return false;
+        }
+        match key.to_ascii_lowercase().as_str() {
+            "backspace" => {
+                self.type_search_query.pop();
+                self.type_search_pending = Some(self.type_search_query.clone());
+            }
+            "arrowdown" => {
+                self.type_search_selected = (self.type_search_selected + 1)
+                    .min(self.workspace_search_result_len().saturating_sub(1));
+                self.reveal_type_search_selection();
+            }
+            "arrowup" => {
+                self.type_search_selected = self.type_search_selected.saturating_sub(1);
+                self.reveal_type_search_selection();
+            }
+            "enter" => self.open_selected_type(),
+            "escape" => self.close_type_search(),
+            _ => {}
+        }
+        true
+    }
+
+    /// Abre o item destacado no editor principal e fecha a janela.
+    fn open_selected_type(&mut self) {
+        let location = match self.workspace_search_mode {
+            WorkspaceSearchMode::Types => self
+                .type_search_results
+                .get(self.type_search_selected)
+                .map(|hit| hit.location.clone()),
+            WorkspaceSearchMode::Content => self
+                .content_search_results
+                .get(self.type_search_selected)
+                .map(|hit| hit.location.clone()),
+        };
+        let Some(location) = location else {
+            return;
+        };
+        self.close_type_search();
+        if let Err(error) = self.open_location(
+            &location.path,
+            location.range.start.line as usize,
+            location.range.start.column as usize,
+        ) {
+            self.status_message = error;
         }
     }
 
@@ -3388,7 +3796,6 @@ impl IdeShell {
         }
     }
 
-
     /// Escreve no painel que está na frente.
     ///
     /// Marcar o documento como modificado e fechar o autocomplete são efeitos do
@@ -3412,8 +3819,6 @@ impl IdeShell {
             self.status_message = "Modified".to_owned();
         }
     }
-
-
 
     fn backspace(&mut self) {
         self.completion_items.clear();
@@ -3475,7 +3880,6 @@ impl IdeShell {
         }
         self.completion_items.clear();
     }
-
 
     fn visible_entries(&self) -> Vec<(usize, &FileNode)> {
         fn visit<'a>(
@@ -3827,7 +4231,10 @@ impl IdeShell {
         commands.extend(actions.into_commands());
         if self.settings_modal.is_open() {
             let mut modal = self.settings_modal.clone();
-            modal.layout(&self.layout_context(), Rect::new(0.0, 0.0, size.width, size.height));
+            modal.layout(
+                &self.layout_context(),
+                Rect::new(0.0, 0.0, size.width, size.height),
+            );
             let geometry = settings_dialog_geometry(modal.panel_bounds());
             let mut modal_paint = self.paint_context();
             modal.paint(&mut modal_paint);
@@ -3903,6 +4310,7 @@ impl IdeShell {
         }
         // A janela de criação cobre o conteúdo, e o menu de contexto cobre ela.
         self.paint_new_item_dialog(&mut commands, size);
+        self.paint_type_search(&mut commands, size);
         self.paint_inspection(&mut commands, size);
         // Depois da janela de inspeção, ou a lista ficaria atrás dela.
         if self.inspection_modal.is_open()
@@ -4135,10 +4543,7 @@ impl IdeShell {
             // Clicar em um valor com campos abre e fecha, como no Explorer.
             if !inspection.expanded.remove(&path) {
                 inspection.expanded.insert(path.clone());
-                let pending = inspection
-                    .root
-                    .find(&path)
-                    .is_some_and(|node| !node.loaded);
+                let pending = inspection.root.find(&path).is_some_and(|node| !node.loaded);
                 if pending {
                     // Os campos só são pedidos ao abrir: perguntar por tudo de
                     // uma vez percorreria o grafo inteiro do objeto.
@@ -4154,6 +4559,71 @@ impl IdeShell {
     ///
     /// Moldura, véu e título são do `ModalHost`; os campos, os botões e as
     /// legendas são componentes da biblioteca. A IDE diz onde e o que.
+    /// Desenha a busca de tipo: campo em cima, resultados embaixo.
+    ///
+    /// Janela, campo e lista são da biblioteca; a IDE diz o que cada um mostra.
+    fn paint_type_search(&self, commands: &mut Vec<PaintCommand>, size: Size) {
+        if !self.type_search_modal.is_open() {
+            return;
+        }
+        let mut modal = self.type_search_modal.clone();
+        modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let mut paint = self.paint_context();
+        modal.paint(&mut paint);
+        let panel = modal.panel_bounds();
+        let input = Rect::new(
+            panel.origin.x + 16.0,
+            panel.origin.y + 56.0,
+            panel.size.width - 32.0,
+            34.0,
+        );
+        let placeholder = match self.workspace_search_mode {
+            WorkspaceSearchMode::Types => "Nome da classe, interface, record ou enum",
+            WorkspaceSearchMode::Content => "Texto nos arquivos das pastas java",
+        };
+        let mut field = TextInput::new(TYPE_SEARCH_INPUT_ID, &self.type_search_query)
+            .with_placeholder(placeholder);
+        field.event(&mut EventContext::default(), &UiEvent::FocusGained);
+        field.layout(&self.layout_context(), input);
+        field.paint(&mut paint);
+
+        let list_rect = Rect::new(
+            panel.origin.x + 16.0,
+            input.origin.y + input.size.height + 12.0,
+            panel.size.width - 32.0,
+            (panel.origin.y + panel.size.height - 16.0)
+                - (input.origin.y + input.size.height + 12.0),
+        );
+        let labels = match self.workspace_search_mode {
+            WorkspaceSearchMode::Types => self
+                .type_search_results
+                .iter()
+                .skip(self.type_search_first_visible)
+                .take(TYPE_SEARCH_VISIBLE_ROWS)
+                .map(TypeSearchHit::label)
+                .collect::<Vec<_>>(),
+            WorkspaceSearchMode::Content => self
+                .content_search_results
+                .iter()
+                .skip(self.type_search_first_visible)
+                .take(TYPE_SEARCH_VISIBLE_ROWS)
+                .map(ContentSearchHit::label)
+                .collect::<Vec<_>>(),
+        };
+        let mut list =
+            ListView::new(TYPE_SEARCH_LIST_ID, labels).with_row_height(TYPE_SEARCH_ROW_HEIGHT);
+        list.set_selected(
+            self.type_search_selected
+                .checked_sub(self.type_search_first_visible),
+        );
+        list.layout(&self.layout_context(), list_rect);
+        list.paint(&mut paint);
+        commands.extend(paint.into_commands());
+    }
+
     fn paint_new_item_dialog(&self, commands: &mut Vec<PaintCommand>, size: Size) {
         let Some(dialog) = self.new_item_dialog.as_ref() else {
             return;
@@ -4372,8 +4842,10 @@ impl IdeShell {
         if !self.settings_modal.is_open() {
             return;
         }
-        self.settings_modal
-            .layout(&self.layout_context(), Rect::new(0.0, 0.0, size.width, size.height));
+        self.settings_modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
         let geometry = settings_dialog_geometry(self.settings_modal.panel_bounds());
         // Qual página foi clicada é a lista quem sabe: altura de linha e rolagem
         // são dela.
@@ -4396,7 +4868,8 @@ impl IdeShell {
             self.debug_page_pointer_down(point, &geometry);
             return;
         }
-        self.jdk_combo.layout(&self.layout_context(), geometry.combo);
+        self.jdk_combo
+            .layout(&self.layout_context(), geometry.combo);
         self.jdk_browse_button
             .layout(&self.layout_context(), geometry.browse);
         self.settings_close_button
@@ -4871,12 +5344,7 @@ fn new_item_geometry(panel: Rect) -> NewItemGeometry {
         field_width,
         34.0,
     );
-    let name = Rect::new(
-        package.origin.x,
-        package.origin.y + 64.0,
-        field_width,
-        34.0,
-    );
+    let name = Rect::new(package.origin.x, package.origin.y + 64.0, field_width, 34.0);
     // Criar à direita, encostado na borda, como o Salvar das Configurações.
     let create = Rect::new(
         panel.origin.x + panel.size.width - 104.0,
@@ -4931,12 +5399,7 @@ fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
         88.0,
         34.0,
     );
-    let close = Rect::new(
-        save.origin.x - 98.0,
-        save.origin.y,
-        88.0,
-        save.size.height,
-    );
+    let close = Rect::new(save.origin.x - 98.0, save.origin.y, 88.0, save.size.height);
     let debug_host = Rect::new(combo.origin.x, combo.origin.y, 220.0, 36.0);
     let debug_port = Rect::new(
         debug_host.origin.x + debug_host.size.width + 12.0,
@@ -5167,7 +5630,6 @@ fn is_identifier_character(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
 }
 
-
 fn fill(rect: Rect, color: Color) -> PaintCommand {
     PaintCommand::FillRect(FillRectCommand { rect, color })
 }
@@ -5304,10 +5766,7 @@ fn editor_menu_entries(has_selection: bool, debugging: bool) -> Vec<MenuEntry> {
     let copy = MenuItem::new("Copiar", CommandId("editor.copy".to_owned()));
     let mut entries = vec![
         MenuEntry::Item(if has_selection { copy } else { copy.disabled() }),
-        MenuEntry::Item(MenuItem::new(
-            "Colar",
-            CommandId("editor.paste".to_owned()),
-        )),
+        MenuEntry::Item(MenuItem::new("Colar", CommandId("editor.paste".to_owned()))),
     ];
     // Inspecionar só existe com uma sessão de depuração de pé: fora dela não há
     // quadro que dê valor ao nome, e o item prometeria o que não pode cumprir.
@@ -5365,6 +5824,35 @@ fn explorer_items(node: &FileNode) -> Vec<TreeItem> {
             TreeItem::new(explorer_id(&node.path), label, explorer_items(node))
         })
         .collect()
+}
+
+/// Linha visual de um item depois de aplicar a expansão da árvore.
+///
+/// Usa os mesmos `TreeItem`s que a `TreeView`, portanto cadeias de pacotes Java
+/// compactadas contam como uma linha, não como todos os diretórios no disco.
+fn visible_tree_row(items: &[TreeItem], expanded: &HashSet<u64>, target: u64) -> Option<usize> {
+    fn visit(
+        items: &[TreeItem],
+        expanded: &HashSet<u64>,
+        target: u64,
+        row: &mut usize,
+    ) -> Option<usize> {
+        for item in items {
+            if item.id == target {
+                return Some(*row);
+            }
+            *row += 1;
+            if expanded.contains(&item.id)
+                && let Some(found) = visit(&item.children, expanded, target, row)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let mut row = 0;
+    visit(items, expanded, target, &mut row)
 }
 
 /// O que uma barra de abas pediu para um clique.
@@ -5788,7 +6276,11 @@ mod tests {
                     _ => (filled, outlined),
                 })
         };
-        assert_eq!(circles(&mut shell), (0, 1), "sem sessão, o ponto é pendente");
+        assert_eq!(
+            circles(&mut shell),
+            (0, 1),
+            "sem sessão, o ponto é pendente"
+        );
 
         shell.set_verified_breakpoints(&path, &[1]);
         assert_eq!(circles(&mut shell), (1, 0), "confirmado vira disco");
@@ -6173,9 +6665,10 @@ mod tests {
         let mut shell = test_shell();
         let size = Size::new(1_000.0, 700.0);
         shell.open_settings_dialog(vec!["JDK 8".to_owned()], 0);
-        shell
-            .settings_modal
-            .layout(&LayoutContext::default(), Rect::new(0.0, 0.0, size.width, size.height));
+        shell.settings_modal.layout(
+            &LayoutContext::default(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
         let geometry = settings_dialog_geometry(shell.settings_modal.panel_bounds());
 
         // Segunda linha da navegação é a página de Depuração.
@@ -6309,7 +6802,9 @@ mod tests {
         let mut shell = test_shell();
         //                                    0         1         2         3
         //                                    0123456789012345678901234567890
-        let document_id = shell.editor.open_memory("A.java", "void metodo() { int x = y; }");
+        let document_id = shell
+            .editor
+            .open_memory("A.java", "void metodo() { int x = y; }");
         let realce = |coluna_inicial: u32, coluna_final: u32, kind| ide_domain::SyntaxHighlight {
             range: ide_domain::TextRange {
                 start: ide_domain::TextPosition {
@@ -6421,7 +6916,8 @@ mod tests {
         let size = Size::new(1280.0, 800.0);
         let track = shell.explorer_horizontal_scrollbar_rect(size);
         // O nome não cabe na largura visível, então há o que rolar.
-        let (_, content, viewport, _) = shell.scrollbar_range(ScrollTarget::ExplorerHorizontal, size);
+        let (_, content, viewport, _) =
+            shell.scrollbar_range(ScrollTarget::ExplorerHorizontal, size);
         assert!(content > viewport);
         shell.pointer_down(
             Point::new(
@@ -6477,6 +6973,68 @@ mod tests {
         );
         shell.text_input("X");
         assert_eq!(shell.active_text(), Some("Xone"));
+    }
+
+    #[test]
+    fn active_file_expands_selects_and_scrolls_the_explorer() {
+        static NEXT_PROJECT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT_PROJECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "er-ide-explorer-active-{}-{sequence}",
+            std::process::id()
+        ));
+        let package = root
+            .join("src")
+            .join("main")
+            .join("java")
+            .join("br")
+            .join("com")
+            .join("exemplo")
+            .join("controller");
+        assert!(std::fs::create_dir_all(&package).is_ok());
+        for index in 0..12 {
+            assert!(std::fs::write(root.join(format!("Anterior{index:02}.txt")), "x").is_ok());
+        }
+        let first = package.join("PrimeiroController.java");
+        let second = package.join("SegundoController.java");
+        assert!(std::fs::write(&first, "class PrimeiroController {}").is_ok());
+        assert!(std::fs::write(&second, "class SegundoController {}").is_ok());
+
+        let mut shell = match IdeShell::open(&root) {
+            Ok(shell) => shell,
+            Err(error) => panic!("projeto não abriu: {error}"),
+        };
+        assert!(shell.open_file(&first).is_ok());
+        assert!(shell.open_file(&second).is_ok());
+        assert_eq!(
+            shell.explorer_tree.selected(),
+            Some(explorer_id(&second)),
+            "a última aba restaurada deve nascer selecionada no Explorer"
+        );
+        for ancestor in second.ancestors().skip(1).take_while(|path| *path != root) {
+            assert!(
+                shell.expanded.contains(ancestor),
+                "{} deveria estar expandido",
+                ancestor.display()
+            );
+        }
+        assert!(
+            shell.explorer_scroll_line > 0,
+            "o arquivo ativo precisa ser revelado mesmo abaixo do primeiro viewport"
+        );
+
+        let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
+        shell.pointer_down(
+            Point::new(editor_x + 10.0, TITLE_HEIGHT + 10.0),
+            Size::new(1280.0, 800.0),
+        );
+        assert_eq!(shell.active_document_path(), Some(first.clone()));
+        assert_eq!(
+            shell.explorer_tree.selected(),
+            Some(explorer_id(&first)),
+            "trocar de aba também precisa trocar a seleção da árvore"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -6544,9 +7102,11 @@ mod tests {
             "esperava um título encurtado, veio {texts:?}"
         );
         let tabs = shell.editor_tabs_rect(Size::new(1280.0, 800.0));
-        assert!(rendered.iter().any(|command| {
-            matches!(command, PaintCommand::PushClip(rect) if *rect == tabs)
-        }));
+        assert!(
+            rendered.iter().any(|command| {
+                matches!(command, PaintCommand::PushClip(rect) if *rect == tabs)
+            })
+        );
     }
 
     /// O divisor é desenhado no lugar certo desde o primeiro quadro, antes de
@@ -6557,18 +7117,15 @@ mod tests {
         let size = Size::new(1280.0, 800.0);
         let divider_color = |shell: &mut IdeShell| {
             let x = ACTIVITY_WIDTH + shell.sidebar_width(size);
-            shell
-                .paint(size)
-                .iter()
-                .find_map(|command| match command {
-                    PaintCommand::FillRect(fill)
-                        if (fill.rect.origin.x - x).abs() < 0.01
-                            && fill.rect.size.width == Splitter::THICKNESS =>
-                    {
-                        Some(fill.color)
-                    }
-                    _ => None,
-                })
+            shell.paint(size).iter().find_map(|command| match command {
+                PaintCommand::FillRect(fill)
+                    if (fill.rect.origin.x - x).abs() < 0.01
+                        && fill.rect.size.width == Splitter::THICKNESS =>
+                {
+                    Some(fill.color)
+                }
+                _ => None,
+            })
         };
         assert_eq!(divider_color(&mut shell), Some(shell.theme().colors.border));
 
@@ -6715,8 +7272,10 @@ mod tests {
         let text = (0..200)
             .map(|line| format!("linha {line}"))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         shell.editor.open_memory("longo.rs", &text);
         let size = Size::new(1280.0, 800.0);
         let track = shell.editor_scrollbar_rect(size);
@@ -6902,8 +7461,10 @@ mod tests {
         let texto = (0..200)
             .map(|linha| format!("linha {linha}"))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         shell.editor.open_memory("Longo.java", &texto);
         let size = Size::new(1280.0, 800.0);
         let visiveis = shell.editor_visible_lines(size);
@@ -6930,8 +7491,10 @@ mod tests {
         let texto = (0..60)
             .map(|linha| format!("linha {linha}"))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         shell.editor.open_memory("Longo.java", &texto);
         let size = Size::new(1280.0, 800.0);
         let destaque = Theme::default().colors.highlight;
@@ -6958,7 +7521,11 @@ mod tests {
             ),
             size,
         );
-        assert_eq!(destacadas(&mut shell), 0, "mover o cursor encerra o destaque");
+        assert_eq!(
+            destacadas(&mut shell),
+            0,
+            "mover o cursor encerra o destaque"
+        );
     }
 
     #[test]
@@ -6966,11 +7533,13 @@ mod tests {
         let mut shell = test_shell();
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(shell.open_location(&path, 1, 3).is_ok());
-        let position = line_column(shell.active_text().unwrap_or_default(), shell.editor_pane.cursor());
+        let position = line_column(
+            shell.active_text().unwrap_or_default(),
+            shell.editor_pane.cursor(),
+        );
         assert_eq!(position, (1, 3));
         assert_eq!(shell.focus(), ShellFocus::Editor);
     }
-
 
     #[test]
     fn project_menu_requests_build_and_reimport() {
@@ -7159,9 +7728,10 @@ mod tests {
         let mut shell = test_shell();
         let size = Size::new(1_000.0, 700.0);
         shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
-        shell
-            .settings_modal
-            .layout(&LayoutContext::default(), Rect::new(0.0, 0.0, size.width, size.height));
+        shell.settings_modal.layout(
+            &LayoutContext::default(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
         let geometry = settings_dialog_geometry(shell.settings_modal.panel_bounds());
         shell.pointer_down(
             Point::new(
@@ -7462,9 +8032,9 @@ mod tests {
         let texts = painted_texts(&mut shell, size);
         // Painel esquerdo: a raiz aberta, com os campos abaixo dela.
         assert!(
-            texts.iter().any(|text| {
-                text.contains("pedido = (br.com.exemplo.Pedido) Pedido@1a2b")
-            }),
+            texts
+                .iter()
+                .any(|text| { text.contains("pedido = (br.com.exemplo.Pedido) Pedido@1a2b") }),
             "a árvore precisa mostrar o objeto: {texts:?}"
         );
         assert!(
@@ -7574,7 +8144,10 @@ mod tests {
 
         // Clicar no editor leva o foco e a digitação para lá.
         shell.pointer_down(
-            Point::new(geometry.source.origin.x + 60.0, geometry.source.origin.y + 8.0),
+            Point::new(
+                geometry.source.origin.x + 60.0,
+                geometry.source.origin.y + 8.0,
+            ),
             size,
         );
         shell.text_input("pedido.total");
@@ -7592,7 +8165,10 @@ mod tests {
         shell.show_inspection("pedido", inspection_value(), inspection_fields());
         let geometry = inspection_layout(&mut shell, size);
         shell.pointer_down(
-            Point::new(geometry.source.origin.x + 60.0, geometry.source.origin.y + 8.0),
+            Point::new(
+                geometry.source.origin.x + 60.0,
+                geometry.source.origin.y + 8.0,
+            ),
             size,
         );
         shell.text_input("pedido.cliente.nome");
@@ -7635,11 +8211,7 @@ mod tests {
         );
 
         // Chega o retorno da chamada: nada de árvore nova.
-        shell.inspection_result(
-            "pedido.pagar()".to_owned(),
-            inspection_void(),
-            Vec::new(),
-        );
+        shell.inspection_result("pedido.pagar()".to_owned(), inspection_void(), Vec::new());
         assert_eq!(shell.inspected_expression(), Some("pedido"));
         let texts = painted_texts(&mut shell, size);
         assert!(
@@ -7736,6 +8308,267 @@ mod tests {
         );
     }
 
+    fn type_hit(name: &str, kind: &str, path: &std::path::Path, line: u32) -> TypeSearchHit {
+        TypeSearchHit {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            location: Location {
+                path: path.into(),
+                range: ide_domain::TextRange {
+                    start: DomainTextPosition { line, column: 0 },
+                    end: DomainTextPosition { line, column: 0 },
+                },
+            },
+        }
+    }
+
+    fn content_hit(path: &std::path::Path, line: u32, column: u32) -> ContentSearchHit {
+        ContentSearchHit {
+            preview: "String mensagem = \"conteúdo procurado\";".to_owned(),
+            location: Location {
+                path: path.into(),
+                range: ide_domain::TextRange {
+                    start: DomainTextPosition { line, column },
+                    end: DomainTextPosition { line, column },
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn type_search_shows_the_path_after_the_last_java_directory() {
+        let absolute = PathBuf::from(r"C:\workspace\java\modulo\src\main\java")
+            .join("br")
+            .join("com")
+            .join("exemplo")
+            .join("Pedido.java");
+        let hit = type_hit("Pedido", "classe", &absolute, 0);
+        let expected = PathBuf::from("br")
+            .join("com")
+            .join("exemplo")
+            .join("Pedido.java");
+
+        assert_eq!(type_search_display_path(&absolute), expected);
+        assert!(
+            !hit.label().contains("workspace"),
+            "o resultado não pode mostrar o caminho absoluto: {}",
+            hit.label()
+        );
+    }
+
+    /// Diretório com dois tipos, para a busca ter o que abrir de verdade.
+    fn type_search_workspace() -> std::path::PathBuf {
+        static NEXT_WORKSPACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT_WORKSPACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("er-ide-busca-{}-{sequence}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(std::fs::create_dir_all(&root).is_ok());
+        assert!(std::fs::write(root.join("Pedido.java"), "class Pedido {}\n").is_ok());
+        assert!(
+            std::fs::write(
+                root.join("PedidoRepository.java"),
+                "interface PedidoRepository {}\n"
+            )
+            .is_ok()
+        );
+        root
+    }
+
+    /// A busca por nome pede, mostra e leva ao arquivo escolhido.
+    #[test]
+    fn the_type_search_asks_lists_and_opens_what_was_chosen() {
+        let root = type_search_workspace();
+        let mut shell = shell_editing("class Uso {}");
+        let size = Size::new(1280.0, 800.0);
+        shell.open_type_search();
+        assert!(shell.type_search_open());
+        assert_eq!(
+            shell.take_type_search_request(),
+            Some(String::new()),
+            "a janela nasce pedindo tudo, sem esperar a primeira letra"
+        );
+
+        // Digitar refina, e cada tecla vira um pedido.
+        shell.text_input("Ped");
+        assert_eq!(shell.take_type_search_request(), Some("Ped".to_owned()));
+        shell.key_down("Backspace");
+        assert_eq!(shell.take_type_search_request(), Some("Pe".to_owned()));
+
+        // Os resultados aparecem na janela, com nome, tipo e caminho.
+        let repositorio = root.join("PedidoRepository.java");
+        shell.set_type_search_results(vec![
+            type_hit("Pedido", "classe", &root.join("Pedido.java"), 0),
+            type_hit("PedidoRepository", "interface", &repositorio, 0),
+        ]);
+        let texts = painted_texts(&mut shell, size);
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Pedido (classe)") && text.contains("Pedido.java")),
+            "a lista precisa mostrar o que foi encontrado e onde: {texts:?}"
+        );
+
+        // As setas andam na lista e `Enter` abre o escolhido numa aba.
+        shell.key_down("ArrowDown");
+        shell.key_down("Enter");
+        assert!(!shell.type_search_open(), "escolher fecha a janela");
+        assert_eq!(
+            shell.active_document_path(),
+            Some(repositorio),
+            "o segundo item é o que devia abrir"
+        );
+        assert_eq!(
+            shell.active_text(),
+            Some("interface PedidoRepository {}\n"),
+            "e a aba precisa mostrar o conteúdo dele"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A busca textual usa o mesmo modal, mas só pede depois de haver texto e
+    /// abre a ocorrência na linha e coluna devolvidas pelo workspace.
+    #[test]
+    fn content_search_reuses_the_modal_and_opens_the_occurrence() {
+        let root = type_search_workspace();
+        let source = root.join("Pedido.java");
+        assert!(
+            std::fs::write(
+                &source,
+                "class Pedido {\n    String mensagem = \"conteúdo procurado\";\n}\n"
+            )
+            .is_ok()
+        );
+        let mut shell = shell_editing("class Uso {}");
+        let size = Size::new(1280.0, 800.0);
+
+        shell.open_content_search();
+        assert!(shell.type_search_open());
+        assert_eq!(
+            shell.take_content_search_request(),
+            None,
+            "a consulta vazia não deve varrer todos os arquivos"
+        );
+        shell.text_input("conteúdo");
+        assert_eq!(
+            shell.take_content_search_request(),
+            Some("conteúdo".to_owned())
+        );
+        assert_eq!(
+            shell.take_type_search_request(),
+            None,
+            "cada modo possui uma porta própria"
+        );
+
+        shell.set_content_search_results(vec![content_hit(&source, 1, 23)]);
+        let texts = painted_texts(&mut shell, size);
+        assert!(
+            texts.iter().any(|text| {
+                text.contains("Pedido.java:2") && text.contains("conteúdo procurado")
+            }),
+            "a lista precisa mostrar arquivo, linha e trecho: {texts:?}"
+        );
+        shell.key_down("Enter");
+
+        assert!(!shell.type_search_open());
+        assert_eq!(shell.active_document_path(), Some(source));
+        let active_text = shell.active_text();
+        assert!(
+            active_text.is_some(),
+            "a ocorrência precisa abrir o arquivo"
+        );
+        let Some(active_text) = active_text else {
+            return;
+        };
+        assert_eq!(
+            line_column(active_text, shell.editor_pane.cursor()),
+            (1, 23)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `Esc` dispensa a busca sem abrir nada.
+    #[test]
+    fn escape_closes_the_type_search() {
+        let root = type_search_workspace();
+        let mut shell = shell_editing("class Uso {}");
+        let antes = shell.active_document_path();
+        shell.open_type_search();
+        let _ = shell.take_type_search_request();
+        shell.set_type_search_results(vec![type_hit(
+            "Pedido",
+            "classe",
+            &root.join("Pedido.java"),
+            0,
+        )]);
+        shell.escape();
+        assert!(!shell.type_search_open());
+        assert_eq!(
+            shell.active_document_path(),
+            antes,
+            "desistir não troca a aba aberta"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A lista revela a seleção das setas e a roda nunca alcança o editor atrás.
+    #[test]
+    fn type_search_scroll_stays_inside_the_modal_and_reveals_keyboard_selection() {
+        let root = type_search_workspace();
+        let mut shell = shell_editing(
+            &(0..80)
+                .map(|line| format!("linha {line}\n"))
+                .collect::<String>(),
+        );
+        let size = Size::new(1280.0, 800.0);
+        shell.open_type_search();
+        let _ = shell.take_type_search_request();
+        shell.set_type_search_results(
+            (0..30)
+                .map(|index| {
+                    type_hit(
+                        &format!("Tipo{index:02}"),
+                        "classe",
+                        &root.join("Pedido.java"),
+                        0,
+                    )
+                })
+                .collect(),
+        );
+
+        for _ in 0..(TYPE_SEARCH_VISIBLE_ROWS + 3) {
+            shell.key_down("ArrowDown");
+        }
+        assert_eq!(shell.type_search_selected, TYPE_SEARCH_VISIBLE_ROWS + 3);
+        assert!(
+            shell.type_search_first_visible > 0,
+            "a seleção que passou do viewport precisa trazer a lista junto"
+        );
+        let texts = painted_texts(&mut shell, size);
+        assert!(
+            texts.iter().any(|text| text.contains("Tipo15")),
+            "o item escolhido pelas setas precisa continuar visível: {texts:?}"
+        );
+
+        let editor_before = shell.editor_pane.scroll_line();
+        let (_, list) = shell.type_search_geometry(size);
+        shell.scroll(
+            Point::new(list.origin.x + 20.0, list.origin.y + 20.0),
+            3,
+            size,
+        );
+        assert_eq!(
+            shell.editor_pane.scroll_line(),
+            editor_before,
+            "a roda no modal não pode rolar o editor atrás"
+        );
+        assert!(
+            shell.type_search_first_visible > 0,
+            "a própria lista precisa receber a roda"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A sequência real: `Ctrl+D` pela shell e depois digitar.
     ///
     /// O teste do painel passava e a IDE não, então o caminho que o app percorre
@@ -7748,10 +8581,13 @@ mod tests {
         shell.editor_pane.set_cursor(4);
         shell.editor_pane.set_selection(Some((0, 4)));
 
-        shell.key_down_with_modifiers("d", Modifiers {
-            control: true,
-            ..Modifiers::default()
-        });
+        shell.key_down_with_modifiers(
+            "d",
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        );
         assert_eq!(
             shell.editor_pane.occurrences(),
             vec![(0, 4), (7, 11)],
@@ -7824,10 +8660,7 @@ mod tests {
         assert!(!shell.completion_follow_up("s"));
 
         shell.set_completions(vec![item("setId()"), item("setNome()")]);
-        assert!(
-            shell.completion_follow_up("s"),
-            "cada letra refaz o filtro"
-        );
+        assert!(shell.completion_follow_up("s"), "cada letra refaz o filtro");
         assert!(shell.completion_open(), "e a lista continua à mostra");
 
         // O que não faz parte de um nome encerra o nome.
@@ -7989,10 +8822,13 @@ mod tests {
         // Shift com as setas também marca, como no editor principal.
         shell.inspection_editor.set_cursor(0);
         for _ in 0..4 {
-            shell.key_down_with_modifiers("ArrowRight", Modifiers {
-                shift: true,
-                ..Modifiers::default()
-            });
+            shell.key_down_with_modifiers(
+                "ArrowRight",
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+            );
         }
         assert_eq!(
             shell
@@ -8204,38 +9040,60 @@ mod tests {
     /// As setas verticais movem o cursor entre linhas, preservando a coluna.
     #[test]
     fn vertical_arrows_move_the_cursor_between_lines() {
-        let mut shell = shell_editing("primeira
+        let mut shell = shell_editing(
+            "primeira
 segunda
-ab");
+ab",
+        );
         shell.editor_pane.set_cursor(4);
         shell.key_down("ArrowDown");
         // Mesma coluna na linha de baixo.
-        assert_eq!(shell.editor_pane.cursor(), "primeira
-".len() + 4);
+        assert_eq!(
+            shell.editor_pane.cursor(),
+            "primeira
+"
+            .len()
+                + 4
+        );
 
         // Descer para uma linha curta para no fim dela, e não num ponto inexistente.
         shell.key_down("ArrowDown");
-        assert_eq!(shell.editor_pane.cursor(), "primeira
+        assert_eq!(
+            shell.editor_pane.cursor(),
+            "primeira
 segunda
-ab".len());
+ab"
+            .len()
+        );
 
         // Na última linha, descer de novo não faz nada.
         shell.key_down("ArrowDown");
-        assert_eq!(shell.editor_pane.cursor(), "primeira
+        assert_eq!(
+            shell.editor_pane.cursor(),
+            "primeira
 segunda
-ab".len());
+ab"
+            .len()
+        );
 
         shell.key_down("ArrowUp");
-        assert_eq!(shell.editor_pane.cursor(), "primeira
-".len() + 2);
+        assert_eq!(
+            shell.editor_pane.cursor(),
+            "primeira
+"
+            .len()
+                + 2
+        );
     }
 
     /// Shift com as setas verticais estende a seleção por linhas.
     #[test]
     fn shift_with_vertical_arrows_extends_the_selection() {
-        let mut shell = shell_editing("um
+        let mut shell = shell_editing(
+            "um
 dois
-tres");
+tres",
+        );
         shell.editor_pane.set_cursor(0);
         let shift = Modifiers {
             shift: true,
@@ -8248,16 +9106,23 @@ tres");
     /// Tab com um bloco marcado desloca todas as linhas dele.
     #[test]
     fn tab_shifts_the_selected_block() {
-        let mut shell = shell_editing("um
+        let mut shell = shell_editing(
+            "um
 dois
-tres");
+tres",
+        );
         // Da segunda linha até o meio da terceira.
         shell.editor_pane.set_cursor(9);
         shell.editor_pane.set_selection(Some((3, 9)));
         shell.key_down("Tab");
-        assert_eq!(shell.active_text(), Some("um
+        assert_eq!(
+            shell.active_text(),
+            Some(
+                "um
     dois
-    tres"));
+    tres"
+            )
+        );
         // A seleção segue cobrindo o bloco, para indentar de novo sem remarcar.
         assert_eq!(shell.editor_pane.selection_range(), Some(3..20));
 
@@ -8266,9 +9131,14 @@ tres");
             ..Modifiers::default()
         };
         shell.key_down_with_modifiers("Tab", shift);
-        assert_eq!(shell.active_text(), Some("um
+        assert_eq!(
+            shell.active_text(),
+            Some(
+                "um
 dois
-tres"));
+tres"
+            )
+        );
     }
 
     /// Arrastar no editor seleciona, e digitar substitui o trecho marcado.
@@ -8347,7 +9217,10 @@ tres"));
         shell.focus = ShellFocus::Editor;
         shell.editor_pane.set_cursor(0);
         shell.text_input("// nota\n");
-        assert!(shell.active_document_modified(), "a edição deixa a aba suja");
+        assert!(
+            shell.active_document_modified(),
+            "a edição deixa a aba suja"
+        );
 
         assert!(shell.save_active_document());
         assert_eq!(
@@ -8446,10 +9319,7 @@ tres"));
                 _ => false,
             })
         };
-        assert!(
-            !shows(&mut shell, "Pedido"),
-            "a classe ainda não existe"
-        );
+        assert!(!shows(&mut shell, "Pedido"), "a classe ainda não existe");
 
         assert!(std::fs::write(package.join("Pedido.java"), "class Pedido {}").is_ok());
         assert!(shell.reload_workspace().is_ok());

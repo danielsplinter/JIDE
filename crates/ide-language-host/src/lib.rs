@@ -14,7 +14,7 @@ use std::{
 use ide_domain::{
     CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
     DocumentSnapshot, LanguageId, Location, ProviderId, ReferencesRequest, RequestId,
-    SemanticSnapshot, SyntaxSnapshot,
+    SemanticSnapshot, SemanticSymbol, SyntaxSnapshot,
 };
 use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
@@ -436,6 +436,20 @@ impl LanguageHost {
         worker.type_members(context, type_name, prefix).await
     }
 
+    /// Tipos do projeto que casam com a consulta, para a busca por nome.
+    pub async fn workspace_types(
+        &self,
+        context: LanguageRequestContext,
+        extension: &str,
+        query: String,
+        limit: usize,
+    ) -> Result<Vec<SemanticSymbol>, LanguageHostError> {
+        let provider_id =
+            self.provider_for_extension(extension, LanguageCapabilities::COMPLETION)?;
+        let worker = self.ensure_active(&provider_id)?;
+        worker.workspace_types(context, query, limit).await
+    }
+
     pub async fn definition(
         &self,
         context: LanguageRequestContext,
@@ -764,6 +778,12 @@ enum WorkerRequest {
         prefix: String,
         response: oneshot::Sender<Result<Vec<CompletionItem>, LanguageHostError>>,
     },
+    WorkspaceTypes {
+        context: LanguageRequestContext,
+        query: String,
+        limit: usize,
+        response: oneshot::Sender<Result<Vec<SemanticSymbol>, LanguageHostError>>,
+    },
     Definition {
         context: LanguageRequestContext,
         request: DefinitionRequest,
@@ -974,6 +994,25 @@ impl ProviderWorker {
             .map_err(|_| LanguageHostError::WorkerStopped)?
     }
 
+    async fn workspace_types(
+        &self,
+        context: LanguageRequestContext,
+        query: String,
+        limit: usize,
+    ) -> Result<Vec<SemanticSymbol>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::WorkspaceTypes {
+            context,
+            query,
+            limit,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
     async fn definition(
         &self,
         context: LanguageRequestContext,
@@ -1155,6 +1194,21 @@ fn run_worker(
                 };
                 let _ = response.send(result);
             }
+            WorkerRequest::WorkspaceTypes {
+                context,
+                query,
+                limit,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.workspace_types(&query, limit))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
             WorkerRequest::Definition {
                 context,
                 request,
@@ -1205,7 +1259,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ide_domain::{DocumentId, DocumentSnapshot, LanguageId, ProviderId};
+    use ide_domain::{DocumentId, DocumentSnapshot, LanguageId, ProviderId, SemanticSymbol};
     use ide_language_api::{
         ActiveLanguage, ApiVersion, LANGUAGE_API_VERSION, LanguageActivationContext,
         LanguageCapabilities, LanguageError, LanguageMetadata, LanguageProvider, ProviderState,
@@ -1295,6 +1349,14 @@ mod tests {
             &self.language_id
         }
 
+        async fn workspace_types(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<SemanticSymbol>, LanguageError> {
+            Ok(Vec::new())
+        }
+
         async fn open_document(&self, _document: DocumentSnapshot) -> Result<(), LanguageError> {
             Ok(())
         }
@@ -1348,6 +1410,25 @@ mod tests {
             host.register(provider),
             Err(LanguageHostError::DuplicateProvider(_))
         ));
+    }
+
+    #[test]
+    fn workspace_types_activate_by_extension_without_an_open_document() {
+        let host = LanguageHost::new(".");
+        success(host.register(Arc::new(TestProvider::new(
+            "java.types",
+            LanguageCapabilities::COMPLETION,
+        ))));
+        let found = pollster::block_on(host.workspace_types(
+            host.request_context(),
+            "java",
+            String::new(),
+            100,
+        ));
+        assert!(
+            matches!(found, Ok(ref types) if types.is_empty()),
+            "a busca do workspace não pode depender de uma rota de documento: {found:?}"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::sync::{
 use ide_domain::{
     CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
     DocumentSnapshot, LanguageId, Location, ProviderId, ReferencesRequest, RequestId,
-    SemanticSnapshot, SyntaxSnapshot,
+    SemanticSnapshot, SemanticSymbol, SyntaxSnapshot,
 };
 use thiserror::Error;
 
@@ -136,6 +136,21 @@ pub trait ActiveLanguage: Send + Sync {
         _prefix: &str,
     ) -> Result<Vec<CompletionItem>, LanguageError> {
         Err(LanguageError::Unsupported("type members".to_owned()))
+    }
+    /// Tipos do projeto cujo nome casa com o que foi digitado.
+    ///
+    /// Serve à busca por nome — abrir uma classe sem saber em que pasta ela está.
+    /// Só entram tipos com arquivo no workspace: o resultado existe para ser
+    /// aberto, e uma classe dentro de um jar não tem onde ser aberta.
+    ///
+    /// Consulta vazia devolve tudo o que couber no teto, para a janela ter o que
+    /// mostrar antes da primeira letra.
+    async fn workspace_types(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<SemanticSymbol>, LanguageError> {
+        Err(LanguageError::Unsupported("workspace types".to_owned()))
     }
     async fn definition(
         &self,

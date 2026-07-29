@@ -33,6 +33,10 @@ normalmente; `Backspace`, `Enter` e as quatro setas estão disponíveis — as
 verticais movem entre linhas preservando a coluna, e param no fim de uma linha
 mais curta em vez de num ponto que não existe.
 
+Ao iniciar a IDE ou trocar de aba, o Explorer expande automaticamente todas as
+pastas que levam ao arquivo ativo, seleciona esse arquivo na árvore e ajusta a
+rolagem para mantê-lo visível.
+
 `Enter` abre a linha nova já com a **indentação da linha anterior**, de modo que
 escrever dentro de um bloco não exige reindentar a cada linha. A regra é do editor
 do ERLibUi, e vale igual no editor da janela de inspeção do depurador.
@@ -72,6 +76,32 @@ em todas as ocorrências ao mesmo tempo e param nas bordas da marca — sair del
 acabaria com a correspondência entre os pontos. `Enter` confirma e solta as marcas; `Esc` desiste e
 devolve o texto ao que era antes da primeira marca, de uma vez, sem gastar os
 passos do desfazer.
+
+`Ctrl+L` abre a **busca de tipo por nome**: uma janela larga com um campo em cima
+e, abaixo, a lista do que foi encontrado — classes, interfaces, records e enums do
+projeto. Cada linha traz o nome, o que ele é e o caminho **relativo à última
+pasta `java`** da raiz de fontes — por exemplo, `br\com\exemplo\Pedido.java` —,
+sem exibir o caminho absoluto da máquina. Dois tipos de mesmo nome em pacotes
+diferentes são justamente o caso que a busca precisa desempatar. A janela nasce
+mostrando o que existe, e cada letra digitada refina; quem começa com o que foi
+digitado vem antes de quem só contém.
+
+As setas andam na lista, `Enter` ou um clique abrem o tipo escolhido numa aba do
+editor, posicionando o cursor na declaração, e `Esc` dispensa sem abrir nada. Só
+entram tipos com arquivo no projeto: o resultado existe para ser aberto, e uma
+classe dentro de um jar não teria onde abrir.
+
+`Ctrl+Shift+L` abre **a mesma janela no modo de busca por conteúdo**. A consulta
+percorre somente arquivos descendentes de diretórios chamados `java`, inclusive
+quando o projeto possui vários módulos ou raízes `src/main/java` e
+`src/test/java`; arquivos fora dessas raízes não aparecem. A janela nasce
+aguardando texto para não transformar cada linha vazia do projeto em resultado,
+e a comparação ignora diferenças entre maiúsculas e minúsculas.
+
+Cada ocorrência mostra o caminho relativo à última pasta `java`, o número da
+linha e um trecho do conteúdo. Setas, roda, clique, `Enter` e `Esc` têm exatamente
+o mesmo comportamento da busca de tipos; abrir uma ocorrência posiciona o cursor
+na linha e na coluna encontradas.
 
 `Ctrl+S` grava a aba ativa, o mesmo que `Arquivo → Salvar`.
 Pressione `F3` para abrir a busca e `Esc` para fechá-la.

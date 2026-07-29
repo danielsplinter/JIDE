@@ -78,6 +78,21 @@ redimensionamento horizontal por clique, retenção e arraste. Editor e painel d
 terminal ocupam sempre a largura restante e acompanham imediatamente essa
 mudança de layout, sem enviar redimensionamentos ao PTY.
 
+Na inicialização e em toda troca de aba, a `TreeView` deve acompanhar o documento
+ativo: expandir todos os diretórios ancestrais, selecionar o arquivo
+correspondente e ajustar a rolagem vertical para deixá-lo visível.
+
+`Ctrl+L` abre a busca de tipos do projeto e `Ctrl+Shift+L` reutiliza o mesmo
+`ModalHost`, campo e lista para buscar pelo conteúdo dos arquivos. No segundo
+modo, a varredura fica estritamente limitada aos descendentes de diretórios
+chamados `java`, funciona em projetos multimódulo e ignora diferenças entre
+maiúsculas e minúsculas. A consulta vazia não varre o projeto.
+
+Cada ocorrência textual apresenta caminho relativo à última pasta `java`, linha
+e trecho. `Enter` ou clique abrem o arquivo na linha e coluna encontradas; setas,
+roda e `Esc` mantêm o mesmo contrato da busca de tipos. O teto de resultados
+impede que uma consulta ampla bloqueie a interface com uma lista sem utilidade.
+
 Esse divisor e o que separa editor e terminal são `Splitter` da ERLibUi, com
 limites em pontos — a largura mínima da barra lateral e a do editor, a altura
 mínima do terminal e o espaço que o editor precisa manter. A área que aceita o

@@ -311,15 +311,49 @@ impl ActiveLanguage for JavaLanguage {
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))
     }
 
+    async fn workspace_types(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticSymbol>, LanguageError> {
+        let query = query.trim().to_ascii_lowercase();
+        let mut found: Vec<SemanticSymbol> = self
+            .workspace_index
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                matches!(
+                    symbol.kind,
+                    SymbolKind::Class
+                        | SymbolKind::Interface
+                        | SymbolKind::Record
+                        | SymbolKind::Enum
+                )
+            })
+            .filter(|symbol| query.is_empty() || symbol.name.to_ascii_lowercase().contains(&query))
+            .cloned()
+            .collect();
+        // Quem começa com o que foi digitado vem antes de quem só contém: é o
+        // que se procura ao escrever as primeiras letras de um nome.
+        found.sort_by(|left, right| {
+            let peso = |symbol: &SemanticSymbol| {
+                usize::from(!symbol.name.to_ascii_lowercase().starts_with(&query))
+            };
+            peso(left)
+                .cmp(&peso(right))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        found.dedup_by(|left, right| left.name == right.name && left.location == right.location);
+        found.truncate(limit);
+        Ok(found)
+    }
+
     async fn type_members(
         &self,
         type_name: &str,
         prefix: &str,
     ) -> Result<Vec<CompletionItem>, LanguageError> {
-        Ok(finish_member_list(
-            self.members_of_type(type_name),
-            prefix,
-        ))
+        Ok(finish_member_list(self.members_of_type(type_name), prefix))
     }
 
     async fn completion(
@@ -527,19 +561,16 @@ impl WorkspaceIndex {
         };
         let mut archives = Vec::new();
         if let Ok(entries) = fs::read_dir(home.join("jmods")) {
-            archives.extend(
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| {
-                        path.extension()
-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("jmod"))
-                    }),
-            );
+            archives.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("jmod"))
+            }));
             // `java.base` primeiro: se o teto cortar alguma coisa, que não seja
             // `java.lang`.
             archives.sort_by_key(|path| {
-                let base = path.file_name().is_some_and(|name| name == "java.base.jmod");
+                let base = path
+                    .file_name()
+                    .is_some_and(|name| name == "java.base.jmod");
                 (!base, path.clone())
             });
         } else {
@@ -1085,11 +1116,7 @@ fn private_members(tree: &Tree, text: &str) -> HashSet<String> {
             .children(&mut node.walk())
             .find(|child| child.kind() == "modifiers")
             .and_then(|modifiers| modifiers.utf8_text(text.as_bytes()).ok())
-            .is_some_and(|modifiers| {
-                modifiers
-                    .split_whitespace()
-                    .any(|word| word == "private")
-            });
+            .is_some_and(|modifiers| modifiers.split_whitespace().any(|word| word == "private"));
         if !private {
             continue;
         }
@@ -1589,11 +1616,18 @@ mod tests {
         };
 
         let kind_em = |ancora: &str, alvo: &str| {
-            let base = texto.find(ancora).unwrap_or_else(|| panic!("âncora {ancora}"));
+            let base = texto
+                .find(ancora)
+                .unwrap_or_else(|| panic!("âncora {ancora}"));
             let offset = base + ancora.find(alvo).unwrap_or(0);
             let antes = &texto[..offset];
             let line = antes.matches(char::from(10)).count() as u32;
-            let column = antes.rsplit(char::from(10)).next().unwrap_or("").chars().count() as u32;
+            let column = antes
+                .rsplit(char::from(10))
+                .next()
+                .unwrap_or("")
+                .chars()
+                .count() as u32;
             resultado
                 .highlights
                 .iter()
@@ -1757,6 +1791,78 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A busca por nome encontra os tipos do projeto e diz onde eles estão.
+    ///
+    /// Só tipos, e só com arquivo: o resultado existe para ser aberto.
+    #[test]
+    fn workspace_types_are_found_by_name_with_where_they_are() {
+        let root = std::env::temp_dir().join(format!("er-ide-busca-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(
+            fs::write(
+                root.join("Pedido.java"),
+                "public class Pedido { void calcular() {} }\n",
+            )
+            .is_ok()
+        );
+        assert!(
+            fs::write(
+                root.join("PedidoRepository.java"),
+                "public interface PedidoRepository {}\n",
+            )
+            .is_ok()
+        );
+        assert!(
+            fs::write(
+                root.join("MeuPedido.java"),
+                "public record MeuPedido(long id) {}\n",
+            )
+            .is_ok()
+        );
+        let active = match pollster::block_on(JavaLanguageProvider::new().activate(
+            LanguageActivationContext {
+                workspace_root: root.clone(),
+                jdk_home: None,
+            },
+        )) {
+            Ok(active) => active,
+            Err(error) => panic!("falha ao ativar o provider: {error}"),
+        };
+
+        let found = match pollster::block_on(active.workspace_types("pedido", 50)) {
+            Ok(found) => found,
+            Err(error) => panic!("falha na busca: {error}"),
+        };
+        let nomes: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            nomes,
+            vec!["Pedido", "PedidoRepository", "MeuPedido"],
+            "quem começa com o digitado vem antes: {nomes:?}"
+        );
+        assert!(
+            found[0].location.path.ends_with("Pedido.java"),
+            "o resultado precisa dizer onde abrir"
+        );
+        assert!(!nomes.contains(&"calcular"), "método não é tipo: {nomes:?}");
+
+        // Consulta vazia devolve tudo, para a janela nascer com conteúdo.
+        assert_eq!(
+            pollster::block_on(active.workspace_types("", 50))
+                .map(|found| found.len())
+                .unwrap_or_default(),
+            3
+        );
+        // O teto é respeitado.
+        assert_eq!(
+            pollster::block_on(active.workspace_types("", 1))
+                .map(|found| found.len())
+                .unwrap_or_default(),
+            1
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// Consultar por nome de tipo alcança o projeto inteiro, sem arquivo aberto.
     ///
     /// É o que o editor do depurador usa: lá não há documento, e uma classe que
@@ -1859,14 +1965,20 @@ mod tests {
         };
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
         assert!(labels.contains(&"total"), "campo do tipo: {labels:?}");
-        assert!(labels.contains(&"descricao()"), "método do tipo: {labels:?}");
+        assert!(
+            labels.contains(&"descricao()"),
+            "método do tipo: {labels:?}"
+        );
         assert!(
             !labels.contains(&"interno()"),
             "membro privado não se alcança pelo ponto: {labels:?}"
         );
         // O menu depois do ponto fala do objeto, não do arquivo: nada de
         // palavra-chave nem de classe solta do índice.
-        assert!(!labels.contains(&"class"), "palavra-chave vazou: {labels:?}");
+        assert!(
+            !labels.contains(&"class"),
+            "palavra-chave vazou: {labels:?}"
+        );
         assert!(!labels.contains(&"Uso"), "classe vizinha vazou: {labels:?}");
     }
 
