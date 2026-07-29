@@ -44,6 +44,16 @@ pollster = "0.4"
 portable-pty = "=0.8.1"
 rfd = "0.17.2"
 winit = "0.30.13"
+ui-api = { version = "0.1.0", path = "../ERLibUi/crates/ui-api" }
+ui-clipboard-arboard = { version = "0.1.0", path = "../ERLibUi/crates/ui-clipboard-arboard" }
+ui-components = { version = "0.1.0", path = "../ERLibUi/crates/ui-components" }
+ui-core = { version = "0.1.0", path = "../ERLibUi/crates/ui-core" }
+ui-editor = { version = "0.1.0", path = "../ERLibUi/crates/ui-editor" }
+ui-render-api = { version = "0.1.0", path = "../ERLibUi/crates/ui-render-api" }
+ui-render-wgpu = { version = "0.1.0", path = "../ERLibUi/crates/ui-render-wgpu" }
+ui-text-cosmic = { version = "0.1.0", path = "../ERLibUi/crates/ui-text-cosmic" }
+ui-window-api = { version = "0.1.0", path = "../ERLibUi/crates/ui-window-api" }
+ui-window-winit = { version = "0.1.0", path = "../ERLibUi/crates/ui-window-winit" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

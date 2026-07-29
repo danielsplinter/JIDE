@@ -13,6 +13,19 @@ workers canceláveis, e o suporte a Java cobre análise sintática e semântica,
 navegação, referências, autocomplete, toolchain JDK, os build systems Maven e
 Gradle e a depuração remota de processos em execução.
 
+## Dependência da interface
+
+A IDE usa a ERLibUi `0.1.0` como repositório irmão, sem caminhos absolutos:
+
+```text
+projetos/rust/
+  ERLibUi/
+  ide/
+```
+
+As dependências ficam centralizadas em `workspace.dependencies`; portanto mover
+essa pasta conjunta para outro usuário ou unidade não exige editar manifests.
+
 ## Executar
 
 ```text
@@ -92,9 +105,10 @@ entram tipos com arquivo no projeto: o resultado existe para ser aberto, e uma
 classe dentro de um jar não teria onde abrir.
 
 `Ctrl+Shift+L` abre **a mesma janela no modo de busca por conteúdo**. A consulta
-percorre somente arquivos descendentes de diretórios chamados `java`, inclusive
-quando o projeto possui vários módulos ou raízes `src/main/java` e
-`src/test/java`; arquivos fora dessas raízes não aparecem. A janela nasce
+percorre somente as `source_roots` informadas pelo modelo Maven ou Gradle,
+inclusive quando o projeto possui vários módulos ou raízes `src/main/java` e
+`src/test/java`; arquivos fora dessas raízes não aparecem. Antes de existir um
+modelo importado, a IDE usa diretórios chamados `java` como fallback. A janela nasce
 aguardando texto para não transformar cada linha vazia do projeto em resultado,
 e a comparação ignora diferenças entre maiúsculas e minúsculas.
 

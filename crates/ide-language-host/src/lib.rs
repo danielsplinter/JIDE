@@ -1273,6 +1273,8 @@ mod tests {
 
     struct TestProvider {
         provider_id: ProviderId,
+        language_id: LanguageId,
+        extension: String,
         capabilities: LanguageCapabilities,
         activations: Arc<AtomicUsize>,
         shutdowns: Arc<AtomicUsize>,
@@ -1284,6 +1286,8 @@ mod tests {
         fn new(provider_id: &str, capabilities: LanguageCapabilities) -> Self {
             Self {
                 provider_id: ProviderId(provider_id.to_owned()),
+                language_id: LanguageId("java".to_owned()),
+                extension: ".JAVA".to_owned(),
                 capabilities,
                 activations: Arc::new(AtomicUsize::new(0)),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
@@ -1298,16 +1302,29 @@ mod tests {
                 ..Self::new(provider_id, capabilities)
             }
         }
+
+        fn for_language(
+            provider_id: &str,
+            language_id: &str,
+            extension: &str,
+            capabilities: LanguageCapabilities,
+        ) -> Self {
+            Self {
+                language_id: LanguageId(language_id.to_owned()),
+                extension: extension.to_owned(),
+                ..Self::new(provider_id, capabilities)
+            }
+        }
     }
 
     #[async_trait]
     impl LanguageProvider for TestProvider {
         fn metadata(&self) -> LanguageMetadata {
             LanguageMetadata {
-                language_id: LanguageId("java".to_owned()),
+                language_id: self.language_id.clone(),
                 provider_id: self.provider_id.clone(),
                 display_name: self.provider_id.0.clone(),
-                extensions: vec![".JAVA".to_owned()],
+                extensions: vec![self.extension.clone()],
                 api_version: LANGUAGE_API_VERSION,
                 trigger_characters: vec!['.'],
             }
@@ -1329,10 +1346,36 @@ mod tests {
                 return Err(LanguageError::Provider("activation failed".to_owned()));
             }
             Ok(Box::new(TestActiveLanguage {
-                language_id: LanguageId("java".to_owned()),
+                language_id: self.language_id.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
             }))
         }
+    }
+
+    #[test]
+    fn registers_a_fake_language_without_application_or_ui_changes() {
+        let host = LanguageHost::new(".");
+        let provider = Arc::new(TestProvider::for_language(
+            "fake.native",
+            "fake",
+            ".fake",
+            LanguageCapabilities::SYNTAX,
+        ));
+        success(host.register(provider.clone()));
+        let document = DocumentSnapshot {
+            id: DocumentId(77),
+            path: "sample.fake".into(),
+            version: 1,
+            text: "fake source".to_owned(),
+        };
+        success(pollster::block_on(
+            host.open_document(host.request_context(), document),
+        ));
+        assert_eq!(provider.activations.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            success(host.provider_for_extension("fake", LanguageCapabilities::SYNTAX)),
+            ProviderId("fake.native".to_owned())
+        );
     }
 
     struct TestActiveLanguage {

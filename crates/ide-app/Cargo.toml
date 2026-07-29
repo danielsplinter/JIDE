@@ -26,13 +26,13 @@ pollster.workspace = true
 rfd.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-ui-clipboard-arboard = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-clipboard-arboard" }
-ui-core = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-core" }
-ui-render-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-api" }
-ui-render-wgpu = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-render-wgpu" }
-ui-text-cosmic = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-text-cosmic" }
-ui-window-api = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-window-api" }
-ui-window-winit = { path = "C:/Users/jdani/Documents/projetos/rust/ERLibUi/crates/ui-window-winit" }
+ui-clipboard-arboard.workspace = true
+ui-core.workspace = true
+ui-render-api.workspace = true
+ui-render-wgpu.workspace = true
+ui-text-cosmic.workspace = true
+ui-window-api.workspace = true
+ui-window-winit.workspace = true
 winit.workspace = true
 
 [lints]

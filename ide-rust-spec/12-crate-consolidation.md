@@ -250,14 +250,38 @@ Validação da fase: testes direcionados dos contratos e consumidores afetados,
 `cargo test --workspace`, Clippy estrito sem warnings e build release de
 `ide-app`.
 
-### Fase 7 — Portabilidade e fiscalização
+### Fase 7 — Portabilidade e fiscalização ✅ Concluída
 
-- [ ] substituir caminhos absolutos da ERLibUi por dependências portáveis e
+**Estado: concluída em 29/07/2026.**
+
+As dependências da ERLibUi foram centralizadas em `workspace.dependencies`.
+Cada uma declara a versão compatível `0.1.0` e um caminho relativo ao
+repositório irmão `../ERLibUi`; `ide-app` e `ide-ui` apenas herdam essas
+entradas. Assim, nenhum manifest contém usuário, unidade ou diretório absoluto.
+Para desenvolvimento conjunto, os repositórios `ide` e `ERLibUi` devem ser
+checados lado a lado; a versão explícita impede o uso acidental de uma revisão
+com versão incompatível.
+
+Testes arquiteturais em `ide-core/tests/architecture.rs` leem os manifests
+reais e falham quando uma dependência usa caminho absoluto, uma crate protegida
+atravessa uma fronteira proibida ou o grafo interno contém ciclo. O grafo inclui
+dependências de desenvolvimento, build e condicionais por plataforma.
+
+O host possui ainda um teste ponta a ponta que registra o provider fictício
+`fake.native`, roteia a extensão `.fake`, ativa o worker e abre um documento.
+O teste vive somente em `ide-language-host`, demonstrando que uma linguagem
+nova não exige alteração em `ide-app` nem `ide-ui`.
+
+- [x] substituir caminhos absolutos da ERLibUi por dependências portáveis e
   versionadas;
-- [ ] adicionar testes arquiteturais para dependências proibidas;
-- [ ] verificar que uma linguagem falsa pode ser registrada sem modificar
+- [x] adicionar testes arquiteturais para dependências proibidas;
+- [x] verificar que uma linguagem falsa pode ser registrada sem modificar
   `ide-app` ou `ide-ui`;
-- [ ] verificar ausência de ciclos no grafo de crates.
+- [x] verificar ausência de ciclos no grafo de crates.
+
+Validação da fase: testes arquiteturais e do provider falso,
+`cargo test --workspace`, Clippy estrito sem warnings e build release de
+`ide-app`.
 
 ## Critérios de conclusão de cada fase
 
