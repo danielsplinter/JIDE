@@ -11,6 +11,9 @@ use thiserror::Error;
 /// filesystem e ciclo de vida é a aplicação.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplicationCommand {
+    OpenDocument(OpenDocumentRequest),
+    SaveDocument(SaveDocumentRequest),
+    ReloadWorkspace,
     OpenProject,
     OpenSettings,
     OpenCompilerSettings,
@@ -29,6 +32,39 @@ pub enum ApplicationCommand {
     Debug(DebugRequest),
     SearchTypes(String),
     SearchContent(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenDocumentRequest {
+    pub path: PathBuf,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl OpenDocumentRequest {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            line: 0,
+            column: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn at(mut self, line: usize, column: usize) -> Self {
+        self.line = line;
+        self.column = column;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SaveDocumentRequest {
+    pub document_id: DocumentId,
+    pub path: PathBuf,
+    pub text: String,
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

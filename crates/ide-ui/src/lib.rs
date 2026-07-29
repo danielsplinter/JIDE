@@ -4,6 +4,7 @@ mod editor;
 pub use editor::{EditorAction, EditorCapabilities, EditorPane};
 pub use ide_application::{
     ApplicationCommand, DebugRequest, NavigationRequest, NewItemKind, NewItemRequest,
+    OpenDocumentRequest, SaveDocumentRequest,
 };
 
 use std::{
@@ -18,8 +19,7 @@ use ide_domain::{
     SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition, member_access,
 };
 use ide_terminal::{ShellKind, TerminalSession};
-use ide_text::{EditorSession, TextBuffer};
-use ide_workspace::{FileNode, WorkspaceError};
+use ide_workspace::{EditorSession, FileNode, TextBuffer};
 use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 use ui_components::{
     Button, ComboBox, ComboBoxItem, ContextMenu, Icon, IconTint, Label, ListSelection, ListView,
@@ -586,9 +586,64 @@ pub struct IdeShell {
 }
 
 impl IdeShell {
-    pub fn open(root: &Path) -> Result<Self, WorkspaceError> {
-        let workspace = FileNode::scan(root)?;
-        Ok(Self::from_tree(workspace))
+    #[cfg(test)]
+    fn open(root: &Path) -> Result<Self, ide_workspace::WorkspaceError> {
+        ide_workspace::WorkspaceService::native()
+            .scan(root)
+            .map(Self::from_tree)
+    }
+
+    #[cfg(test)]
+    fn open_file(&mut self, path: &Path) -> Result<DocumentId, String> {
+        if self.editor.tabs().any(|document| document.path == path) {
+            return Ok(self.show_document(path, String::new()));
+        }
+        let text = ide_workspace::WorkspaceService::native()
+            .read_document(path)
+            .map_err(|error| error.to_string())?;
+        Ok(self.show_document(path, text))
+    }
+
+    #[cfg(test)]
+    fn open_location(
+        &mut self,
+        path: &Path,
+        line: usize,
+        column: usize,
+    ) -> Result<DocumentId, String> {
+        if self.editor.tabs().any(|document| document.path == path) {
+            return Ok(self.show_location(path, String::new(), line, column));
+        }
+        let text = ide_workspace::WorkspaceService::native()
+            .read_document(path)
+            .map_err(|error| error.to_string())?;
+        Ok(self.show_location(path, text, line, column))
+    }
+
+    #[cfg(test)]
+    fn save_active_document(&mut self) -> bool {
+        let Some(document) = self.editor.active() else {
+            return false;
+        };
+        let id = document.id;
+        let path = document.path.clone();
+        let text = document.buffer.text().to_owned();
+        let revision = document.buffer.revision();
+        if ide_workspace::WorkspaceService::native()
+            .save_document(&path, &text)
+            .is_err()
+        {
+            return false;
+        }
+        self.document_saved(id, revision, &path);
+        true
+    }
+
+    #[cfg(test)]
+    fn reload_workspace(&mut self) -> Result<(), ide_workspace::WorkspaceError> {
+        let tree = ide_workspace::WorkspaceService::native().scan(&self.workspace.path)?;
+        self.replace_workspace_tree(tree);
+        Ok(())
     }
 
     /// Raiz atualmente carregada no Explorer.
@@ -604,22 +659,15 @@ impl IdeShell {
         &self.workspace
     }
 
-    /// Relê a árvore do disco preservando o que está expandido.
-    ///
-    /// O que nasceu depois da última varredura não existe para o Explorer até ele
-    /// reler. A expansão é mantida porque ela é a posição do usuário na árvore:
-    /// recolher tudo depois de criar um arquivo esconderia justamente o que ele
-    /// acabou de criar.
-    pub fn reload_workspace(&mut self) -> Result<(), WorkspaceError> {
-        let root = self.workspace.path.clone();
-        self.workspace = FileNode::scan(&root)?;
+    /// Substitui a árvore já carregada pela camada de workspace.
+    pub fn replace_workspace_tree(&mut self, workspace: FileNode) {
+        self.workspace = workspace;
         // A `TreeView` guarda os itens dela: reler o disco sem repô-los deixava a
         // árvore desenhando a varredura anterior. `set_roots` preserva expansão e
         // seleção por identidade, então a posição do usuário não se perde.
         self.explorer_tree
             .set_roots(explorer_items(&self.workspace));
         self.sync_explorer_tree();
-        Ok(())
     }
 
     /// A aba ativa tem alteração ainda não gravada.
@@ -633,21 +681,28 @@ impl IdeShell {
             .is_some_and(|document| document.buffer.is_dirty())
     }
 
-    /// Grava a aba ativa no disco.
-    ///
-    /// Devolve `true` quando gravou. A barra de estado relata as duas saídas: um
-    /// salvamento silencioso não se distingue de um que falhou, e a aba continua
-    /// marcada como modificada quando a escrita não deu certo.
-    pub fn save_active_document(&mut self) -> bool {
-        match self.editor.save_active() {
-            Ok(path) => {
-                self.status_message = format!("Salvo {}", path.display());
-                true
-            }
-            Err(error) => {
-                self.status_message = error.to_string();
-                false
-            }
+    /// Solicita a gravação da aba ativa à camada de aplicação.
+    pub fn request_save_active_document(&mut self) {
+        let Some(document) = self.editor.active() else {
+            self.status_message = "Nenhum documento aberto".to_owned();
+            return;
+        };
+        if !document.is_persistent() {
+            self.status_message = "Documento em memória não possui caminho para salvar".to_owned();
+            return;
+        }
+        self.commands
+            .push(ApplicationCommand::SaveDocument(SaveDocumentRequest {
+                document_id: document.id,
+                path: document.path.clone(),
+                text: document.buffer.text().to_owned(),
+                revision: document.buffer.revision(),
+            }));
+    }
+
+    pub fn document_saved(&mut self, document_id: DocumentId, revision: u64, path: &Path) {
+        if self.editor.mark_saved(document_id, revision).is_ok() {
+            self.status_message = format!("Salvo {}", path.display());
         }
     }
 
@@ -657,7 +712,7 @@ impl IdeShell {
     /// revelar o caminho é o que faz o resultado aparecer.
     pub fn reveal_in_explorer(&mut self, path: &Path) {
         for ancestor in path.ancestors() {
-            if ancestor.starts_with(&self.workspace.path) && ancestor.is_dir() {
+            if ancestor.starts_with(&self.workspace.path) {
                 self.expanded.insert(ancestor.to_path_buf());
             }
         }
@@ -673,7 +728,7 @@ impl IdeShell {
             .to_owned();
         let mut expanded = HashSet::new();
         expanded.insert(workspace.path.clone());
-        let terminal_root = if workspace.path.is_dir() {
+        let terminal_root = if workspace.is_directory {
             workspace.path.clone()
         } else {
             PathBuf::from(".")
@@ -681,7 +736,8 @@ impl IdeShell {
         let terminals = TerminalSession::discover_profiles()
             .into_iter()
             .filter_map(|profile| {
-                TerminalSession::new(terminal_root.clone(), 2_000, profile)
+                TerminalSession::new(terminal_root.clone(), 2_000, profile.clone())
+                    .or_else(|_| TerminalSession::new(PathBuf::from("."), 2_000, profile))
                     .ok()
                     .map(|session| TerminalTab {
                         session,
@@ -880,13 +936,14 @@ impl IdeShell {
         }
     }
 
-    pub fn open_file(&mut self, path: &Path) -> Result<DocumentId, String> {
-        let id = self.editor.open(path).map_err(|error| error.to_string())?;
+    /// Apresenta um documento cujo conteúdo já foi carregado pelo workspace.
+    pub fn show_document(&mut self, path: &Path, text: impl Into<String>) -> DocumentId {
+        let id = self.editor.open(path, text);
         self.editor_pane.set_cursor(0);
         self.focus = ShellFocus::Editor;
         self.status_message = format!("Opened {}", path.display());
         self.sync_explorer_to_active();
-        Ok(id)
+        id
     }
 
     pub const fn focus(&self) -> ShellFocus {
@@ -1313,7 +1370,7 @@ impl IdeShell {
     pub fn open_document_paths(&self) -> Vec<PathBuf> {
         self.editor
             .tabs()
-            .filter(|document| document.path.is_file())
+            .filter(|document| document.is_persistent())
             .map(|document| document.path.clone())
             .collect()
     }
@@ -1323,8 +1380,8 @@ impl IdeShell {
     pub fn active_document_path(&self) -> Option<PathBuf> {
         self.editor
             .active()
+            .filter(|document| document.is_persistent())
             .map(|document| document.path.clone())
-            .filter(|path| path.is_file())
     }
     pub fn is_expanded(&self, path: &Path) -> bool {
         self.expanded.contains(path)
@@ -1421,7 +1478,9 @@ impl IdeShell {
         if let Some((path, line)) = view.stopped_at.clone()
             && self.debug.stopped_at.as_ref() != Some(&(path.clone(), line))
         {
-            let _ = self.open_location(&path, line as usize, 0);
+            self.commands.push(ApplicationCommand::OpenDocument(
+                OpenDocumentRequest::new(path).at(line as usize, 0),
+            ));
         }
         self.debug = view;
         self.debug_frames.set_items(
@@ -2080,7 +2139,9 @@ impl IdeShell {
             .get(row)
             .and_then(|frame| frame.location.clone())
         {
-            let _ = self.open_location(&path, line as usize, 0);
+            self.commands.push(ApplicationCommand::OpenDocument(
+                OpenDocumentRequest::new(path).at(line as usize, 0),
+            ));
         }
     }
 
@@ -2428,9 +2489,7 @@ impl IdeShell {
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "file.save" => {
-                // Salvar é do shell, que é dono da sessão do editor: não há o que
-                // pedir ao app.
-                self.save_active_document();
+                self.request_save_active_document();
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "settings.open" => {
@@ -2539,8 +2598,11 @@ impl IdeShell {
                         self.expanded.insert(path);
                     }
                     self.sync_explorer_tree();
-                } else if let Err(error) = self.open_file(&path) {
-                    self.status_message = error;
+                } else {
+                    self.commands
+                        .push(ApplicationCommand::OpenDocument(OpenDocumentRequest::new(
+                            path,
+                        )));
                 }
             }
             return;
@@ -2619,19 +2681,20 @@ impl IdeShell {
                 }
             }
             EditorAction::Save => {
-                self.save_active_document();
+                self.request_save_active_document();
             }
             EditorAction::ContextMenu(_) | EditorAction::None => {}
         }
     }
 
-    pub fn open_location(
+    pub fn show_location(
         &mut self,
         path: &Path,
+        text: impl Into<String>,
         line: usize,
         column: usize,
-    ) -> Result<DocumentId, String> {
-        let id = self.open_file(path)?;
+    ) -> DocumentId {
+        let id = self.show_document(path, text);
         let text = self.active_text().unwrap_or_default();
         self.editor_pane
             .set_cursor(offset_for_line_column(text, line, column));
@@ -2641,7 +2704,7 @@ impl IdeShell {
         self.navigated = Some((line, self.editor_pane.cursor()));
         self.focus = ShellFocus::Editor;
         self.status_message = format!("Definition: {}:{}:{}", path.display(), line + 1, column + 1);
-        Ok(id)
+        id
     }
 
     pub fn pointer_move(&mut self, point: Point, size: Size) -> bool {
@@ -3241,13 +3304,12 @@ impl IdeShell {
             return;
         };
         self.close_type_search();
-        if let Err(error) = self.open_location(
-            &location.path,
-            location.range.start.line as usize,
-            location.range.start.column as usize,
-        ) {
-            self.status_message = error;
-        }
+        self.commands.push(ApplicationCommand::OpenDocument(
+            OpenDocumentRequest::new(location.path).at(
+                location.range.start.line as usize,
+                location.range.start.column as usize,
+            ),
+        ));
     }
 
     /// Recebe uma avaliação vinda do depurador e decide o que ela significa.
@@ -8430,19 +8492,17 @@ mod tests {
             "a lista precisa mostrar o que foi encontrado e onde: {texts:?}"
         );
 
-        // As setas andam na lista e `Enter` abre o escolhido numa aba.
+        // As setas andam na lista e `Enter` pede à aplicação que abra o
+        // escolhido. A UI não lê o arquivo.
         shell.key_down("ArrowDown");
         shell.key_down("Enter");
         assert!(!shell.type_search_open(), "escolher fecha a janela");
         assert_eq!(
-            shell.active_document_path(),
-            Some(repositorio),
+            shell.drain_application_commands(),
+            vec![ApplicationCommand::OpenDocument(OpenDocumentRequest::new(
+                repositorio
+            ))],
             "o segundo item é o que devia abrir"
-        );
-        assert_eq!(
-            shell.active_text(),
-            Some("interface PedidoRepository {}\n"),
-            "e a aba precisa mostrar o conteúdo dele"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8492,18 +8552,11 @@ mod tests {
         shell.key_down("Enter");
 
         assert!(!shell.type_search_open());
-        assert_eq!(shell.active_document_path(), Some(source));
-        let active_text = shell.active_text();
-        assert!(
-            active_text.is_some(),
-            "a ocorrência precisa abrir o arquivo"
-        );
-        let Some(active_text) = active_text else {
-            return;
-        };
         assert_eq!(
-            line_column(active_text, shell.editor_pane.cursor()),
-            (1, 23)
+            shell.drain_application_commands(),
+            vec![ApplicationCommand::OpenDocument(
+                OpenDocumentRequest::new(source).at(1, 23)
+            )]
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -9256,7 +9309,7 @@ tres"
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// O item "Salvar" do menu Arquivo faz o mesmo que o atalho.
+    /// O item "Salvar" entrega o conteúdo à aplicação sem escrever pela UI.
     #[test]
     fn the_file_menu_saves_the_active_tab() {
         let root = std::env::temp_dir().join(format!("er-ide-menu-save-{}", std::process::id()));
@@ -9276,10 +9329,17 @@ tres"
         // Abre o menu Arquivo e escolhe a segunda entrada.
         shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
         shell.pointer_down(Point::new(100.0, TITLE_HEIGHT + 42.0), size);
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap_or_default(),
-            "// pelo menu\nclass Pedido {}"
+        let commands = shell.drain_application_commands();
+        let Some(ApplicationCommand::SaveDocument(request)) = commands.first() else {
+            panic!("o menu deveria emitir SaveDocument");
+        };
+        assert_eq!(request.path, file);
+        assert_eq!(request.text, "// pelo menu\nclass Pedido {}");
+        assert!(
+            shell.active_document_modified(),
+            "a confirmação do adapter ainda não chegou"
         );
+        shell.document_saved(request.document_id, request.revision, &request.path);
         assert!(!shell.active_document_modified());
         let _ = std::fs::remove_dir_all(&root);
     }

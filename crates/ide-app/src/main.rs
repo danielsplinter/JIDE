@@ -14,7 +14,7 @@ use std::{
 
 use ide_application::{
     ApplicationCommand, DebugRequest, EventBus, IdeEvent, NavigationRequest, NewItemKind,
-    NewItemRequest,
+    NewItemRequest, OpenDocumentRequest, SaveDocumentRequest,
 };
 use ide_core::{AppConfig, config_path, init_logging};
 use ide_debug_api::{DebugEvent, StepKind};
@@ -35,6 +35,7 @@ use ide_toolchain_api::{
 use ide_ui::{
     ContentSearchHit, DebugView, IdeShell, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
 };
+use ide_workspace::WorkspaceService;
 use java_gradle_adapter::{GRADLE_BUILD_SYSTEM_ID, GradleAdapter};
 use java_javac_adapter::JavaJavacAdapter;
 use java_maven_adapter::{MAVEN_BUILD_SYSTEM_ID, MavenAdapter};
@@ -67,6 +68,7 @@ struct NativeIde {
     window: Option<WinitWindow>,
     renderer: Option<WgpuRenderer>,
     shell: Option<IdeShell>,
+    workspace: WorkspaceService,
     startup_error: Option<String>,
     cursor: Point,
     /// Instante e posição do último clique simples, para detectar o duplo.
@@ -142,7 +144,11 @@ impl NativeIde {
             .register(Arc::new(JavaLanguageProvider::new()))
             .map_err(|error| error.to_string())?;
         self.language_host = Some(language_host);
-        let mut shell = IdeShell::open(&root).map_err(|error| error.to_string())?;
+        let tree = self
+            .workspace
+            .scan(&root)
+            .map_err(|error| error.to_string())?;
+        let mut shell = IdeShell::from_tree(tree);
         // Os componentes medem o texto pela mesma fonte que vai desenhá-lo. Quem
         // constrói o mecanismo é a aplicação; a interface só recebe a porta.
         shell.set_text_metrics(Arc::new(ui_text_cosmic::CosmicTextEngine::new()));
@@ -157,12 +163,12 @@ impl NativeIde {
         // continuar de onde parou, e um arquivo que sumiu é ignorado em
         // silêncio, como um projeto inexistente.
         for document in self.config.workspace.resolved_documents(&root) {
-            if let Err(error) = shell.open_file(&document) {
+            if let Err(error) = self.open_document_in_shell(&mut shell, &document, 0, 0) {
                 tracing::warn!(%error, path = %document.display(), "aba não pôde ser reaberta");
             }
         }
         if let Some(active) = self.config.workspace.resolved_active_document(&root)
-            && let Err(error) = shell.open_file(&active)
+            && let Err(error) = self.open_document_in_shell(&mut shell, &active, 0, 0)
         {
             tracing::warn!(%error, path = %active.display(), "aba ativa não pôde ser restaurada");
         }
@@ -245,6 +251,62 @@ impl NativeIde {
         }
     }
 
+    fn open_document_in_shell(
+        &self,
+        shell: &mut IdeShell,
+        path: &Path,
+        line: usize,
+        column: usize,
+    ) -> Result<DocumentId, String> {
+        let text = self
+            .workspace
+            .read_document(path)
+            .map_err(|error| error.to_string())?;
+        Ok(shell.show_location(path, text, line, column))
+    }
+
+    fn open_document(&mut self, request: OpenDocumentRequest) {
+        let result = self.workspace.read_document(&request.path);
+        let Some(shell) = self.shell.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(text) => {
+                shell.show_location(&request.path, text, request.line, request.column);
+            }
+            Err(error) => shell.set_status_message(error.to_string()),
+        }
+    }
+
+    fn save_document(&mut self, request: SaveDocumentRequest) {
+        let result = self.workspace.save_document(&request.path, &request.text);
+        let Some(shell) = self.shell.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(()) => shell.document_saved(request.document_id, request.revision, &request.path),
+            Err(error) => shell.set_status_message(error.to_string()),
+        }
+    }
+
+    fn reload_workspace(&mut self) {
+        let Some(root) = self
+            .shell
+            .as_ref()
+            .map(|shell| shell.workspace_path().to_path_buf())
+        else {
+            return;
+        };
+        let result = self.workspace.scan(&root);
+        let Some(shell) = self.shell.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(tree) => shell.replace_workspace_tree(tree),
+            Err(error) => shell.set_status_message(error.to_string()),
+        }
+    }
+
     fn choose_project(&mut self) {
         let Some(current) = self
             .shell
@@ -260,8 +322,8 @@ impl NativeIde {
         else {
             return;
         };
-        match IdeShell::open(&folder) {
-            Ok(shell) => {
+        match self.workspace.scan(&folder) {
+            Ok(tree) => {
                 if let Some(language_host) = &self.language_host {
                     if let Err(error) = pollster::block_on(language_host.shutdown())
                         .and_then(|()| language_host.set_workspace_root(&folder))
@@ -275,7 +337,7 @@ impl NativeIde {
                 }
                 self.language_documents.clear();
                 self.application_documents.clear();
-                self.shell = Some(shell);
+                self.shell = Some(IdeShell::from_tree(tree));
                 self.publish_event(IdeEvent::WorkspaceOpened {
                     root: folder.clone(),
                 });
@@ -432,15 +494,10 @@ impl NativeIde {
         ) {
             Ok(locations) => {
                 if let Some(location) = locations.first() {
-                    if let Some(shell) = self.shell.as_mut()
-                        && let Err(error) = shell.open_location(
-                            &location.path,
-                            location.range.start.line as usize,
-                            location.range.start.column as usize,
-                        )
-                    {
-                        shell.set_status_message(error);
-                    }
+                    self.open_document(OpenDocumentRequest::new(&location.path).at(
+                        location.range.start.line as usize,
+                        location.range.start.column as usize,
+                    ));
                 } else if let Some(shell) = self.shell.as_mut() {
                     shell.set_status_message(format!("Definition not found: {}", request.token));
                 }
@@ -492,7 +549,8 @@ impl NativeIde {
     /// diretórios chamados `java` podem produzir ocorrências.
     fn answer_content_search(&mut self, query: &str) {
         let found = self.shell.as_ref().map_or_else(Vec::new, |shell| {
-            ide_workspace::search_java_content(shell.workspace_tree(), query, TYPE_SEARCH_LIMIT)
+            self.workspace
+                .search_java_content(shell.workspace_tree(), query, TYPE_SEARCH_LIMIT)
         });
         if let Some(shell) = self.shell.as_mut() {
             shell.set_content_search_results(
@@ -671,7 +729,7 @@ impl NativeIde {
             .fold(request.source_root.clone(), |path, segment| {
                 path.join(segment)
             });
-        if let Err(error) = ide_workspace::create_directory(&directory) {
+        if let Err(error) = self.workspace.create_directory(&directory) {
             if let Some(shell) = self.shell.as_mut() {
                 shell.set_new_item_message(error.to_string());
             }
@@ -682,7 +740,7 @@ impl NativeIde {
         } else {
             let path = directory.join(format!("{}.java", request.name));
             let source = java_source(&request, &request.name);
-            if let Err(error) = ide_workspace::create_file(&path, &source) {
+            if let Err(error) = self.workspace.create_file(&path, &source) {
                 if let Some(shell) = self.shell.as_mut() {
                     shell.set_new_item_message(error.to_string());
                 }
@@ -694,8 +752,9 @@ impl NativeIde {
             shell.close_new_item_dialog();
             // A árvore precisa reler o disco: o que acabou de nascer não estava
             // na varredura anterior.
-            if let Err(error) = shell.reload_workspace() {
-                shell.set_status_message(error.to_string());
+            match self.workspace.scan(shell.workspace_path()) {
+                Ok(tree) => shell.replace_workspace_tree(tree),
+                Err(error) => shell.set_status_message(error.to_string()),
             }
             // O que nasceu dentro de uma pasta fechada não aparece: revelar o
             // caminho é parte de ter criado.
@@ -703,8 +762,11 @@ impl NativeIde {
             match &created_file {
                 Some(path) => {
                     shell.set_status_message(format!("Criado {}", path.display()));
-                    if let Err(error) = shell.open_file(path) {
-                        shell.set_status_message(error);
+                    match self.workspace.read_document(path) {
+                        Ok(text) => {
+                            shell.show_document(path, text);
+                        }
+                        Err(error) => shell.set_status_message(error.to_string()),
                     }
                 }
                 None => shell.set_status_message(format!("Criado {}", directory.display())),
@@ -791,7 +853,7 @@ impl NativeIde {
                 };
                 self.project = Some(ImportedProject {
                     adapter,
-                    manifest_modified: modified_at(&descriptor.manifest),
+                    manifest_modified: self.workspace.modified_at(&descriptor.manifest),
                     descriptor,
                     model,
                 });
@@ -805,7 +867,7 @@ impl NativeIde {
                 // O último modelo válido continua valendo, e o carimbo do
                 // manifesto é atualizado para não repetir a falha a cada segundo.
                 let summary = previous.map(|mut project| {
-                    project.manifest_modified = modified_at(&descriptor.manifest);
+                    project.manifest_modified = self.workspace.modified_at(&descriptor.manifest);
                     let summary = project.model.summary();
                     self.project = Some(project);
                     summary
@@ -849,7 +911,7 @@ impl NativeIde {
             return false;
         }
         self.last_manifest_check = Some(Instant::now());
-        let modified = modified_at(&project.descriptor.manifest);
+        let modified = self.workspace.modified_at(&project.descriptor.manifest);
         if modified == project.manifest_modified {
             return false;
         }
@@ -1095,6 +1157,9 @@ impl NativeIde {
         }
         for command in direct {
             match command {
+                ApplicationCommand::OpenDocument(request) => self.open_document(request),
+                ApplicationCommand::SaveDocument(request) => self.save_document(request),
+                ApplicationCommand::ReloadWorkspace => self.reload_workspace(),
                 ApplicationCommand::OpenProject => self.choose_project(),
                 ApplicationCommand::OpenSettings => self.open_jdk_selector(),
                 ApplicationCommand::OpenCompilerSettings => {
@@ -1521,12 +1586,6 @@ fn project_sources(files: Vec<PathBuf>, model: Option<&ProjectModel>) -> Vec<Pat
     if filtered.is_empty() { files } else { filtered }
 }
 
-fn modified_at(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-}
-
 fn main_class_name(document: &DocumentSnapshot) -> Option<String> {
     if !document
         .path
@@ -1829,7 +1888,7 @@ impl ApplicationHandler for NativeIde {
                 {
                     // Salvar é do shell, que é dono da sessão do editor.
                     if let Some(shell) = self.shell.as_mut() {
-                        shell.save_active_document();
+                        shell.request_save_active_document();
                     }
                 } else if self.control_pressed && event.text.as_deref() == Some(" ") {
                     completion_requested = true;
@@ -2078,6 +2137,22 @@ mod tests {
 
     use super::*;
 
+    fn test_shell(root: &Path) -> IdeShell {
+        let service = WorkspaceService::native();
+        match service.scan(root) {
+            Ok(tree) => IdeShell::from_tree(tree),
+            Err(error) => panic!("projeto não abriu: {error}"),
+        }
+    }
+
+    fn open_test_document(shell: &mut IdeShell, path: &Path) -> DocumentId {
+        let service = WorkspaceService::native();
+        match service.read_document(path) {
+            Ok(text) => shell.show_document(path, text),
+            Err(error) => panic!("documento não abriu: {error}"),
+        }
+    }
+
     /// Ctrl+clique encontra a definição em outro arquivo do projeto, para
     /// qualquer forma de declarar um tipo.
     ///
@@ -2135,15 +2210,12 @@ mod tests {
         );
         let mut ide = NativeIde {
             language_host: Some(language_host),
-            shell: Some(match IdeShell::open(&root) {
-                Ok(shell) => shell,
-                Err(error) => panic!("projeto não abriu: {error}"),
-            }),
+            shell: Some(test_shell(&root)),
             ..NativeIde::default()
         };
-        let document_id = match ide.shell.as_mut().map(|shell| shell.open_file(&uso)) {
-            Some(Ok(id)) => id,
-            _ => panic!("documento não abriu"),
+        let document_id = match ide.shell.as_mut() {
+            Some(shell) => open_test_document(shell, &uso),
+            None => panic!("shell de teste ausente"),
         };
         ide.sync_languages();
 
@@ -2193,14 +2265,11 @@ mod tests {
 
         let mut ide = NativeIde {
             language_host: Some(language_host),
-            shell: Some(match IdeShell::open(&root) {
-                Ok(shell) => shell,
-                Err(error) => panic!("projeto não abriu: {error}"),
-            }),
+            shell: Some(test_shell(&root)),
             ..NativeIde::default()
         };
         if let Some(shell) = ide.shell.as_mut() {
-            assert!(shell.open_file(&file).is_ok());
+            open_test_document(shell, &file);
         }
 
         let keyword_colored = |ide: &mut NativeIde| {
@@ -2247,12 +2316,9 @@ mod tests {
         let config_file = root.join("config.toml");
 
         // Sessão de trabalho: dois arquivos abertos pelo Explorer.
-        let mut shell = match IdeShell::open(&project) {
-            Ok(shell) => shell,
-            Err(error) => panic!("projeto não abriu: {error}"),
-        };
-        assert!(shell.open_file(&first).is_ok());
-        assert!(shell.open_file(&second).is_ok());
+        let mut shell = test_shell(&project);
+        open_test_document(&mut shell, &first);
+        open_test_document(&mut shell, &second);
 
         let mut config = AppConfig::default();
         assert!(config.remember_workspace(&project, &config_file).is_ok());
@@ -2271,13 +2337,10 @@ mod tests {
             Ok(config) => config,
             Err(error) => panic!("releitura falhou: {error}"),
         };
-        let mut restored = match IdeShell::open(&project) {
-            Ok(shell) => shell,
-            Err(error) => panic!("projeto não reabriu: {error}"),
-        };
+        let mut restored = test_shell(&project);
         assert_eq!(restored.tab_count(), 0, "a IDE abre sem abas");
         for document in reopened.workspace.resolved_documents(&project) {
-            assert!(restored.open_file(&document).is_ok());
+            open_test_document(&mut restored, &document);
         }
         assert_eq!(restored.open_document_paths(), vec![first, second.clone()]);
         assert_eq!(restored.active_document_path(), Some(second));

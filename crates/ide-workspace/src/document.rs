@@ -1,8 +1,7 @@
-#![doc = "Buffers, documentos abertos e abas do editor."]
+//! Buffers puros, documentos abertos e abas do editor.
 
 use std::{
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -63,6 +62,14 @@ pub struct OpenDocument {
     pub id: DocumentId,
     pub path: PathBuf,
     pub buffer: TextBuffer,
+    persistent: bool,
+}
+
+impl OpenDocument {
+    #[must_use]
+    pub const fn is_persistent(&self) -> bool {
+        self.persistent
+    }
 }
 
 #[derive(Default)]
@@ -74,16 +81,15 @@ pub struct EditorSession {
 }
 
 impl EditorSession {
-    pub fn open(&mut self, path: &Path) -> Result<DocumentId, BufferError> {
+    pub fn open(&mut self, path: &Path, text: impl Into<String>) -> DocumentId {
         if let Some(document) = self
             .documents
             .values()
             .find(|document| document.path == path)
         {
             self.active = Some(document.id);
-            return Ok(document.id);
+            return document.id;
         }
-        let text = fs::read_to_string(path)?;
         self.next_id += 1;
         let id = DocumentId(self.next_id);
         self.documents.insert(
@@ -92,11 +98,12 @@ impl EditorSession {
                 id,
                 path: path.to_path_buf(),
                 buffer: TextBuffer::new(text),
+                persistent: true,
             },
         );
         self.tabs.push(id);
         self.active = Some(id);
-        Ok(id)
+        id
     }
 
     pub fn open_memory(&mut self, name: impl Into<PathBuf>, text: impl Into<String>) -> DocumentId {
@@ -108,6 +115,7 @@ impl EditorSession {
                 id,
                 path: name.into(),
                 buffer: TextBuffer::new(text),
+                persistent: false,
             },
         );
         self.tabs.push(id);
@@ -148,26 +156,18 @@ impl EditorSession {
         self.documents.get(&id)
     }
 
-    /// Grava o documento no caminho de onde ele veio.
-    ///
-    /// A sessão já lê arquivo em [`EditorSession::open`]; gravar é a operação
-    /// simétrica e mora no mesmo lugar. O buffer só deixa de estar sujo depois de
-    /// a escrita ter dado certo — marcar antes faria a aba anunciar como salvo um
-    /// conteúdo que não chegou ao disco.
-    pub fn save(&mut self, id: DocumentId) -> Result<PathBuf, BufferError> {
+    /// Confirma a gravação somente se o buffer ainda estiver na revisão enviada
+    /// ao adapter. Assim uma resposta atrasada nunca limpa a marca de uma edição
+    /// mais nova.
+    pub fn mark_saved(&mut self, id: DocumentId, revision: u64) -> Result<(), BufferError> {
         let document = self
             .documents
             .get_mut(&id)
             .ok_or(BufferError::UnknownDocument(id))?;
-        fs::write(&document.path, document.buffer.text())?;
-        document.buffer.mark_saved();
-        Ok(document.path.clone())
-    }
-
-    /// Grava o documento ativo.
-    pub fn save_active(&mut self) -> Result<PathBuf, BufferError> {
-        let id = self.active.ok_or(BufferError::NoActiveDocument)?;
-        self.save(id)
+        if document.buffer.revision() == revision {
+            document.buffer.mark_saved();
+        }
+        Ok(())
     }
     pub fn tabs(&self) -> impl Iterator<Item = &OpenDocument> {
         self.tabs.iter().filter_map(|id| self.documents.get(id))
@@ -180,10 +180,6 @@ pub enum BufferError {
     InvalidRange,
     #[error("unknown document {0:?}")]
     UnknownDocument(DocumentId),
-    #[error("nenhum documento aberto")]
-    NoActiveDocument,
-    #[error("document I/O failed: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 #[cfg(test)]
@@ -206,5 +202,24 @@ mod tests {
         let second = session.open_memory("two.rs", "two");
         assert!(session.close(second).is_ok());
         assert_eq!(session.active_id(), Some(first));
+    }
+
+    #[test]
+    fn saving_an_old_revision_does_not_clear_a_new_edit() {
+        let mut session = EditorSession::default();
+        let id = session.open_memory("one.rs", "one");
+        let Some(document) = session.active_mut() else {
+            panic!("documento em memória deveria estar ativo");
+        };
+        assert!(document.buffer.replace(0..3, "two").is_ok());
+        let saved_revision = document.buffer.revision();
+        assert!(document.buffer.replace(0..3, "three").is_ok());
+
+        assert!(session.mark_saved(id, saved_revision).is_ok());
+        assert!(
+            session
+                .active()
+                .is_some_and(|document| document.buffer.is_dirty())
+        );
     }
 }

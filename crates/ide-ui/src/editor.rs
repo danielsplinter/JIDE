@@ -10,7 +10,7 @@
 //! assim a janela principal continua editando o documento aberto enquanto uma
 //! segunda tela edita um rascunho, sem cópia nem sincronização entre os dois.
 
-use ide_text::TextBuffer;
+use ide_workspace::TextBuffer;
 use ui_api::{LayoutContext, PaintContext, Widget};
 use ui_core::{Point, Rect, Size};
 use ui_editor::{
@@ -344,7 +344,10 @@ impl EditorPane {
     pub fn pointer_up(&mut self) {
         self.selecting = false;
         // Pressionar e soltar no mesmo ponto é um clique, não uma seleção vazia.
-        if self.selection.is_some_and(|(anchor, focus)| anchor == focus) {
+        if self
+            .selection
+            .is_some_and(|(anchor, focus)| anchor == focus)
+        {
             self.selection = None;
         }
     }
@@ -456,7 +459,10 @@ impl EditorPane {
             self.multi = Some(multi);
             return false;
         };
-        let novo = (byte_at_char(text, found.start), byte_at_char(text, found.end));
+        let novo = (
+            byte_at_char(text, found.start),
+            byte_at_char(text, found.end),
+        );
         if multi.ranges.contains(&novo) {
             // Deu a volta inteira: não há ocorrência nova a acrescentar.
             self.multi = Some(multi);
@@ -548,7 +554,11 @@ impl EditorPane {
         for (start, end) in multi.ranges.iter().rev() {
             let ponto = (*start + caret).min(*end);
             let previous = previous_boundary(buffer.text(), ponto);
-            let removivel = if previous >= *start { ponto - previous } else { 0 };
+            let removivel = if previous >= *start {
+                ponto - previous
+            } else {
+                0
+            };
             if removivel > 0 && buffer.replace(previous..ponto, "").is_err() {
                 return false;
             }
@@ -682,9 +692,7 @@ impl EditorPane {
                 self.remember(buffer);
                 if !self.delete_selection(buffer) {
                     let previous = previous_boundary(buffer.text(), self.cursor);
-                    if previous < self.cursor
-                        && buffer.replace(previous..self.cursor, "").is_ok()
-                    {
+                    if previous < self.cursor && buffer.replace(previous..self.cursor, "").is_ok() {
                         self.cursor = previous;
                     }
                 }
@@ -697,8 +705,7 @@ impl EditorPane {
                 let from = self
                     .selection_range()
                     .map_or(self.cursor, |range| range.start);
-                let indentation =
-                    CodeEditor::line_indentation(text, chars_before(text, from));
+                let indentation = CodeEditor::line_indentation(text, chars_before(text, from));
                 self.insert(buffer, &format!("\n{indentation}"));
             }
             // Com um trecho marcado, Tab desloca o bloco inteiro.
@@ -775,7 +782,10 @@ impl EditorPane {
         if removable == 0 {
             return;
         }
-        if buffer.replace(line_start..line_start + removable, "").is_ok() {
+        if buffer
+            .replace(line_start..line_start + removable, "")
+            .is_ok()
+        {
             self.cursor = cursor.saturating_sub(removable).max(line_start);
         }
     }
@@ -837,7 +847,10 @@ impl EditorPane {
         // sairia do lugar no primeiro acento do arquivo.
         let cursor = chars_before(text, self.cursor);
         let selection = self.selection_range().map(|range| {
-            EditorRange::new(chars_before(text, range.start), chars_before(text, range.end))
+            EditorRange::new(
+                chars_before(text, range.start),
+                chars_before(text, range.end),
+            )
         });
         // As demais ocorrências marcadas também precisam ser vistas: são elas
         // que dizem onde a próxima tecla vai bater.
@@ -1006,7 +1019,10 @@ mod tests {
     fn the_gutter_only_answers_when_the_capability_is_on() {
         let point = Point::new(4.0, CodeEditor::line_height() + 4.0);
         let (mut plain, buffer) = pane(EditorCapabilities::plain());
-        assert_eq!(plain.pointer_down(&buffer, point, false), EditorAction::None);
+        assert_eq!(
+            plain.pointer_down(&buffer, point, false),
+            EditorAction::None
+        );
 
         let (mut full, buffer) = pane(EditorCapabilities::full());
         assert_eq!(
@@ -1132,7 +1148,11 @@ mod tests {
         assert_eq!(pane.undo_depth(), 1);
 
         pane.set_source(2);
-        assert_eq!(pane.undo_depth(), 0, "o histórico do outro arquivo não vale");
+        assert_eq!(
+            pane.undo_depth(),
+            0,
+            "o histórico do outro arquivo não vale"
+        );
         let mut segundo = TextBuffer::new("segundo");
         assert!(!pane.undo(&mut segundo));
         assert_eq!(segundo.text(), "segundo", "nada do outro arquivo vazou");
@@ -1181,7 +1201,11 @@ mod tests {
         pane.select_next_occurrence(&buffer);
 
         pane.insert(&mut buffer, "s");
-        assert_eq!(buffer.text(), "nomes = nomes + nomes", "o que estava lá fica");
+        assert_eq!(
+            buffer.text(),
+            "nomes = nomes + nomes",
+            "o que estava lá fica"
+        );
         assert_eq!(pane.occurrences(), vec![(0, 5), (8, 13), (16, 21)]);
 
         pane.insert(&mut buffer, "!");

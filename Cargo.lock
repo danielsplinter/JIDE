@@ -862,7 +862,6 @@ dependencies = [
  "ide-process",
  "ide-project",
  "ide-terminal",
- "ide-text",
  "ide-toolchain-api",
  "ide-ui",
  "ide-workspace",
@@ -972,14 +971,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ide-text"
-version = "0.1.0"
-dependencies = [
- "ide-domain",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "ide-toolchain-api"
 version = "0.1.0"
 dependencies = [
@@ -995,7 +986,6 @@ dependencies = [
  "ide-application",
  "ide-domain",
  "ide-terminal",
- "ide-text",
  "ide-workspace",
  "ui-api",
  "ui-components",
@@ -1009,6 +999,8 @@ dependencies = [
 name = "ide-workspace"
 version = "0.1.0"
 dependencies = [
+ "ide-application",
+ "ide-domain",
  "thiserror 2.0.19",
 ]
 

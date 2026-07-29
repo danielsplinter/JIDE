@@ -10,7 +10,6 @@ ide/
 │   ├── ide-application/
 │   ├── ide-core/
 │   ├── ide-domain/
-│   ├── ide-text/
 │   ├── ide-ui/
 │   ├── ide-workspace/
 │   ├── ide-project/
@@ -44,7 +43,11 @@ ide-domain
 
 ide-application
     depende de ide-domain e reúne comandos, eventos e, gradualmente, os casos
-    de uso coordenados pela aplicação
+    de uso coordenados pela aplicação; define a porta injetável de workspace
+
+ide-workspace
+    depende da porta de ide-application e de ide-domain; reúne buffers puros,
+    sessão de documentos, árvore, busca e o adapter nativo de filesystem
 
 ide-language-api
     depende de ide-domain

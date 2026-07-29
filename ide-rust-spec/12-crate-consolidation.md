@@ -27,8 +27,8 @@ Problemas a corrigir:
 
 - `ide-commands` e `ide-events` são abstrações de aplicação separadas e ainda
   não participam do fluxo real de `ide-app`;
-- `ide-text` e `ide-workspace` compartilham a responsabilidade por documentos e
-  filesystem;
+- `ide-text` e `ide-workspace` compartilhavam a responsabilidade por documentos
+  e filesystem;
 - `ide-build-api` dependia integralmente de `ide-project-model`;
 - `java-javac-adapter` depende da seleção, classpath e instalação mantidos por
   `java-toolchain`;
@@ -134,14 +134,30 @@ Validação da fase: testes direcionados de `ide-project`,
 `cargo test --workspace`, Clippy estrito sem warnings e build release de
 `ide-app`.
 
-### Fase 3 — Documentos e workspace
+### Fase 3 — Documentos e workspace ✅ Concluída
 
-- [ ] manter `TextBuffer` livre de I/O;
-- [ ] mover sessão de documentos, árvore, busca e filesystem para módulos de
+**Estado: concluída em 29/07/2026.**
+
+`ide-workspace` concentra agora documentos, árvore, busca e filesystem em
+módulos separados. `TextBuffer` e `EditorSession` são estruturas puras: recebem
+conteúdo e confirmação de gravação, mas não acessam o disco. A aplicação define
+`WorkspacePort`; `NativeWorkspaceFileSystem` implementa essa porta e é injetado
+no `WorkspaceService` pelo composition root.
+
+A `IdeShell` deixou de varrer, abrir ou gravar arquivos. Ela emite
+`OpenDocument`, `SaveDocument` e `ReloadWorkspace`, recebe árvores e conteúdos
+carregados e só confirma uma gravação quando a revisão enviada ainda é a atual.
+
+- [x] manter `TextBuffer` livre de I/O;
+- [x] mover sessão de documentos, árvore, busca e filesystem para módulos de
   `ide-workspace`;
-- [ ] retirar `FileNode::scan`, abertura e gravação direta de `IdeShell`;
-- [ ] injetar uma porta de workspace na camada de aplicação;
-- [ ] remover `ide-text` quando nenhum consumidor externo permanecer.
+- [x] retirar `FileNode::scan`, abertura e gravação direta de `IdeShell`;
+- [x] injetar uma porta de workspace na camada de aplicação;
+- [x] remover `ide-text` quando nenhum consumidor externo permanecer.
+
+Validação da fase: testes direcionados de `ide-application`, `ide-workspace`,
+`ide-ui` e `ide-app`, `cargo test --workspace`, Clippy estrito sem warnings e
+build release de `ide-app`.
 
 ### Fase 4 — Toolchain Java
 

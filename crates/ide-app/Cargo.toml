@@ -21,7 +21,6 @@ java-toolchain = { path = "../java-toolchain" }
 language-java = { path = "../language-java" }
 ide-process = { path = "../ide-process" }
 ide-terminal = { path = "../ide-terminal" }
-ide-text = { path = "../ide-text" }
 ide-ui = { path = "../ide-ui" }
 ide-workspace = { path = "../ide-workspace" }
 pollster.workspace = true

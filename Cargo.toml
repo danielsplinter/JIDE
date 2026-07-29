@@ -18,7 +18,6 @@ members = [
     "crates/java-debug-adapter",
     "crates/ide-process",
     "crates/ide-terminal",
-    "crates/ide-text",
     "crates/ide-toolchain-api",
     "crates/ide-ui",
     "crates/ide-workspace",
