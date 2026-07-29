@@ -890,7 +890,11 @@ dependencies = [
 name = "ide-application"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "ide-debug-api",
  "ide-domain",
+ "ide-language-api",
+ "ide-toolchain-api",
  "thiserror 2.0.19",
 ]
 

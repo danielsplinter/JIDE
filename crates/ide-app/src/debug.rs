@@ -21,7 +21,6 @@ use ide_debug_api::{
     SourceBreakpoint, StepKind, StopReason, ThreadId,
 };
 use ide_ui::{DebugFrameView, DebugVariableView};
-use java_debug_adapter::JavaDebugAdapter;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 pub(crate) enum DebugCommand {
@@ -105,7 +104,7 @@ pub(crate) struct DebugController {
 }
 
 impl DebugController {
-    pub(crate) fn start() -> Option<Self> {
+    pub(crate) fn start(adapter: Arc<dyn DebugAdapter>) -> Option<Self> {
         let (commands, command_receiver) = unbounded_channel();
         let (event_sender, events) = channel();
         thread::Builder::new()
@@ -121,7 +120,7 @@ impl DebugController {
                         return;
                     }
                 };
-                runtime.block_on(worker(command_receiver, event_sender));
+                runtime.block_on(worker(adapter, command_receiver, event_sender));
             })
             .ok()?;
         Some(Self { commands, events })
@@ -142,8 +141,11 @@ impl DebugController {
     }
 }
 
-async fn worker(mut commands: UnboundedReceiver<DebugCommand>, ui: Sender<DebugUiEvent>) {
-    let adapter = JavaDebugAdapter::new();
+async fn worker(
+    adapter: Arc<dyn DebugAdapter>,
+    mut commands: UnboundedReceiver<DebugCommand>,
+    ui: Sender<DebugUiEvent>,
+) {
     let sink: Arc<dyn DebugEventSink> = Arc::new(ChannelSink {
         events: Mutex::new(ui.clone()),
     });

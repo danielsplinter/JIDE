@@ -1,6 +1,7 @@
 mod bootstrap;
 mod bridges;
 mod debug;
+mod java_contribution;
 mod run;
 mod window;
 
@@ -18,40 +19,32 @@ use std::{
 use bootstrap::{default_goals, java_source, main_class_name, project_sources, startup_root};
 use bridges::{ToolEvent, document_change, position_at_offset};
 use ide_application::{
-    ApplicationCommand, DebugRequest, EventBus, IdeEvent, NavigationRequest, NewItemRequest,
-    OpenDocumentRequest, SaveDocumentRequest,
+    ApplicationCommand, ContributionRegistry, DebugRequest, EventBus, IdeEvent, NavigationRequest,
+    NewItemRequest, OpenDocumentRequest, SaveDocumentRequest, TaskRegistry, ToolchainRegistry,
 };
 use ide_core::{AppConfig, config_path};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
-    DefinitionRequest, DocumentId, DocumentSnapshot, LanguageId, ProviderId, SymbolKind,
-    TextPosition, TextRange,
+    DefinitionRequest, DocumentId, DocumentSnapshot, ProviderId, SymbolKind, TextPosition,
+    TextRange,
 };
-use ide_language_api::LanguageContribution;
 use ide_language_host::{LanguageHost, LanguageToolchainConfig};
 use ide_process::{NativeProcessSupervisor, ProcessSupervisor};
 use ide_project::{
     build::{BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry, ProjectImportRequest},
     model::{ProjectDescriptor, ProjectModel},
 };
-use ide_toolchain_api::{
-    CompilationRequest, CompilerAdapter, DetectionContext, ExecutionRequest, RuntimeAdapter,
-    TestAdapter, TestRequest, ToolchainProvider,
-};
+use ide_toolchain_api::{CompilationRequest, DetectionContext, ExecutionRequest, TestRequest};
 use ide_ui::{
     ContentSearchHit, DebugView, IdeShell, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
 };
 use ide_workspace::WorkspaceService;
 #[cfg(test)]
 use java_gradle_adapter::GRADLE_BUILD_SYSTEM_ID;
-use java_gradle_adapter::GradleAdapter;
 #[cfg(test)]
 use java_maven_adapter::MAVEN_BUILD_SYSTEM_ID;
-use java_maven_adapter::MavenAdapter;
-use java_toolchain::{
-    ClasspathBuilder, JavaToolchainAdapter, JavaToolchainProvider, JavaToolchainSelection,
-};
-use language_java::{JAVA_PROVIDER_ID, JavaLanguageProvider};
+use java_toolchain::{ClasspathBuilder, JavaToolchainProvider};
+use language_java::JAVA_PROVIDER_ID;
 use ui_core::{Modifiers, Point, Size, WindowId};
 use ui_render_api::{FrameInfo, UiRenderer};
 use ui_render_wgpu::WgpuRenderer;
@@ -91,10 +84,9 @@ struct NativeIde {
     language_host: Option<LanguageHost>,
     language_documents: HashMap<DocumentId, DocumentSnapshot>,
     application_documents: HashMap<DocumentId, DocumentSnapshot>,
-    java_toolchains: JavaToolchainSelection,
-    java_compiler: Option<Arc<dyn CompilerAdapter>>,
-    java_runtime: Option<Arc<dyn RuntimeAdapter>>,
-    java_tests: Option<Arc<dyn TestAdapter>>,
+    contributions: ContributionRegistry,
+    toolchains: ToolchainRegistry,
+    tasks: TaskRegistry,
     build_systems: BuildSystemRegistry,
     project: Option<ImportedProject>,
     last_manifest_check: Option<Instant>,
@@ -146,11 +138,17 @@ impl NativeIde {
         self.application_events = EventBus::bounded(self.config.event_capacity.max(1));
         let root = startup_root(&self.config, std::env::current_dir().ok())
             .ok_or_else(|| "não foi possível determinar o diretório do projeto".to_owned())?;
+        let processes: Arc<dyn ProcessSupervisor> = Arc::new(NativeProcessSupervisor::default());
+        let java = java_contribution::contribution(processes.clone());
         let language_host = LanguageHost::new(&root);
         language_host
-            .register_contribution(LanguageContribution::new(Arc::new(
-                JavaLanguageProvider::new(),
-            )))
+            .register(java.provider.clone())
+            .map_err(|error| error.to_string())?;
+        self.tasks
+            .register_contribution(&java)
+            .map_err(|error| error.to_string())?;
+        self.contributions
+            .register(java)
             .map_err(|error| error.to_string())?;
         self.language_host = Some(language_host);
         let tree = self
@@ -184,15 +182,7 @@ impl NativeIde {
         self.remembered_documents = shell.open_document_paths();
         self.shell = Some(shell);
         self.publish_event(IdeEvent::WorkspaceOpened { root: root.clone() });
-        let processes: Arc<dyn ProcessSupervisor> = Arc::new(NativeProcessSupervisor::default());
-        let java_adapter = Arc::new(JavaToolchainAdapter::new(processes.clone()));
-        self.java_compiler = Some(java_adapter.clone());
-        self.java_runtime = Some(java_adapter.clone());
-        self.java_tests = Some(java_adapter);
-        self.build_systems
-            .register(Arc::new(MavenAdapter::new(processes.clone())));
-        self.build_systems
-            .register(Arc::new(GradleAdapter::new(processes)));
+        java_contribution::register_build_systems(&mut self.build_systems, processes);
         let (tool_sender, tool_events) = mpsc::channel();
         self.tool_sender = Some(tool_sender);
         self.tool_events = Some(tool_events);
@@ -201,7 +191,11 @@ impl NativeIde {
         if let Some(shell) = self.shell.as_mut() {
             shell.set_debug_target(&self.config.debug.host, self.config.debug.port);
         }
-        self.debugger = debug::DebugController::start();
+        self.debugger = self
+            .contributions
+            .get(&java_contribution::language_id())
+            .and_then(|contribution| contribution.debugger.clone())
+            .and_then(debug::DebugController::start);
         self.renderer = Some(renderer);
         window
             .inner()
@@ -662,14 +656,26 @@ impl NativeIde {
     }
 
     fn detect_java_toolchains(&mut self, workspace_root: &Path) {
-        let provider = JavaToolchainProvider::new();
+        let language_id = java_contribution::language_id();
+        let Some(provider) = self
+            .contributions
+            .get(&language_id)
+            .and_then(|contribution| contribution.toolchain.clone())
+        else {
+            return;
+        };
         match pollster::block_on(provider.detect(DetectionContext {
             workspace_root: Some(workspace_root.to_path_buf()),
         })) {
             Ok(installations) => {
-                self.java_toolchains = JavaToolchainSelection::new(installations);
+                self.toolchains
+                    .set_installations(language_id.clone(), installations);
                 if let Some(shell) = self.shell.as_mut() {
-                    if let Some(selected) = self.java_toolchains.selected() {
+                    if let Some(selected) = self
+                        .toolchains
+                        .selection(&language_id)
+                        .and_then(ide_application::ToolchainSelection::selected)
+                    {
                         let label = selected
                             .version
                             .clone()
@@ -693,8 +699,10 @@ impl NativeIde {
 
     /// Rótulo de cada JDK detectado, na ordem da lista.
     fn jdk_labels(&self) -> Vec<String> {
-        self.java_toolchains
-            .installations()
+        self.toolchains
+            .selection(&java_contribution::language_id())
+            .map(ide_application::ToolchainSelection::installations)
+            .unwrap_or_default()
             .iter()
             .map(|installation| {
                 format!(
@@ -710,12 +718,17 @@ impl NativeIde {
     }
 
     fn open_jdk_selector(&mut self) {
-        let selected = self.java_toolchains.selected().map(|value| &value.id);
         let selected_index = self
-            .java_toolchains
-            .installations()
-            .iter()
-            .position(|installation| Some(&installation.id) == selected)
+            .toolchains
+            .selection(&java_contribution::language_id())
+            .map(|selection| {
+                let selected = selection.selected().map(|value| &value.id);
+                selection
+                    .installations()
+                    .iter()
+                    .position(|installation| Some(&installation.id) == selected)
+                    .unwrap_or(0)
+            })
             .unwrap_or(0);
         let items = self.jdk_labels();
         if let Some(shell) = self.shell.as_mut() {
@@ -725,8 +738,9 @@ impl NativeIde {
 
     fn choose_jdk_home(&mut self) {
         let initial_directory = self
-            .java_toolchains
-            .selected()
+            .toolchains
+            .selection(&java_contribution::language_id())
+            .and_then(ide_application::ToolchainSelection::selected)
             .map_or_else(|| Path::new(".").to_path_buf(), |jdk| jdk.home.clone());
         let Some(folder) = rfd::FileDialog::new()
             .set_title("Selecionar pasta do JDK")
@@ -740,7 +754,10 @@ impl NativeIde {
                 let home = installation.home.clone();
                 // A pasta apontada entra na lista e fica pendente: quem aplica é
                 // o Salvar, como qualquer escolha feita na janela.
-                let index = self.java_toolchains.add(installation);
+                let selection = self
+                    .toolchains
+                    .ensure_selection(java_contribution::language_id());
+                let index = selection.add(installation);
                 let labels = self.jdk_labels();
                 if let Some(shell) = self.shell.as_mut() {
                     shell.set_toolchain_options(labels, index);
@@ -827,15 +844,16 @@ impl NativeIde {
         let Some(language_host) = &self.language_host else {
             return;
         };
-        let language_id = LanguageId("java".to_owned());
-        let toolchain =
-            self.java_toolchains
-                .selected()
-                .map(|installation| LanguageToolchainConfig {
-                    language_id: language_id.clone(),
-                    installation_root: installation.home.clone(),
-                    properties: Default::default(),
-                });
+        let language_id = java_contribution::language_id();
+        let toolchain = self
+            .toolchains
+            .selection(&language_id)
+            .and_then(ide_application::ToolchainSelection::selected)
+            .map(|installation| LanguageToolchainConfig {
+                language_id: language_id.clone(),
+                installation_root: installation.home.clone(),
+                properties: Default::default(),
+            });
         match language_host.set_toolchain(language_id, toolchain) {
             Ok(true) => {
                 if pollster::block_on(language_host.reactivate()).is_ok() {
@@ -868,10 +886,14 @@ impl NativeIde {
     }
 
     fn select_jdk(&mut self, index: usize) {
-        let Some(installation) = self.java_toolchains.installations().get(index).cloned() else {
+        let language_id = java_contribution::language_id();
+        let Some(selection) = self.toolchains.selection_mut(&language_id) else {
             return;
         };
-        if let Err(error) = self.java_toolchains.select(&installation.id) {
+        let Some(installation) = selection.installations().get(index).cloned() else {
+            return;
+        };
+        if let Err(error) = selection.select(&installation.id) {
             if let Some(shell) = self.shell.as_mut() {
                 shell.set_status_message(error.to_string());
             }
@@ -910,7 +932,11 @@ impl NativeIde {
             return;
         };
         let mut request = ProjectImportRequest::new(descriptor.clone());
-        if let Some(jdk) = self.java_toolchains.selected() {
+        if let Some(jdk) = self
+            .toolchains
+            .selection(&java_contribution::language_id())
+            .and_then(ide_application::ToolchainSelection::selected)
+        {
             request = request
                 .with_environment_variable("JAVA_HOME", jdk.home.to_string_lossy().into_owned());
         }
@@ -1414,7 +1440,11 @@ impl NativeIde {
             project.descriptor.clone(),
             default_goals(&project.descriptor),
         );
-        if let Some(jdk) = self.java_toolchains.selected() {
+        if let Some(jdk) = self
+            .toolchains
+            .selection(&java_contribution::language_id())
+            .and_then(ide_application::ToolchainSelection::selected)
+        {
             request = request
                 .with_environment_variable("JAVA_HOME", jdk.home.to_string_lossy().into_owned());
         }
@@ -1469,16 +1499,25 @@ impl NativeIde {
     }
 
     fn start_java_task(&mut self, task: JavaTask) {
-        let Some(compiler) = self.java_compiler.clone() else {
+        let language_id = java_contribution::language_id();
+        let Some(contribution) = self.contributions.get(&language_id) else {
             return;
         };
-        let Some(runtime_adapter) = self.java_runtime.clone() else {
+        let Some(compiler) = contribution.compiler.clone() else {
             return;
         };
-        let Some(test_adapter) = self.java_tests.clone() else {
+        let Some(runtime_adapter) = contribution.runtime.clone() else {
             return;
         };
-        let Some(installation) = self.java_toolchains.selected().cloned() else {
+        let Some(test_adapter) = contribution.tests.clone() else {
+            return;
+        };
+        let Some(installation) = self
+            .toolchains
+            .selection(&language_id)
+            .and_then(ide_application::ToolchainSelection::selected)
+            .cloned()
+        else {
             if let Some(shell) = self.shell.as_mut() {
                 shell.set_status_message("No JDK selected");
             }
@@ -2154,13 +2193,8 @@ mod tests {
         assert!(std::fs::write(&uso, texto).is_ok());
 
         let language_host = LanguageHost::new(&root);
-        assert!(
-            language_host
-                .register_contribution(LanguageContribution::new(Arc::new(
-                    JavaLanguageProvider::new()
-                )))
-                .is_ok()
-        );
+        let java = java_contribution::contribution(Arc::new(NativeProcessSupervisor::default()));
+        assert!(language_host.register(java.provider).is_ok());
         let mut ide = NativeIde {
             language_host: Some(language_host),
             shell: Some(test_shell(&root)),
@@ -2210,13 +2244,8 @@ mod tests {
         assert!(std::fs::write(&file, "public class Exemplo {}").is_ok());
 
         let language_host = LanguageHost::new(&root);
-        assert!(
-            language_host
-                .register_contribution(LanguageContribution::new(Arc::new(
-                    JavaLanguageProvider::new()
-                )))
-                .is_ok()
-        );
+        let java = java_contribution::contribution(Arc::new(NativeProcessSupervisor::default()));
+        assert!(language_host.register(java.provider).is_ok());
 
         let mut ide = NativeIde {
             language_host: Some(language_host),

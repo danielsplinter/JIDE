@@ -128,21 +128,6 @@ pub trait LanguageProvider: Send + Sync {
     ) -> Result<Box<dyn ActiveLanguage>, LanguageError>;
 }
 
-/// Unidade mínima ligada ao composition root da aplicação.
-///
-/// Os descritores opcionais de tarefas, templates e configurações serão
-/// acrescentados sem mudar o modo como a aplicação entrega o provider ao host.
-pub struct LanguageContribution {
-    pub provider: Arc<dyn LanguageProvider>,
-}
-
-impl LanguageContribution {
-    #[must_use]
-    pub fn new(provider: Arc<dyn LanguageProvider>) -> Self {
-        Self { provider }
-    }
-}
-
 #[async_trait]
 pub trait ActiveLanguage: Send + Sync {
     fn language_id(&self) -> &LanguageId;

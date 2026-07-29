@@ -203,7 +203,15 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
             ]),
         ),
         ("ide-domain", BTreeSet::new()),
-        ("ide-application", BTreeSet::from(["ide-domain"])),
+        (
+            "ide-application",
+            BTreeSet::from([
+                "ide-debug-api",
+                "ide-domain",
+                "ide-language-api",
+                "ide-toolchain-api",
+            ]),
+        ),
         ("ide-core", BTreeSet::from(["ide-domain"])),
         ("ide-language-api", BTreeSet::from(["ide-domain"])),
         (
@@ -352,6 +360,46 @@ fn neutral_crates_expose_no_language_specific_public_api() {
     assert!(
         actual_debt.is_empty(),
         "APIs públicas das crates neutras não podem expor conceitos de linguagem: {actual_debt:?}"
+    );
+}
+
+#[test]
+fn native_ide_has_no_language_specific_fields_or_constructors() {
+    let root = workspace_root();
+    let main = fs::read_to_string(root.join("crates/ide-app/src/main.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ide-app/src/main.rs: {error}"));
+    let struct_start = main
+        .find("struct NativeIde {")
+        .unwrap_or_else(|| panic!("NativeIde não foi encontrado"));
+    let struct_body = &main[struct_start..];
+    let struct_end = struct_body
+        .find("\n}")
+        .unwrap_or_else(|| panic!("fim de NativeIde não foi encontrado"));
+    let fields = &struct_body[..struct_end];
+    assert!(
+        !fields.to_ascii_lowercase().contains("java"),
+        "NativeIde não pode possuir campos específicos de linguagem"
+    );
+
+    for constructor in [
+        "JavaLanguageProvider::new",
+        "JavaToolchainAdapter::new",
+        "JavaDebugAdapter::new",
+        "MavenAdapter::new",
+        "GradleAdapter::new",
+    ] {
+        assert!(
+            !main.contains(constructor),
+            "{constructor} precisa permanecer no módulo de composição Java"
+        );
+    }
+    let composition = fs::read_to_string(root.join("crates/ide-app/src/java_contribution.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler java_contribution.rs: {error}"));
+    assert!(
+        composition.contains("JavaLanguageProvider::new")
+            && composition.contains("JavaToolchainAdapter::new")
+            && composition.contains("JavaDebugAdapter::new"),
+        "a composição Java precisa montar provider e adapters"
     );
 }
 

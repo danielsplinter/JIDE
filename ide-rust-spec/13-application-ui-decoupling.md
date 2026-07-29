@@ -88,6 +88,7 @@ pub struct LanguageContribution {
     pub compiler: Option<Arc<dyn CompilerAdapter>>,
     pub runtime: Option<Arc<dyn RuntimeAdapter>>,
     pub tests: Option<Arc<dyn TestAdapter>>,
+    pub debugger: Option<Arc<dyn DebugAdapter>>,
     pub new_item_templates: Vec<NewItemTemplate>,
     pub settings_sections: Vec<SettingsSection>,
     pub tasks: Vec<TaskDescriptor>,
@@ -248,18 +249,37 @@ Implementação concluída em 29/07/2026:
 - `LanguageContribution` estabelece o contrato mínimo já consumido pelo
   composition root real. O teste de integração em `ide-app` registra e ativa
   uma contribuição falsa por esse mesmo caminho;
-- descritores adicionais de tarefas, templates e configurações continuam na
-  Fase 2 e poderão ampliar `LanguageContribution` sem mudar o caminho de
-  registro entregue nesta fase.
+- a Fase 2 ampliou esse contrato com tarefas, templates, configurações e
+  toolchains sem mudar o caminho de ativação entregue nesta fase.
 
-### Fase 2 — Registro de contribuições
+### Fase 2 — Registro de contribuições ✅
 
-- [ ] criar os descritores genéricos de linguagem, tarefas, templates e
+- [x] criar os descritores genéricos de linguagem, tarefas, templates e
   configurações;
-- [ ] implementar registro indexado por `LanguageId`;
-- [ ] substituir campos Java de `NativeIde` por registros;
-- [ ] mover a montagem Java para uma contribuição isolada;
-- [ ] preservar ativação preguiçosa e ciclo de vida dos providers.
+- [x] implementar registro indexado por `LanguageId`;
+- [x] substituir campos Java de `NativeIde` por registros;
+- [x] mover a montagem Java para uma contribuição isolada;
+- [x] preservar ativação preguiçosa e ciclo de vida dos providers.
+
+Implementação concluída em 29/07/2026:
+
+- `ide-application::contributions` define `LanguageDescriptor`,
+  `TaskDescriptor`, `NewItemTemplate`, `SettingsSection` e
+  `LanguageContribution`, com capacidades opcionais representadas pelos
+  contratos de provider e toolchain;
+- `ContributionRegistry` indexa contribuições por `LanguageId`, valida a
+  linguagem declarada pelos providers e adapters e rejeita duplicatas;
+- `ToolchainRegistry` guarda seleções por linguagem e `TaskRegistry` recebe
+  tarefas declaradas pelas contribuições;
+- `NativeIde` passou a possuir somente os registros genéricos
+  `contributions`, `toolchains` e `tasks`; os campos `java_toolchains`,
+  `java_compiler`, `java_runtime` e `java_tests` foram removidos;
+- `ide-app/src/java_contribution.rs` é o único módulo que instancia o provider,
+  o toolchain, os adapters de compilação, execução, testes e depuração Java,
+  Maven e Gradle; o `DebugController` recebe `Arc<dyn DebugAdapter>`;
+- o teste de contribuição falsa comprova registro de descritores, indexação,
+  estado inicial `Registered`, ativação somente ao abrir um documento e estado
+  final `Active`.
 
 ### Fase 3 — Casos de uso neutros
 
