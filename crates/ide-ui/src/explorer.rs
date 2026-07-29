@@ -3,11 +3,66 @@
 use std::{
     collections::{HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use ide_workspace::FileNode;
-use ui_components::TreeItem;
+use ui_components::{ContextMenu, Scrollbar, Splitter, TreeItem, TreeView};
+
+/// Estado completo do painel de arquivos.
+///
+/// A shell encaminha eventos e fornece geometrias; árvore, expansão, seleção,
+/// rolagem e redimensionamento permanecem juntos nesta feature.
+pub(super) struct ExplorerState {
+    pub(super) workspace_name: String,
+    pub(super) workspace: FileNode,
+    pub(super) tree: TreeView,
+    pub(super) context_menu: ContextMenu,
+    pub(super) context_menu_target: Option<PathBuf>,
+    pub(super) expanded: HashSet<PathBuf>,
+    pub(super) scroll_x: f32,
+    pub(super) scroll_line: usize,
+    pub(super) sidebar_width: f32,
+    pub(super) splitter: Splitter,
+    pub(super) vertical_scrollbar: Scrollbar,
+    pub(super) horizontal_scrollbar: Scrollbar,
+}
+
+impl ExplorerState {
+    #[must_use]
+    pub(super) fn workspace_root(&self) -> &Path {
+        &self.workspace.path
+    }
+
+    #[must_use]
+    pub(super) const fn workspace_tree(&self) -> &FileNode {
+        &self.workspace
+    }
+
+    pub(super) fn replace_workspace(&mut self, workspace: FileNode, source_root_names: &[String]) {
+        self.workspace_name = workspace
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace")
+            .to_owned();
+        self.workspace = workspace;
+        self.tree
+            .set_roots(items(&self.workspace, source_root_names));
+        self.expanded
+            .retain(|path| path.starts_with(&self.workspace.path));
+        self.expanded.insert(self.workspace.path.clone());
+        self.context_menu.close();
+        self.context_menu_target = None;
+        self.scroll_x = 0.0;
+        self.scroll_line = 0;
+    }
+
+    #[must_use]
+    pub(super) fn is_expanded(&self, path: &Path) -> bool {
+        self.expanded.contains(path)
+    }
+}
 
 pub(super) fn id(path: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();

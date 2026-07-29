@@ -1,6 +1,7 @@
 //! Estado de abas, seleção e rolagem do terminal.
 
-use ide_terminal::TerminalSession;
+use ide_terminal::{ShellKind, TerminalSession};
+use ui_components::{Scrollbar, Splitter};
 
 #[derive(Clone, Copy)]
 pub(super) struct TextPosition {
@@ -26,6 +27,59 @@ pub(super) struct TerminalTab {
     pub(super) session: TerminalSession,
     pub(super) scroll_line: usize,
     pub(super) follow_output: bool,
+}
+
+/// Estado do painel de terminais e de sua interação.
+pub(super) struct TerminalPanelState {
+    pub(super) tabs: Vec<TerminalTab>,
+    pub(super) active: usize,
+    pub(super) height: f32,
+    pub(super) last_height: f32,
+    pub(super) minimized: bool,
+    pub(super) splitter: Splitter,
+    pub(super) scrollbar: Scrollbar,
+    pub(super) selection: Option<TerminalSelection>,
+    pub(super) selecting: bool,
+    pub(super) running_terminal: Option<usize>,
+}
+
+impl TerminalPanelState {
+    #[must_use]
+    pub(super) fn active_session(&self) -> &TerminalSession {
+        &self.tabs[self.active].session
+    }
+
+    #[must_use]
+    pub(super) fn active(&self) -> &TerminalSession {
+        self.active_session()
+    }
+
+    pub(super) fn active_session_mut(&mut self) -> &mut TerminalSession {
+        &mut self.tabs[self.active].session
+    }
+
+    #[must_use]
+    pub(super) fn selected_shell(&self) -> ShellKind {
+        self.active_session().selected_profile().kind
+    }
+
+    pub(super) fn active_lines(&self) -> impl Iterator<Item = &str> {
+        self.active_session().lines().map(|line| line.text.as_str())
+    }
+
+    pub(super) fn run(&mut self, command: &str) -> Result<(), String> {
+        let active = self.active;
+        let Some(tab) = self.tabs.get_mut(active) else {
+            return Err("Nenhum terminal disponível".to_owned());
+        };
+        tab.session
+            .run(command)
+            .map_err(|error| error.to_string())?;
+        tab.follow_output = true;
+        self.minimized = false;
+        self.running_terminal = Some(active);
+        Ok(())
+    }
 }
 
 pub(super) fn ordered_selection(selection: TerminalSelection) -> (TextPosition, TextPosition) {

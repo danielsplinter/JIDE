@@ -3,8 +3,15 @@
 use std::path::Path;
 
 use ide_application::{DebugRequest, NewItemTemplate};
-use ui_components::{MenuEntry, MenuItem};
+use ui_components::{MenuBar, MenuEntry, MenuItem};
 use ui_core::CommandId;
+
+use crate::explorer::{is_package, is_source_root};
+
+/// Estado da barra de menus principal.
+pub(super) struct MenuState {
+    pub(super) bar: MenuBar,
+}
 
 pub(super) fn editor_entries(has_selection: bool, debugging: bool) -> Vec<MenuEntry> {
     let copy = MenuItem::new("Copiar", CommandId("editor.copy".to_owned()));
@@ -29,9 +36,7 @@ pub(super) fn explorer_entries(
     source_root_names: &[String],
     templates: &[NewItemTemplate],
 ) -> Vec<MenuEntry> {
-    if super::is_source_root(target, source_root_names)
-        || super::is_package(target, source_root_names)
-    {
+    if is_source_root(target, source_root_names) || is_package(target, source_root_names) {
         let mut entries = Vec::new();
         for (index, template) in templates.iter().enumerate() {
             entries.push(MenuEntry::Item(MenuItem::new(

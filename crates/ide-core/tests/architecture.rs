@@ -434,7 +434,13 @@ fn phase_four_keeps_ui_and_workspace_driven_by_neutral_models() {
     let root = workspace_root();
     let ui = fs::read_to_string(root.join("crates/ide-ui/src/lib.rs"))
         .unwrap_or_else(|error| panic!("não foi possível ler ide-ui/src/lib.rs: {error}"));
-    let production_ui = ui.split("#[cfg(test)]\nmod tests").next().unwrap_or(&ui);
+    let shell = fs::read_to_string(root.join("crates/ide-ui/src/ide_shell.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ide_shell.rs: {error}"));
+    let production_shell = shell
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .unwrap_or(&shell);
+    let production_ui = format!("{ui}\n{production_shell}");
     for forbidden in [
         "java.package",
         "java.class",
@@ -512,6 +518,75 @@ fn internal_crate_graph_has_no_cycles() {
     for node in graph.keys() {
         if let Err(cycle) = visit(node, &graph, &mut state, &mut Vec::new()) {
             panic!("ciclo entre crates: {cycle}");
+        }
+    }
+}
+
+fn struct_field_count(source: &str, name: &str) -> usize {
+    let marker = format!("struct {name} {{");
+    let body = source
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("estrutura {name} não encontrada"))
+        .1
+        .split_once('}')
+        .unwrap_or_else(|| panic!("estrutura {name} sem fechamento"))
+        .0;
+    body.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && !line.starts_with("//") && line.ends_with(',') && line.contains(':')
+        })
+        .count()
+}
+
+#[test]
+fn phase_five_keeps_ui_state_split_by_feature() {
+    let root = workspace_root();
+    let ui_root = root.join("crates/ide-ui/src");
+    let facade = fs::read_to_string(ui_root.join("lib.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ide-ui/src/lib.rs: {error}"));
+    assert!(
+        facade.lines().count() <= 1_500,
+        "ide-ui/src/lib.rs deve permanecer uma fachada com no máximo 1.500 linhas"
+    );
+
+    let shell = fs::read_to_string(ui_root.join("ide_shell.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ide_shell.rs: {error}"));
+    assert!(
+        struct_field_count(&shell, "IdeShell") <= 15,
+        "IdeShell deve possuir no máximo 15 campos de coordenação"
+    );
+
+    let features = [
+        ("explorer.rs", "ExplorerState"),
+        ("editor.rs", "EditorAreaState"),
+        ("terminal.rs", "TerminalPanelState"),
+        ("search.rs", "SearchState"),
+        ("settings.rs", "SettingsState"),
+        ("debugging.rs", "DebugPanelState"),
+        ("menus.rs", "MenuState"),
+    ];
+    let state_names = features.iter().map(|(_, state)| *state).collect::<Vec<_>>();
+    for (file, own_state) in features {
+        let source = fs::read_to_string(ui_root.join(file))
+            .unwrap_or_else(|error| panic!("não foi possível ler {file}: {error}"));
+        assert!(
+            struct_field_count(&source, own_state) <= 20,
+            "{own_state} ultrapassou o teto de 20 campos"
+        );
+        assert!(
+            !source.contains("IdeShell"),
+            "{file} não pode receber ou acessar o IdeShell inteiro"
+        );
+        for foreign_state in state_names
+            .iter()
+            .copied()
+            .filter(|state| *state != own_state)
+        {
+            assert!(
+                !source.contains(foreign_state),
+                "{file} não pode acessar diretamente o estado {foreign_state}"
+            );
         }
     }
 }

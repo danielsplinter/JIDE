@@ -349,15 +349,36 @@ Implementação concluída:
   tarefa sem mudanças na UI, e um guardrail arquitetural impede a volta de
   templates Java fixos ou da inferência de `java` na busca.
 
-### Fase 5 — Decomposição de `IdeShell`
+### Fase 5 — Decomposição de `IdeShell` ✅ Concluída
 
-- [ ] transferir estado e comportamento do Explorer para `ExplorerState`;
-- [ ] transferir terminais e seleção para `TerminalPanelState`;
-- [ ] transferir pesquisas e modais para `SearchState`;
-- [ ] transferir configurações para `SettingsState`;
-- [ ] transferir depuração e inspeção para `DebugPanelState`;
-- [ ] reduzir `IdeShell` e `ide-ui/src/lib.rs` às metas estruturais;
-- [ ] proibir referências cruzadas diretas entre estados de feature.
+- [x] transferir estado e comportamento do Explorer para `ExplorerState`;
+- [x] transferir terminais e seleção para `TerminalPanelState`;
+- [x] transferir pesquisas e modais para `SearchState`;
+- [x] transferir configurações para `SettingsState`;
+- [x] transferir depuração e inspeção para `DebugPanelState`;
+- [x] reduzir `IdeShell` e `ide-ui/src/lib.rs` às metas estruturais;
+- [x] proibir referências cruzadas diretas entre estados de feature.
+
+Implementação concluída em 29/07/2026:
+
+- `ExplorerState`, `EditorAreaState`, `TerminalPanelState`, `SearchState`,
+  `SettingsState`, `DebugPanelState` e `MenuState` são donos dos dados e das
+  transições locais de suas features; `IdeShell` coordena eventos que atravessam
+  features, o catálogo de contribuições e a fila de comandos da aplicação;
+- `IdeShell` passou de 83 para 10 campos de coordenação. Contexto compartilhado
+  e ponteiro ficam em `ShellContext`, sem expor o estado inteiro a uma feature;
+- `ide-ui/src/lib.rs` passou de aproximadamente 9.300 linhas para uma fachada
+  pública de 30 linhas. A implementação da shell está em `ide_shell.rs`, e
+  Explorer, editor, terminal, busca, configurações, depuração, menus e layout
+  possuem módulos próprios;
+- nenhum estado de feature possui mais de 20 campos. Os módulos extraídos não
+  recebem `IdeShell` e não referenciam diretamente o estado de outra feature;
+- o teste arquitetural `phase_five_keeps_ui_state_split_by_feature` mede o teto
+  de campos, o tamanho da fachada e as dependências entre estados, impedindo a
+  recomposição futura da classe concentradora;
+- os 136 testes da UI preservam edição, Explorer, terminais, buscas, modais,
+  configurações e depuração. `cargo test --workspace`, Clippy estrito e o build
+  release de `ide-app` foram executados sem falhas.
 
 ### Fase 6 — Decomposição de `NativeIde`
 

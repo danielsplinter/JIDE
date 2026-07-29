@@ -1,5 +1,8 @@
 //! Estado transacional da janela de configurações.
 
+use ui_components::{Button, ComboBox, ListView, ModalHost, TextInput};
+use ui_core::WidgetId;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsPage {
     Contribution(usize),
@@ -18,4 +21,32 @@ pub(super) struct SettingsDialog {
     pub(super) original_toolchain: Option<usize>,
     pub(super) original_debug_host: String,
     pub(super) original_debug_port: String,
+}
+
+/// Estado e widgets da janela de configurações.
+pub(super) struct SettingsState {
+    pub(super) modal: ModalHost,
+    pub(super) toolchain_combo: ComboBox,
+    pub(super) toolchain_browse_button: Button,
+    pub(super) close_button: Button,
+    pub(super) save_button: Button,
+    pub(super) pages: ListView,
+    pub(super) dialog: Option<SettingsDialog>,
+    pub(super) page: SettingsPage,
+    pub(super) focus: Option<WidgetId>,
+    pub(super) debug_host: TextInput,
+    pub(super) debug_port: TextInput,
+    pub(super) debug_attach_button: Button,
+}
+
+impl SettingsState {
+    #[must_use]
+    pub(super) const fn is_open(&self) -> bool {
+        self.modal.is_open()
+    }
+
+    pub(super) fn set_page(&mut self, page: SettingsPage) {
+        self.page = page;
+        self.focus = None;
+    }
 }

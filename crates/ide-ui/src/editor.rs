@@ -10,13 +10,41 @@
 //! assim a janela principal continua editando o documento aberto enquanto uma
 //! segunda tela edita um rascunho, sem cópia nem sincronização entre os dois.
 
-use ide_workspace::TextBuffer;
+use std::collections::HashMap;
+
+use ide_domain::{CompletionItem, DocumentId, SyntaxSnapshot};
+use ide_workspace::{EditorSession, TextBuffer};
 use ui_api::{LayoutContext, PaintContext, Widget};
+use ui_components::Scrollbar;
 use ui_core::{Point, Rect, Size};
 use ui_editor::{
     CodeEditor, EditSnapshot, LineDecoration, SyntaxSpan, TextRange as EditorRange, UndoHistory,
     next_occurrence,
 };
+
+/// Estado da área central de edição.
+pub(super) struct EditorAreaState {
+    pub(super) session: EditorSession,
+    pub(super) pane: EditorPane,
+    pub(super) search_query: String,
+    pub(super) navigated: Option<(usize, usize)>,
+    pub(super) scrollbar: Scrollbar,
+    pub(super) syntax_snapshots: HashMap<DocumentId, SyntaxSnapshot>,
+    pub(super) completion_items: Vec<CompletionItem>,
+    pub(super) completion_selected: usize,
+}
+
+impl EditorAreaState {
+    #[must_use]
+    pub(super) const fn active_document(&self) -> Option<DocumentId> {
+        self.session.active_id()
+    }
+
+    #[must_use]
+    pub(super) fn active_text(&self) -> Option<&str> {
+        self.session.active().map(|document| document.buffer.text())
+    }
+}
 
 /// Comportamentos que uma tela pode ligar ou desligar.
 ///

@@ -4,7 +4,7 @@ use ide_application::DebugRequest;
 use ui_components::StatusBar;
 use ui_core::{Rect, Size};
 
-use super::{
+use crate::ide_shell::{
     ACTIVITY_WIDTH, DEBUG_ROW_HEIGHT, TAB_HEIGHT, TERMINAL_COLLAPSED_HEIGHT, TITLE_HEIGHT,
 };
 
