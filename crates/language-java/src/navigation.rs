@@ -33,7 +33,7 @@ pub(super) fn within(range: &TextRange, position: TextPosition) -> bool {
 }
 
 pub(super) fn token_at_position(text: &str, position: TextPosition) -> String {
-    let offset = match super::offset_for_position(text, position) {
+    let offset = match crate::language::offset_for_position(text, position) {
         Ok(offset) => offset,
         Err(_) => return String::new(),
     };

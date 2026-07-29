@@ -652,3 +652,91 @@ fn phase_six_keeps_native_application_split_into_controllers() {
         "NativeIde não pode voltar a traduzir comandos de UI diretamente"
     );
 }
+
+#[test]
+fn phase_seven_keeps_language_state_in_its_owning_modules() {
+    let root = workspace_root();
+    let java_root = root.join("crates/language-java/src");
+    let java_facade = fs::read_to_string(java_root.join("lib.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler language-java/lib.rs: {error}"));
+    assert!(
+        java_facade.lines().count() <= 30,
+        "language-java/lib.rs deve permanecer uma fachada de até 30 linhas"
+    );
+    for exported in [
+        "JavaLanguageProvider",
+        "JAVA_LANGUAGE_ID",
+        "JAVA_PROVIDER_ID",
+    ] {
+        assert!(
+            java_facade.contains(exported),
+            "a fachada Java precisa preservar {exported}"
+        );
+    }
+
+    let language = fs::read_to_string(java_root.join("language.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler language.rs: {error}"));
+    let documents = fs::read_to_string(java_root.join("documents.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler documents.rs: {error}"));
+    let index = fs::read_to_string(java_root.join("index.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler index.rs: {error}"));
+    assert!(
+        documents.contains("struct Documents")
+            && documents.contains("parser: JavaParser")
+            && documents.contains("fn change(")
+            && !language.contains("Mutex<HashMap<DocumentId, ParsedDocument>>"),
+        "documents deve possuir documentos analisados e parsing incremental"
+    );
+    assert!(
+        index.contains("struct WorkspaceIndex")
+            && index.contains("fn scan(")
+            && index.contains("external_classes")
+            && !language.contains("struct WorkspaceIndex"),
+        "index deve possuir construção e consulta do índice Java"
+    );
+
+    let host_root = root.join("crates/ide-language-host/src");
+    let host_facade = fs::read_to_string(host_root.join("lib.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ide-language-host/lib.rs: {error}"));
+    assert!(
+        host_facade.lines().count() <= 30,
+        "ide-language-host/lib.rs deve permanecer uma fachada de até 30 linhas"
+    );
+    for exported in [
+        "LanguageHost",
+        "LanguageHostConfig",
+        "LanguageHostError",
+        "ProviderSnapshot",
+        "ProviderSelection",
+        "LanguageToolchainConfig",
+    ] {
+        assert!(
+            host_facade.contains(exported),
+            "a fachada do host precisa preservar {exported}"
+        );
+    }
+
+    let host = fs::read_to_string(host_root.join("host.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler host.rs: {error}"));
+    let worker = fs::read_to_string(host_root.join("worker.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler worker.rs: {error}"));
+    let registry = fs::read_to_string(host_root.join("registry.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler registry.rs: {error}"));
+    let routing = fs::read_to_string(host_root.join("routing.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler routing.rs: {error}"));
+    assert!(
+        worker.contains("struct ProviderWorker")
+            && worker.contains("fn run_worker(")
+            && worker.contains("WorkerRequest::Shutdown")
+            && !host.contains("struct ProviderWorker"),
+        "worker deve possuir ativação, fila, despacho e shutdown"
+    );
+    assert!(
+        registry.contains("fn register(")
+            && registry.contains("fn configure_selection(")
+            && registry.contains("fn candidate_ids(")
+            && registry.contains("fn route(")
+            && routing.contains("struct ProviderSelection"),
+        "registry e routing devem possuir registro, seleção e rotas"
+    );
+}

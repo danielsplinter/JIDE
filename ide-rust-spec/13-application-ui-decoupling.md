@@ -415,14 +415,37 @@ Implementação concluída em 29/07/2026:
 - `cargo test --workspace`, Clippy estrito e o build release de `ide-app` foram
   executados sem falhas.
 
-### Fase 7 — Fachadas de linguagem e host
+### Fase 7 — Fachadas de linguagem e host ✅ Concluída
 
-- [ ] mover propriedade do índice para `language-java::index`;
-- [ ] mover documentos analisados para `language-java::documents`;
-- [ ] mover o worker completo para `ide-language-host::worker`;
-- [ ] mover registro e roteamento completos para seus módulos;
-- [ ] deixar os arquivos raiz como fachadas públicas;
-- [ ] preservar a versão dos contratos ou documentar qualquer quebra.
+- [x] mover propriedade do índice para `language-java::index`;
+- [x] mover documentos analisados para `language-java::documents`;
+- [x] mover o worker completo para `ide-language-host::worker`;
+- [x] mover registro e roteamento completos para seus módulos;
+- [x] deixar os arquivos raiz como fachadas públicas;
+- [x] preservar a versão dos contratos ou documentar qualquer quebra.
+
+Implementação concluída em 29/07/2026:
+
+- `language-java::documents` passou a ser o proprietário de `Documents`, do
+  parser e do ciclo de vida dos documentos analisados; `language-java::index`
+  passou a possuir `WorkspaceIndex`, classes externas, declarações, referências
+  e a varredura de workspace/JDK;
+- a coordenação do provider Java foi isolada em `language-java::language`.
+  O `lib.rs` de `language-java` foi reduzido a uma fachada pública de 12 linhas;
+- `ide-language-host::worker` passou a possuir o worker, sua fila, thread,
+  ativação, requisições assíncronas e encerramento. Registro, seleção,
+  roteamento e metadados passaram para `registry` e `routing`;
+- a coordenação do host foi isolada em `ide-language-host::host`. O `lib.rs` de
+  `ide-language-host` foi reduzido a uma fachada pública de 10 linhas;
+- as APIs públicas anteriores continuam reexportadas pelas fachadas. A versão
+  do contrato de linguagem e a validação de `LANGUAGE_API_VERSION` foram
+  preservadas, sem quebra para consumidores;
+- o teste arquitetural
+  `phase_seven_keeps_language_state_in_its_owning_modules` verifica a
+  propriedade do estado, os limites das fachadas e impede a regressão para os
+  arquivos raiz monolíticos;
+- `cargo test --workspace`, Clippy estrito e o build release de `ide-app` foram
+  executados sem falhas.
 
 ### Fase 8 — Validação final
 

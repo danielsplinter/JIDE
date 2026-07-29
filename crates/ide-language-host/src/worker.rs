@@ -1,12 +1,16 @@
-use ide_domain::{
+﻿use ide_domain::{
     CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
     DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot, SemanticSymbol,
     SyntaxSnapshot,
 };
-use ide_language_api::{LanguageRequestContext, MemberAccess};
+use ide_language_api::{
+    ActiveLanguage, LanguageActivationContext, LanguageMetadata, LanguageProvider,
+    LanguageRequestContext, MemberAccess,
+};
 use tokio::sync::oneshot;
 
-use super::LanguageHostError;
+use crate::host::LanguageHostError;
+use crate::routing::ensure_not_cancelled;
 
 pub(super) enum WorkerRequest {
     Open {
@@ -76,3 +80,491 @@ pub(super) enum WorkerRequest {
         response: oneshot::Sender<Result<(), LanguageHostError>>,
     },
 }
+
+pub(super) struct ProviderWorker {
+    sender: SyncSender<WorkerRequest>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ProviderWorker {
+    pub(super) fn spawn(
+        provider: Arc<dyn LanguageProvider>,
+        metadata: LanguageMetadata,
+        context: LanguageActivationContext,
+        queue_capacity: usize,
+    ) -> Result<Self, LanguageHostError> {
+        let (sender, receiver) = sync_channel(queue_capacity);
+        let (initialized_tx, initialized_rx) = sync_channel(1);
+        let thread_name = format!("language-{}", metadata.provider_id.0);
+        let handle = thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = initialized_tx
+                            .send(Err(LanguageHostError::Provider(error.to_string())));
+                        return;
+                    }
+                };
+                let active = match runtime.block_on(provider.activate(context)) {
+                    Ok(active) if active.language_id() == &metadata.language_id => active,
+                    Ok(_) => {
+                        let _ = initialized_tx.send(Err(LanguageHostError::InvalidMetadata(
+                            "active provider returned a different language id".to_owned(),
+                        )));
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = initialized_tx.send(Err(error.into()));
+                        return;
+                    }
+                };
+                if initialized_tx.send(Ok(())).is_err() {
+                    return;
+                }
+                run_worker(&runtime, active, receiver);
+            })
+            .map_err(|error| LanguageHostError::Provider(error.to_string()))?;
+        initialized_rx
+            .recv()
+            .map_err(|_| LanguageHostError::WorkerStopped)??;
+        Ok(Self {
+            sender,
+            thread: Mutex::new(Some(handle)),
+        })
+    }
+
+    pub(super) async fn open_document(
+        &self,
+        context: LanguageRequestContext,
+        document: DocumentSnapshot,
+    ) -> Result<(), LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Open {
+            context,
+            document,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn change_document(
+        &self,
+        context: LanguageRequestContext,
+        change: DocumentChange,
+    ) -> Result<(), LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Change {
+            context,
+            change,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn close_document(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+    ) -> Result<(), LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Close {
+            context,
+            document_id,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn diagnostics(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+    ) -> Result<Vec<Diagnostic>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Diagnostics {
+            context,
+            document_id,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn syntax(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+    ) -> Result<SyntaxSnapshot, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Syntax {
+            context,
+            document_id,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn semantic(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+    ) -> Result<SemanticSnapshot, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Semantic {
+            context,
+            document_id,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn completion(
+        &self,
+        context: LanguageRequestContext,
+        request: CompletionRequest,
+    ) -> Result<Vec<CompletionItem>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Completion {
+            context,
+            request,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn member_access(
+        &self,
+        context: LanguageRequestContext,
+        text: String,
+        offset: usize,
+    ) -> Result<Option<MemberAccess>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::MemberAccess {
+            context,
+            text,
+            offset,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn type_members(
+        &self,
+        context: LanguageRequestContext,
+        type_name: String,
+        prefix: String,
+    ) -> Result<Vec<CompletionItem>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::TypeMembers {
+            context,
+            type_name,
+            prefix,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn workspace_types(
+        &self,
+        context: LanguageRequestContext,
+        query: String,
+        limit: usize,
+    ) -> Result<Vec<SemanticSymbol>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::WorkspaceTypes {
+            context,
+            query,
+            limit,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn definition(
+        &self,
+        context: LanguageRequestContext,
+        request: DefinitionRequest,
+    ) -> Result<Vec<Location>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Definition {
+            context,
+            request,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn references(
+        &self,
+        context: LanguageRequestContext,
+        request: ReferencesRequest,
+    ) -> Result<Vec<Location>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::References {
+            context,
+            request,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn shutdown(&self) -> Result<(), LanguageHostError> {
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Shutdown { response })?;
+        let result = receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?;
+        let handle = self
+            .thread
+            .lock()
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+            .take();
+        if let Some(handle) = handle {
+            handle
+                .join()
+                .map_err(|_| LanguageHostError::WorkerStopped)?;
+        }
+        result
+    }
+
+    fn send(&self, request: WorkerRequest) -> Result<(), LanguageHostError> {
+        self.sender.try_send(request).map_err(|error| match error {
+            TrySendError::Full(_) => LanguageHostError::Backpressure,
+            TrySendError::Disconnected(_) => LanguageHostError::WorkerStopped,
+        })
+    }
+}
+
+fn run_worker(
+    runtime: &tokio::runtime::Runtime,
+    active: Box<dyn ActiveLanguage>,
+    receiver: Receiver<WorkerRequest>,
+) {
+    while let Ok(request) = receiver.recv() {
+        match request {
+            WorkerRequest::Open {
+                context,
+                document,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.open_document(document))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::Change {
+                context,
+                change,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.change_document(change))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::Close {
+                context,
+                document_id,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.close_document(document_id))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::Diagnostics {
+                context,
+                document_id,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.diagnostics(document_id))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::Syntax {
+                context,
+                document_id,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.syntax(document_id))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::Semantic {
+                context,
+                document_id,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.semantic(document_id))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::Completion {
+                context,
+                request,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.completion(request))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::MemberAccess {
+                context,
+                text,
+                offset,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.member_access(&text, offset))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::TypeMembers {
+                context,
+                type_name,
+                prefix,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.type_members(&type_name, &prefix))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::WorkspaceTypes {
+                context,
+                query,
+                limit,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.workspace_types(&query, limit))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::Definition {
+                context,
+                request,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.definition(request))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::References {
+                context,
+                request,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.references(request))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::Shutdown { response } => {
+                let result = runtime.block_on(active.shutdown()).map_err(Into::into);
+                let _ = response.send(result);
+                break;
+            }
+        }
+    }
+}
+use std::{
+    sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+    },
+    thread::{self, JoinHandle},
+};

@@ -3,7 +3,7 @@ use std::path::Path;
 use ide_domain::{LanguageId, ProviderId};
 use ide_language_api::LanguageRequestContext;
 
-use super::LanguageHostError;
+use crate::host::LanguageHostError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderSelection {
