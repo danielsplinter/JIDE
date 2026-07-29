@@ -10,13 +10,16 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ide_build_api::{
-    BuildCommandRequest, BuildCommandResult, BuildError, BuildSystemAdapter, ProjectImportRequest,
-};
 use ide_process::{ProcessRequest, ProcessSupervisor, find_in_path};
-use ide_project_model::{
-    BuildSystemId, Dependency, ModuleId, ProjectCoordinates, ProjectDescriptor, ProjectModel,
-    ProjectModule, SourceRoots,
+use ide_project::{
+    build::{
+        BuildCommandRequest, BuildCommandResult, BuildError, BuildSystemAdapter,
+        ProjectImportRequest,
+    },
+    model::{
+        BuildSystemId, Dependency, ModuleId, ProjectCoordinates, ProjectDescriptor, ProjectModel,
+        ProjectModule, SourceRoots,
+    },
 };
 
 pub const GRADLE_BUILD_SYSTEM_ID: &str = "gradle";
@@ -347,7 +350,7 @@ mod tests {
 
     use ide_domain::ProcessId;
     use ide_process::{ProcessError, ProcessOutput, ProcessStatus};
-    use ide_project_model::DependencyScope;
+    use ide_project::model::DependencyScope;
 
     use super::*;
 

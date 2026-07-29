@@ -7,9 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-ide-build-api = { path = "../ide-build-api" }
 ide-process = { path = "../ide-process" }
-ide-project-model = { path = "../ide-project-model" }
+ide-project = { path = "../ide-project" }
 
 [dev-dependencies]
 ide-domain = { path = "../ide-domain" }

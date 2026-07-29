@@ -247,10 +247,10 @@ pelo modelo importado, testes completos do workspace e Clippy sem warnings.
 
 ### Critérios funcionais da Fase 6
 
-- `ide-project-model` define o modelo neutro de projeto — módulos, coordenadas,
-  escopos, raízes de código e diretórios de saída — sem conhecer Maven, Gradle
-  ou Java;
-- `ide-build-api` define `BuildSystemAdapter` e o registro que escolhe o
+- `ide_project::model` define o modelo neutro de projeto — módulos,
+  coordenadas, escopos, raízes de código e diretórios de saída — sem conhecer
+  Maven, Gradle ou Java;
+- `ide_project::build` define `BuildSystemAdapter` e o registro que escolhe o
   primeiro adapter capaz de reconhecer a raiz do workspace;
 - a detecção acontece ao abrir a IDE e ao trocar de projeto, sem iniciar
   processo externo;

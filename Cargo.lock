@@ -855,13 +855,12 @@ name = "ide-app"
 version = "0.1.0"
 dependencies = [
  "ide-application",
- "ide-build-api",
  "ide-core",
  "ide-debug-api",
  "ide-domain",
  "ide-language-host",
  "ide-process",
- "ide-project-model",
+ "ide-project",
  "ide-terminal",
  "ide-text",
  "ide-toolchain-api",
@@ -893,16 +892,6 @@ version = "0.1.0"
 dependencies = [
  "ide-domain",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "ide-build-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ide-project-model",
- "thiserror 2.0.19",
- "tokio",
 ]
 
 [[package]]
@@ -966,8 +955,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "ide-project-model"
+name = "ide-project"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thiserror 2.0.19",
+ "tokio",
+]
 
 [[package]]
 name = "ide-terminal"
@@ -1061,10 +1055,9 @@ name = "java-gradle-adapter"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "ide-build-api",
  "ide-domain",
  "ide-process",
- "ide-project-model",
+ "ide-project",
  "tokio",
 ]
 
@@ -1085,10 +1078,9 @@ name = "java-maven-adapter"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "ide-build-api",
  "ide-domain",
  "ide-process",
- "ide-project-model",
+ "ide-project",
  "tokio",
 ]
 

@@ -1,4 +1,4 @@
-#![doc = "Modelo neutro de projeto compartilhado pelos build systems."]
+//! Modelo neutro de projeto compartilhado pelos build systems.
 
 use std::{
     collections::BTreeMap,

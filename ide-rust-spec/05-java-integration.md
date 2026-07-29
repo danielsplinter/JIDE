@@ -292,11 +292,11 @@ A IDE não deve tentar interpretar toda lógica Groovy ou Kotlin.
 
 ## Implementação de Maven e Gradle da Fase 6
 
-O modelo de projeto é neutro e vive em `ide-project-model`: módulos,
+O modelo de projeto é neutro e vive em `ide_project::model`: módulos,
 coordenadas, escopos de dependência, raízes de código — inclusive geradas — e
-diretórios de saída. `ide-build-api` define `BuildSystemAdapter` e o registro
-que escolhe o primeiro adapter capaz de reconhecer a raiz do workspace. Nenhum
-dos dois conhece Java, Maven ou Gradle.
+diretórios de saída. `ide_project::build` define `BuildSystemAdapter` e o
+registro que escolhe o primeiro adapter capaz de reconhecer a raiz do
+workspace. Nenhum dos módulos conhece Java, Maven ou Gradle.
 
 ### Maven
 

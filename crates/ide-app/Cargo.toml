@@ -7,10 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 ide-application = { path = "../ide-application" }
-ide-build-api = { path = "../ide-build-api" }
 ide-core = { path = "../ide-core" }
 ide-debug-api = { path = "../ide-debug-api" }
-ide-project-model = { path = "../ide-project-model" }
+ide-project = { path = "../ide-project" }
 ide-domain = { path = "../ide-domain" }
 ide-language-host = { path = "../ide-language-host" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }

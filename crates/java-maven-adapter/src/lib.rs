@@ -11,13 +11,16 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ide_build_api::{
-    BuildCommandRequest, BuildCommandResult, BuildError, BuildSystemAdapter, ProjectImportRequest,
-};
 use ide_process::{ProcessRequest, ProcessSupervisor, find_in_path};
-use ide_project_model::{
-    BuildSystemId, Dependency, DependencyScope, ModuleId, ProjectCoordinates, ProjectDescriptor,
-    ProjectModel, ProjectModule, SourceRoots,
+use ide_project::{
+    build::{
+        BuildCommandRequest, BuildCommandResult, BuildError, BuildSystemAdapter,
+        ProjectImportRequest,
+    },
+    model::{
+        BuildSystemId, Dependency, DependencyScope, ModuleId, ProjectCoordinates,
+        ProjectDescriptor, ProjectModel, ProjectModule, SourceRoots,
+    },
 };
 
 use crate::pom::EffectivePom;

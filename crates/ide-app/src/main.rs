@@ -16,9 +16,6 @@ use ide_application::{
     ApplicationCommand, DebugRequest, EventBus, IdeEvent, NavigationRequest, NewItemKind,
     NewItemRequest,
 };
-use ide_build_api::{
-    BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry, ProjectImportRequest,
-};
 use ide_core::{AppConfig, config_path, init_logging};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
@@ -27,7 +24,10 @@ use ide_domain::{
 };
 use ide_language_host::LanguageHost;
 use ide_process::{NativeProcessSupervisor, ProcessSupervisor};
-use ide_project_model::{ProjectDescriptor, ProjectModel};
+use ide_project::{
+    build::{BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry, ProjectImportRequest},
+    model::{ProjectDescriptor, ProjectModel},
+};
 use ide_toolchain_api::{
     CompilationRequest, CompilerAdapter, DetectionContext, ExecutionRequest, RuntimeAdapter,
     TestAdapter, TestRequest, ToolchainProvider,
@@ -2074,7 +2074,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use ide_project_model::{BuildSystemId, ModuleId, ProjectModule, SourceRoots};
+    use ide_project::model::{BuildSystemId, ModuleId, ProjectModule, SourceRoots};
 
     use super::*;
 

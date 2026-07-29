@@ -13,7 +13,7 @@ ide/
 │   ├── ide-text/
 │   ├── ide-ui/
 │   ├── ide-workspace/
-│   ├── ide-project-model/
+│   ├── ide-project/
 │   ├── ide-language-api/
 │   ├── ide-language-host/
 │   ├── ide-toolchain-api/
@@ -23,7 +23,6 @@ ide/
 │   ├── ide-plugin-api/
 │   ├── ide-plugin-host/
 │   ├── ide-debug-api/
-│   ├── ide-build-api/
 │   ├── language-java/
 │   ├── java-parser/
 │   ├── java-semantics/
@@ -66,15 +65,13 @@ java-toolchain
 java-javac-adapter
     depende de ide-toolchain-api, ide-process e java-toolchain
 
-ide-project-model
-    não depende de infraestrutura nem de nenhuma linguagem
-
-ide-build-api
-    depende de ide-project-model
+ide-project
+    reúne o modelo neutro em ide_project::model e os contratos de build em
+    ide_project::build; não depende de infraestrutura nem de linguagem
 
 java-maven-adapter
 java-gradle-adapter
-    dependem de ide-build-api, ide-project-model e ide-process
+    dependem de ide-project e ide-process
 
 ide-debug-api
     depende de ide-domain; não conhece servidor, container nem protocolo

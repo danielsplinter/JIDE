@@ -1,10 +1,11 @@
-#![doc = "Contratos para sistemas de build externos."]
+//! Contratos para sistemas de build externos.
 
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use ide_project_model::{BuildSystemId, ModuleId, ProjectDescriptor, ProjectModel};
 use thiserror::Error;
+
+use crate::model::{BuildSystemId, ModuleId, ProjectDescriptor, ProjectModel};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectImportRequest {
@@ -159,8 +160,6 @@ pub enum BuildError {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-
-    use ide_project_model::ProjectModel;
 
     use super::*;
 

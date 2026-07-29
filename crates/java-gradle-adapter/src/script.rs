@@ -6,7 +6,7 @@
 //! as dependências com coordenada em string. Qualquer coisa calculada em tempo
 //! de execução é ignorada e continua acessível executando o Gradle.
 
-use ide_project_model::{DependencyScope, ProjectCoordinates};
+use ide_project::model::{DependencyScope, ProjectCoordinates};
 
 const CONFIGURATIONS: &[&str] = &[
     "implementation",

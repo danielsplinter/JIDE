@@ -1,5 +1,5 @@
 [package]
-name = "ide-build-api"
+name = "ide-project"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-ide-project-model = { path = "../ide-project-model" }
 thiserror.workspace = true
 
 [dev-dependencies]

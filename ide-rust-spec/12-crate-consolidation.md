@@ -29,7 +29,7 @@ Problemas a corrigir:
   não participam do fluxo real de `ide-app`;
 - `ide-text` e `ide-workspace` compartilham a responsabilidade por documentos e
   filesystem;
-- `ide-build-api` depende integralmente de `ide-project-model`;
+- `ide-build-api` dependia integralmente de `ide-project-model`;
 - `java-javac-adapter` depende da seleção, classpath e instalação mantidos por
   `java-toolchain`;
 - arquivos grandes como `ide-ui/src/lib.rs`, `ide-app/src/main.rs`,
@@ -114,13 +114,25 @@ Validação da fase: testes direcionados de `ide-application`, `ide-ui` e
 `ide-app`, `cargo test --workspace`, Clippy estrito sem warnings e build
 release de `ide-app`.
 
-### Fase 2 — Projeto e build
+### Fase 2 — Projeto e build ✅ Concluída
 
-- [ ] criar `ide-project`;
-- [ ] mover `ide-project-model` para `ide_project::model`;
-- [ ] mover `ide-build-api` e o registry para `ide_project::build`;
-- [ ] atualizar Maven, Gradle e `ide-app`;
-- [ ] remover as crates substituídas.
+**Estado: concluída em 29/07/2026.**
+
+O modelo neutro e os contratos de build foram consolidados em `ide-project`,
+mantendo módulos públicos separados. Maven, Gradle e o composition root
+dependem agora de uma única fronteira de projeto, sem perder a possibilidade de
+substituir os adapters externos.
+
+- [x] criar `ide-project`;
+- [x] mover `ide-project-model` para `ide_project::model`;
+- [x] mover `ide-build-api` e o registry para `ide_project::build`;
+- [x] atualizar Maven, Gradle e `ide-app`;
+- [x] remover as crates substituídas.
+
+Validação da fase: testes direcionados de `ide-project`,
+`java-maven-adapter`, `java-gradle-adapter` e `ide-app`,
+`cargo test --workspace`, Clippy estrito sem warnings e build release de
+`ide-app`.
 
 ### Fase 3 — Documentos e workspace
 
