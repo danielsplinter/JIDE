@@ -1,5 +1,8 @@
+mod bootstrap;
+mod bridges;
 mod debug;
 mod run;
+mod window;
 
 use std::{
     collections::HashMap,
@@ -12,15 +15,17 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use bootstrap::{default_goals, java_source, main_class_name, project_sources, startup_root};
+use bridges::{ToolEvent, document_change, position_at_offset};
 use ide_application::{
-    ApplicationCommand, DebugRequest, EventBus, IdeEvent, NavigationRequest, NewItemKind,
-    NewItemRequest, OpenDocumentRequest, SaveDocumentRequest,
+    ApplicationCommand, DebugRequest, EventBus, IdeEvent, NavigationRequest, NewItemRequest,
+    OpenDocumentRequest, SaveDocumentRequest,
 };
-use ide_core::{AppConfig, config_path, init_logging};
+use ide_core::{AppConfig, config_path};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
-    DefinitionRequest, DocumentChange, DocumentId, DocumentSnapshot, ProviderId, SymbolKind,
-    TextPosition, TextRange,
+    DefinitionRequest, DocumentId, DocumentSnapshot, ProviderId, SymbolKind, TextPosition,
+    TextRange,
 };
 use ide_language_host::LanguageHost;
 use ide_process::{NativeProcessSupervisor, ProcessSupervisor};
@@ -36,8 +41,12 @@ use ide_ui::{
     ContentSearchHit, DebugView, IdeShell, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
 };
 use ide_workspace::WorkspaceService;
-use java_gradle_adapter::{GRADLE_BUILD_SYSTEM_ID, GradleAdapter};
-use java_maven_adapter::{MAVEN_BUILD_SYSTEM_ID, MavenAdapter};
+#[cfg(test)]
+use java_gradle_adapter::GRADLE_BUILD_SYSTEM_ID;
+use java_gradle_adapter::GradleAdapter;
+#[cfg(test)]
+use java_maven_adapter::MAVEN_BUILD_SYSTEM_ID;
+use java_maven_adapter::MavenAdapter;
 use java_toolchain::{
     ClasspathBuilder, JavaToolchainAdapter, JavaToolchainProvider, JavaToolchainSelection,
 };
@@ -47,10 +56,11 @@ use ui_render_api::{FrameInfo, UiRenderer};
 use ui_render_wgpu::WgpuRenderer;
 use ui_window_api::WindowRequest;
 use ui_window_winit::WinitWindow;
+use window::ClickTracker;
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::{Key, NamedKey},
     window::{CursorIcon, WindowId as WinitWindowId},
 };
@@ -72,8 +82,7 @@ struct NativeIde {
     workspace: WorkspaceService,
     startup_error: Option<String>,
     cursor: Point,
-    /// Instante e posição do último clique simples, para detectar o duplo.
-    last_click: Option<(Instant, Point)>,
+    click_tracker: ClickTracker,
     control_pressed: bool,
     shift_pressed: bool,
     navigation_requests: Vec<NavigationRequest>,
@@ -105,12 +114,6 @@ struct ImportedProject {
     descriptor: ProjectDescriptor,
     model: ProjectModel,
     manifest_modified: Option<SystemTime>,
-}
-
-struct ToolEvent {
-    status: String,
-    stdout: String,
-    stderr: String,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1564,59 +1567,6 @@ impl NativeIde {
     }
 }
 
-/// Projeto a abrir na inicialização.
-///
-/// O último projeto usado tem prioridade sobre o diretório atual: quem abriu a
-/// IDE pela segunda vez espera continuar de onde parou. Sem registro válido —
-/// primeira execução, ou pasta que sumiu — vale o diretório atual.
-fn startup_root(config: &AppConfig, current_directory: Option<PathBuf>) -> Option<PathBuf> {
-    config.resolved_project().or(current_directory)
-}
-
-/// Metas equivalentes a "compilar o projeto" em cada build system.
-fn default_goals(descriptor: &ProjectDescriptor) -> Vec<String> {
-    match descriptor.build_system.0.as_str() {
-        GRADLE_BUILD_SYSTEM_ID => vec!["classes".to_owned()],
-        MAVEN_BUILD_SYSTEM_ID => vec!["compile".to_owned()],
-        _ => vec!["build".to_owned()],
-    }
-}
-
-/// Restringe as fontes às raízes do projeto importado, incluindo o código gerado.
-///
-/// Sem projeto — ou quando nenhuma fonte está sob as raízes declaradas — vale a
-/// varredura completa do workspace usada desde a Fase 5.
-fn project_sources(files: Vec<PathBuf>, model: Option<&ProjectModel>) -> Vec<PathBuf> {
-    let Some(model) = model else {
-        return files;
-    };
-    let filtered: Vec<PathBuf> = files
-        .iter()
-        .filter(|path| model.contains_source(path))
-        .cloned()
-        .collect();
-    if filtered.is_empty() { files } else { filtered }
-}
-
-fn main_class_name(document: &DocumentSnapshot) -> Option<String> {
-    if !document
-        .path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("java"))
-    {
-        return None;
-    }
-    let class = document.path.file_stem()?.to_str()?;
-    let package = document.text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("package ")
-            .and_then(|value| value.strip_suffix(';'))
-            .map(str::trim)
-    });
-    Some(package.map_or_else(|| class.to_owned(), |package| format!("{package}.{class}")))
-}
-
 impl ApplicationHandler for NativeIde {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -1723,14 +1673,12 @@ impl ApplicationHandler for NativeIde {
                 // distância, mover o ponteiro entre cliques distantes ainda
                 // contaria como duplo.
                 let now = Instant::now();
-                let double = self.last_click.is_some_and(|(instant, point)| {
-                    now.duration_since(instant) <= DOUBLE_CLICK_INTERVAL
-                        && (point.x - self.cursor.x).abs() <= DOUBLE_CLICK_SLACK
-                        && (point.y - self.cursor.y).abs() <= DOUBLE_CLICK_SLACK
-                });
-                // Um duplo clique encerra a contagem: três cliques seguidos não
-                // são dois duplos.
-                self.last_click = (!double).then_some((now, self.cursor));
+                let double = self.click_tracker.register(
+                    now,
+                    self.cursor,
+                    DOUBLE_CLICK_INTERVAL,
+                    DOUBLE_CLICK_SLACK,
+                );
                 if double {
                     if let Some(shell) = self.shell.as_mut() {
                         shell.select_word_at_point(self.cursor, window.logical_size());
@@ -2062,85 +2010,8 @@ const fn type_kind_label(kind: SymbolKind) -> Option<&'static str> {
     })
 }
 
-fn document_change(previous: &DocumentSnapshot, current: &DocumentSnapshot) -> DocumentChange {
-    let prefix = common_prefix_boundary(&previous.text, &current.text);
-    let suffix = common_suffix_boundary(&previous.text, &current.text, prefix);
-    let old_end = previous.text.len().saturating_sub(suffix);
-    let new_end = current.text.len().saturating_sub(suffix);
-    DocumentChange {
-        document_id: current.id,
-        version: current.version,
-        range: Some(TextRange {
-            start: position_at_offset(&previous.text, prefix),
-            end: position_at_offset(&previous.text, old_end),
-        }),
-        text: current.text[prefix..new_end].to_owned(),
-    }
-}
-
-fn common_prefix_boundary(left: &str, right: &str) -> usize {
-    left.char_indices()
-        .zip(right.char_indices())
-        .take_while(|((_, left), (_, right))| left == right)
-        .map(|((index, character), _)| index + character.len_utf8())
-        .last()
-        .unwrap_or(0)
-}
-
-fn common_suffix_boundary(left: &str, right: &str, prefix: usize) -> usize {
-    left[prefix..]
-        .chars()
-        .rev()
-        .zip(right[prefix..].chars().rev())
-        .take_while(|(left, right)| left == right)
-        .map(|(character, _)| character.len_utf8())
-        .sum()
-}
-
-fn position_at_offset(text: &str, offset: usize) -> TextPosition {
-    let prefix = &text[..offset.min(text.len())];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
-    let column = prefix
-        .rsplit_once('\n')
-        .map_or(prefix, |(_, line)| line)
-        .chars()
-        .count();
-    TextPosition {
-        line: line as u32,
-        column: column as u32,
-    }
-}
-
-/// Gabarito do arquivo Java criado.
-///
-/// A declaração de pacote vem do caminho, que é a regra da linguagem: o
-/// diretório espelha o pacote, e um arquivo sem `package` na pasta errada não
-/// compila. Um pacote raiz não declara nada.
-fn java_source(request: &NewItemRequest, name: &str) -> String {
-    let declaration = if request.package.is_empty() {
-        String::new()
-    } else {
-        format!("package {};\n\n", request.package)
-    };
-    let keyword = match request.kind {
-        NewItemKind::Interface => "interface",
-        // Um pacote criado com nome de tipo produz uma classe: é o tipo mais
-        // comum, e quem quer interface pede interface no menu.
-        NewItemKind::Class | NewItemKind::Package => "class",
-    };
-    format!("{declaration}public {keyword} {name} {{\n}}\n")
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_logging("info")?;
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = NativeIde::default();
-    event_loop.run_app(&mut app)?;
-    if let Some(error) = app.startup_error {
-        return Err(error.into());
-    }
-    Ok(())
+    bootstrap::run()
 }
 
 #[cfg(test)]

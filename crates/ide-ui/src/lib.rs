@@ -1,11 +1,23 @@
 #![doc = "Shell visual e interativo da IDE baseado no ERLibUi."]
 
+mod debugging;
 mod editor;
+mod explorer;
+mod layout;
+mod menus;
+mod search;
+mod settings;
+mod shell;
+mod terminal;
+pub use debugging::{DebugFrameView, DebugVariableView, DebugView};
 pub use editor::{EditorAction, EditorCapabilities, EditorPane};
 pub use ide_application::{
     ApplicationCommand, DebugRequest, NavigationRequest, NewItemKind, NewItemRequest,
     OpenDocumentRequest, SaveDocumentRequest,
 };
+pub use search::{ContentSearchHit, TypeSearchHit};
+pub use settings::SettingsPage;
+pub use shell::ShellFocus;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -14,16 +26,40 @@ use std::{
     sync::Arc,
 };
 
+use explorer::{
+    id as explorer_id, is_java_package, is_java_source_root, items as explorer_items,
+    visible_row as visible_tree_row,
+};
+#[cfg(test)]
+use ide_domain::Location;
 use ide_domain::{
-    CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, Location, OutlineItem,
+    CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, OutlineItem,
     SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition, member_access,
 };
 use ide_terminal::{ShellKind, TerminalSession};
 use ide_workspace::{EditorSession, FileNode, TextBuffer};
+use layout::{
+    DEBUG_BUTTONS, Geometry, action_button_rects, debug_panel_geometry, shell_geometry as geometry,
+};
+use menus::{
+    debug_request as debug_request_for, editor_entries as editor_menu_entries,
+    explorer_entries as explorer_menu_entries,
+};
+use search::WorkspaceSearchMode;
+#[cfg(test)]
+use search::type_search_display_path;
+use settings::SettingsDialog;
+use shell::ShellCommandQueue;
+use terminal::{
+    ScrollTarget, TerminalSelection, TerminalTab, TextPosition, ordered_selection,
+    selection_columns,
+};
 use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
+#[cfg(test)]
+use ui_components::MenuEntry;
 use ui_components::{
     Button, ComboBox, ComboBoxItem, ContextMenu, Icon, IconTint, Label, ListSelection, ListView,
-    MenuBar, MenuBarItem, MenuEntry, MenuItem, ModalHost, Popup, Scrollbar, ScrollbarOrientation,
+    MenuBar, MenuBarItem, MenuItem, ModalHost, Popup, Scrollbar, ScrollbarOrientation,
     SplitOrientation, Splitter, StatusBar, TabItem, Tabs, TextInput, TreeItem, TreeView,
 };
 use ui_core::{
@@ -147,90 +183,6 @@ const COMPLETION_POPUP_PADDING: f32 = 4.0;
 const SEARCH_BOX_WIDTH: f32 = 380.0;
 const SEARCH_BOX_HEIGHT: f32 = 42.0;
 
-/// Página ativa da janela de configurações.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SettingsPage {
-    #[default]
-    Compiler,
-    Debug,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DebugFrameView {
-    pub name: String,
-    pub location: Option<(PathBuf, u32)>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DebugVariableView {
-    pub name: String,
-    pub value: String,
-    pub type_name: Option<String>,
-    /// O valor tem campos que podem ser revelados.
-    ///
-    /// Sem isso a inspeção não teria como oferecer o triângulo de expansão só
-    /// onde há o que abrir, e um número simples pareceria esconder algo.
-    pub expandable: bool,
-}
-
-/// Estado da depuração apresentado pela interface.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DebugView {
-    pub attached: bool,
-    pub status: String,
-    pub stopped_at: Option<(PathBuf, u32)>,
-    pub frames: Vec<DebugFrameView>,
-    pub selected_frame: usize,
-    pub variables: Vec<DebugVariableView>,
-}
-
-impl DebugView {
-    #[must_use]
-    pub const fn is_stopped(&self) -> bool {
-        self.stopped_at.is_some()
-    }
-}
-
-#[derive(Clone, Copy)]
-struct TextPosition {
-    line: usize,
-    column: usize,
-}
-
-#[derive(Clone, Copy)]
-struct TerminalSelection {
-    anchor: TextPosition,
-    focus: TextPosition,
-}
-
-/// Qual barra de rolagem está sob o gesto.
-///
-/// O deslocamento da pegada pertence ao componente; aqui só se registra qual
-/// deles está sendo arrastado, para que o mesmo movimento não role duas áreas.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ScrollTarget {
-    Editor,
-    Terminal,
-    ExplorerHorizontal,
-    ExplorerVertical,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ShellFocus {
-    #[default]
-    None,
-    Explorer,
-    Editor,
-    Search,
-    Terminal,
-}
-
-struct TerminalTab {
-    session: TerminalSession,
-    scroll_line: usize,
-    follow_output: bool,
-}
-
 /// Para onde vão as teclas dentro da janela de inspeção.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum InspectionFocus {
@@ -254,78 +206,6 @@ struct InspectionRun {
     /// Posição da atual, contando a partir de 1.
     position: usize,
     total: usize,
-}
-
-/// Um tipo encontrado pela busca por nome.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TypeSearchHit {
-    pub name: String,
-    /// `classe`, `interface`, `record`, `enum` — o que o usuário escreveria.
-    pub kind: String,
-    pub location: Location,
-}
-
-/// Uma ocorrência textual encontrada dentro de uma raiz `java`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContentSearchHit {
-    /// Linha resumida que permite reconhecer a ocorrência antes de abri-la.
-    pub preview: String,
-    pub location: Location,
-}
-
-impl ContentSearchHit {
-    #[must_use]
-    pub fn label(&self) -> String {
-        let path = type_search_display_path(&self.location.path);
-        format!(
-            "{}:{}  —  {}",
-            path.display(),
-            self.location.range.start.line + 1,
-            self.preview
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WorkspaceSearchMode {
-    Types,
-    Content,
-}
-
-impl TypeSearchHit {
-    /// Linha mostrada na lista: o nome, o que ele é, e onde está.
-    ///
-    /// O caminho vai junto porque duas classes de mesmo nome em pacotes
-    /// diferentes são o caso que a busca precisa desempatar.
-    #[must_use]
-    pub fn label(&self) -> String {
-        let path = type_search_display_path(&self.location.path);
-        format!("{} ({})  —  {}", self.name, self.kind, path.display())
-    }
-}
-
-/// Caminho apresentado pela busca, relativo à última pasta `java`.
-///
-/// Projetos multimódulo podem possuir mais de uma raiz `src/.../java`; procurar
-/// de trás para frente evita exibir o prefixo de um módulo que também se chame
-/// `java`. Quando a localização não possui essa pasta, mostramos somente o nome
-/// do arquivo em vez de vazar um caminho absoluto.
-fn type_search_display_path(path: &Path) -> PathBuf {
-    let components = path.components().collect::<Vec<_>>();
-    let java = components.iter().rposition(|component| {
-        matches!(
-            component,
-            std::path::Component::Normal(name)
-                if name.to_string_lossy().eq_ignore_ascii_case("java")
-        )
-    });
-    if let Some(index) = java {
-        let relative = components.iter().skip(index + 1).collect::<PathBuf>();
-        if !relative.as_os_str().is_empty() {
-            return relative;
-        }
-    }
-    path.file_name().map_or_else(PathBuf::new, PathBuf::from)
 }
 
 /// Um valor na árvore de inspeção, com os campos já revelados.
@@ -413,21 +293,6 @@ const fn new_item_name_caption(kind: NewItemKind) -> &'static str {
         NewItemKind::Class => "Nome da classe",
         NewItemKind::Interface => "Nome da interface",
     }
-}
-
-/// Estado da janela de configurações enquanto ela está aberta.
-///
-/// A janela é uma transação: o que se mexe ali só vale quando o usuário salva.
-/// Por isso guarda o que estava valendo na abertura — é para lá que o
-/// cancelamento volta — e a escolha pendente, que ainda não saiu daqui.
-struct SettingsDialog {
-    message: Option<String>,
-    /// JDK escolhido na janela, ainda não aplicado.
-    pending_jdk: Option<usize>,
-    /// Estado no momento da abertura, para o cancelamento restaurar.
-    original_jdk: Option<usize>,
-    original_debug_host: String,
-    original_debug_port: String,
 }
 
 pub struct IdeShell {
@@ -582,7 +447,7 @@ pub struct IdeShell {
     debug_frames: ListView,
     debug_variables: ListView,
     /// Fila única de intenções que a camada de aplicação consumirá em ordem.
-    commands: Vec<ApplicationCommand>,
+    commands: ShellCommandQueue,
 }
 
 impl IdeShell {
@@ -904,7 +769,7 @@ impl IdeShell {
                 .with_row_height(DEBUG_ROW_HEIGHT),
             debug_variables: ListView::new(DEBUG_VARIABLES_ID, Vec::<String>::new())
                 .with_row_height(DEBUG_ROW_HEIGHT),
-            commands: Vec::new(),
+            commands: ShellCommandQueue::default(),
         };
         shell.sync_explorer_tree();
         shell
@@ -1165,7 +1030,7 @@ impl IdeShell {
     }
     /// Retira, em ordem, todas as intenções produzidas desde a última consulta.
     pub fn drain_application_commands(&mut self) -> Vec<ApplicationCommand> {
-        std::mem::take(&mut self.commands)
+        self.commands.drain()
     }
 
     #[cfg(test)]
@@ -5493,105 +5358,6 @@ fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
     }
 }
 
-struct Geometry {
-    content_top: f32,
-    content_bottom: f32,
-    editor_bottom: f32,
-    editor_width: f32,
-    editor_height: f32,
-    terminal_height: f32,
-}
-
-/// Barra de ações no canto direito da barra de menus: parar, executar, depurar.
-///
-/// A ordem e o desenho dos ícones pertencem à ERLibUi; aqui só existe a posição
-/// dos botões na janela.
-fn action_button_rects(size: Size) -> [Rect; 3] {
-    const SIDE: f32 = 28.0;
-    const GAP: f32 = 2.0;
-    let top = (TITLE_HEIGHT - SIDE) / 2.0;
-    let first = (size.width - 10.0 - SIDE * 3.0 - GAP * 2.0).max(0.0);
-    [0.0, 1.0, 2.0].map(|index| Rect::new(first + index * (SIDE + GAP), top, SIDE, SIDE))
-}
-
-/// Comandos do menu `Depurar` que viram pedidos diretos à sessão.
-fn debug_request_for(command: &str) -> Option<DebugRequest> {
-    Some(match command {
-        "debug.continue" => DebugRequest::Continue,
-        "debug.pause" => DebugRequest::Pause,
-        "debug.over" => DebugRequest::StepOver,
-        "debug.into" => DebugRequest::StepInto,
-        "debug.out" => DebugRequest::StepOut,
-        "debug.detach" => DebugRequest::Detach,
-        _ => return None,
-    })
-}
-
-/// Botões do painel, na ordem em que aparecem.
-const DEBUG_BUTTONS: [(&str, DebugRequest); 5] = [
-    ("Cont.", DebugRequest::Continue),
-    ("Sobre", DebugRequest::StepOver),
-    ("Entrar", DebugRequest::StepInto),
-    ("Sair", DebugRequest::StepOut),
-    ("Fim", DebugRequest::Detach),
-];
-
-struct DebugPanelGeometry {
-    panel: Rect,
-    buttons: Vec<Rect>,
-    /// Área das listas, já no formato que os widgets da biblioteca recebem.
-    frames: Rect,
-    variables: Rect,
-}
-
-fn debug_panel_geometry(panel: Rect, frame_count: usize) -> DebugPanelGeometry {
-    let button_width = (panel.size.width - 20.0) / DEBUG_BUTTONS.len() as f32;
-    let buttons = (0..DEBUG_BUTTONS.len())
-        .map(|index| {
-            Rect::new(
-                panel.origin.x + 10.0 + index as f32 * button_width,
-                panel.origin.y + 34.0,
-                button_width - 4.0,
-                26.0,
-            )
-        })
-        .collect();
-    let frames_top = panel.origin.y + 86.0;
-    let visible_frames = frame_count.clamp(1, 8) as f32;
-    let frames_height = visible_frames * DEBUG_ROW_HEIGHT;
-    let list_x = panel.origin.x + 6.0;
-    let list_width = (panel.size.width - 12.0).max(0.0);
-    let variables_top = frames_top + frames_height + 30.0;
-    DebugPanelGeometry {
-        panel,
-        buttons,
-        frames: Rect::new(list_x, frames_top, list_width, frames_height),
-        variables: Rect::new(
-            list_x,
-            variables_top,
-            list_width,
-            (panel.origin.y + panel.size.height - variables_top).max(0.0),
-        ),
-    }
-}
-
-fn geometry(size: Size, requested_terminal_height: f32, sidebar_width: f32) -> Geometry {
-    let content_top = TITLE_HEIGHT + TAB_HEIGHT;
-    // O rodapé é a barra de estado da biblioteca; a altura é dela.
-    let content_bottom = size.height - StatusBar::HEIGHT;
-    let terminal_height = requested_terminal_height
-        .min((content_bottom - content_top - 100.0).max(TERMINAL_COLLAPSED_HEIGHT));
-    let editor_height = (content_bottom - content_top - terminal_height).max(0.0);
-    Geometry {
-        content_top,
-        content_bottom,
-        editor_bottom: content_top + editor_height,
-        editor_width: (size.width - ACTIVITY_WIDTH - sidebar_width).max(0.0),
-        editor_height,
-        terminal_height,
-    }
-}
-
 fn previous_boundary(text: &str, cursor: usize) -> usize {
     text.get(..cursor.min(text.len()))
         .and_then(|prefix| prefix.char_indices().next_back().map(|(index, _)| index))
@@ -5754,174 +5520,6 @@ const fn token_kind_for(kind: SyntaxHighlightKind) -> TokenKind {
     }
 }
 
-/// Identidade estável de um nó do Explorer.
-///
-/// A árvore da biblioteca identifica nós por número e o Explorer os identifica
-/// por caminho; o caminho é o que sobrevive a uma releitura do disco, então ele
-/// é a origem do número.
-fn explorer_id(path: &Path) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Nome de um nó como aparece na árvore.
-fn explorer_label(node: &FileNode) -> &str {
-    node.path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("?")
-}
-
-/// Raiz de fontes Java pelo layout de Maven e Gradle: `src/<conjunto>/java`.
-///
-/// O modelo de projeto ainda não chega até o shell, então a convenção de
-/// diretório é o que existe para reconhecer uma raiz de fontes. Ela cobre os
-/// dois construtores que a IDE já entende, e enquanto o modelo não chegar é
-/// preferível acertar o caso comum a não comprimir nada.
-fn is_java_source_root(path: &Path) -> bool {
-    if path.file_name().and_then(|name| name.to_str()) != Some("java") {
-        return false;
-    }
-    let mut ancestors = path.ancestors().skip(1);
-    let parent = ancestors.next().and_then(Path::file_name);
-    let grandparent = ancestors.next().and_then(Path::file_name);
-    parent.is_some_and(|name| name == "src") || grandparent.is_some_and(|name| name == "src")
-}
-
-/// O diretório é um pacote, isto é, está dentro de uma raiz de fontes.
-///
-/// A raiz em si não é pacote: `java` continua sendo uma linha própria, e a
-/// compressão começa no primeiro diretório abaixo dela.
-fn is_java_package(path: &Path) -> bool {
-    path.ancestors().skip(1).any(is_java_source_root)
-}
-
-/// Junta uma cadeia de pacotes de filho único em um nó só.
-///
-/// `br` que contém apenas `com`, que contém apenas `exemplo`, não carrega
-/// informação nenhuma: os três existem porque o Java exige que o diretório
-/// espelhe o pacote. Devolve o diretório final da cadeia — é ele que responde
-/// pelo nó, então o identificador segue sendo o de um caminho real e o clique
-/// resolve para o diretório que de fato tem conteúdo.
-///
-/// Um diretório com um arquivo ao lado do subdiretório tem mais de um filho e
-/// interrompe a cadeia, como no IntelliJ.
-fn compact_package_chain(node: &FileNode) -> (&FileNode, String) {
-    let mut label = explorer_label(node).to_owned();
-    let mut current = node;
-    while is_java_package(&current.path) {
-        let [only_child] = current.children.as_slice() else {
-            break;
-        };
-        if !only_child.is_directory {
-            break;
-        }
-        label.push('.');
-        label.push_str(explorer_label(only_child));
-        current = only_child;
-    }
-    (current, label)
-}
-
-/// Ações do menu de contexto do editor.
-///
-/// Copiar sem seleção não tem o que copiar, então aparece desabilitado em vez de
-/// sumir: um item que troca de lugar entre duas aberturas faz o usuário procurar
-/// a ação onde ela não está mais.
-fn editor_menu_entries(has_selection: bool, debugging: bool) -> Vec<MenuEntry> {
-    let copy = MenuItem::new("Copiar", CommandId("editor.copy".to_owned()));
-    let mut entries = vec![
-        MenuEntry::Item(if has_selection { copy } else { copy.disabled() }),
-        MenuEntry::Item(MenuItem::new("Colar", CommandId("editor.paste".to_owned()))),
-    ];
-    // Inspecionar só existe com uma sessão de depuração de pé: fora dela não há
-    // quadro que dê valor ao nome, e o item prometeria o que não pode cumprir.
-    if debugging {
-        entries.push(MenuEntry::Separator);
-        let inspect = MenuItem::new("Inspecionar", CommandId("debug.inspect".to_owned()));
-        entries.push(MenuEntry::Item(if has_selection {
-            inspect
-        } else {
-            inspect.disabled()
-        }));
-    }
-    entries
-}
-
-/// Ações que fazem sentido no diretório clicado.
-///
-/// Dentro de uma raiz de fontes Java o que se cria é pacote, classe e
-/// interface: ali um diretório *é* um pacote e um arquivo solto *é* um tipo, e
-/// oferecer "nova pasta" faria o usuário criar um pacote sem saber que criou.
-/// Fora dela não há pacote nem classe, então resta a pasta.
-///
-/// A própria pasta `java` conta como dentro: ela é a raiz onde o primeiro
-/// pacote nasce.
-fn explorer_menu_entries(target: &Path) -> Vec<MenuEntry> {
-    if is_java_source_root(target) || is_java_package(target) {
-        return vec![
-            MenuEntry::Item(MenuItem::new(
-                "Novo pacote",
-                CommandId("explorer.new.package".to_owned()),
-            )),
-            MenuEntry::Separator,
-            MenuEntry::Item(MenuItem::new(
-                "Nova classe",
-                CommandId("explorer.new.class".to_owned()),
-            )),
-            MenuEntry::Item(MenuItem::new(
-                "Nova interface",
-                CommandId("explorer.new.interface".to_owned()),
-            )),
-        ];
-    }
-    vec![MenuEntry::Item(MenuItem::new(
-        "Nova pasta",
-        CommandId("explorer.new.folder".to_owned()),
-    ))]
-}
-
-/// Converte a árvore de arquivos em itens da biblioteca.
-fn explorer_items(node: &FileNode) -> Vec<TreeItem> {
-    node.children
-        .iter()
-        .map(|child| {
-            let (node, label) = compact_package_chain(child);
-            TreeItem::new(explorer_id(&node.path), label, explorer_items(node))
-        })
-        .collect()
-}
-
-/// Linha visual de um item depois de aplicar a expansão da árvore.
-///
-/// Usa os mesmos `TreeItem`s que a `TreeView`, portanto cadeias de pacotes Java
-/// compactadas contam como uma linha, não como todos os diretórios no disco.
-fn visible_tree_row(items: &[TreeItem], expanded: &HashSet<u64>, target: u64) -> Option<usize> {
-    fn visit(
-        items: &[TreeItem],
-        expanded: &HashSet<u64>,
-        target: u64,
-        row: &mut usize,
-    ) -> Option<usize> {
-        for item in items {
-            if item.id == target {
-                return Some(*row);
-            }
-            *row += 1;
-            if expanded.contains(&item.id)
-                && let Some(found) = visit(&item.children, expanded, target, row)
-            {
-                return Some(found);
-            }
-        }
-        None
-    }
-
-    let mut row = 0;
-    visit(items, expanded, target, &mut row)
-}
-
 /// O que uma barra de abas pediu para um clique.
 enum TabCommand {
     Select(u64),
@@ -5949,38 +5547,6 @@ fn tab_command(tabs: &mut Tabs, point: Point) -> Option<TabCommand> {
         .map(TabCommand::Select)
 }
 
-fn ordered_selection(selection: TerminalSelection) -> (TextPosition, TextPosition) {
-    if (selection.anchor.line, selection.anchor.column)
-        <= (selection.focus.line, selection.focus.column)
-    {
-        (selection.anchor, selection.focus)
-    } else {
-        (selection.focus, selection.anchor)
-    }
-}
-
-fn selection_columns(
-    selection: Option<TerminalSelection>,
-    line: usize,
-    text: &str,
-) -> Option<(usize, usize)> {
-    let (start, end) = ordered_selection(selection?);
-    if line < start.line || line > end.line {
-        return None;
-    }
-    let length = text.chars().count();
-    let from = if line == start.line {
-        start.column.min(length)
-    } else {
-        0
-    };
-    let to = if line == end.line {
-        end.column.min(length)
-    } else {
-        length
-    };
-    (to > from).then_some((from, to))
-}
 fn count_outline(items: &[OutlineItem]) -> usize {
     items
         .iter()

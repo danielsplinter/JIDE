@@ -182,17 +182,42 @@ Validação da fase: testes direcionados de `java-toolchain` e `ide-app`,
 `cargo test --workspace`, Clippy estrito sem warnings e build release de
 `ide-app`.
 
-### Fase 5 — Modularização interna
+### Fase 5 — Modularização interna ✅ Concluída
 
-- [ ] dividir `ide-ui` em shell, editor, Explorer, terminal, pesquisa,
+**Estado: concluída em 29/07/2026.**
+
+Os arquivos centrais permanecem como orquestradores, enquanto estado e
+operações coesas passaram a módulos internos:
+
+- `ide-ui`: `shell` possui foco e fila de comandos; `terminal` possui abas,
+  seleção e rolagem; `search`, `settings` e `debugging` possuem seus modelos;
+  `explorer`, `menus` e `layout` concentram respectivamente a árvore, a criação
+  de menus e a geometria; `editor` continua sendo a fronteira do editor;
+- `ide-app`: `bootstrap` monta e inicia a aplicação, `window` possui o estado de
+  interação da janela e `bridges` traduz mudanças de documento e eventos de
+  ferramentas; os módulos existentes `run` e `debug` preservam seus casos de
+  uso;
+- `language-java`: `parser` encapsula o parser mutável; `index`, `symbols`,
+  `semantics`, `completion` e `navigation` expõem somente as operações de cada
+  etapa da linguagem;
+- `ide-language-host`: `registry` possui providers, seleções e rotas;
+  `routing` normaliza e resolve o contexto das requisições; `worker` define o
+  protocolo isolado enviado aos workers.
+
+Nenhum desses módulos recebe a estrutura central inteira. Eles possuem estado
+mínimo ou funções sobre entradas explícitas e deixam aos arquivos raiz somente
+a coordenação entre fronteiras.
+
+- [x] dividir `ide-ui` em shell, editor, Explorer, terminal, pesquisa,
   configurações, depuração, menus e layout;
-- [ ] dividir `ide-app` em bootstrap, janela e bridges de aplicação;
-- [ ] dividir `language-java` em parser, índice, símbolos, semântica,
+- [x] dividir `ide-app` em bootstrap, janela e bridges de aplicação;
+- [x] dividir `language-java` em parser, índice, símbolos, semântica,
   completação e navegação;
-- [ ] dividir `ide-language-host` em registry, routing e worker.
+- [x] dividir `ide-language-host` em registry, routing e worker.
 
-Separar arquivos não basta: cada módulo deve possuir estado e API mínimos, sem
-acessar todos os campos de uma estrutura central.
+Validação da fase: testes direcionados de `ide-ui`, `ide-app`,
+`language-java` e `ide-language-host`, `cargo test --workspace`, Clippy
+estrito sem warnings e build release de `ide-app`.
 
 ### Fase 6 — Neutralidade dos contratos
 

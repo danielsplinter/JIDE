@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use completion::{finish_member_list, member_name};
 use ide_domain::{
     CompletionItem, CompletionKind, CompletionRequest, DefinitionRequest, Diagnostic,
     DiagnosticSeverity, DocumentChange, DocumentId, DocumentSnapshot, ImportItem, LanguageId,
@@ -19,6 +20,11 @@ use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
     LanguageError, LanguageMetadata, LanguageProvider,
 };
+use index::collect_workspace_paths;
+use navigation::{token_at_position, within};
+use parser::JavaParser;
+use semantics::receiver_type;
+use symbols::simple_class_name;
 use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
 pub const JAVA_LANGUAGE_ID: &str = "java";
@@ -78,7 +84,7 @@ struct ParsedDocument {
 
 struct JavaLanguage {
     language_id: LanguageId,
-    parser: Mutex<Parser>,
+    parser: JavaParser,
     documents: Mutex<HashMap<DocumentId, ParsedDocument>>,
     workspace_index: WorkspaceIndex,
 }
@@ -165,13 +171,9 @@ impl JavaLanguage {
         let Ok(text) = fs::read_to_string(path) else {
             return Vec::new();
         };
-        let Ok(mut parser) = self.parser.lock() else {
+        let Ok(tree) = self.parser.parse(&text, None) else {
             return Vec::new();
         };
-        let Some(tree) = parser.parse(&text, None) else {
-            return Vec::new();
-        };
-        drop(parser);
         let snapshot = DocumentSnapshot {
             id: DocumentId(0),
             path: path.clone(),
@@ -186,14 +188,12 @@ impl JavaLanguage {
     }
 
     fn new(workspace_root: &Path, jdk_home: Option<&Path>) -> Result<Self, LanguageError> {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_java::LANGUAGE.into())
-            .map_err(|error| LanguageError::Provider(error.to_string()))?;
-        let workspace_index = WorkspaceIndex::scan(workspace_root, jdk_home, &mut parser);
+        let parser = JavaParser::new()?;
+        let workspace_index =
+            parser.with_mut(|parser| WorkspaceIndex::scan(workspace_root, jdk_home, parser))?;
         Ok(Self {
             language_id: LanguageId(JAVA_LANGUAGE_ID.to_owned()),
-            parser: Mutex::new(parser),
+            parser,
             documents: Mutex::new(HashMap::new()),
             workspace_index,
         })
@@ -204,12 +204,7 @@ impl JavaLanguage {
         snapshot: DocumentSnapshot,
         previous: Option<&Tree>,
     ) -> Result<ParsedDocument, LanguageError> {
-        let tree = self
-            .parser
-            .lock()
-            .map_err(|_| LanguageError::Provider("Java parser lock poisoned".to_owned()))?
-            .parse(&snapshot.text, previous)
-            .ok_or_else(|| LanguageError::Provider("Java parsing was cancelled".to_owned()))?;
+        let tree = self.parser.parse(&snapshot.text, previous)?;
         let analysis = analyze(&snapshot, &tree);
         let (semantic, references) = analyze_semantics(&snapshot, &tree);
         Ok(ParsedDocument {
@@ -693,32 +688,6 @@ impl WorkspaceIndex {
     }
 }
 
-fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>, limit: usize) {
-    if output.len() >= limit {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if output.len() >= limit {
-            break;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            let ignored = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| matches!(name, ".git" | "target" | "node_modules" | ".gradle"));
-            if !ignored {
-                collect_workspace_paths(&path, output, limit);
-            }
-        } else {
-            output.push(path);
-        }
-    }
-}
-
 fn merge_references(
     target: &mut HashMap<String, Vec<Location>>,
     source: HashMap<String, Vec<Location>>,
@@ -734,17 +703,6 @@ fn merge_references(
 /// `System.Logger`, e o tipo se chama `Logger`. Tomando o primeiro, a classe
 /// aninhada — e a anônima `System$1` — atenderiam por `System`, e uma delas
 /// responderia no lugar da verdadeira.
-fn simple_class_name(binary_name: &str) -> String {
-    binary_name
-        .rsplit('.')
-        .next()
-        .unwrap_or(binary_name)
-        .rsplit('$')
-        .next()
-        .unwrap_or(binary_name)
-        .to_owned()
-}
-
 fn analyze_semantics(
     document: &DocumentSnapshot,
     tree: &Tree,
@@ -912,30 +870,11 @@ const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_BRIDGE: u16 = 0x0040;
 
 /// A posição está dentro do intervalo.
-fn within(range: &TextRange, position: TextPosition) -> bool {
-    let point = (position.line, position.column);
-    point >= (range.start.line, range.start.column) && point <= (range.end.line, range.end.column)
-}
-
 /// Nome do tipo que o receptor tem.
 ///
 /// Variável, parâmetro ou campo declarado no arquivo entrega o tipo pela
 /// declaração. Não achando nenhum, o próprio receptor é tomado como nome de
 /// tipo — é o caso do acesso estático, `Integer.` ou `Math.`.
-fn receiver_type(receiver: &str, symbols: &[SemanticSymbol]) -> String {
-    symbols
-        .iter()
-        .filter(|symbol| {
-            matches!(
-                symbol.kind,
-                SymbolKind::LocalVariable | SymbolKind::Parameter | SymbolKind::Field
-            )
-        })
-        .find(|symbol| symbol.name == receiver)
-        .and_then(|symbol| symbol.type_descriptor.as_ref())
-        .map_or_else(|| receiver.to_owned(), |descriptor| descriptor.name.clone())
-}
-
 /// Traduz um descritor da JVM para a forma que se lê no código.
 ///
 /// `Ljava/lang/String;` vira `String`, `[I` vira `int[]`. O nome simples basta:
@@ -1084,19 +1023,6 @@ fn members_in_document(type_name: &str, semantic: &SemanticSnapshot) -> Vec<Comp
 /// Só o que o usuário pode escrever com o ponto.
 /// Filtra pelo prefixo, tira repetidos e ordena. É o fim de toda lista de
 /// membros, venha ela de onde vier.
-fn finish_member_list(mut items: Vec<CompletionItem>, prefix: &str) -> Vec<CompletionItem> {
-    let mut seen = HashSet::new();
-    items.retain(|item| item.label.starts_with(prefix) && seen.insert(item.label.clone()));
-    items.sort_by(|left, right| left.label.cmp(&right.label));
-    items.truncate(100);
-    items
-}
-
-/// Nome do membro sem os parênteses que marcam um método na lista.
-fn member_name(label: &str) -> &str {
-    label.strip_suffix("()").unwrap_or(label)
-}
-
 /// Nomes dos membros declarados `private` no arquivo.
 ///
 /// As classes compiladas trazem os modificadores nos próprios bytes; o fonte
@@ -1200,36 +1126,6 @@ fn completion_for_symbol(symbol: &SemanticSymbol) -> CompletionItem {
             }
         },
     }
-}
-
-fn token_at_position(text: &str, position: TextPosition) -> String {
-    let offset = match offset_for_position(text, position) {
-        Ok(offset) => offset,
-        Err(_) => return String::new(),
-    };
-    let mut start = offset;
-    while start > 0 {
-        let previous = text[..start]
-            .char_indices()
-            .last()
-            .map_or(0, |(index, _)| index);
-        let character = text[previous..start].chars().next();
-        if !character.is_some_and(|character| character == '_' || character.is_alphanumeric()) {
-            break;
-        }
-        start = previous;
-    }
-    let mut end = offset;
-    while end < text.len() {
-        let Some(character) = text[end..].chars().next() else {
-            break;
-        };
-        if character != '_' && !character.is_alphanumeric() {
-            break;
-        }
-        end += character.len_utf8();
-    }
-    text[start..end].to_owned()
 }
 
 fn analyze(document: &DocumentSnapshot, tree: &Tree) -> SyntaxSnapshot {
@@ -2303,3 +2199,9 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 }
+mod completion;
+mod index;
+mod navigation;
+mod parser;
+mod semantics;
+mod symbols;

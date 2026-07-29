@@ -1,8 +1,7 @@
 #![doc = "Registro, ciclo de vida e isolamento dos providers de linguagem."]
 
 use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -22,6 +21,14 @@ use ide_language_api::{
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
+mod registry;
+mod routing;
+mod worker;
+
+use registry::{ProviderEntry, Registry};
+pub use routing::ProviderSelection;
+use routing::{document_extension, ensure_not_cancelled, normalize_extension};
+use worker::WorkerRequest;
 
 #[derive(Clone, Debug)]
 pub struct LanguageHostConfig {
@@ -36,12 +43,6 @@ impl Default for LanguageHostConfig {
             max_active_providers: 8,
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProviderSelection {
-    pub primary: ProviderId,
-    pub fallbacks: Vec<ProviderId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,22 +105,6 @@ impl From<LanguageError> for LanguageHostError {
             LanguageError::Provider(message) => Self::Provider(message),
         }
     }
-}
-
-struct ProviderEntry {
-    provider: Arc<dyn LanguageProvider>,
-    metadata: LanguageMetadata,
-    capabilities: LanguageCapabilities,
-    state: ProviderState,
-    worker: Option<Arc<ProviderWorker>>,
-    last_error: Option<String>,
-}
-
-#[derive(Default)]
-struct Registry {
-    providers: HashMap<ProviderId, ProviderEntry>,
-    selections: HashMap<LanguageId, ProviderSelection>,
-    document_routes: HashMap<DocumentId, ProviderId>,
 }
 
 pub struct LanguageHost {
@@ -712,91 +697,6 @@ fn validate_metadata(metadata: &LanguageMetadata) -> Result<(), LanguageHostErro
         ));
     }
     Ok(())
-}
-
-fn normalize_extension(extension: &str) -> String {
-    extension
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase()
-}
-
-fn document_extension(path: &Path) -> String {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(normalize_extension)
-        .unwrap_or_default()
-}
-
-fn ensure_not_cancelled(context: &LanguageRequestContext) -> Result<(), LanguageHostError> {
-    if context.cancellation.is_cancelled() {
-        Err(LanguageHostError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-enum WorkerRequest {
-    Open {
-        context: LanguageRequestContext,
-        document: DocumentSnapshot,
-        response: oneshot::Sender<Result<(), LanguageHostError>>,
-    },
-    Change {
-        context: LanguageRequestContext,
-        change: DocumentChange,
-        response: oneshot::Sender<Result<(), LanguageHostError>>,
-    },
-    Close {
-        context: LanguageRequestContext,
-        document_id: DocumentId,
-        response: oneshot::Sender<Result<(), LanguageHostError>>,
-    },
-    Diagnostics {
-        context: LanguageRequestContext,
-        document_id: DocumentId,
-        response: oneshot::Sender<Result<Vec<Diagnostic>, LanguageHostError>>,
-    },
-    Syntax {
-        context: LanguageRequestContext,
-        document_id: DocumentId,
-        response: oneshot::Sender<Result<SyntaxSnapshot, LanguageHostError>>,
-    },
-    Semantic {
-        context: LanguageRequestContext,
-        document_id: DocumentId,
-        response: oneshot::Sender<Result<SemanticSnapshot, LanguageHostError>>,
-    },
-    Completion {
-        context: LanguageRequestContext,
-        request: CompletionRequest,
-        response: oneshot::Sender<Result<Vec<CompletionItem>, LanguageHostError>>,
-    },
-    TypeMembers {
-        context: LanguageRequestContext,
-        type_name: String,
-        prefix: String,
-        response: oneshot::Sender<Result<Vec<CompletionItem>, LanguageHostError>>,
-    },
-    WorkspaceTypes {
-        context: LanguageRequestContext,
-        query: String,
-        limit: usize,
-        response: oneshot::Sender<Result<Vec<SemanticSymbol>, LanguageHostError>>,
-    },
-    Definition {
-        context: LanguageRequestContext,
-        request: DefinitionRequest,
-        response: oneshot::Sender<Result<Vec<Location>, LanguageHostError>>,
-    },
-    References {
-        context: LanguageRequestContext,
-        request: ReferencesRequest,
-        response: oneshot::Sender<Result<Vec<Location>, LanguageHostError>>,
-    },
-    Shutdown {
-        response: oneshot::Sender<Result<(), LanguageHostError>>,
-    },
 }
 
 struct ProviderWorker {
