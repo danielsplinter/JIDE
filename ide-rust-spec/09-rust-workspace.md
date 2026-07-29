@@ -27,7 +27,6 @@ ide/
 │   ├── java-semantics/
 │   ├── java-classfile/
 │   ├── java-toolchain/
-│   ├── java-javac-adapter/
 │   ├── java-maven-adapter/
 │   ├── java-gradle-adapter/
 │   └── java-debug-adapter/
@@ -63,10 +62,8 @@ java-classfile
     depende somente de contratos próprios e do leitor ZIP
 
 java-toolchain
-    depende de ide-toolchain-api e ide-domain
-
-java-javac-adapter
-    depende de ide-toolchain-api, ide-process e java-toolchain
+    depende de ide-toolchain-api, ide-domain e ide-process; reúne detecção,
+    seleção, classpath e os adapters javac/runtime/teste em módulos internos
 
 ide-project
     reúne o modelo neutro em ide_project::model e os contratos de build em

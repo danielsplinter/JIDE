@@ -30,7 +30,7 @@ Problemas a corrigir:
 - `ide-text` e `ide-workspace` compartilhavam a responsabilidade por documentos
   e filesystem;
 - `ide-build-api` dependia integralmente de `ide-project-model`;
-- `java-javac-adapter` depende da seleção, classpath e instalação mantidos por
+- `java-javac-adapter` dependia da seleção, classpath e instalação mantidos por
   `java-toolchain`;
 - arquivos grandes como `ide-ui/src/lib.rs`, `ide-app/src/main.rs`,
   `language-java/src/lib.rs` e `ide-language-host/src/lib.rs` precisam de
@@ -159,12 +159,28 @@ Validação da fase: testes direcionados de `ide-application`, `ide-workspace`,
 `ide-ui` e `ide-app`, `cargo test --workspace`, Clippy estrito sem warnings e
 build release de `ide-app`.
 
-### Fase 4 — Toolchain Java
+### Fase 4 — Toolchain Java ✅ Concluída
 
-- [ ] mover detecção, seleção e classpath para módulos de `java-toolchain`;
-- [ ] mover javac, runtime e testes de `java-javac-adapter`;
-- [ ] fazer `ide-app` depender de adapters pelos contratos;
-- [ ] remover `java-javac-adapter`.
+**Estado: concluída em 29/07/2026.**
+
+`java-toolchain` reúne agora `detection`, `selection`, `classpath` e `adapter`
+como módulos com APIs mínimas. O adapter implementa compilação com `javac`,
+execução com `java` e o ciclo de testes, preservando os contratos neutros de
+`ide-toolchain-api`.
+
+No `ide-app`, os casos de uso guardam os adapters como
+`Arc<dyn CompilerAdapter>`, `Arc<dyn RuntimeAdapter>` e
+`Arc<dyn TestAdapter>`. O `JavaToolchainAdapter` concreto aparece somente no
+composition root.
+
+- [x] mover detecção, seleção e classpath para módulos de `java-toolchain`;
+- [x] mover javac, runtime e testes de `java-javac-adapter`;
+- [x] fazer `ide-app` depender de adapters pelos contratos;
+- [x] remover `java-javac-adapter`.
+
+Validação da fase: testes direcionados de `java-toolchain` e `ide-app`,
+`cargo test --workspace`, Clippy estrito sem warnings e build release de
+`ide-app`.
 
 ### Fase 5 — Modularização interna
 

@@ -37,9 +37,10 @@ use ide_ui::{
 };
 use ide_workspace::WorkspaceService;
 use java_gradle_adapter::{GRADLE_BUILD_SYSTEM_ID, GradleAdapter};
-use java_javac_adapter::JavaJavacAdapter;
 use java_maven_adapter::{MAVEN_BUILD_SYSTEM_ID, MavenAdapter};
-use java_toolchain::{ClasspathBuilder, JavaToolchainProvider, JavaToolchainSelection};
+use java_toolchain::{
+    ClasspathBuilder, JavaToolchainAdapter, JavaToolchainProvider, JavaToolchainSelection,
+};
 use language_java::{JAVA_PROVIDER_ID, JavaLanguageProvider};
 use ui_core::{Modifiers, Point, Size, WindowId};
 use ui_render_api::{FrameInfo, UiRenderer};
@@ -81,7 +82,9 @@ struct NativeIde {
     language_documents: HashMap<DocumentId, DocumentSnapshot>,
     application_documents: HashMap<DocumentId, DocumentSnapshot>,
     java_toolchains: JavaToolchainSelection,
-    java_adapter: Option<Arc<JavaJavacAdapter>>,
+    java_compiler: Option<Arc<dyn CompilerAdapter>>,
+    java_runtime: Option<Arc<dyn RuntimeAdapter>>,
+    java_tests: Option<Arc<dyn TestAdapter>>,
     build_systems: BuildSystemRegistry,
     project: Option<ImportedProject>,
     last_manifest_check: Option<Instant>,
@@ -176,7 +179,10 @@ impl NativeIde {
         self.shell = Some(shell);
         self.publish_event(IdeEvent::WorkspaceOpened { root: root.clone() });
         let processes: Arc<dyn ProcessSupervisor> = Arc::new(NativeProcessSupervisor::default());
-        self.java_adapter = Some(Arc::new(JavaJavacAdapter::new(processes.clone())));
+        let java_adapter = Arc::new(JavaToolchainAdapter::new(processes.clone()));
+        self.java_compiler = Some(java_adapter.clone());
+        self.java_runtime = Some(java_adapter.clone());
+        self.java_tests = Some(java_adapter);
         self.build_systems
             .register(Arc::new(MavenAdapter::new(processes.clone())));
         self.build_systems
@@ -1395,7 +1401,13 @@ impl NativeIde {
     }
 
     fn start_java_task(&mut self, task: JavaTask) {
-        let Some(adapter) = self.java_adapter.clone() else {
+        let Some(compiler) = self.java_compiler.clone() else {
+            return;
+        };
+        let Some(runtime_adapter) = self.java_runtime.clone() else {
+            return;
+        };
+        let Some(test_adapter) = self.java_tests.clone() else {
             return;
         };
         let Some(installation) = self.java_toolchains.selected().cloned() else {
@@ -1474,7 +1486,7 @@ impl NativeIde {
                 };
                 let result = runtime.block_on(async {
                     if task == JavaTask::Test {
-                        let tested = adapter
+                        let tested = test_adapter
                             .run_tests(TestRequest {
                                 compilation,
                                 test_classes: vec![main_class.unwrap_or_default()],
@@ -1499,7 +1511,7 @@ impl NativeIde {
                             stderr,
                         });
                     }
-                    let compiled = adapter.compile(compilation).await?;
+                    let compiled = compiler.compile(compilation).await?;
                     let mut stdout = compiled.stdout;
                     let mut stderr = compiled.stderr;
                     if !compiled.success || task == JavaTask::Compile {
@@ -1517,7 +1529,7 @@ impl NativeIde {
                     if !run_classpath.entries.contains(&output_directory) {
                         run_classpath.entries.insert(0, output_directory);
                     }
-                    let executed = adapter
+                    let executed = runtime_adapter
                         .run(ExecutionRequest {
                             installation,
                             main_class: main_class.unwrap_or_default(),

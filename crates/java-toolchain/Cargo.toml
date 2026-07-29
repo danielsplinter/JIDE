@@ -8,7 +8,11 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 ide-domain = { path = "../ide-domain" }
+ide-process = { path = "../ide-process" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

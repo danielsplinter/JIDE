@@ -867,7 +867,6 @@ dependencies = [
  "ide-workspace",
  "java-debug-adapter",
  "java-gradle-adapter",
- "java-javac-adapter",
  "java-maven-adapter",
  "java-toolchain",
  "language-java",
@@ -1054,18 +1053,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "java-javac-adapter"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ide-domain",
- "ide-process",
- "ide-toolchain-api",
- "java-toolchain",
- "tokio",
-]
-
-[[package]]
 name = "java-maven-adapter"
 version = "0.1.0"
 dependencies = [
@@ -1082,7 +1069,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ide-domain",
+ "ide-process",
  "ide-toolchain-api",
+ "tokio",
 ]
 
 [[package]]

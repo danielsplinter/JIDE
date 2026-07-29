@@ -15,7 +15,6 @@ ide-language-host = { path = "../ide-language-host" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }
 java-debug-adapter = { path = "../java-debug-adapter" }
 java-gradle-adapter = { path = "../java-gradle-adapter" }
-java-javac-adapter = { path = "../java-javac-adapter" }
 java-maven-adapter = { path = "../java-maven-adapter" }
 java-toolchain = { path = "../java-toolchain" }
 language-java = { path = "../language-java" }

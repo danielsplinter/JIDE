@@ -232,12 +232,15 @@ O `ClasspathBuilder` elimina duplicatas e inclui o diretório de saída
 contidos neles e saídas usuais do Gradle. Os caminhos são unidos com o separador
 correto da plataforma.
 
-O crate `java-javac-adapter` implementa os contratos de compilação, execução e
-testes. `Ctrl+B` compila as fontes Java do workspace com `javac`, UTF-8,
+O módulo `java_toolchain::adapter` implementa os contratos de compilação,
+execução e testes. `Ctrl+B` compila as fontes Java do workspace com `javac`, UTF-8,
 `-source 8`, `-target 8` e o classpath calculado. `F5` compila e depois executa
 com `java` a classe do arquivo Java ativo, incluindo seu package.
 `Ctrl+Shift+T` compila e executa o arquivo Java ativo como classe de teste.
-Cada processo recebe `JAVA_HOME` correspondente ao JDK selecionado.
+Cada processo recebe `JAVA_HOME` correspondente ao JDK selecionado. Os casos de
+uso do `ide-app` mantêm apenas `Arc<dyn CompilerAdapter>`,
+`Arc<dyn RuntimeAdapter>` e `Arc<dyn TestAdapter>`; o tipo concreto é conhecido
+somente durante a composição da aplicação.
 
 Compilação e execução acontecem fora da thread da interface. Código de saída,
 `stdout` e `stderr` retornam como dados tipados; a aplicação acrescenta a saída

@@ -12,7 +12,6 @@ members = [
     "crates/language-java",
     "crates/java-classfile",
     "crates/java-toolchain",
-    "crates/java-javac-adapter",
     "crates/java-maven-adapter",
     "crates/java-gradle-adapter",
     "crates/java-debug-adapter",

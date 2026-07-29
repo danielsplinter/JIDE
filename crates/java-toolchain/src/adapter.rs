@@ -1,7 +1,8 @@
-#![doc = "Adapters externos para javac, java e execução de testes Java."]
+//! Adapters para javac, runtime Java e execução de testes.
 
 use std::{fs, sync::Arc, time::Duration};
 
+use crate::jdk_executable;
 use async_trait::async_trait;
 use ide_domain::LanguageId;
 use ide_process::{ProcessRequest, ProcessSupervisor};
@@ -10,14 +11,13 @@ use ide_toolchain_api::{
     ExecutionResult, RuntimeAdapter, TestAdapter, TestCaseResult, TestRequest, TestResult,
     ToolchainError,
 };
-use java_toolchain::jdk_executable;
 
-pub struct JavaJavacAdapter {
+pub struct JavaToolchainAdapter {
     processes: Arc<dyn ProcessSupervisor>,
     timeout: Duration,
 }
 
-impl JavaJavacAdapter {
+impl JavaToolchainAdapter {
     #[must_use]
     pub fn new(processes: Arc<dyn ProcessSupervisor>) -> Self {
         Self {
@@ -34,7 +34,7 @@ impl JavaJavacAdapter {
 }
 
 #[async_trait]
-impl CompilerAdapter for JavaJavacAdapter {
+impl CompilerAdapter for JavaToolchainAdapter {
     fn supported_language(&self) -> LanguageId {
         LanguageId("java".to_owned())
     }
@@ -103,7 +103,7 @@ impl CompilerAdapter for JavaJavacAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter for JavaJavacAdapter {
+impl RuntimeAdapter for JavaToolchainAdapter {
     fn supported_language(&self) -> LanguageId {
         LanguageId("java".to_owned())
     }
@@ -142,7 +142,7 @@ impl RuntimeAdapter for JavaJavacAdapter {
 }
 
 #[async_trait]
-impl TestAdapter for JavaJavacAdapter {
+impl TestAdapter for JavaToolchainAdapter {
     fn supported_language(&self) -> LanguageId {
         LanguageId("java".to_owned())
     }
@@ -248,7 +248,7 @@ mod tests {
         assert!(fs::write(&source, "class Main {}").is_ok());
         let output = root.join("classes");
         let processes = Arc::new(FakeProcesses::default());
-        let adapter = JavaJavacAdapter::new(processes.clone());
+        let adapter = JavaToolchainAdapter::new(processes.clone());
         let runtime = match tokio::runtime::Builder::new_current_thread().build() {
             Ok(runtime) => runtime,
             Err(error) => panic!("runtime failed: {error}"),
@@ -303,7 +303,7 @@ mod tests {
         assert!(fs::write(&source, "class ExampleTest {}").is_ok());
         let output = root.join("classes");
         let processes = Arc::new(FakeProcesses::default());
-        let adapter = JavaJavacAdapter::new(processes.clone());
+        let adapter = JavaToolchainAdapter::new(processes.clone());
         let runtime = match tokio::runtime::Builder::new_current_thread().build() {
             Ok(runtime) => runtime,
             Err(error) => panic!("runtime failed: {error}"),
