@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use ide_application::WorkspacePort;
+use ide_application::{SearchScope, WorkspacePort};
 
 use crate::FileNode;
 
@@ -17,7 +17,7 @@ pub struct SearchMatch {
 pub(crate) fn search_content(
     filesystem: &dyn WorkspacePort,
     root: &FileNode,
-    source_roots: &[PathBuf],
+    scope: &SearchScope,
     query: &str,
     limit: usize,
 ) -> Vec<SearchMatch> {
@@ -25,54 +25,31 @@ pub(crate) fn search_content(
         return Vec::new();
     }
     let mut matches = Vec::new();
-    search_java_node(
-        filesystem,
-        root,
-        source_roots,
-        query,
-        limit,
-        false,
-        &mut matches,
-    );
+    search_node(filesystem, root, scope, query, limit, &mut matches);
     matches
 }
 
-fn search_java_node(
+fn search_node(
     filesystem: &dyn WorkspacePort,
     node: &FileNode,
-    source_roots: &[PathBuf],
+    scope: &SearchScope,
     query: &str,
     limit: usize,
-    inside_java: bool,
     output: &mut Vec<SearchMatch>,
 ) {
     if output.len() >= limit {
         return;
     }
     if node.is_directory {
-        let inside_java = inside_java
-            || node
-                .path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("java"));
         for child in &node.children {
-            search_java_node(
-                filesystem,
-                child,
-                source_roots,
-                query,
-                limit,
-                inside_java,
-                output,
-            );
+            search_node(filesystem, child, scope, query, limit, output);
             if output.len() >= limit {
                 break;
             }
         }
         return;
     }
-    let in_source_root = source_roots.iter().any(|root| node.path.starts_with(root));
-    if (!source_roots.is_empty() && !in_source_root) || (source_roots.is_empty() && !inside_java) {
+    if !scope.contains(&node.path) {
         return;
     }
     let Ok(content) = filesystem.read_text(&node.path) else {

@@ -11,7 +11,7 @@ use std::{
     time::SystemTime,
 };
 
-use ide_application::{WorkspacePort, WorkspacePortError};
+use ide_application::{SearchScope, WorkspacePort, WorkspacePortError};
 use thiserror::Error;
 
 pub use document::{BufferError, EditorSession, OpenDocument, TextBuffer};
@@ -80,11 +80,11 @@ impl WorkspaceService {
     pub fn search_content(
         &self,
         root: &FileNode,
-        source_roots: &[PathBuf],
+        scope: &SearchScope,
         query: &str,
         limit: usize,
     ) -> Vec<SearchMatch> {
-        search::search_content(self.filesystem.as_ref(), root, source_roots, query, limit)
+        search::search_content(self.filesystem.as_ref(), root, scope, query, limit)
     }
 }
 
@@ -122,11 +122,18 @@ mod tests {
             .is_ok()
         );
         assert!(fs::write(root.join("docs/fora.txt"), "conteudo fora\n").is_ok());
+        assert!(
+            fs::write(
+                root.join("modulo/src/main/java/br/com/ignorado.txt"),
+                "conteudo procurado\n"
+            )
+            .is_ok()
+        );
         root
     }
 
     #[test]
-    fn service_scans_and_searches_only_java_roots() {
+    fn service_searches_only_the_explicit_scope() {
         let root = workspace();
         let service = WorkspaceService::native();
         let tree = service.scan(&root);
@@ -134,10 +141,19 @@ mod tests {
         let Ok(tree) = tree else {
             return;
         };
-        let found =
-            service.search_content(&tree, &[root.join("modulo/src/main/java")], "CONTEUDO", 20);
+        let scope = SearchScope::new(
+            vec![root.join("modulo/src/main/java")],
+            vec!["java".to_owned()],
+        );
+        let found = service.search_content(&tree, &scope, "CONTEUDO", 20);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].line, 2);
+        let empty_scope = SearchScope::default();
+        assert!(
+            service
+                .search_content(&tree, &empty_scope, "CONTEUDO", 20)
+                .is_empty()
+        );
         let _ = fs::remove_dir_all(root);
     }
 

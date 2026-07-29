@@ -20,8 +20,8 @@ use bootstrap::{default_goals, java_source, project_sources, startup_root};
 use bridges::{ToolEvent, document_change, position_at_offset};
 use ide_application::{
     ApplicationCommand, ContributionRegistry, DebugRequest, EventBus, IdeEvent, NavigationRequest,
-    NewItemRequest, OpenDocumentRequest, SaveDocumentRequest, TaskController, TaskExecutionContext,
-    TaskId, ToolchainRegistry,
+    NewItemRequest, OpenDocumentRequest, SaveDocumentRequest, SearchScope, TaskController,
+    TaskExecutionContext, TaskId, ToolchainRegistry,
 };
 use ide_core::{AppConfig, config_path};
 use ide_debug_api::{DebugEvent, StepKind};
@@ -39,7 +39,7 @@ use ide_toolchain_api::DetectionContext;
 use ide_ui::{
     ContentSearchHit, DebugView, IdeShell, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
 };
-use ide_workspace::WorkspaceService;
+use ide_workspace::{FileNode, WorkspaceService};
 #[cfg(test)]
 use java_gradle_adapter::GRADLE_BUILD_SYSTEM_ID;
 #[cfg(test)]
@@ -150,6 +150,7 @@ impl NativeIde {
             .scan(&root)
             .map_err(|error| error.to_string())?;
         let mut shell = IdeShell::from_tree(tree);
+        shell.set_ui_catalog(self.contributions.ui_catalog());
         // Os componentes medem o texto pela mesma fonte que vai desenhá-lo. Quem
         // constrói o mecanismo é a aplicação; a interface só recebe a porta.
         shell.set_text_metrics(Arc::new(ui_text_cosmic::CosmicTextEngine::new()));
@@ -338,7 +339,9 @@ impl NativeIde {
                 }
                 self.language_documents.clear();
                 self.application_documents.clear();
-                self.shell = Some(IdeShell::from_tree(tree));
+                let mut shell = IdeShell::from_tree(tree);
+                shell.set_ui_catalog(self.contributions.ui_catalog());
+                self.shell = Some(shell);
                 self.publish_event(IdeEvent::WorkspaceOpened {
                     root: folder.clone(),
                 });
@@ -546,21 +549,29 @@ impl NativeIde {
 
     /// Responde à busca textual usando a árvore já carregada no Explorer.
     ///
-    /// O serviço de workspace conhece o limite estrutural: somente arquivos sob
-    /// diretórios chamados `java` podem produzir ocorrências.
+    /// O serviço de workspace recebe raízes e extensões explícitas. Nenhuma
+    /// convenção de linguagem fica embutida na busca.
     fn answer_content_search(&mut self, query: &str) {
-        let source_roots = self
+        let mut source_roots = self
             .project
             .as_ref()
             .map(|project| project.model.source_roots())
             .unwrap_or_default();
+        if source_roots.is_empty()
+            && let Some(shell) = self.shell.as_ref()
+        {
+            let root_names = self.contributions.ui_catalog().source_root_names;
+            collect_named_source_roots(shell.workspace_tree(), &root_names, &mut source_roots);
+        }
+        let extensions = self
+            .contributions
+            .iter()
+            .flat_map(|contribution| contribution.descriptor.extensions.iter().cloned())
+            .collect();
+        let scope = SearchScope::new(source_roots, extensions);
         let found = self.shell.as_ref().map_or_else(Vec::new, |shell| {
-            self.workspace.search_content(
-                shell.workspace_tree(),
-                &source_roots,
-                query,
-                TYPE_SEARCH_LIMIT,
-            )
+            self.workspace
+                .search_content(shell.workspace_tree(), &scope, query, TYPE_SEARCH_LIMIT)
         });
         if let Some(shell) = self.shell.as_mut() {
             shell.set_content_search_results(
@@ -1245,9 +1256,9 @@ impl NativeIde {
                 ApplicationCommand::OpenSettings => {
                     self.open_toolchain_selector(&java_contribution::language_id());
                 }
-                ApplicationCommand::OpenCompilerSettings => {
+                ApplicationCommand::OpenToolchainSettings => {
                     if let Some(shell) = self.shell.as_mut() {
-                        shell.set_settings_page(SettingsPage::Compiler);
+                        shell.set_settings_page(SettingsPage::Contribution(0));
                     }
                     self.open_toolchain_selector(&java_contribution::language_id());
                 }
@@ -1259,16 +1270,8 @@ impl NativeIde {
                 }
                 ApplicationCommand::BuildProject => self.start_project_build(),
                 ApplicationCommand::ReimportProject => self.reimport_project(),
-                ApplicationCommand::CompileProject => {
-                    self.start_task(TaskId(java_contribution::COMPILE_TASK_ID.to_owned()));
-                }
                 ApplicationCommand::RunProject => self.run_application(),
-                ApplicationCommand::RunActiveFile => {
-                    self.start_task(TaskId(java_contribution::RUN_TASK_ID.to_owned()));
-                }
-                ApplicationCommand::TestProject => {
-                    self.start_task(TaskId(java_contribution::TEST_TASK_ID.to_owned()));
-                }
+                ApplicationCommand::ExecuteTask(task_id) => self.start_task(task_id),
                 ApplicationCommand::StopProject => self.stop_application(),
                 ApplicationCommand::Navigate(request) => {
                     tracing::info!(
@@ -1597,6 +1600,26 @@ impl NativeIde {
     }
 }
 
+fn collect_named_source_roots(node: &FileNode, names: &[String], output: &mut Vec<PathBuf>) {
+    if node.is_directory
+        && node
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                names
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(name))
+            })
+    {
+        output.push(node.path.clone());
+        return;
+    }
+    for child in &node.children {
+        collect_named_source_roots(child, names, output);
+    }
+}
+
 impl ApplicationHandler for NativeIde {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -1807,12 +1830,14 @@ impl ApplicationHandler for NativeIde {
                     && self.shift_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("j"))
                 {
-                    direct_commands.push(ApplicationCommand::OpenCompilerSettings);
+                    direct_commands.push(ApplicationCommand::OpenToolchainSettings);
                 } else if self.control_pressed
                     && self.shift_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("t"))
                 {
-                    direct_commands.push(ApplicationCommand::TestProject);
+                    direct_commands.push(ApplicationCommand::ExecuteTask(TaskId(
+                        java_contribution::TEST_TASK_ID.to_owned(),
+                    )));
                 } else if self.control_pressed
                     && self.shift_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("b"))
@@ -1821,7 +1846,9 @@ impl ApplicationHandler for NativeIde {
                 } else if self.control_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("b"))
                 {
-                    direct_commands.push(ApplicationCommand::CompileProject);
+                    direct_commands.push(ApplicationCommand::ExecuteTask(TaskId(
+                        java_contribution::COMPILE_TASK_ID.to_owned(),
+                    )));
                 } else if self.control_pressed
                     && self.shift_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("l"))
@@ -1895,7 +1922,9 @@ impl ApplicationHandler for NativeIde {
                             }
                         }
                         Key::Named(NamedKey::F5) => {
-                            direct_commands.push(ApplicationCommand::RunActiveFile);
+                            direct_commands.push(ApplicationCommand::ExecuteTask(TaskId(
+                                java_contribution::RUN_TASK_ID.to_owned(),
+                            )));
                         }
                         Key::Named(NamedKey::F8) => {
                             if let Some(shell) = self.shell.as_mut() {

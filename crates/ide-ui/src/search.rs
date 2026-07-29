@@ -19,8 +19,8 @@ pub struct ContentSearchHit {
 
 impl ContentSearchHit {
     #[must_use]
-    pub fn label(&self) -> String {
-        let path = type_search_display_path(&self.location.path);
+    pub fn label(&self, source_root_names: &[String]) -> String {
+        let path = search_display_path(&self.location.path, source_root_names);
         format!(
             "{}:{}  —  {}",
             path.display(),
@@ -38,22 +38,24 @@ pub(super) enum WorkspaceSearchMode {
 
 impl TypeSearchHit {
     #[must_use]
-    pub fn label(&self) -> String {
-        let path = type_search_display_path(&self.location.path);
+    pub fn label(&self, source_root_names: &[String]) -> String {
+        let path = search_display_path(&self.location.path, source_root_names);
         format!("{} ({})  —  {}", self.name, self.kind, path.display())
     }
 }
 
-pub(super) fn type_search_display_path(path: &Path) -> PathBuf {
+pub(super) fn search_display_path(path: &Path, source_root_names: &[String]) -> PathBuf {
     let components = path.components().collect::<Vec<_>>();
-    let java = components.iter().rposition(|component| {
+    let source_root = components.iter().rposition(|component| {
         matches!(
             component,
             std::path::Component::Normal(name)
-                if name.to_string_lossy().eq_ignore_ascii_case("java")
+                if source_root_names
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(&name.to_string_lossy()))
         )
     });
-    if let Some(index) = java {
+    if let Some(index) = source_root {
         let relative = components.iter().skip(index + 1).collect::<PathBuf>();
         if !relative.as_os_str().is_empty() {
             return relative;

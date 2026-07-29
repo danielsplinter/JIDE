@@ -19,6 +19,11 @@ pub struct LanguageDescriptor {
     pub language_id: LanguageId,
     pub display_name: String,
     pub extensions: Vec<String>,
+    /// Nomes de diretórios que delimitam raízes de fontes desta linguagem.
+    ///
+    /// A aplicação usa estes dados para construir escopos e a UI para
+    /// apresentar pacotes, sem conhecer convenções de uma linguagem concreta.
+    pub source_root_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -29,6 +34,7 @@ pub struct TaskDescriptor {
     pub id: TaskId,
     pub title: String,
     pub requires_active_document: bool,
+    pub show_in_toolbar: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +77,20 @@ pub struct NewItemTemplate {
 pub struct SettingsSection {
     pub id: String,
     pub title: String,
+    pub field_caption: String,
+    pub browse_button_title: String,
+}
+
+/// Dados de apresentação agregados das contribuições registradas.
+///
+/// Este é o único modelo de linguagem que atravessa para `ide-ui`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UiContributionCatalog {
+    pub language_names: Vec<String>,
+    pub source_root_names: Vec<String>,
+    pub new_item_templates: Vec<NewItemTemplate>,
+    pub settings_sections: Vec<SettingsSection>,
+    pub tasks: Vec<TaskDescriptor>,
 }
 
 #[derive(Clone)]
@@ -143,6 +163,31 @@ impl ContributionRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.contributions.is_empty()
+    }
+
+    #[must_use]
+    pub fn ui_catalog(&self) -> UiContributionCatalog {
+        let mut catalog = UiContributionCatalog::default();
+        for contribution in self.contributions.values() {
+            catalog
+                .language_names
+                .push(contribution.descriptor.display_name.clone());
+            catalog
+                .source_root_names
+                .extend(contribution.descriptor.source_root_names.iter().cloned());
+            catalog
+                .new_item_templates
+                .extend(contribution.new_item_templates.iter().cloned());
+            catalog
+                .settings_sections
+                .extend(contribution.settings_sections.iter().cloned());
+            catalog.tasks.extend(contribution.tasks.iter().cloned());
+        }
+        catalog.source_root_names.sort();
+        catalog.source_root_names.dedup();
+        catalog.language_names.sort();
+        catalog.language_names.dedup();
+        catalog
     }
 }
 
@@ -547,6 +592,7 @@ mod tests {
                 language_id: language_id.clone(),
                 display_name: language.to_owned(),
                 extensions: vec![language.to_owned()],
+                source_root_names: vec![language.to_owned()],
             },
             Arc::new(FakeProvider { language_id }),
         );
@@ -554,6 +600,7 @@ mod tests {
             id: TaskId(format!("{language}.run")),
             title: format!("Run {language}"),
             requires_active_document: true,
+            show_in_toolbar: true,
         });
         contribution
     }
@@ -589,5 +636,31 @@ mod tests {
                 .map(|(language, task)| (language.0.clone(), task.title.clone())),
             Some(("fake".to_owned(), "Run fake".to_owned()))
         );
+    }
+
+    #[test]
+    fn ui_catalog_is_derived_only_from_registered_contributions() {
+        let mut fake = contribution("fake");
+        fake.new_item_templates.push(NewItemTemplate {
+            id: NewItemTemplateId::new("fake.module"),
+            title: "New module".to_owned(),
+            name_caption: "Name".to_owned(),
+            file_extension: Some("fake".to_owned()),
+            allows_empty_name: false,
+        });
+        fake.settings_sections.push(SettingsSection {
+            id: "fake.runtime".to_owned(),
+            title: "Runtime".to_owned(),
+            field_caption: "SDK".to_owned(),
+            browse_button_title: "Browse".to_owned(),
+        });
+        let mut registry = ContributionRegistry::default();
+        assert!(registry.register(fake).is_ok());
+        let catalog = registry.ui_catalog();
+        assert_eq!(catalog.language_names, vec!["fake"]);
+        assert_eq!(catalog.source_root_names, vec!["fake"]);
+        assert_eq!(catalog.new_item_templates[0].id.as_str(), "fake.module");
+        assert_eq!(catalog.settings_sections[0].field_caption, "SDK");
+        assert_eq!(catalog.tasks[0].id, TaskId("fake.run".to_owned()));
     }
 }

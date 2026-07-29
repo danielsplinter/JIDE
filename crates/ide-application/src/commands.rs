@@ -5,6 +5,8 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use ide_domain::DocumentId;
 use thiserror::Error;
 
+use crate::TaskId;
+
 /// Intenções que atravessam a fronteira entre apresentação e aplicação.
 ///
 /// A interface apenas descreve o pedido. Quem conhece providers, adapters,
@@ -16,15 +18,13 @@ pub enum ApplicationCommand {
     ReloadWorkspace,
     OpenProject,
     OpenSettings,
-    OpenCompilerSettings,
+    OpenToolchainSettings,
     BrowseToolchain,
     SelectToolchain(usize),
     BuildProject,
     ReimportProject,
-    CompileProject,
     RunProject,
-    RunActiveFile,
-    TestProject,
+    ExecuteTask(TaskId),
     StopProject,
     Navigate(NavigationRequest),
     CreateItem(NewItemRequest),
@@ -111,6 +111,35 @@ pub struct NewItemRequest {
     pub package: String,
     pub name: String,
     pub source_root: PathBuf,
+}
+
+/// Delimita explicitamente os arquivos que uma busca textual pode visitar.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchScope {
+    pub roots: Vec<PathBuf>,
+    pub extensions: Vec<String>,
+}
+
+impl SearchScope {
+    #[must_use]
+    pub fn new(roots: Vec<PathBuf>, extensions: Vec<String>) -> Self {
+        Self { roots, extensions }
+    }
+
+    #[must_use]
+    pub fn contains(&self, path: &std::path::Path) -> bool {
+        let in_root = self.roots.iter().any(|root| path.starts_with(root));
+        let extension_matches = self.extensions.is_empty()
+            || path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| {
+                    self.extensions
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+                });
+        in_root && extension_matches
+    }
 }
 
 pub type CommandHandler = Arc<dyn Fn() -> Result<(), CommandError> + Send + Sync>;

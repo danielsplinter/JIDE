@@ -313,14 +313,41 @@ Implementação concluída em 29/07/2026:
   mesmo `TaskController`, comprovando que controllers não precisam mudar para
   receber outra linguagem.
 
-### Fase 4 — UI neutra
+### Fase 4 — UI neutra ✅ Concluída
 
-- [ ] substituir `NewItemKind` fechado por templates registrados;
-- [ ] substituir configurações de JDK por seções genéricas;
-- [ ] substituir textos fixos Java por modelos fornecidos;
-- [ ] tornar busca de conteúdo neutra e dirigida por `SearchScope`;
-- [ ] gerar menus e botões de tarefas a partir de descritores;
-- [ ] manter todos os fluxos Java atuais sem regressão visual.
+- [x] substituir `NewItemKind` fechado por templates registrados;
+- [x] substituir configurações de JDK por seções genéricas;
+- [x] substituir textos fixos Java por modelos fornecidos;
+- [x] tornar busca de conteúdo neutra e dirigida por `SearchScope`;
+- [x] gerar menus e botões de tarefas a partir de descritores;
+- [x] manter todos os fluxos Java atuais sem regressão visual.
+
+Implementação concluída:
+
+- `ContributionRegistry::ui_catalog` agrega nomes de linguagem, raízes de
+  fontes, `NewItemTemplate`, `SettingsSection` e `TaskDescriptor` sem expor
+  providers concretos à apresentação;
+- `IdeShell::set_ui_catalog` reconstrói a árvore, menus, páginas de
+  configuração e o botão de tarefa a partir desse catálogo;
+- o menu contextual do Explorer usa identificadores completos de template e a
+  janela de criação usa título, legenda e obrigatoriedade fornecidos pelo
+  descritor, sem constantes de pacote, classe ou interface;
+- as páginas contribuídas usam título, legenda da toolchain e texto do botão
+  fornecidos por `SettingsSection`; a página interna de depuração permanece
+  independente das linguagens;
+- `ApplicationCommand::ExecuteTask(TaskId)` substitui os três comandos
+  fechados de compilar, executar arquivo e testar; menu, botão e atalhos
+  convergem para o mesmo despacho pelo `TaskController`;
+- `SearchScope` contém raízes e extensões explícitas. `ide-workspace` não
+  reconhece nomes de diretório de linguagem e não pesquisa fora do escopo;
+- quando o modelo de projeto ainda não está disponível, a aplicação encontra
+  raízes pelos nomes declarados em `LanguageDescriptor`, constrói o
+  `SearchScope` e mantém o `Ctrl+Shift+L` funcional;
+- a apresentação do caminho dos resultados usa os nomes de raiz registrados,
+  preservando para Java o caminho relativo após a última pasta `java`;
+- testes com uma contribuição fictícia comprovam geração de template, seção e
+  tarefa sem mudanças na UI, e um guardrail arquitetural impede a volta de
+  templates Java fixos ou da inferência de `java` na busca.
 
 ### Fase 5 — Decomposição de `IdeShell`
 

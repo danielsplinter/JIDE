@@ -22,24 +22,28 @@ fn label(node: &FileNode) -> &str {
         .unwrap_or("?")
 }
 
-pub(super) fn is_java_source_root(path: &Path) -> bool {
-    if path.file_name().and_then(|name| name.to_str()) != Some("java") {
+pub(super) fn is_source_root(path: &Path, source_root_names: &[String]) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
-    }
-    let mut ancestors = path.ancestors().skip(1);
-    let parent = ancestors.next().and_then(Path::file_name);
-    let grandparent = ancestors.next().and_then(Path::file_name);
-    parent.is_some_and(|name| name == "src") || grandparent.is_some_and(|name| name == "src")
+    };
+    source_root_names
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
-pub(super) fn is_java_package(path: &Path) -> bool {
-    path.ancestors().skip(1).any(is_java_source_root)
+pub(super) fn is_package(path: &Path, source_root_names: &[String]) -> bool {
+    path.ancestors()
+        .skip(1)
+        .any(|ancestor| is_source_root(ancestor, source_root_names))
 }
 
-fn compact_package_chain(node: &FileNode) -> (&FileNode, String) {
+fn compact_package_chain<'a>(
+    node: &'a FileNode,
+    source_root_names: &[String],
+) -> (&'a FileNode, String) {
     let mut label = label(node).to_owned();
     let mut current = node;
-    while is_java_package(&current.path) {
+    while is_package(&current.path, source_root_names) {
         let [only_child] = current.children.as_slice() else {
             break;
         };
@@ -53,12 +57,12 @@ fn compact_package_chain(node: &FileNode) -> (&FileNode, String) {
     (current, label)
 }
 
-pub(super) fn items(node: &FileNode) -> Vec<TreeItem> {
+pub(super) fn items(node: &FileNode, source_root_names: &[String]) -> Vec<TreeItem> {
     node.children
         .iter()
         .map(|child| {
-            let (node, label) = compact_package_chain(child);
-            TreeItem::new(id(&node.path), label, items(node))
+            let (node, label) = compact_package_chain(child, source_root_names);
+            TreeItem::new(id(&node.path), label, items(node, source_root_names))
         })
         .collect()
 }

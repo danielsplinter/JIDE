@@ -12,8 +12,9 @@ mod terminal;
 pub use debugging::{DebugFrameView, DebugVariableView, DebugView};
 pub use editor::{EditorAction, EditorCapabilities, EditorPane};
 pub use ide_application::{
-    ApplicationCommand, DebugRequest, NavigationRequest, NewItemRequest, NewItemTemplateId,
-    OpenDocumentRequest, SaveDocumentRequest,
+    ApplicationCommand, DebugRequest, NavigationRequest, NewItemRequest, NewItemTemplate,
+    NewItemTemplateId, OpenDocumentRequest, SaveDocumentRequest, SettingsSection, TaskDescriptor,
+    TaskId, UiContributionCatalog,
 };
 pub use search::{ContentSearchHit, TypeSearchHit};
 pub use settings::SettingsPage;
@@ -27,7 +28,7 @@ use std::{
 };
 
 use explorer::{
-    id as explorer_id, is_java_package, is_java_source_root, items as explorer_items,
+    id as explorer_id, is_package, is_source_root, items as explorer_items,
     visible_row as visible_tree_row,
 };
 #[cfg(test)]
@@ -47,7 +48,7 @@ use menus::{
 };
 use search::WorkspaceSearchMode;
 #[cfg(test)]
-use search::type_search_display_path;
+use search::search_display_path;
 use settings::SettingsDialog;
 use shell::ShellCommandQueue;
 use terminal::{
@@ -95,8 +96,8 @@ const DEBUG_PANEL_WIDTH: f32 = 320.0;
 const DEBUG_ROW_HEIGHT: f32 = 21.0;
 const MENU_BAR_ID: WidgetId = WidgetId(10_001);
 const SETTINGS_MODAL_ID: WidgetId = WidgetId(10_002);
-const JDK_COMBO_ID: WidgetId = WidgetId(10_003);
-const JDK_BROWSE_ID: WidgetId = WidgetId(10_004);
+const TOOLCHAIN_COMBO_ID: WidgetId = WidgetId(10_003);
+const TOOLCHAIN_BROWSE_ID: WidgetId = WidgetId(10_004);
 const SETTINGS_CLOSE_ID: WidgetId = WidgetId(10_005);
 const SETTINGS_SAVE_ID: WidgetId = WidgetId(10_030);
 const SETTINGS_TITLE_ID: WidgetId = WidgetId(10_031);
@@ -104,7 +105,7 @@ const SETTINGS_CAPTION_ID: WidgetId = WidgetId(10_032);
 const SETTINGS_MESSAGE_ID: WidgetId = WidgetId(10_033);
 const SETTINGS_PAGES_ID: WidgetId = WidgetId(10_034);
 /// Páginas da janela de configurações, na ordem em que aparecem.
-const SETTINGS_PAGE_TITLES: [&str; 2] = ["Compilador e VM", "Depuração"];
+const DEBUG_SETTINGS_TITLE: &str = "Depuração";
 const SETTINGS_PAGE_ROW_HEIGHT: f32 = 42.0;
 const NEW_ITEM_MODAL_ID: WidgetId = WidgetId(10_035);
 const NEW_ITEM_PACKAGE_ID: WidgetId = WidgetId(10_036);
@@ -272,42 +273,17 @@ struct InspectionView {
 
 /// Janela de criação enquanto está aberta.
 struct NewItemDialog {
-    template_id: NewItemTemplateId,
+    template: NewItemTemplate,
     source_root: PathBuf,
     message: Option<String>,
     /// Campo com o foco: `false` é o pacote, `true` é o nome.
     naming: bool,
 }
 
-const PACKAGE_TEMPLATE: &str = "java.package";
-const CLASS_TEMPLATE: &str = "java.class";
-const INTERFACE_TEMPLATE: &str = "java.interface";
-
-fn new_item_title(template_id: &NewItemTemplateId) -> &'static str {
-    match template_id.as_str() {
-        PACKAGE_TEMPLATE => "Novo pacote",
-        CLASS_TEMPLATE => "Nova classe",
-        INTERFACE_TEMPLATE => "Nova interface",
-        _ => "Novo item",
-    }
-}
-
-fn new_item_name_caption(template_id: &NewItemTemplateId) -> &'static str {
-    match template_id.as_str() {
-        PACKAGE_TEMPLATE => "Classe (opcional)",
-        CLASS_TEMPLATE => "Nome da classe",
-        INTERFACE_TEMPLATE => "Nome da interface",
-        _ => "Nome",
-    }
-}
-
-fn is_package_template(template_id: &NewItemTemplateId) -> bool {
-    template_id.as_str() == PACKAGE_TEMPLATE
-}
-
 pub struct IdeShell {
     workspace_name: String,
     workspace: FileNode,
+    ui_catalog: UiContributionCatalog,
     /// O Explorer é a `TreeView` da biblioteca. Ela é reconstruída só quando a
     /// árvore ou a expansão mudam — o caminho oposto ao das abas, porque
     /// remontar milhares de nós a cada quadro custaria caro.
@@ -382,8 +358,8 @@ pub struct IdeShell {
     terminal_selecting: bool,
     menu_bar: MenuBar,
     settings_modal: ModalHost,
-    jdk_combo: ComboBox,
-    jdk_browse_button: Button,
+    toolchain_combo: ComboBox,
+    toolchain_browse_button: Button,
     settings_close_button: Button,
     settings_save_button: Button,
     /// Navegação entre as páginas da janela de configurações.
@@ -540,8 +516,10 @@ impl IdeShell {
         // A `TreeView` guarda os itens dela: reler o disco sem repô-los deixava a
         // árvore desenhando a varredura anterior. `set_roots` preserva expansão e
         // seleção por identidade, então a posição do usuário não se perde.
-        self.explorer_tree
-            .set_roots(explorer_items(&self.workspace));
+        self.explorer_tree.set_roots(explorer_items(
+            &self.workspace,
+            &self.ui_catalog.source_root_names,
+        ));
         self.sync_explorer_tree();
     }
 
@@ -621,11 +599,12 @@ impl IdeShell {
                     })
             })
             .collect();
-        let explorer_tree = TreeView::new(EXPLORER_TREE_ID, explorer_items(&workspace))
+        let explorer_tree = TreeView::new(EXPLORER_TREE_ID, explorer_items(&workspace, &[]))
             .with_row_height(EXPLORER_ROW_HEIGHT);
         let mut shell = Self {
             workspace_name,
             workspace,
+            ui_catalog: UiContributionCatalog::default(),
             explorer_tree,
             context_menu: ContextMenu::new(EXPLORER_CONTEXT_MENU_ID, Vec::new()),
             context_menu_target: None,
@@ -702,13 +681,15 @@ impl IdeShell {
                 "Configurações",
                 Size::new(780.0, 460.0),
             ),
-            jdk_combo: ComboBox::new(JDK_COMBO_ID, Vec::new()).with_command_prefix("jdk.select."),
-            jdk_browse_button: Button::new(JDK_BROWSE_ID, "Procurar...").with_command("jdk.browse"),
+            toolchain_combo: ComboBox::new(TOOLCHAIN_COMBO_ID, Vec::new())
+                .with_command_prefix("toolchain.select."),
+            toolchain_browse_button: Button::new(TOOLCHAIN_BROWSE_ID, "Procurar...")
+                .with_command("toolchain.browse"),
             settings_close_button: Button::new(SETTINGS_CLOSE_ID, "Cancelar")
                 .with_command("settings.cancel"),
             settings_save_button: Button::new(SETTINGS_SAVE_ID, "Salvar")
                 .with_command("settings.save"),
-            settings_pages: ListView::new(SETTINGS_PAGES_ID, SETTINGS_PAGE_TITLES)
+            settings_pages: ListView::new(SETTINGS_PAGES_ID, [DEBUG_SETTINGS_TITLE])
                 .with_row_height(SETTINGS_PAGE_ROW_HEIGHT)
                 .with_selection(ListSelection::Marker),
             type_search_modal: ModalHost::new(
@@ -848,8 +829,13 @@ impl IdeShell {
         let error_count = snapshot.diagnostics.len();
         let symbol_count = count_outline(&snapshot.outline);
         let import_count = snapshot.imports.len();
+        let language = self
+            .ui_catalog
+            .language_names
+            .first()
+            .map_or("Análise", String::as_str);
         self.status_message = format!(
-            "Java: {error_count} error(s), {symbol_count} symbol(s), {import_count} import(s)"
+            "{language}: {error_count} error(s), {symbol_count} symbol(s), {import_count} import(s)"
         );
         self.syntax_snapshots.insert(snapshot.document_id, snapshot);
     }
@@ -917,47 +903,121 @@ impl IdeShell {
     pub fn set_status_message(&mut self, message: impl Into<String>) {
         self.status_message = message.into();
     }
+
+    /// Instala o modelo visual agregado das contribuições de linguagem.
+    ///
+    /// Templates, páginas, raízes e tarefas deixam de ser convenções da UI:
+    /// trocar o catálogo reconstrói os controles que apresentam esses dados.
+    pub fn set_ui_catalog(&mut self, catalog: UiContributionCatalog) {
+        let mut project_items = vec![
+            MenuItem::new("Compilar projeto", "project.build"),
+            MenuItem::new("Reimportar projeto", "project.reimport"),
+            MenuItem::new("Executar aplicação", "project.run"),
+            MenuItem::new("Parar aplicação", "project.stop"),
+        ];
+        project_items.extend(catalog.tasks.iter().map(|task| {
+            MenuItem::new(
+                task.title.clone(),
+                CommandId(format!("task.execute.{}", task.id.0)),
+            )
+        }));
+        self.menu_bar = MenuBar::new(
+            MENU_BAR_ID,
+            vec![
+                MenuBarItem::menu(
+                    "Arquivo",
+                    vec![
+                        MenuItem::new("Projeto...", "file.project"),
+                        MenuItem::new("Salvar", "file.save"),
+                    ],
+                ),
+                MenuBarItem::menu("Projeto", project_items),
+                MenuBarItem::menu(
+                    "Depurar",
+                    vec![
+                        MenuItem::new("Conectar...", "debug.connect"),
+                        MenuItem::new("Continuar", "debug.continue"),
+                        MenuItem::new("Pausar", "debug.pause"),
+                        MenuItem::new("Passo sobre", "debug.over"),
+                        MenuItem::new("Entrar", "debug.into"),
+                        MenuItem::new("Sair", "debug.out"),
+                        MenuItem::new("Desconectar", "debug.detach"),
+                    ],
+                ),
+                MenuBarItem::command("Configurações", "settings.open"),
+            ],
+        );
+        let mut settings_titles = catalog
+            .settings_sections
+            .iter()
+            .map(|section| section.title.clone())
+            .collect::<Vec<_>>();
+        settings_titles.push(DEBUG_SETTINGS_TITLE.to_owned());
+        self.settings_pages = ListView::new(SETTINGS_PAGES_ID, settings_titles)
+            .with_row_height(SETTINGS_PAGE_ROW_HEIGHT)
+            .with_selection(ListSelection::Marker);
+        if let Some(section) = catalog.settings_sections.first() {
+            self.toolchain_browse_button =
+                Button::new(TOOLCHAIN_BROWSE_ID, section.browse_button_title.clone())
+                    .with_command("toolchain.browse");
+        }
+        if let Some(task) = catalog.tasks.iter().find(|task| task.show_in_toolbar) {
+            self.run_button = Button::icon(RUN_BUTTON_ID, Icon::Play, task.title.clone())
+                .with_tint(IconTint::Success)
+                .with_command(CommandId(format!("task.execute.{}", task.id.0)));
+        }
+        self.ui_catalog = catalog;
+        self.explorer_tree.set_roots(explorer_items(
+            &self.workspace,
+            &self.ui_catalog.source_root_names,
+        ));
+    }
+
+    #[must_use]
+    pub fn ui_catalog(&self) -> &UiContributionCatalog {
+        &self.ui_catalog
+    }
     pub fn open_settings_dialog(
         &mut self,
         toolchain_items: Vec<String>,
         selected_toolchain: usize,
     ) {
-        self.jdk_combo.set_items(
+        self.toolchain_combo.set_items(
             toolchain_items
                 .into_iter()
                 .enumerate()
                 .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
                 .collect(),
         );
-        self.jdk_combo.set_selected(selected_toolchain);
+        self.toolchain_combo.set_selected(selected_toolchain);
         self.settings_modal.open();
         // Reabrir a janela recomeça a transação: o que ficou pendente de uma
         // abertura anterior foi descartado com ela.
         self.settings_dialog = Some(SettingsDialog {
             message: None,
-            pending_jdk: None,
-            original_jdk: Some(selected_toolchain),
+            pending_toolchain: None,
+            original_toolchain: Some(selected_toolchain),
             original_debug_host: self.debug_host.value().to_owned(),
             original_debug_port: self.debug_port.value().to_owned(),
         });
     }
 
-    /// Repõe a lista de JDKs e deixa um deles escolhido, sem sair da transação.
+    /// Repõe a lista de toolchains e deixa uma delas escolhida, sem sair da transação.
     ///
     /// É o que o `Procurar...` precisa: a instalação apontada entra na lista e
     /// fica pendente como qualquer escolha feita no combo. Reabrir a janela
     /// recomeçaria a transação e apagaria o que já estava pendente.
     pub fn set_toolchain_options(&mut self, toolchain_items: Vec<String>, pending: usize) {
-        self.jdk_combo.set_items(
+        self.toolchain_combo.set_items(
             toolchain_items
                 .into_iter()
                 .enumerate()
                 .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
                 .collect(),
         );
-        self.jdk_combo.set_selected(pending);
+        self.toolchain_combo.set_selected(pending);
         if let Some(dialog) = self.settings_dialog.as_mut() {
-            dialog.pending_jdk = Some(pending);
+            dialog.pending_toolchain = Some(pending);
             dialog.message = None;
         }
     }
@@ -1693,7 +1753,11 @@ impl IdeShell {
             .iter()
             .map(|path| explorer_id(path))
             .collect::<HashSet<_>>();
-        if let Some(row) = visible_tree_row(&explorer_items(&self.workspace), &expanded, target) {
+        if let Some(row) = visible_tree_row(
+            &explorer_items(&self.workspace, &self.ui_catalog.source_root_names),
+            &expanded,
+            target,
+        ) {
             // Duas linhas de contexto ajudam a reconhecer o pacote pai. A cópia
             // da TreeView usada na pintura limita o deslocamento no fim da lista.
             self.explorer_scroll_line = row.saturating_sub(2);
@@ -2141,8 +2205,11 @@ impl IdeShell {
         } else {
             path.parent().map(Path::to_path_buf).unwrap_or(path)
         };
-        self.context_menu
-            .set_entries(explorer_menu_entries(&target));
+        self.context_menu.set_entries(explorer_menu_entries(
+            &target,
+            &self.ui_catalog.source_root_names,
+            &self.ui_catalog.new_item_templates,
+        ));
         self.context_menu.layout(
             &self.layout_context(),
             Rect::new(0.0, 0.0, size.width, size.height),
@@ -2223,17 +2290,23 @@ impl IdeShell {
         let Some(target) = self.context_menu_target.clone() else {
             return;
         };
-        let template_id = match command {
-            "explorer.new.package" => NewItemTemplateId::new(PACKAGE_TEMPLATE),
-            "explorer.new.class" => NewItemTemplateId::new(CLASS_TEMPLATE),
-            "explorer.new.interface" => NewItemTemplateId::new(INTERFACE_TEMPLATE),
-            "explorer.new.folder" => {
-                self.status_message = format!("Nova pasta em {}", target.display());
-                return;
-            }
-            _ => return,
+        if command == "explorer.new.folder" {
+            self.status_message = format!("Nova pasta em {}", target.display());
+            return;
+        }
+        let Some(template_id) = command.strip_prefix("explorer.new.") else {
+            return;
         };
-        self.open_new_item_dialog(template_id, &target);
+        let Some(template) = self
+            .ui_catalog
+            .new_item_templates
+            .iter()
+            .find(|template| template.id.as_str() == template_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.open_new_item_dialog(template, &target);
     }
 
     /// Abre a janela de criação com o pacote do alvo já preenchido.
@@ -2242,13 +2315,13 @@ impl IdeShell {
     /// no Explorer e o que ele vai editar para criar um pacote abaixo. Sem raiz de
     /// fontes não há pacote, e a janela não abre — o menu que oferece essas ações
     /// só aparece dentro dela.
-    fn open_new_item_dialog(&mut self, template_id: NewItemTemplateId, target: &Path) {
+    fn open_new_item_dialog(&mut self, template: NewItemTemplate, target: &Path) {
         let Some(source_root) = target
             .ancestors()
-            .find(|ancestor| is_java_source_root(ancestor))
+            .find(|ancestor| is_source_root(ancestor, &self.ui_catalog.source_root_names))
             .map(Path::to_path_buf)
         else {
-            self.status_message = "Fora de uma raiz de fontes Java".to_owned();
+            self.status_message = "Fora de uma raiz de fontes registrada".to_owned();
             return;
         };
         let package = target
@@ -2263,17 +2336,17 @@ impl IdeShell {
             .unwrap_or_default();
         self.new_item_package.set_value(package);
         self.new_item_name.set_value(String::new());
-        self.new_item_modal.set_title(new_item_title(&template_id));
+        self.new_item_modal.set_title(template.title.clone());
         self.new_item_modal.open();
         self.new_item_dialog = Some(NewItemDialog {
-            template_id: template_id.clone(),
+            template: template.clone(),
             source_root,
             message: None,
             naming: false,
         });
         // O pacote já vem preenchido, então o que falta digitar é o nome —
         // exceto ao criar pacote, em que o nome é justamente o que se edita.
-        self.focus_new_item_field(!is_package_template(&template_id));
+        self.focus_new_item_field(!template.allows_empty_name);
     }
 
     pub const fn new_item_dialog_open(&self) -> bool {
@@ -2301,7 +2374,7 @@ impl IdeShell {
         let Some(dialog) = self.new_item_dialog.as_ref() else {
             return;
         };
-        let template_id = dialog.template_id.clone();
+        let template_id = dialog.template.id.clone();
         let source_root = dialog.source_root.clone();
         let package = self.new_item_package.value().trim().to_owned();
         let name = self.new_item_name.value().trim().to_owned();
@@ -2309,7 +2382,7 @@ impl IdeShell {
             self.set_new_item_message("Informe o pacote.");
             return;
         }
-        if name.is_empty() && !is_package_template(&template_id) {
+        if name.is_empty() && !dialog.template.allows_empty_name {
             self.set_new_item_message("Informe o nome.");
             return;
         }
@@ -2392,6 +2465,15 @@ impl IdeShell {
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "project.stop" => {
                 self.commands.push(ApplicationCommand::StopProject);
+                return;
+            }
+            EventResult::Action(WidgetAction::Command(command))
+                if command.0.starts_with("task.execute.") =>
+            {
+                if let Some(id) = command.0.strip_prefix("task.execute.") {
+                    self.commands
+                        .push(ApplicationCommand::ExecuteTask(TaskId(id.to_owned())));
+                }
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "debug.connect" => {
@@ -2896,7 +2978,7 @@ impl IdeShell {
                 modifiers,
             });
             let mut context = EventContext::default();
-            let result = self.jdk_combo.event(&mut context, &event);
+            let result = self.toolchain_combo.event(&mut context, &event);
             if !self.handle_settings_action(result) {
                 let _ = self.settings_modal.event(&mut context, &event);
                 // A janela fechada por dentro do componente — Esc no
@@ -3076,7 +3158,11 @@ impl IdeShell {
     /// linha vazia de cada arquivo não é um resultado útil.
     pub fn open_content_search(&mut self) {
         self.workspace_search_mode = WorkspaceSearchMode::Content;
-        self.type_search_modal.set_title("Buscar conteúdo em Java");
+        let title = self.ui_catalog.language_names.first().map_or_else(
+            || "Buscar conteúdo".to_owned(),
+            |language| format!("Buscar conteúdo em {language}"),
+        );
+        self.type_search_modal.set_title(title);
         self.type_search_query.clear();
         self.type_search_results.clear();
         self.content_search_results.clear();
@@ -3102,7 +3188,7 @@ impl IdeShell {
         self.type_search_first_visible = 0;
     }
 
-    /// Entrega as ocorrências encontradas nos arquivos sob raízes `java`.
+    /// Entrega as ocorrências encontradas dentro do escopo fornecido pela aplicação.
     pub fn set_content_search_results(&mut self, results: Vec<ContentSearchHit>) {
         self.content_search_results = results;
         self.type_search_results.clear();
@@ -4191,13 +4277,14 @@ impl IdeShell {
             let pages = self.settings_pages_for(&geometry);
             pages.paint(&mut component_paint);
             match self.settings_page {
-                SettingsPage::Compiler => {
+                SettingsPage::Contribution(index) => {
+                    let section = self.ui_catalog.settings_sections.get(index);
                     // Título e legenda são `Label` da biblioteca: tamanho e cor
                     // vêm do tema, não de números escritos aqui.
                     self.paint_settings_text(
                         &mut component_paint,
                         SETTINGS_TITLE_ID,
-                        "Compilador e VM",
+                        section.map_or("Ferramenta", |section| section.title.as_str()),
                         Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 34.0),
                         17.0,
                         IconTint::Text,
@@ -4205,15 +4292,15 @@ impl IdeShell {
                     self.paint_settings_text(
                         &mut component_paint,
                         SETTINGS_CAPTION_ID,
-                        "JDK",
+                        section.map_or("Toolchain", |section| section.field_caption.as_str()),
                         Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 16.0),
                         13.0,
                         IconTint::Muted,
                     );
-                    let mut combo = self.jdk_combo.clone();
+                    let mut combo = self.toolchain_combo.clone();
                     combo.layout(&self.layout_context(), geometry.combo);
                     combo.paint(&mut component_paint);
-                    let mut browse = self.jdk_browse_button.clone();
+                    let mut browse = self.toolchain_browse_button.clone();
                     browse.layout(&self.layout_context(), geometry.browse);
                     browse.paint(&mut component_paint);
                 }
@@ -4528,7 +4615,7 @@ impl IdeShell {
         );
         let placeholder = match self.workspace_search_mode {
             WorkspaceSearchMode::Types => "Nome da classe, interface, record ou enum",
-            WorkspaceSearchMode::Content => "Texto nos arquivos das pastas java",
+            WorkspaceSearchMode::Content => "Texto nos arquivos do escopo do projeto",
         };
         let mut field = TextInput::new(TYPE_SEARCH_INPUT_ID, &self.type_search_query)
             .with_placeholder(placeholder);
@@ -4549,14 +4636,14 @@ impl IdeShell {
                 .iter()
                 .skip(self.type_search_first_visible)
                 .take(TYPE_SEARCH_VISIBLE_ROWS)
-                .map(TypeSearchHit::label)
+                .map(|hit| hit.label(&self.ui_catalog.source_root_names))
                 .collect::<Vec<_>>(),
             WorkspaceSearchMode::Content => self
                 .content_search_results
                 .iter()
                 .skip(self.type_search_first_visible)
                 .take(TYPE_SEARCH_VISIBLE_ROWS)
-                .map(ContentSearchHit::label)
+                .map(|hit| hit.label(&self.ui_catalog.source_root_names))
                 .collect::<Vec<_>>(),
         };
         let mut list =
@@ -4598,7 +4685,7 @@ impl IdeShell {
         self.paint_settings_text(
             &mut paint,
             NEW_ITEM_NAME_CAPTION_ID,
-            new_item_name_caption(&dialog.template_id),
+            &dialog.template.name_caption,
             Point::new(geometry.name.origin.x, geometry.name.origin.y - 18.0),
             13.0,
             IconTint::Muted,
@@ -4754,10 +4841,13 @@ impl IdeShell {
     fn settings_pages_for(&self, geometry: &SettingsDialogGeometry) -> ListView {
         let mut pages = self.settings_pages.clone();
         pages.set_selected(Some(match self.settings_page {
-            SettingsPage::Compiler => 0,
-            SettingsPage::Debug => 1,
+            SettingsPage::Contribution(index) => index,
+            SettingsPage::Debug => self.ui_catalog.settings_sections.len(),
         }));
-        pages.layout(&self.layout_context(), settings_pages_rect(geometry));
+        pages.layout(
+            &self.layout_context(),
+            settings_pages_rect(geometry, self.ui_catalog.settings_sections.len() + 1),
+        );
         pages
     }
 
@@ -4800,11 +4890,14 @@ impl IdeShell {
             &mut EventContext::default(),
             &UiEvent::PointerDown(primary_pointer(point)),
         );
-        if let Some(page) = pages.selected().and_then(|index| match index {
-            0 => Some(SettingsPage::Compiler),
-            1 => Some(SettingsPage::Debug),
-            _ => None,
-        }) && settings_pages_rect(&geometry).contains(point)
+        if let Some(page) = pages.selected().map(|index| {
+            if index < self.ui_catalog.settings_sections.len() {
+                SettingsPage::Contribution(index)
+            } else {
+                SettingsPage::Debug
+            }
+        }) && settings_pages_rect(&geometry, self.ui_catalog.settings_sections.len() + 1)
+            .contains(point)
         {
             self.settings_page = page;
             self.settings_focus = None;
@@ -4814,9 +4907,9 @@ impl IdeShell {
             self.debug_page_pointer_down(point, &geometry);
             return;
         }
-        self.jdk_combo
+        self.toolchain_combo
             .layout(&self.layout_context(), geometry.combo);
-        self.jdk_browse_button
+        self.toolchain_browse_button
             .layout(&self.layout_context(), geometry.browse);
         self.settings_close_button
             .layout(&self.layout_context(), geometry.close);
@@ -4824,12 +4917,12 @@ impl IdeShell {
             .layout(&self.layout_context(), geometry.save);
         let event = UiEvent::PointerDown(primary_pointer(point));
         let mut context = EventContext::default();
-        let combo_result = self.jdk_combo.event(&mut context, &event);
+        let combo_result = self.toolchain_combo.event(&mut context, &event);
         let combo_consumed = !matches!(combo_result, EventResult::Ignored);
         if self.handle_settings_action(combo_result) || combo_consumed {
             return;
         }
-        let browse_result = click_widget(&mut self.jdk_browse_button, point);
+        let browse_result = click_widget(&mut self.toolchain_browse_button, point);
         if self.handle_settings_action(browse_result) {
             return;
         }
@@ -4870,7 +4963,7 @@ impl IdeShell {
                 12.0,
             ),
             label(
-                "Vale para qualquer processo Java: servidor, container ou ferramenta.",
+                "Vale para qualquer processo depurado: servidor, container ou ferramenta.",
                 Point::new(origin.x, geometry.debug_attach.origin.y + 66.0),
                 colors.muted_text,
                 12.0,
@@ -4938,6 +5031,12 @@ impl IdeShell {
                     "project.run" => {
                         self.commands.push(ApplicationCommand::RunProject);
                         self.status_message = "Executando a aplicação".to_owned();
+                    }
+                    task if task.starts_with("task.execute.") => {
+                        if let Some(id) = task.strip_prefix("task.execute.") {
+                            self.commands
+                                .push(ApplicationCommand::ExecuteTask(TaskId(id.to_owned())));
+                        }
                     }
                     "debug.run" => self.request_run_and_attach(),
                     _ => continue,
@@ -5038,17 +5137,17 @@ impl IdeShell {
         };
         if let Some(index) = command
             .0
-            .strip_prefix("jdk.select.")
+            .strip_prefix("toolchain.select.")
             .and_then(|value| value.parse::<usize>().ok())
         {
             // A escolha fica pendente: quem aplica é o Salvar.
             if let Some(dialog) = self.settings_dialog.as_mut() {
-                dialog.pending_jdk = Some(index);
+                dialog.pending_toolchain = Some(index);
             }
             return true;
         }
         match command.0.as_str() {
-            "jdk.browse" => {
+            "toolchain.browse" => {
                 self.commands.push(ApplicationCommand::BrowseToolchain);
                 true
             }
@@ -5066,13 +5165,13 @@ impl IdeShell {
 
     /// Aplica o que foi mexido e fecha.
     ///
-    /// Só o que mudou sai daqui: sem escolha pendente, salvar não reaplica o JDK
+    /// Só o que mudou sai daqui: sem escolha pendente, salvar não reaplica a toolchain
     /// que já estava valendo — reaplicar derrubaria o provider de linguagem e
     /// reindexaria a biblioteca padrão por nada.
     fn save_settings(&mut self) {
         if let Some(dialog) = self.settings_dialog.as_ref()
-            && let Some(index) = dialog.pending_jdk
-            && dialog.original_jdk != Some(index)
+            && let Some(index) = dialog.pending_toolchain
+            && dialog.original_toolchain != Some(index)
         {
             self.commands
                 .push(ApplicationCommand::SelectToolchain(index));
@@ -5084,8 +5183,8 @@ impl IdeShell {
     /// Descarta tudo o que foi mexido e fecha.
     fn cancel_settings(&mut self) {
         if let Some(dialog) = self.settings_dialog.take() {
-            if let Some(original) = dialog.original_jdk {
-                self.jdk_combo.set_selected(original);
+            if let Some(original) = dialog.original_toolchain {
+                self.toolchain_combo.set_selected(original);
             }
             self.debug_host.set_value(dialog.original_debug_host);
             self.debug_port.set_value(dialog.original_debug_port);
@@ -5312,12 +5411,12 @@ fn new_item_geometry(panel: Rect) -> NewItemGeometry {
 }
 
 /// Área que a lista de páginas ocupa: as linhas, e não a barra inteira.
-fn settings_pages_rect(geometry: &SettingsDialogGeometry) -> Rect {
+fn settings_pages_rect(geometry: &SettingsDialogGeometry, page_count: usize) -> Rect {
     Rect::new(
         geometry.compiler_option.origin.x,
         geometry.compiler_option.origin.y,
         geometry.compiler_option.size.width,
-        SETTINGS_PAGE_ROW_HEIGHT * SETTINGS_PAGE_TITLES.len() as f32,
+        SETTINGS_PAGE_ROW_HEIGHT * page_count as f32,
     )
 }
 
@@ -5576,6 +5675,83 @@ fn count_outline(items: &[OutlineItem]) -> usize {
 mod tests {
     use super::*;
 
+    fn java_source_roots() -> Vec<String> {
+        vec!["java".to_owned()]
+    }
+
+    fn java_catalog() -> UiContributionCatalog {
+        UiContributionCatalog {
+            language_names: vec!["Java".to_owned()],
+            source_root_names: java_source_roots(),
+            new_item_templates: vec![
+                NewItemTemplate {
+                    id: NewItemTemplateId::new("java.package"),
+                    title: "Novo pacote".to_owned(),
+                    name_caption: "Classe (opcional)".to_owned(),
+                    file_extension: None,
+                    allows_empty_name: true,
+                },
+                NewItemTemplate {
+                    id: NewItemTemplateId::new("java.class"),
+                    title: "Nova classe".to_owned(),
+                    name_caption: "Nome da classe".to_owned(),
+                    file_extension: Some("java".to_owned()),
+                    allows_empty_name: false,
+                },
+                NewItemTemplate {
+                    id: NewItemTemplateId::new("java.interface"),
+                    title: "Nova interface".to_owned(),
+                    name_caption: "Nome da interface".to_owned(),
+                    file_extension: Some("java".to_owned()),
+                    allows_empty_name: false,
+                },
+            ],
+            settings_sections: vec![SettingsSection {
+                id: "java.compiler-vm".to_owned(),
+                title: "Compilador e VM".to_owned(),
+                field_caption: "JDK".to_owned(),
+                browse_button_title: "Procurar...".to_owned(),
+            }],
+            tasks: vec![TaskDescriptor {
+                id: TaskId("java.run".to_owned()),
+                title: "Executar".to_owned(),
+                requires_active_document: true,
+                show_in_toolbar: true,
+            }],
+        }
+    }
+
+    fn fake_catalog() -> UiContributionCatalog {
+        UiContributionCatalog {
+            language_names: vec!["Fake".to_owned()],
+            source_root_names: vec!["src".to_owned()],
+            new_item_templates: vec![NewItemTemplate {
+                id: NewItemTemplateId::new("fake.module"),
+                title: "Novo módulo fake".to_owned(),
+                name_caption: "Nome do módulo".to_owned(),
+                file_extension: Some("fake".to_owned()),
+                allows_empty_name: false,
+            }],
+            settings_sections: vec![SettingsSection {
+                id: "fake.runtime".to_owned(),
+                title: "Runtime fake".to_owned(),
+                field_caption: "Runtime".to_owned(),
+                browse_button_title: "Localizar...".to_owned(),
+            }],
+            tasks: vec![TaskDescriptor {
+                id: TaskId("fake.run".to_owned()),
+                title: "Executar fake".to_owned(),
+                requires_active_document: false,
+                show_in_toolbar: true,
+            }],
+        }
+    }
+
+    fn open_java_settings(shell: &mut IdeShell, items: Vec<String>, selected: usize) {
+        shell.set_ui_catalog(java_catalog());
+        shell.open_settings_dialog(items, selected);
+    }
+
     fn test_shell() -> IdeShell {
         let root = PathBuf::from("workspace");
         let directory = root.join("src");
@@ -5689,7 +5865,7 @@ mod tests {
     /// não são pacotes.
     #[test]
     fn explorer_joins_single_child_java_packages_into_one_row() {
-        let items = explorer_items(&maven_project());
+        let items = explorer_items(&maven_project(), &java_source_roots());
         let src = &items[0];
         assert_eq!(labels(&items), vec!["src"]);
         let main = &src.children[0];
@@ -5707,7 +5883,7 @@ mod tests {
     /// clique continua resolvendo para um caminho que existe.
     #[test]
     fn a_joined_package_keeps_the_identity_of_the_deepest_directory() {
-        let items = explorer_items(&maven_project());
+        let items = explorer_items(&maven_project(), &java_source_roots());
         let package = &items[0].children[0].children[0].children[0];
         assert_eq!(
             package.id,
@@ -5729,7 +5905,10 @@ mod tests {
                 ],
             )],
         );
-        assert_eq!(labels(&explorer_items(&tree)), vec!["br"]);
+        assert_eq!(
+            labels(&explorer_items(&tree, &java_source_roots())),
+            vec!["br"]
+        );
     }
 
     /// Fora de uma raiz de fontes não há pacote, e juntar nomes com ponto diria
@@ -5743,7 +5922,7 @@ mod tests {
                 vec![dir("demo/docs/adr", vec![file("demo/docs/adr/0001.md")])],
             )],
         );
-        let items = explorer_items(&tree);
+        let items = explorer_items(&tree, &java_source_roots());
         assert_eq!(labels(&items), vec!["docs"]);
         assert_eq!(labels(&items[0].children), vec!["adr"]);
     }
@@ -5825,7 +6004,11 @@ mod tests {
             "demo/src/test/java/br/com/exemplo",
         ] {
             assert_eq!(
-                entry_labels(&explorer_menu_entries(Path::new(target))),
+                entry_labels(&explorer_menu_entries(
+                    Path::new(target),
+                    &java_source_roots(),
+                    &java_catalog().new_item_templates,
+                )),
                 vec!["Novo pacote", "—", "Nova classe", "Nova interface"],
                 "alvo {target}"
             );
@@ -5837,7 +6020,11 @@ mod tests {
     fn outside_the_source_root_the_menu_offers_a_folder() {
         for target in ["demo", "demo/docs", "demo/src/main/resources"] {
             assert_eq!(
-                entry_labels(&explorer_menu_entries(Path::new(target))),
+                entry_labels(&explorer_menu_entries(
+                    Path::new(target),
+                    &java_source_roots(),
+                    &java_catalog().new_item_templates,
+                )),
                 vec!["Nova pasta"],
                 "alvo {target}"
             );
@@ -5872,6 +6059,7 @@ mod tests {
             )],
         );
         let mut shell = IdeShell::from_tree(tree);
+        shell.set_ui_catalog(java_catalog());
         let size = Size::new(1280.0, 800.0);
         shell.expanded.insert(PathBuf::from("demo/src/main/java"));
         shell.sync_explorer_tree();
@@ -6143,6 +6331,44 @@ mod tests {
     }
 
     #[test]
+    fn contribution_catalog_generates_templates_settings_and_task_button() {
+        let mut shell = test_shell();
+        shell.set_ui_catalog(fake_catalog());
+        assert_eq!(
+            entry_labels(&explorer_menu_entries(
+                Path::new("workspace/src"),
+                &shell.ui_catalog.source_root_names,
+                &shell.ui_catalog.new_item_templates,
+            )),
+            vec!["Novo módulo fake"]
+        );
+        open_java_settings(&mut shell, vec!["Fake SDK".to_owned()], 0);
+        shell.set_ui_catalog(fake_catalog());
+        let texts = shell
+            .paint(Size::new(1_000.0, 700.0))
+            .into_iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(texts.iter().any(|text| text == "Runtime fake"));
+        assert!(texts.iter().any(|text| text == "Runtime"));
+        shell.escape();
+
+        let size = Size::new(1_000.0, 700.0);
+        let run = action_button_rects(size)[1];
+        shell.pointer_down(Point::new(run.origin.x + 2.0, run.origin.y + 2.0), size);
+        assert!(
+            shell
+                .drain_application_commands()
+                .contains(&ApplicationCommand::ExecuteTask(TaskId(
+                    "fake.run".to_owned()
+                )))
+        );
+    }
+
+    #[test]
     fn the_play_button_requests_a_plain_run() {
         let mut shell = test_shell();
         let size = Size::new(1_280.0, 800.0);
@@ -6278,7 +6504,7 @@ mod tests {
     fn the_debug_menu_opens_the_settings_window_on_the_debug_page() {
         let mut shell = test_shell();
         let size = Size::new(1_000.0, 700.0);
-        assert_eq!(shell.settings_page(), SettingsPage::Compiler);
+        assert_eq!(shell.settings_page(), SettingsPage::Contribution(0));
 
         // Menu `Depurar` → `Conectar...`.
         shell.pointer_down(Point::new(280.0, 10.0), size);
@@ -6286,7 +6512,7 @@ mod tests {
         assert!(shell.take_open_settings_request());
         assert_eq!(shell.settings_page(), SettingsPage::Debug);
 
-        shell.open_settings_dialog(vec!["JDK 17".to_owned()], 0);
+        open_java_settings(&mut shell, vec!["JDK 17".to_owned()], 0);
         let texts: Vec<String> = shell
             .paint(size)
             .iter()
@@ -6299,7 +6525,7 @@ mod tests {
         assert!(!texts.iter().any(|text| text == "JDK"));
 
         // O atalho do compilador troca a página de volta.
-        shell.set_settings_page(SettingsPage::Compiler);
+        shell.set_settings_page(SettingsPage::Contribution(0));
         let texts: Vec<String> = shell
             .paint(size)
             .iter()
@@ -6315,7 +6541,7 @@ mod tests {
     fn debug_settings_page_validates_the_target_before_connecting() {
         let mut shell = test_shell();
         let size = Size::new(1_000.0, 700.0);
-        shell.open_settings_dialog(vec!["JDK 8".to_owned()], 0);
+        open_java_settings(&mut shell, vec!["JDK 8".to_owned()], 0);
         shell.settings_modal.layout(
             &LayoutContext::default(),
             Rect::new(0.0, 0.0, size.width, size.height),
@@ -7351,7 +7577,7 @@ mod tests {
         shell.pointer_down(Point::new(340.0, 10.0), size);
         assert!(shell.take_open_settings_request());
 
-        shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
+        open_java_settings(&mut shell, vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
         assert!(shell.settings_dialog_open());
         let paint = shell.paint(size);
         let labels = paint
@@ -7378,7 +7604,7 @@ mod tests {
     fn settings_jdk_combo_and_browse_button_emit_requests() {
         let mut shell = test_shell();
         let size = Size::new(1_000.0, 700.0);
-        shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
+        open_java_settings(&mut shell, vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
         shell.settings_modal.layout(
             &LayoutContext::default(),
             Rect::new(0.0, 0.0, size.width, size.height),
@@ -7416,7 +7642,7 @@ mod tests {
     fn saving_the_settings_applies_the_chosen_jdk() {
         let mut shell = test_shell();
         let size = Size::new(1_000.0, 700.0);
-        shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
+        open_java_settings(&mut shell, vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
         let geometry = open_settings_geometry(&mut shell, size);
         choose_second_jdk(&mut shell, &geometry, size);
         shell.pointer_down(
@@ -7432,7 +7658,7 @@ mod tests {
     fn cancelling_the_settings_discards_every_change() {
         let mut shell = test_shell();
         let size = Size::new(1_000.0, 700.0);
-        shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
+        open_java_settings(&mut shell, vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
         let geometry = open_settings_geometry(&mut shell, size);
         choose_second_jdk(&mut shell, &geometry, size);
         shell.pointer_down(
@@ -7444,12 +7670,12 @@ mod tests {
         );
         assert_eq!(shell.take_settings_jdk_result(), None);
         assert!(!shell.settings_dialog_open());
-        assert_eq!(shell.jdk_combo.selected_index(), 0);
+        assert_eq!(shell.toolchain_combo.selected_index(), 0);
     }
 
     /// Projeto Maven com um pacote já criado, para o menu agir sobre ele.
     fn shell_with_package() -> IdeShell {
-        IdeShell::from_tree(dir(
+        let mut shell = IdeShell::from_tree(dir(
             "demo",
             vec![dir(
                 "demo/src/main/java",
@@ -7458,7 +7684,9 @@ mod tests {
                     vec![dir("demo/src/main/java/br/com", Vec::new())],
                 )],
             )],
-        ))
+        ));
+        shell.set_ui_catalog(java_catalog());
+        shell
     }
 
     /// O menu abre a janela com o pacote do alvo já preenchido.
@@ -7469,7 +7697,7 @@ mod tests {
     fn the_new_item_dialog_opens_with_the_clicked_package() {
         let mut shell = shell_with_package();
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-        shell.run_explorer_command("explorer.new.class");
+        shell.run_explorer_command("explorer.new.java.class");
         assert!(shell.new_item_dialog_open());
         assert_eq!(shell.new_item_package.value(), "br.com");
         assert_eq!(shell.new_item_name.value(), "");
@@ -7481,17 +7709,16 @@ mod tests {
         let mut shell = shell_with_package();
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
         for (command, title) in [
-            ("explorer.new.package", "Novo pacote"),
-            ("explorer.new.class", "Nova classe"),
-            ("explorer.new.interface", "Nova interface"),
+            ("explorer.new.java.package", "Novo pacote"),
+            ("explorer.new.java.class", "Nova classe"),
+            ("explorer.new.java.interface", "Nova interface"),
         ] {
             shell.run_explorer_command(command);
-            let template_id = shell
+            let actual_title = shell
                 .new_item_dialog
                 .as_ref()
-                .map(|dialog| dialog.template_id.clone())
-                .unwrap_or_else(|| NewItemTemplateId::new(PACKAGE_TEMPLATE));
-            assert_eq!(new_item_title(&template_id), title);
+                .map(|dialog| dialog.template.title.as_str());
+            assert_eq!(actual_title, Some(title));
             assert_eq!(shell.new_item_package.value(), "br.com");
         }
     }
@@ -7501,7 +7728,7 @@ mod tests {
     fn enter_with_only_the_package_asks_for_the_package() {
         let mut shell = shell_with_package();
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-        shell.run_explorer_command("explorer.new.package");
+        shell.run_explorer_command("explorer.new.java.package");
         // O foco começa no pacote, com o cursor no fim do que veio preenchido.
         shell.text_input(".exemplo");
         shell.key_down("Enter");
@@ -7509,7 +7736,7 @@ mod tests {
         assert_eq!(
             request,
             Some(NewItemRequest {
-                template_id: NewItemTemplateId::new(PACKAGE_TEMPLATE),
+                template_id: NewItemTemplateId::new("java.package"),
                 package: "br.com.exemplo".to_owned(),
                 name: String::new(),
                 source_root: PathBuf::from("demo/src/main/java"),
@@ -8015,11 +8242,12 @@ mod tests {
             .join("exemplo")
             .join("Pedido.java");
 
-        assert_eq!(type_search_display_path(&absolute), expected);
+        let roots = java_source_roots();
+        assert_eq!(search_display_path(&absolute, &roots), expected);
         assert!(
-            !hit.label().contains("workspace"),
+            !hit.label(&roots).contains("workspace"),
             "o resultado não pode mostrar o caminho absoluto: {}",
-            hit.label()
+            hit.label(&roots)
         );
     }
 
@@ -8925,7 +9153,7 @@ tres"
         let mut shell = shell_with_package();
         let size = Size::new(1280.0, 800.0);
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-        shell.run_explorer_command("explorer.new.class");
+        shell.run_explorer_command("explorer.new.java.class");
         // O painel do `ModalHost` é o retângulo de superfície desenhado sobre o
         // véu, do tamanho declarado para a janela.
         let surface = shell.theme.colors.surface;
@@ -8993,7 +9221,7 @@ tres"
         let mut shell = shell_with_package();
         let size = Size::new(1_000.0, 700.0);
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-        shell.run_explorer_command("explorer.new.package");
+        shell.run_explorer_command("explorer.new.java.package");
         shell.new_item_modal.layout(
             &LayoutContext::default(),
             Rect::new(0.0, 0.0, size.width, size.height),
@@ -9020,14 +9248,14 @@ tres"
     fn enter_with_a_name_asks_for_the_type_inside_the_package() {
         let mut shell = shell_with_package();
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-        shell.run_explorer_command("explorer.new.interface");
+        shell.run_explorer_command("explorer.new.java.interface");
         // Ao criar um tipo o foco já está no nome.
         shell.text_input("Repositorio");
         shell.key_down("Enter");
         assert_eq!(
             shell.take_new_item_request(),
             Some(NewItemRequest {
-                template_id: NewItemTemplateId::new(INTERFACE_TEMPLATE),
+                template_id: NewItemTemplateId::new("java.interface"),
                 package: "br.com".to_owned(),
                 name: "Repositorio".to_owned(),
                 source_root: PathBuf::from("demo/src/main/java"),
@@ -9040,7 +9268,7 @@ tres"
     fn tab_moves_between_the_two_fields() {
         let mut shell = shell_with_package();
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-        shell.run_explorer_command("explorer.new.class");
+        shell.run_explorer_command("explorer.new.java.class");
         shell.key_down("Tab");
         shell.text_input(".exemplo");
         shell.key_down("Tab");
@@ -9049,7 +9277,7 @@ tres"
         assert_eq!(
             shell.take_new_item_request(),
             Some(NewItemRequest {
-                template_id: NewItemTemplateId::new(CLASS_TEMPLATE),
+                template_id: NewItemTemplateId::new("java.class"),
                 package: "br.com.exemplo".to_owned(),
                 name: "Pedido".to_owned(),
                 source_root: PathBuf::from("demo/src/main/java"),
@@ -9062,7 +9290,7 @@ tres"
     fn a_type_without_a_name_is_refused_without_closing() {
         let mut shell = shell_with_package();
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-        shell.run_explorer_command("explorer.new.class");
+        shell.run_explorer_command("explorer.new.java.class");
         shell.key_down("Enter");
         assert_eq!(shell.take_new_item_request(), None);
         assert!(shell.new_item_dialog_open());
@@ -9080,7 +9308,7 @@ tres"
     fn escape_closes_the_new_item_dialog_without_creating() {
         let mut shell = shell_with_package();
         shell.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-        shell.run_explorer_command("explorer.new.class");
+        shell.run_explorer_command("explorer.new.java.class");
         shell.escape();
         assert!(!shell.new_item_dialog_open());
         assert_eq!(shell.take_new_item_request(), None);
@@ -9091,13 +9319,13 @@ tres"
     fn escape_in_the_settings_discards_every_change() {
         let mut shell = test_shell();
         let size = Size::new(1_000.0, 700.0);
-        shell.open_settings_dialog(vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
+        open_java_settings(&mut shell, vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
         let geometry = open_settings_geometry(&mut shell, size);
         choose_second_jdk(&mut shell, &geometry, size);
         shell.escape();
         assert_eq!(shell.take_settings_jdk_result(), None);
         assert!(!shell.settings_dialog_open());
-        assert_eq!(shell.jdk_combo.selected_index(), 0);
+        assert_eq!(shell.toolchain_combo.selected_index(), 0);
     }
 
     fn open_settings_geometry(shell: &mut IdeShell, size: Size) -> SettingsDialogGeometry {

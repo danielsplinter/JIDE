@@ -127,6 +127,7 @@ fn application_contracts_accept_a_fake_language_without_java_dependencies() {
             language_id: LanguageId("fake".to_owned()),
             display_name: "Fake".to_owned(),
             extensions: vec!["fake".to_owned()],
+            source_root_names: vec!["fake".to_owned()],
         },
         Arc::new(FakeProvider {
             activations: Arc::clone(&activations),
@@ -142,11 +143,14 @@ fn application_contracts_accept_a_fake_language_without_java_dependencies() {
     contribution.settings_sections.push(SettingsSection {
         id: "fake.runtime".to_owned(),
         title: "Fake runtime".to_owned(),
+        field_caption: "Runtime".to_owned(),
+        browse_button_title: "Browse...".to_owned(),
     });
     contribution.tasks.push(TaskDescriptor {
         id: TaskId("fake.run".to_owned()),
         title: "Run fake".to_owned(),
         requires_active_document: true,
+        show_in_toolbar: true,
     });
     contribution.task_executor = Some(Arc::new(FakeTaskExecutor {
         executions: Arc::clone(&task_executions),

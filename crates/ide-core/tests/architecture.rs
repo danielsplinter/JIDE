@@ -429,6 +429,41 @@ fn tasks_and_toolchains_are_dispatched_without_java_branches_in_native_ide() {
     );
 }
 
+#[test]
+fn phase_four_keeps_ui_and_workspace_driven_by_neutral_models() {
+    let root = workspace_root();
+    let ui = fs::read_to_string(root.join("crates/ide-ui/src/lib.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ide-ui/src/lib.rs: {error}"));
+    let production_ui = ui.split("#[cfg(test)]\nmod tests").next().unwrap_or(&ui);
+    for forbidden in [
+        "java.package",
+        "java.class",
+        "java.interface",
+        "Buscar conteúdo em Java",
+        "SettingsPage::Compiler",
+        "ApplicationCommand::CompileProject",
+        "ApplicationCommand::RunActiveFile",
+        "ApplicationCommand::TestProject",
+    ] {
+        assert!(
+            !production_ui.contains(forbidden),
+            "a UI neutra não pode conter o fluxo concreto {forbidden}"
+        );
+    }
+    assert!(
+        production_ui.contains("UiContributionCatalog")
+            && production_ui.contains("ApplicationCommand::ExecuteTask"),
+        "templates, seções e tarefas precisam chegar à UI pelo catálogo"
+    );
+
+    let workspace_search = fs::read_to_string(root.join("crates/ide-workspace/src/search.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler a busca: {error}"));
+    assert!(
+        workspace_search.contains("SearchScope") && !workspace_search.contains("\"java\""),
+        "a busca de conteúdo deve obedecer SearchScope sem inferir Java"
+    );
+}
+
 fn visit(
     node: &str,
     graph: &HashMap<String, BTreeSet<String>>,

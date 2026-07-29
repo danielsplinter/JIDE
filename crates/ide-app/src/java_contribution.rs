@@ -203,6 +203,7 @@ pub fn contribution(processes: Arc<dyn ProcessSupervisor>) -> LanguageContributi
             language_id: language_id(),
             display_name: "Java".to_owned(),
             extensions: vec!["java".to_owned()],
+            source_root_names: vec!["java".to_owned()],
         },
         provider,
     );
@@ -238,22 +239,27 @@ pub fn contribution(processes: Arc<dyn ProcessSupervisor>) -> LanguageContributi
     contribution.settings_sections = vec![SettingsSection {
         id: "java.compiler-vm".to_owned(),
         title: "Compilador e VM".to_owned(),
+        field_caption: "JDK".to_owned(),
+        browse_button_title: "Procurar...".to_owned(),
     }];
     contribution.tasks = vec![
         TaskDescriptor {
             id: TaskId(COMPILE_TASK_ID.to_owned()),
             title: "Compilar".to_owned(),
             requires_active_document: false,
+            show_in_toolbar: false,
         },
         TaskDescriptor {
             id: TaskId(RUN_TASK_ID.to_owned()),
             title: "Executar".to_owned(),
             requires_active_document: true,
+            show_in_toolbar: true,
         },
         TaskDescriptor {
             id: TaskId(TEST_TASK_ID.to_owned()),
             title: "Testar".to_owned(),
             requires_active_document: true,
+            show_in_toolbar: false,
         },
     ];
     contribution

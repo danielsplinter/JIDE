@@ -7,13 +7,13 @@ pub mod workspace;
 
 pub use commands::{
     ApplicationCommand, Command, CommandError, CommandRegistry, DebugRequest, NavigationRequest,
-    NewItemRequest, NewItemTemplateId, OpenDocumentRequest, SaveDocumentRequest,
+    NewItemRequest, NewItemTemplateId, OpenDocumentRequest, SaveDocumentRequest, SearchScope,
 };
 pub use contributions::{
     ContributionError, ContributionRegistry, LanguageContribution, LanguageDescriptor,
     NewItemTemplate, SettingsSection, TaskController, TaskControllerError, TaskDescriptor,
     TaskExecutionContext, TaskExecutionError, TaskExecutionResult, TaskExecutor, TaskId,
-    TaskRegistry, ToolchainRegistry, ToolchainSelection,
+    TaskRegistry, ToolchainRegistry, ToolchainSelection, UiContributionCatalog,
 };
 pub use events::{EventBus, IdeEvent, PublishError};
 pub use workspace::{WorkspaceEntry, WorkspacePort, WorkspacePortError};

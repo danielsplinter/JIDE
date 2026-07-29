@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use ide_application::DebugRequest;
+use ide_application::{DebugRequest, NewItemTemplate};
 use ui_components::{MenuEntry, MenuItem};
 use ui_core::CommandId;
 
@@ -24,23 +24,25 @@ pub(super) fn editor_entries(has_selection: bool, debugging: bool) -> Vec<MenuEn
     entries
 }
 
-pub(super) fn explorer_entries(target: &Path) -> Vec<MenuEntry> {
-    if super::is_java_source_root(target) || super::is_java_package(target) {
-        return vec![
-            MenuEntry::Item(MenuItem::new(
-                "Novo pacote",
-                CommandId("explorer.new.package".to_owned()),
-            )),
-            MenuEntry::Separator,
-            MenuEntry::Item(MenuItem::new(
-                "Nova classe",
-                CommandId("explorer.new.class".to_owned()),
-            )),
-            MenuEntry::Item(MenuItem::new(
-                "Nova interface",
-                CommandId("explorer.new.interface".to_owned()),
-            )),
-        ];
+pub(super) fn explorer_entries(
+    target: &Path,
+    source_root_names: &[String],
+    templates: &[NewItemTemplate],
+) -> Vec<MenuEntry> {
+    if super::is_source_root(target, source_root_names)
+        || super::is_package(target, source_root_names)
+    {
+        let mut entries = Vec::new();
+        for (index, template) in templates.iter().enumerate() {
+            entries.push(MenuEntry::Item(MenuItem::new(
+                template.title.clone(),
+                CommandId(format!("explorer.new.{}", template.id.as_str())),
+            )));
+            if template.file_extension.is_none() && index + 1 < templates.len() {
+                entries.push(MenuEntry::Separator);
+            }
+        }
+        return entries;
     }
     vec![MenuEntry::Item(MenuItem::new(
         "Nova pasta",
