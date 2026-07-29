@@ -129,6 +129,10 @@ pub trait ToolchainProvider: Send + Sync {
         &self,
         installation: &ToolchainInstallation,
     ) -> Result<ToolchainValidation, ToolchainError>;
+    async fn resolve_installation(
+        &self,
+        home: PathBuf,
+    ) -> Result<ToolchainInstallation, ToolchainError>;
 }
 
 #[derive(Debug, Error)]

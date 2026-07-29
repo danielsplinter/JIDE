@@ -98,6 +98,13 @@ impl ToolchainProvider for JavaToolchainProvider {
         }
         Ok(ToolchainValidation { valid, details })
     }
+
+    async fn resolve_installation(
+        &self,
+        home: PathBuf,
+    ) -> Result<ToolchainInstallation, ToolchainError> {
+        Self::installation_from_home(home)
+    }
 }
 
 #[must_use]

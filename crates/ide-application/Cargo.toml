@@ -6,14 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 ide-debug-api = { path = "../ide-debug-api" }
 ide-domain = { path = "../ide-domain" }
 ide-language-api = { path = "../ide-language-api" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }
 thiserror.workspace = true
-
-[dev-dependencies]
-async-trait.workspace = true
 
 [lints]
 workspace = true

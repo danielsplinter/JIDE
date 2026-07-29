@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 
 use ide_core::{AppConfig, init_logging};
-use ide_domain::DocumentSnapshot;
 use ide_project::model::{ProjectDescriptor, ProjectModel};
 use ide_ui::NewItemRequest;
 use java_gradle_adapter::GRADLE_BUILD_SYSTEM_ID;
@@ -37,25 +36,6 @@ pub(super) fn project_sources(files: Vec<PathBuf>, model: Option<&ProjectModel>)
         .cloned()
         .collect::<Vec<_>>();
     if filtered.is_empty() { files } else { filtered }
-}
-
-pub(super) fn main_class_name(document: &DocumentSnapshot) -> Option<String> {
-    if !document
-        .path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("java"))
-    {
-        return None;
-    }
-    let class = document.path.file_stem()?.to_str()?;
-    let package = document.text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("package ")
-            .and_then(|value| value.strip_suffix(';'))
-            .map(str::trim)
-    });
-    Some(package.map_or_else(|| class.to_owned(), |package| format!("{package}.{class}")))
 }
 
 pub(super) fn java_source(request: &NewItemRequest, name: &str) -> String {

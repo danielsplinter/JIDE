@@ -1,9 +1,10 @@
 //! Catálogo de capacidades fornecidas por linguagens.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
+use async_trait::async_trait;
 use ide_debug_api::DebugAdapter;
-use ide_domain::LanguageId;
+use ide_domain::{DocumentSnapshot, LanguageId};
 use ide_language_api::LanguageProvider;
 use ide_toolchain_api::{
     CompilerAdapter, RuntimeAdapter, TestAdapter, ToolchainError, ToolchainId,
@@ -30,6 +31,33 @@ pub struct TaskDescriptor {
     pub requires_active_document: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct TaskExecutionContext {
+    pub workspace_root: PathBuf,
+    pub source_files: Vec<PathBuf>,
+    pub active_document: Option<DocumentSnapshot>,
+    pub classpath_entries: Vec<PathBuf>,
+    pub installation: ToolchainInstallation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskExecutionResult {
+    pub success: bool,
+    pub status: String,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[async_trait]
+pub trait TaskExecutor: Send + Sync {
+    fn supported_language(&self) -> LanguageId;
+    async fn execute(
+        &self,
+        task: &TaskDescriptor,
+        context: TaskExecutionContext,
+    ) -> Result<TaskExecutionResult, TaskExecutionError>;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewItemTemplate {
     pub id: NewItemTemplateId,
@@ -54,6 +82,7 @@ pub struct LanguageContribution {
     pub runtime: Option<Arc<dyn RuntimeAdapter>>,
     pub tests: Option<Arc<dyn TestAdapter>>,
     pub debugger: Option<Arc<dyn DebugAdapter>>,
+    pub task_executor: Option<Arc<dyn TaskExecutor>>,
     pub new_item_templates: Vec<NewItemTemplate>,
     pub settings_sections: Vec<SettingsSection>,
     pub tasks: Vec<TaskDescriptor>,
@@ -70,6 +99,7 @@ impl LanguageContribution {
             runtime: None,
             tests: None,
             debugger: None,
+            task_executor: None,
             new_item_templates: Vec::new(),
             settings_sections: Vec::new(),
             tasks: Vec::new(),
@@ -142,6 +172,10 @@ fn validate_contribution(contribution: &LanguageContribution) -> Result<(), Cont
             .debugger
             .as_ref()
             .map(|adapter| adapter.supported_language()),
+        contribution
+            .task_executor
+            .as_ref()
+            .map(|executor| executor.supported_language()),
     ]
     .into_iter()
     .flatten()
@@ -223,9 +257,47 @@ impl ToolchainSelection {
 #[derive(Default)]
 pub struct ToolchainRegistry {
     selections: BTreeMap<LanguageId, ToolchainSelection>,
+    providers: BTreeMap<LanguageId, Arc<dyn ToolchainProvider>>,
 }
 
 impl ToolchainRegistry {
+    pub fn register_contribution(&mut self, contribution: &LanguageContribution) {
+        if let Some(provider) = &contribution.toolchain {
+            let language_id = contribution.descriptor.language_id.clone();
+            self.providers.insert(language_id.clone(), provider.clone());
+            self.selections.entry(language_id).or_default();
+        }
+    }
+
+    pub async fn detect(
+        &mut self,
+        language_id: &LanguageId,
+        context: ide_toolchain_api::DetectionContext,
+    ) -> Result<&ToolchainSelection, ToolchainError> {
+        let provider = self
+            .providers
+            .get(language_id)
+            .cloned()
+            .ok_or(ToolchainError::NotFound)?;
+        let installations = provider.detect(context).await?;
+        self.set_installations(language_id.clone(), installations);
+        self.selection(language_id).ok_or(ToolchainError::NotFound)
+    }
+
+    pub async fn add_from_home(
+        &mut self,
+        language_id: &LanguageId,
+        home: PathBuf,
+    ) -> Result<usize, ToolchainError> {
+        let provider = self
+            .providers
+            .get(language_id)
+            .cloned()
+            .ok_or(ToolchainError::NotFound)?;
+        let installation = provider.resolve_installation(home).await?;
+        Ok(self.ensure_selection(language_id.clone()).add(installation))
+    }
+
     pub fn set_installations(
         &mut self,
         language_id: LanguageId,
@@ -249,9 +321,72 @@ impl ToolchainRegistry {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct TaskRegistry {
     tasks: BTreeMap<TaskId, (LanguageId, TaskDescriptor)>,
+}
+
+#[derive(Clone, Default)]
+pub struct TaskController {
+    tasks: TaskRegistry,
+    executors: BTreeMap<LanguageId, Arc<dyn TaskExecutor>>,
+}
+
+impl TaskController {
+    pub fn register_contribution(
+        &mut self,
+        contribution: &LanguageContribution,
+    ) -> Result<(), ContributionError> {
+        if !contribution.tasks.is_empty() && contribution.task_executor.is_none() {
+            return Err(ContributionError::MissingTaskExecutor(
+                contribution.descriptor.language_id.clone(),
+            ));
+        }
+        self.tasks.register_contribution(contribution)?;
+        if let Some(executor) = &contribution.task_executor {
+            self.executors.insert(
+                contribution.descriptor.language_id.clone(),
+                executor.clone(),
+            );
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn task(&self, id: &TaskId) -> Option<(LanguageId, TaskDescriptor)> {
+        self.tasks
+            .get(id)
+            .map(|(language_id, task)| (language_id.clone(), task.clone()))
+    }
+
+    pub async fn execute(
+        &self,
+        id: &TaskId,
+        context: TaskExecutionContext,
+    ) -> Result<TaskExecutionResult, TaskControllerError> {
+        let (language_id, task) = self
+            .tasks
+            .get(id)
+            .ok_or_else(|| TaskControllerError::UnknownTask(id.clone()))?;
+        let executor = self
+            .executors
+            .get(language_id)
+            .ok_or_else(|| TaskControllerError::MissingExecutor(language_id.clone()))?;
+        executor
+            .execute(task, context)
+            .await
+            .map_err(TaskControllerError::Execution)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
 }
 
 impl TaskRegistry {
@@ -309,6 +444,24 @@ pub enum ContributionError {
     },
     #[error("toolchain does not support language {0:?}")]
     UnsupportedToolchainLanguage(LanguageId),
+    #[error("language contribution has tasks but no executor: {0:?}")]
+    MissingTaskExecutor(LanguageId),
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum TaskExecutionError {
+    #[error("task execution failed: {0}")]
+    Failed(String),
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum TaskControllerError {
+    #[error("task is not registered: {0:?}")]
+    UnknownTask(TaskId),
+    #[error("task executor is not registered for language: {0:?}")]
+    MissingExecutor(LanguageId),
+    #[error(transparent)]
+    Execution(#[from] TaskExecutionError),
 }
 
 #[cfg(test)]

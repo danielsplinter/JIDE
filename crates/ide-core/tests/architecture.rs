@@ -403,6 +403,32 @@ fn native_ide_has_no_language_specific_fields_or_constructors() {
     );
 }
 
+#[test]
+fn tasks_and_toolchains_are_dispatched_without_java_branches_in_native_ide() {
+    let root = workspace_root();
+    let main = fs::read_to_string(root.join("crates/ide-app/src/main.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler ide-app/src/main.rs: {error}"));
+    for forbidden in [
+        "enum JavaTask",
+        "fn start_java_task",
+        "fn detect_java_",
+        "JavaToolchainProvider::",
+        "CompilationRequest {",
+        "ExecutionRequest {",
+        "TestRequest {",
+    ] {
+        assert!(
+            !main.contains(forbidden),
+            "{forbidden} precisa pertencer à contribuição, não a NativeIde"
+        );
+    }
+    assert!(
+        main.contains("fn start_task(&mut self, task_id: TaskId)")
+            && main.contains("controller.execute(&task_id, context)"),
+        "NativeIde precisa despachar todas as tarefas pelo TaskController"
+    );
+}
+
 fn visit(
     node: &str,
     graph: &HashMap<String, BTreeSet<String>>,

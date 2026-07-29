@@ -89,6 +89,7 @@ pub struct LanguageContribution {
     pub runtime: Option<Arc<dyn RuntimeAdapter>>,
     pub tests: Option<Arc<dyn TestAdapter>>,
     pub debugger: Option<Arc<dyn DebugAdapter>>,
+    pub task_executor: Option<Arc<dyn TaskExecutor>>,
     pub new_item_templates: Vec<NewItemTemplate>,
     pub settings_sections: Vec<SettingsSection>,
     pub tasks: Vec<TaskDescriptor>,
@@ -281,14 +282,36 @@ Implementação concluída em 29/07/2026:
   estado inicial `Registered`, ativação somente ao abrir um documento e estado
   final `Active`.
 
-### Fase 3 — Casos de uso neutros
+### Fase 3 — Casos de uso neutros ✅
 
-- [ ] unificar compilação, execução e testes em `TaskController`;
-- [ ] mover descoberta e seleção de JDK para a contribuição Java;
-- [ ] manter Maven e Gradle atrás de `BuildSystemAdapter`;
-- [ ] remover `JavaTask` e métodos `detect_java_*` de `ide-app`;
-- [ ] garantir que uma contribuição falsa execute uma tarefa falsa ponta a
+- [x] unificar compilação, execução e testes em `TaskController`;
+- [x] mover descoberta e seleção de JDK para a contribuição Java;
+- [x] manter Maven e Gradle atrás de `BuildSystemAdapter`;
+- [x] remover `JavaTask` e métodos `detect_java_*` de `ide-app`;
+- [x] garantir que uma contribuição falsa execute uma tarefa falsa ponta a
   ponta sem alterar controllers.
+
+Implementação concluída em 29/07/2026:
+
+- `TaskExecutor`, `TaskExecutionContext` e `TaskExecutionResult` formam o caso
+  de uso neutro; `TaskController` resolve `TaskId`, linguagem e executor sem
+  ramos por linguagem;
+- `NativeIde::start_task` apenas coleta contexto genérico, despacha pelo
+  controller e publica o resultado. A montagem de `CompilationRequest`,
+  `ExecutionRequest`, `TestRequest`, classpath e classe principal foi movida
+  para o executor da contribuição Java;
+- `ToolchainRegistry` registra providers por `LanguageId`, executa descoberta,
+  mantém seleção e resolve uma instalação apontada manualmente. O conhecimento
+  de JDK permanece em `JavaToolchainProvider`;
+- `ToolchainProvider::resolve_installation` tornou a seleção manual uma
+  capacidade do provider, removendo o uso direto de `JavaToolchainProvider` da
+  aplicação;
+- `JavaTask` e os métodos `start_java_task` e `detect_java_*` foram removidos;
+- Maven e Gradle continuam acessados somente como `BuildSystemAdapter` dentro
+  de `BuildSystemRegistry`;
+- a contribuição fictícia registra `fake.run` e o executa ponta a ponta pelo
+  mesmo `TaskController`, comprovando que controllers não precisam mudar para
+  receber outra linguagem.
 
 ### Fase 4 — UI neutra
 

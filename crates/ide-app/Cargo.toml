@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 ide-application = { path = "../ide-application" }
 ide-core = { path = "../ide-core" }
 ide-debug-api = { path = "../ide-debug-api" }
@@ -35,9 +36,6 @@ ui-text-cosmic.workspace = true
 ui-window-api.workspace = true
 ui-window-winit.workspace = true
 winit.workspace = true
-
-[dev-dependencies]
-async-trait.workspace = true
 
 [lints]
 workspace = true

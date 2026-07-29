@@ -11,8 +11,9 @@ pub use commands::{
 };
 pub use contributions::{
     ContributionError, ContributionRegistry, LanguageContribution, LanguageDescriptor,
-    NewItemTemplate, SettingsSection, TaskDescriptor, TaskId, TaskRegistry, ToolchainRegistry,
-    ToolchainSelection,
+    NewItemTemplate, SettingsSection, TaskController, TaskControllerError, TaskDescriptor,
+    TaskExecutionContext, TaskExecutionError, TaskExecutionResult, TaskExecutor, TaskId,
+    TaskRegistry, ToolchainRegistry, ToolchainSelection,
 };
 pub use events::{EventBus, IdeEvent, PublishError};
 pub use workspace::{WorkspaceEntry, WorkspacePort, WorkspacePortError};

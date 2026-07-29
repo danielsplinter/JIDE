@@ -16,17 +16,18 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use bootstrap::{default_goals, java_source, main_class_name, project_sources, startup_root};
+use bootstrap::{default_goals, java_source, project_sources, startup_root};
 use bridges::{ToolEvent, document_change, position_at_offset};
 use ide_application::{
     ApplicationCommand, ContributionRegistry, DebugRequest, EventBus, IdeEvent, NavigationRequest,
-    NewItemRequest, OpenDocumentRequest, SaveDocumentRequest, TaskRegistry, ToolchainRegistry,
+    NewItemRequest, OpenDocumentRequest, SaveDocumentRequest, TaskController, TaskExecutionContext,
+    TaskId, ToolchainRegistry,
 };
 use ide_core::{AppConfig, config_path};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
-    DefinitionRequest, DocumentId, DocumentSnapshot, ProviderId, SymbolKind, TextPosition,
-    TextRange,
+    DefinitionRequest, DocumentId, DocumentSnapshot, LanguageId, ProviderId, SymbolKind,
+    TextPosition, TextRange,
 };
 use ide_language_host::{LanguageHost, LanguageToolchainConfig};
 use ide_process::{NativeProcessSupervisor, ProcessSupervisor};
@@ -34,7 +35,7 @@ use ide_project::{
     build::{BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry, ProjectImportRequest},
     model::{ProjectDescriptor, ProjectModel},
 };
-use ide_toolchain_api::{CompilationRequest, DetectionContext, ExecutionRequest, TestRequest};
+use ide_toolchain_api::DetectionContext;
 use ide_ui::{
     ContentSearchHit, DebugView, IdeShell, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
 };
@@ -43,7 +44,6 @@ use ide_workspace::WorkspaceService;
 use java_gradle_adapter::GRADLE_BUILD_SYSTEM_ID;
 #[cfg(test)]
 use java_maven_adapter::MAVEN_BUILD_SYSTEM_ID;
-use java_toolchain::{ClasspathBuilder, JavaToolchainProvider};
 use language_java::JAVA_PROVIDER_ID;
 use ui_core::{Modifiers, Point, Size, WindowId};
 use ui_render_api::{FrameInfo, UiRenderer};
@@ -86,7 +86,7 @@ struct NativeIde {
     application_documents: HashMap<DocumentId, DocumentSnapshot>,
     contributions: ContributionRegistry,
     toolchains: ToolchainRegistry,
-    tasks: TaskRegistry,
+    tasks: TaskController,
     build_systems: BuildSystemRegistry,
     project: Option<ImportedProject>,
     last_manifest_check: Option<Instant>,
@@ -107,13 +107,6 @@ struct ImportedProject {
     descriptor: ProjectDescriptor,
     model: ProjectModel,
     manifest_modified: Option<SystemTime>,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum JavaTask {
-    Compile,
-    Run,
-    Test,
 }
 
 impl NativeIde {
@@ -144,6 +137,7 @@ impl NativeIde {
         language_host
             .register(java.provider.clone())
             .map_err(|error| error.to_string())?;
+        self.toolchains.register_contribution(&java);
         self.tasks
             .register_contribution(&java)
             .map_err(|error| error.to_string())?;
@@ -186,7 +180,7 @@ impl NativeIde {
         let (tool_sender, tool_events) = mpsc::channel();
         self.tool_sender = Some(tool_sender);
         self.tool_events = Some(tool_events);
-        self.detect_java_toolchains(&root);
+        self.detect_toolchains(&java_contribution::language_id(), &root);
         self.import_project(&root);
         if let Some(shell) = self.shell.as_mut() {
             shell.set_debug_target(&self.config.debug.host, self.config.debug.port);
@@ -349,7 +343,7 @@ impl NativeIde {
                     root: folder.clone(),
                 });
                 self.remember_project(&folder);
-                self.detect_java_toolchains(&folder);
+                self.detect_toolchains(&java_contribution::language_id(), &folder);
                 self.import_project(&folder);
                 self.sync_languages();
                 if let Some(window) = self.window.as_ref() {
@@ -655,36 +649,33 @@ impl NativeIde {
         }
     }
 
-    fn detect_java_toolchains(&mut self, workspace_root: &Path) {
-        let language_id = java_contribution::language_id();
-        let Some(provider) = self
+    fn detect_toolchains(&mut self, language_id: &LanguageId, workspace_root: &Path) {
+        let display_name = self
             .contributions
-            .get(&language_id)
-            .and_then(|contribution| contribution.toolchain.clone())
-        else {
-            return;
-        };
-        match pollster::block_on(provider.detect(DetectionContext {
-            workspace_root: Some(workspace_root.to_path_buf()),
-        })) {
-            Ok(installations) => {
-                self.toolchains
-                    .set_installations(language_id.clone(), installations);
+            .get(language_id)
+            .map(|contribution| contribution.descriptor.display_name.clone())
+            .unwrap_or_else(|| language_id.0.clone());
+        let detected = pollster::block_on(self.toolchains.detect(
+            language_id,
+            DetectionContext {
+                workspace_root: Some(workspace_root.to_path_buf()),
+            },
+        ));
+        match detected {
+            Ok(selection) => {
+                let selected = selection.selected().map(|installation| {
+                    installation
+                        .version
+                        .clone()
+                        .unwrap_or_else(|| installation.home.to_string_lossy().into_owned())
+                });
                 if let Some(shell) = self.shell.as_mut() {
-                    if let Some(selected) = self
-                        .toolchains
-                        .selection(&language_id)
-                        .and_then(ide_application::ToolchainSelection::selected)
-                    {
-                        let label = selected
-                            .version
-                            .clone()
-                            .unwrap_or_else(|| selected.home.to_string_lossy().into_owned());
-                        shell.set_status_message(format!("JDK: {}", label));
+                    if let Some(selected) = selected {
+                        shell.set_status_message(format!("{display_name}: {selected}"));
                     } else {
-                        shell.set_status_message(
-                            "JDK not found; configure JAVA_HOME or install a JDK",
-                        );
+                        shell.set_status_message(format!(
+                            "Nenhuma toolchain encontrada para {display_name}"
+                        ));
                     }
                 }
             }
@@ -694,13 +685,12 @@ impl NativeIde {
                 }
             }
         }
-        self.apply_jdk_to_languages();
+        self.apply_selected_toolchain(language_id.clone());
     }
 
-    /// Rótulo de cada JDK detectado, na ordem da lista.
-    fn jdk_labels(&self) -> Vec<String> {
+    fn toolchain_labels(&self, language_id: &LanguageId) -> Vec<String> {
         self.toolchains
-            .selection(&java_contribution::language_id())
+            .selection(language_id)
             .map(ide_application::ToolchainSelection::installations)
             .unwrap_or_default()
             .iter()
@@ -717,10 +707,10 @@ impl NativeIde {
             .collect()
     }
 
-    fn open_jdk_selector(&mut self) {
+    fn open_toolchain_selector(&mut self, language_id: &LanguageId) {
         let selected_index = self
             .toolchains
-            .selection(&java_contribution::language_id())
+            .selection(language_id)
             .map(|selection| {
                 let selected = selection.selected().map(|value| &value.id);
                 selection
@@ -730,16 +720,16 @@ impl NativeIde {
                     .unwrap_or(0)
             })
             .unwrap_or(0);
-        let items = self.jdk_labels();
+        let items = self.toolchain_labels(language_id);
         if let Some(shell) = self.shell.as_mut() {
             shell.open_settings_dialog(items, selected_index);
         }
     }
 
-    fn choose_jdk_home(&mut self) {
+    fn choose_toolchain_home(&mut self, language_id: &LanguageId) {
         let initial_directory = self
             .toolchains
-            .selection(&java_contribution::language_id())
+            .selection(language_id)
             .and_then(ide_application::ToolchainSelection::selected)
             .map_or_else(|| Path::new(".").to_path_buf(), |jdk| jdk.home.clone());
         let Some(folder) = rfd::FileDialog::new()
@@ -749,16 +739,12 @@ impl NativeIde {
         else {
             return;
         };
-        match JavaToolchainProvider::installation_from_home(folder) {
-            Ok(installation) => {
-                let home = installation.home.clone();
+        let home = folder.clone();
+        match pollster::block_on(self.toolchains.add_from_home(language_id, folder)) {
+            Ok(index) => {
                 // A pasta apontada entra na lista e fica pendente: quem aplica é
                 // o Salvar, como qualquer escolha feita na janela.
-                let selection = self
-                    .toolchains
-                    .ensure_selection(java_contribution::language_id());
-                let index = selection.add(installation);
-                let labels = self.jdk_labels();
+                let labels = self.toolchain_labels(language_id);
                 if let Some(shell) = self.shell.as_mut() {
                     shell.set_toolchain_options(labels, index);
                     shell.set_status_message(format!("JDK a salvar: {}", home.display()));
@@ -840,11 +826,10 @@ impl NativeIde {
     /// trocar de JDK derruba os providers ativos: eles indexaram o JDK anterior.
     /// Os documentos abertos são esquecidos de propósito — o provider novo nasce
     /// sem nenhum, e a próxima sincronização os reabre.
-    fn apply_jdk_to_languages(&mut self) {
+    fn apply_selected_toolchain(&mut self, language_id: LanguageId) {
         let Some(language_host) = &self.language_host else {
             return;
         };
-        let language_id = java_contribution::language_id();
         let toolchain = self
             .toolchains
             .selection(&language_id)
@@ -885,9 +870,8 @@ impl NativeIde {
         }
     }
 
-    fn select_jdk(&mut self, index: usize) {
-        let language_id = java_contribution::language_id();
-        let Some(selection) = self.toolchains.selection_mut(&language_id) else {
+    fn select_toolchain(&mut self, language_id: &LanguageId, index: usize) {
+        let Some(selection) = self.toolchains.selection_mut(language_id) else {
             return;
         };
         let Some(installation) = selection.installations().get(index).cloned() else {
@@ -902,7 +886,7 @@ impl NativeIde {
         if let Some(shell) = self.shell.as_mut() {
             shell.set_status_message(format!("Selected JDK: {}", installation.home.display()));
         }
-        self.apply_jdk_to_languages();
+        self.apply_selected_toolchain(language_id.clone());
     }
 
     /// Detecta o build system da raiz e importa módulos e dependências.
@@ -1258,23 +1242,33 @@ impl NativeIde {
                 ApplicationCommand::SaveDocument(request) => self.save_document(request),
                 ApplicationCommand::ReloadWorkspace => self.reload_workspace(),
                 ApplicationCommand::OpenProject => self.choose_project(),
-                ApplicationCommand::OpenSettings => self.open_jdk_selector(),
+                ApplicationCommand::OpenSettings => {
+                    self.open_toolchain_selector(&java_contribution::language_id());
+                }
                 ApplicationCommand::OpenCompilerSettings => {
                     if let Some(shell) = self.shell.as_mut() {
                         shell.set_settings_page(SettingsPage::Compiler);
                     }
-                    self.open_jdk_selector();
+                    self.open_toolchain_selector(&java_contribution::language_id());
                 }
-                ApplicationCommand::BrowseToolchain => self.choose_jdk_home(),
-                ApplicationCommand::SelectToolchain(index) => self.select_jdk(index),
+                ApplicationCommand::BrowseToolchain => {
+                    self.choose_toolchain_home(&java_contribution::language_id());
+                }
+                ApplicationCommand::SelectToolchain(index) => {
+                    self.select_toolchain(&java_contribution::language_id(), index);
+                }
                 ApplicationCommand::BuildProject => self.start_project_build(),
                 ApplicationCommand::ReimportProject => self.reimport_project(),
                 ApplicationCommand::CompileProject => {
-                    self.start_java_task(JavaTask::Compile);
+                    self.start_task(TaskId(java_contribution::COMPILE_TASK_ID.to_owned()));
                 }
                 ApplicationCommand::RunProject => self.run_application(),
-                ApplicationCommand::RunActiveFile => self.start_java_task(JavaTask::Run),
-                ApplicationCommand::TestProject => self.start_java_task(JavaTask::Test),
+                ApplicationCommand::RunActiveFile => {
+                    self.start_task(TaskId(java_contribution::RUN_TASK_ID.to_owned()));
+                }
+                ApplicationCommand::TestProject => {
+                    self.start_task(TaskId(java_contribution::TEST_TASK_ID.to_owned()));
+                }
                 ApplicationCommand::StopProject => self.stop_application(),
                 ApplicationCommand::Navigate(request) => {
                     tracing::info!(
@@ -1498,18 +1492,14 @@ impl NativeIde {
         }
     }
 
-    fn start_java_task(&mut self, task: JavaTask) {
-        let language_id = java_contribution::language_id();
+    fn start_task(&mut self, task_id: TaskId) {
+        let Some((language_id, descriptor)) = self.tasks.task(&task_id) else {
+            if let Some(shell) = self.shell.as_mut() {
+                shell.set_status_message(format!("Tarefa não registrada: {}", task_id.0));
+            }
+            return;
+        };
         let Some(contribution) = self.contributions.get(&language_id) else {
-            return;
-        };
-        let Some(compiler) = contribution.compiler.clone() else {
-            return;
-        };
-        let Some(runtime_adapter) = contribution.runtime.clone() else {
-            return;
-        };
-        let Some(test_adapter) = contribution.tests.clone() else {
             return;
         };
         let Some(installation) = self
@@ -1531,54 +1521,47 @@ impl NativeIde {
             return;
         };
         let workspace = shell.workspace_path().to_path_buf();
-        let source_files = project_sources(shell.source_files("java"), model.as_ref());
+        let extension = contribution
+            .descriptor
+            .extensions
+            .first()
+            .map(String::as_str)
+            .unwrap_or_default();
+        let source_files = project_sources(shell.source_files(extension), model.as_ref());
         if source_files.is_empty() {
-            shell.set_status_message("No Java source files found");
+            shell.set_status_message(format!(
+                "Nenhum arquivo-fonte encontrado para {}",
+                contribution.descriptor.display_name
+            ));
             return;
         }
         let active = shell
             .document_snapshots()
             .into_iter()
             .find(|snapshot| Some(snapshot.id) == shell.active_document());
-        let main_class = active.as_ref().and_then(main_class_name);
-        if task != JavaTask::Compile && main_class.is_none() {
-            shell.set_status_message("Open a Java file before running or testing");
+        if descriptor.requires_active_document && active.is_none() {
+            shell.set_status_message("Abra um arquivo antes de executar esta tarefa");
             return;
         }
-        let output_directory = workspace.join(".er-ide").join("classes");
-        let mut builder = ClasspathBuilder::new().workspace_defaults(&workspace, &output_directory);
-        for entry in model
-            .as_ref()
-            .map(ProjectModel::classpath_entries)
-            .unwrap_or_default()
-        {
-            builder = builder.with_entry(entry);
-        }
-        let classpath = builder.build();
-        let compilation = CompilationRequest {
-            installation: installation.clone(),
+        let context = TaskExecutionContext {
+            workspace_root: workspace,
             source_files,
-            output_directory: output_directory.clone(),
-            classpath: classpath.clone(),
-            additional_args: vec![
-                "-source".to_owned(),
-                "8".to_owned(),
-                "-target".to_owned(),
-                "8".to_owned(),
-            ],
-            working_directory: workspace.clone(),
+            active_document: active,
+            classpath_entries: model
+                .as_ref()
+                .map(ProjectModel::classpath_entries)
+                .unwrap_or_default(),
+            installation,
         };
-        shell.append_tool_output(
-            match task {
-                JavaTask::Compile => "[Java] Compiling workspace...",
-                JavaTask::Run => "[Java] Compiling before run...",
-                JavaTask::Test => "[Java] Compiling before test...",
-            },
-            false,
+        let label = format!(
+            "[{}] {}",
+            contribution.descriptor.display_name, descriptor.title
         );
-        shell.set_status_message("Java task running");
+        shell.append_tool_output(&format!("{label}..."), false);
+        shell.set_status_message(format!("{label} em execução"));
+        let controller = self.tasks.clone();
         let spawn = thread::Builder::new()
-            .name("java-build-run".to_owned())
+            .name("language-task".to_owned())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_time()
@@ -1587,85 +1570,25 @@ impl NativeIde {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         let _ = sender.send(ToolEvent {
-                            status: "Java task failed".to_owned(),
+                            status: format!("{label} falhou"),
                             stdout: String::new(),
                             stderr: error.to_string(),
                         });
                         return;
                     }
                 };
-                let result = runtime.block_on(async {
-                    if task == JavaTask::Test {
-                        let tested = test_adapter
-                            .run_tests(TestRequest {
-                                compilation,
-                                targets: vec![main_class.unwrap_or_default()],
-                                args: Vec::new(),
-                            })
-                            .await?;
-                        let mut stdout = tested.compilation.stdout;
-                        let mut stderr = tested.compilation.stderr;
-                        let mut success = tested.compilation.success;
-                        for case in tested.cases {
-                            stdout.push_str(&case.execution.stdout);
-                            stderr.push_str(&case.execution.stderr);
-                            success &= case.execution.success;
-                        }
-                        return Ok::<ToolEvent, ide_toolchain_api::ToolchainError>(ToolEvent {
-                            status: if success {
-                                "Java test completed".to_owned()
-                            } else {
-                                "Java test failed".to_owned()
-                            },
-                            stdout,
-                            stderr,
-                        });
-                    }
-                    let compiled = compiler.compile(compilation).await?;
-                    let mut stdout = compiled.stdout;
-                    let mut stderr = compiled.stderr;
-                    if !compiled.success || task == JavaTask::Compile {
-                        return Ok::<ToolEvent, ide_toolchain_api::ToolchainError>(ToolEvent {
-                            status: if compiled.success {
-                                "Java compilation completed".to_owned()
-                            } else {
-                                format!("Java compilation failed ({})", compiled.exit_code)
-                            },
-                            stdout,
-                            stderr,
-                        });
-                    }
-                    let mut run_classpath = classpath;
-                    if !run_classpath.entries.contains(&output_directory) {
-                        run_classpath.entries.insert(0, output_directory);
-                    }
-                    let executed = runtime_adapter
-                        .run(ExecutionRequest {
-                            installation,
-                            entry_point: main_class.unwrap_or_default(),
-                            classpath: run_classpath,
-                            args: Vec::new(),
-                            runtime_args: Vec::new(),
-                            working_directory: workspace,
-                        })
-                        .await?;
-                    stdout.push_str(&executed.stdout);
-                    stderr.push_str(&executed.stderr);
-                    Ok(ToolEvent {
-                        status: if executed.success {
-                            "Java execution completed".to_owned()
-                        } else {
-                            format!("Java execution failed ({})", executed.exit_code)
-                        },
-                        stdout,
-                        stderr,
-                    })
-                });
-                let event = result.unwrap_or_else(|error| ToolEvent {
-                    status: "Java task failed".to_owned(),
-                    stdout: String::new(),
-                    stderr: error.to_string(),
-                });
+                let event = match runtime.block_on(controller.execute(&task_id, context)) {
+                    Ok(result) => ToolEvent {
+                        status: result.status,
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                    },
+                    Err(error) => ToolEvent {
+                        status: format!("{label} falhou"),
+                        stdout: String::new(),
+                        stderr: error.to_string(),
+                    },
+                };
                 let _ = sender.send(event);
             });
         if let Err(error) = spawn {

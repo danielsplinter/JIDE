@@ -6,7 +6,8 @@ use std::sync::{
 use async_trait::async_trait;
 use ide_application::{
     ContributionRegistry, LanguageContribution, LanguageDescriptor, NewItemTemplate,
-    NewItemTemplateId, SettingsSection, TaskDescriptor, TaskId, TaskRegistry,
+    NewItemTemplateId, SettingsSection, TaskController, TaskDescriptor, TaskExecutionContext,
+    TaskExecutionError, TaskExecutionResult, TaskExecutor, TaskId,
 };
 use ide_domain::{
     Diagnostic, DocumentChange, DocumentId, DocumentSnapshot, LanguageId, ProviderId,
@@ -16,6 +17,7 @@ use ide_language_api::{
     LanguageError, LanguageMetadata, LanguageProvider, ProviderState,
 };
 use ide_language_host::LanguageHost;
+use ide_toolchain_api::{ToolchainId, ToolchainInstallation};
 
 fn success<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     match result {
@@ -60,6 +62,31 @@ struct FakeLanguage {
     language_id: LanguageId,
 }
 
+struct FakeTaskExecutor {
+    executions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TaskExecutor for FakeTaskExecutor {
+    fn supported_language(&self) -> LanguageId {
+        LanguageId("fake".to_owned())
+    }
+
+    async fn execute(
+        &self,
+        task: &TaskDescriptor,
+        context: TaskExecutionContext,
+    ) -> Result<TaskExecutionResult, TaskExecutionError> {
+        self.executions.fetch_add(1, Ordering::Relaxed);
+        Ok(TaskExecutionResult {
+            success: true,
+            status: format!("{} completed", task.title),
+            stdout: format!("workspace={}", context.workspace_root.display()),
+            stderr: String::new(),
+        })
+    }
+}
+
 #[async_trait]
 impl ActiveLanguage for FakeLanguage {
     fn language_id(&self) -> &LanguageId {
@@ -93,6 +120,7 @@ impl ActiveLanguage for FakeLanguage {
 #[test]
 fn application_contracts_accept_a_fake_language_without_java_dependencies() {
     let activations = Arc::new(AtomicUsize::new(0));
+    let task_executions = Arc::new(AtomicUsize::new(0));
     let host = LanguageHost::new(".");
     let mut contribution = LanguageContribution::new(
         LanguageDescriptor {
@@ -120,8 +148,11 @@ fn application_contracts_accept_a_fake_language_without_java_dependencies() {
         title: "Run fake".to_owned(),
         requires_active_document: true,
     });
+    contribution.task_executor = Some(Arc::new(FakeTaskExecutor {
+        executions: Arc::clone(&task_executions),
+    }));
 
-    let mut tasks = TaskRegistry::default();
+    let mut tasks = TaskController::default();
     success(tasks.register_contribution(&contribution));
     let mut contributions = ContributionRegistry::default();
     success(contributions.register(contribution));
@@ -158,4 +189,22 @@ fn application_contracts_accept_a_fake_language_without_java_dependencies() {
         host.providers().as_deref(),
         Ok([snapshot]) if snapshot.state == ProviderState::Active
     ));
+
+    let task_result = success(pollster::block_on(tasks.execute(
+        &TaskId("fake.run".to_owned()),
+        TaskExecutionContext {
+            workspace_root: "fake-workspace".into(),
+            source_files: vec!["sample.fake".into()],
+            active_document: None,
+            classpath_entries: Vec::new(),
+            installation: ToolchainInstallation {
+                id: ToolchainId("fake-runtime".to_owned()),
+                home: "fake-runtime".into(),
+                version: Some("1".to_owned()),
+            },
+        },
+    )));
+    assert!(task_result.success);
+    assert_eq!(task_result.status, "Run fake completed");
+    assert_eq!(task_executions.load(Ordering::Relaxed), 1);
 }
