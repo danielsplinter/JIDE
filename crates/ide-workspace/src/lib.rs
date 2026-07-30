@@ -14,7 +14,7 @@ use std::{
 use ide_application::{SearchScope, WorkspacePort, WorkspacePortError};
 use thiserror::Error;
 
-pub use document::{BufferError, EditorSession, OpenDocument, TextBuffer};
+pub use document::{BufferError, EditorSession, OpenDocument, TextBuffer, rewrite_occurrences};
 pub use filesystem::NativeWorkspaceFileSystem;
 pub use search::SearchMatch;
 pub use tree::FileNode;
@@ -61,6 +61,11 @@ impl WorkspaceService {
         self.filesystem
             .write_text(path, contents)
             .map_err(Into::into)
+    }
+
+    /// Move um arquivo dentro do workspace.
+    pub fn rename_path(&self, from: &Path, to: &Path) -> Result<(), WorkspaceError> {
+        self.filesystem.rename_path(from, to).map_err(Into::into)
     }
 
     pub fn create_directory(&self, path: &Path) -> Result<(), WorkspaceError> {

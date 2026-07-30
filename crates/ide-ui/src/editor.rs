@@ -50,6 +50,33 @@ pub(super) struct EditorAreaState {
     pub(super) constructor_pending: Option<ConstructorRequest>,
     /// Janela da geração de acessores.
     pub(super) generate_modal: ui_components::ModalHost,
+    /// Renomeação em curso, aberta pelo menu do editor.
+    pub(super) rename: Option<RenameState>,
+    /// Arquivo cuja renomeação foi pedida e ainda não foi respondida.
+    ///
+    /// Quem responde é a aplicação: ela pergunta à linguagem onde o nome é
+    /// referenciado — no projeto inteiro, inclusive em arquivos fechados.
+    pub(super) rename_pending: Option<std::path::PathBuf>,
+    /// Janela da renomeação. Própria: renomear não é gerar.
+    pub(super) rename_modal: ui_components::ModalHost,
+}
+
+/// Renomeação em curso: o nome novo e quem referencia o tipo.
+///
+/// Os componentes são os da biblioteca — `TextInput` para o nome e `ListView`
+/// para as referências —, porque caixa de texto e lista são dela; a IDE só diz
+/// o que mostrar e o que fazer com a resposta.
+pub(super) struct RenameState {
+    /// Arquivo a renomear, e o nome que ele tem hoje.
+    pub(super) path: std::path::PathBuf,
+    pub(super) old_name: String,
+    /// Onde o nome antigo aparece, agrupado por arquivo.
+    ///
+    /// Inclui o próprio arquivo: nele estão a declaração e os construtores, que
+    /// sem a troca ficariam com o nome antigo e não compilariam.
+    pub(super) occurrences: Vec<(std::path::PathBuf, Vec<ide_domain::TextRange>)>,
+    pub(super) input: ui_components::TextInput,
+    pub(super) list: ui_components::ListView,
 }
 
 /// Construtor escolhido, à espera do texto que a linguagem vai montar.

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use ide_application::{
     ApplicationCommand, DebugRequest, EventBus, IdeEvent, NavigationRequest, NewItemRequest,
-    OpenDocumentRequest, SaveDocumentRequest, TaskId,
+    OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, TaskId,
 };
 use ide_ui::IdeShell;
 
@@ -26,6 +26,7 @@ pub(super) enum UiAction {
     CreateItem(NewItemRequest),
     BreakpointsChanged(PathBuf),
     Debug(DebugRequest),
+    RenameDocument(RenameDocumentRequest),
     SearchTypes(String),
     SearchContent(String),
 }
@@ -34,6 +35,7 @@ impl From<ApplicationCommand> for UiAction {
     fn from(command: ApplicationCommand) -> Self {
         match command {
             ApplicationCommand::OpenDocument(value) => Self::OpenDocument(value),
+            ApplicationCommand::RenameDocument(value) => Self::RenameDocument(value),
             ApplicationCommand::SaveDocument(value) => Self::SaveDocument(value),
             ApplicationCommand::ReloadWorkspace => Self::ReloadWorkspace,
             ApplicationCommand::OpenProject => Self::OpenProject,

@@ -17,7 +17,8 @@ use crate::ui_bridge::{UiAction, UiBridge};
 use crate::{debug, java_contribution, run};
 use ide_application::{
     ApplicationCommand, DebugRequest, IdeEvent, NavigationRequest, NewItemRequest,
-    OpenDocumentRequest, SaveDocumentRequest, SearchScope, TaskExecutionContext, TaskId,
+    OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, SearchScope,
+    TaskExecutionContext, TaskId,
 };
 use ide_core::{AppConfig, config_path};
 use ide_debug_api::{DebugEvent, StepKind};
@@ -578,6 +579,127 @@ impl NativeIde {
                 Err(error) => shell.set_status_message(error.to_string()),
             }
         }
+    }
+
+    /// Responde ao pedido de renomear: onde o nome aparece no projeto.
+    ///
+    /// A pergunta é da linguagem que atende a extensão do arquivo. Sem provider
+    /// para ela — um `.md`, por exemplo — a resposta é vazia, e renomear passa a
+    /// ser só mover o arquivo, que continua sendo uma resposta útil.
+    fn answer_rename_request(&mut self) {
+        let Some(path) = self
+            .ui
+            .shell
+            .as_mut()
+            .and_then(IdeShell::take_rename_request)
+        else {
+            return;
+        };
+        let nome = path
+            .file_stem()
+            .and_then(|valor| valor.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let extensao = path
+            .extension()
+            .and_then(|valor| valor.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let referencias = self
+            .languages
+            .host
+            .as_ref()
+            .map(|host| {
+                pollster::block_on(host.references_to_name(
+                    host.request_context(),
+                    &extensao,
+                    nome,
+                ))
+                .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.show_rename(path, referencias);
+        }
+    }
+
+    /// Renomeia o arquivo e reescreve tudo o que citava o nome antigo.
+    ///
+    /// Tudo ou nada: os conteúdos novos são calculados **antes** de qualquer
+    /// gravação, e uma falha no meio desfaz o que já foi escrito. Meio caminho
+    /// aqui é um projeto que não compila e um usuário sem saber onde parou.
+    fn rename_document(&mut self, request: RenameDocumentRequest) {
+        use ide_workspace::rewrite_occurrences;
+        let mut originais: Vec<(PathBuf, String)> = Vec::new();
+        let mut novos: Vec<(PathBuf, String)> = Vec::new();
+        for arquivo in &request.occurrences {
+            let Ok(texto) = self.workspace.read_document(&arquivo.path) else {
+                continue;
+            };
+            let novo = rewrite_occurrences(
+                &texto,
+                &arquivo.ranges,
+                &request.old_name,
+                &request.new_name,
+            );
+            if novo != texto {
+                originais.push((arquivo.path.clone(), texto));
+                novos.push((arquivo.path.clone(), novo));
+            }
+        }
+
+        let mut gravados: Vec<PathBuf> = Vec::new();
+        for (caminho, conteudo) in &novos {
+            if let Err(error) = self.workspace.save_document(caminho, conteudo) {
+                // Desfaz o que já foi escrito: o projeto volta ao que era.
+                for gravado in &gravados {
+                    if let Some((_, original)) =
+                        originais.iter().find(|(caminho, _)| caminho == gravado)
+                    {
+                        let _ = self.workspace.save_document(gravado, original);
+                    }
+                }
+                if let Some(shell) = self.ui.shell.as_mut() {
+                    shell.set_status_message(format!("Renomeação desfeita: {error}"));
+                }
+                return;
+            }
+            gravados.push(caminho.clone());
+        }
+
+        if let Err(error) = self.workspace.rename_path(&request.from, &request.to) {
+            for gravado in &gravados {
+                if let Some((_, original)) = originais.iter().find(|(caminho, _)| caminho == gravado)
+                {
+                    let _ = self.workspace.save_document(gravado, original);
+                }
+            }
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_status_message(format!("Renomeação desfeita: {error}"));
+            }
+            return;
+        }
+
+        // O índice da linguagem é montado na ativação e não é incremental: ele
+        // ainda guarda o caminho e o nome antigos. Sem refazê-lo, a próxima
+        // renomeação listaria um arquivo que não existe mais.
+        if let Some(host) = self.languages.host.as_ref()
+            && pollster::block_on(host.reactivate()).is_ok()
+        {
+            self.documents.language.clear();
+        }
+        // A aba do arquivo renomeado, se estiver aberta, precisa seguir o novo
+        // caminho: sem isso a próxima gravação recriaria o arquivo antigo.
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.follow_renamed_path(&request.from, &request.to);
+            shell.set_status_message(format!(
+                "{} renomeado para {} em {} arquivo(s)",
+                request.old_name,
+                request.new_name,
+                gravados.len() + 1
+            ));
+        }
+        self.reload_workspace();
     }
 
     /// Monta o construtor escolhido na janela e o entrega à tela.
@@ -1295,6 +1417,7 @@ impl NativeIde {
             match command {
                 UiAction::OpenDocument(request) => self.open_document(request),
                 UiAction::SaveDocument(request) => self.save_document(request),
+                UiAction::RenameDocument(request) => self.rename_document(request),
                 UiAction::ReloadWorkspace => self.reload_workspace(),
                 UiAction::OpenProject => self.choose_project(),
                 UiAction::OpenSettings => {
@@ -2157,6 +2280,7 @@ impl ApplicationHandler for NativeIde {
         // O menu `Generate` só marca o pedido; quem tem a linguagem responde.
         self.answer_accessor_request();
         self.answer_constructor_request();
+        self.answer_rename_request();
         self.drain_application_events();
         if let Some(etiqueta) = etiqueta
             && iniciado.elapsed() >= PERF_THRESHOLD

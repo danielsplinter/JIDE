@@ -27,6 +27,11 @@ pub trait WorkspacePort: Send + Sync {
     fn read_text(&self, path: &Path) -> Result<String, WorkspacePortError>;
     fn write_text(&self, path: &Path, contents: &str) -> Result<(), WorkspacePortError>;
     fn create_directory(&self, path: &Path) -> Result<(), WorkspacePortError>;
+    /// Move um arquivo. Falha se o destino já existir.
+    ///
+    /// Sobrescrever é o que **não** se quer aqui: renomear uma classe para um
+    /// nome já ocupado apagaria o arquivo do outro tipo.
+    fn rename_path(&self, from: &Path, to: &Path) -> Result<(), WorkspacePortError>;
     fn exists(&self, path: &Path) -> bool;
 }
 

@@ -8,7 +8,7 @@ use crate::debugging::{
 };
 use crate::editor::{
     CachedSyntax, ConstructorRequest, EditorAction, EditorAreaState, EditorCapabilities, EditorPane,
-    GenerateState, SyntaxView,
+    GenerateState, RenameState, SyntaxView,
 };
 use crate::explorer::{
     ExplorerState, id as explorer_id, is_source_root, items as explorer_items,
@@ -25,7 +25,8 @@ use crate::terminal::{
 };
 use ide_application::{
     ApplicationCommand, DebugRequest, NavigationRequest, NewItemRequest, NewItemTemplate,
-    OpenDocumentRequest, SaveDocumentRequest, TaskId, UiContributionCatalog,
+    FileOccurrences, OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, TaskId,
+    UiContributionCatalog,
 };
 #[cfg(test)]
 use ide_application::{NewItemTemplateId, SettingsSection, TaskDescriptor};
@@ -47,15 +48,14 @@ use crate::menus::{
 #[cfg(test)]
 use crate::search::search_display_path;
 use crate::settings::SettingsDialog;
-#[cfg(test)]
-use ide_domain::Location;
 use ide_domain::{
     AccessorCandidate, AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DocumentId,
-    DocumentSnapshot, OutlineItem, OutlineKind,
+    DocumentSnapshot, Location, OutlineItem, OutlineKind,
     SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition,
+    TextRange as DomainTextRange,
 };
 use ide_terminal::{ShellKind, TerminalSession};
-use ide_workspace::{EditorSession, FileNode, TextBuffer};
+use ide_workspace::{EditorSession, FileNode, TextBuffer, rewrite_occurrences};
 use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 #[cfg(test)]
 use ui_components::MenuEntry;
@@ -109,6 +109,16 @@ const SETTINGS_PAGES_ID: WidgetId = WidgetId(10_034);
 /// Páginas da janela de configurações, na ordem em que aparecem.
 const DEBUG_SETTINGS_TITLE: &str = "Depuração";
 const SETTINGS_PAGE_ROW_HEIGHT: f32 = 42.0;
+const RENAME_MODAL_ID: WidgetId = WidgetId(10_060);
+const RENAME_INPUT_ID: WidgetId = WidgetId(10_061);
+const RENAME_LIST_ID: WidgetId = WidgetId(10_062);
+const RENAME_OK_ID: WidgetId = WidgetId(10_063);
+const RENAME_CANCEL_ID: WidgetId = WidgetId(10_064);
+const RENAME_NAME_CAPTION_ID: WidgetId = WidgetId(10_065);
+const RENAME_LIST_CAPTION_ID: WidgetId = WidgetId(10_066);
+/// A janela é larga porque a lista mostra caminho e contagem em cada linha, e
+/// estreitá-la só empurraria o trabalho para a barra lateral.
+const RENAME_PANEL_SIZE: Size = Size::new(720.0, 460.0);
 const NEW_ITEM_MODAL_ID: WidgetId = WidgetId(10_035);
 const NEW_ITEM_PACKAGE_ID: WidgetId = WidgetId(10_036);
 const NEW_ITEM_NAME_ID: WidgetId = WidgetId(10_037);
@@ -199,6 +209,11 @@ struct ShellContext {
     status_message: String,
     project_summary: Option<String>,
     pointer: Point,
+    /// Tamanho da janela no último quadro.
+    ///
+    /// A soltura do ponteiro não recebe tamanho, e as janelas precisam dele
+    /// para saber onde estão seus componentes.
+    last_size: Size,
     scrollbar_drag: Option<ScrollTarget>,
 }
 
@@ -413,6 +428,7 @@ impl IdeShell {
                 tree: explorer_tree,
                 context_menu: ContextMenu::new(EXPLORER_CONTEXT_MENU_ID, Vec::new()),
                 context_menu_target: None,
+                context_menu_file: None,
                 expanded,
                 scroll_x: 0.0,
                 scroll_line: 0,
@@ -444,6 +460,9 @@ impl IdeShell {
                 generate: None,
                 generate_pending: None,
                 constructor_pending: None,
+                rename: None,
+                rename_pending: None,
+                rename_modal: ModalHost::new(RENAME_MODAL_ID, "Renomear", RENAME_PANEL_SIZE),
                 generate_modal: ModalHost::new(
                     GENERATE_MODAL_ID,
                     "Generate",
@@ -586,6 +605,7 @@ impl IdeShell {
                 status_message: "Ready".to_owned(),
                 project_summary: None,
                 pointer: Point::new(-1.0, -1.0),
+                last_size: Size::new(1280.0, 800.0),
                 scrollbar_drag: None,
             },
             commands: ShellCommandQueue::default(),
@@ -1153,6 +1173,31 @@ impl IdeShell {
             .collect()
     }
 
+    /// Texto de um documento aberto, para quem vai gravá-lo.
+    #[must_use]
+    pub fn document_text(&self, document_id: DocumentId) -> Option<String> {
+        self.editor_area
+            .session
+            .document(document_id)
+            .map(|document| document.buffer.text().to_owned())
+    }
+
+    /// Faz a aba seguir o arquivo que mudou de nome.
+    ///
+    /// Sem isso a aba continuaria apontando para um caminho que não existe
+    /// mais, e a próxima gravação recriaria o arquivo antigo.
+    pub fn follow_renamed_path(&mut self, from: &Path, to: &Path) {
+        let aberto = self
+            .editor_area
+            .session
+            .tabs()
+            .find(|documento| documento.path == from)
+            .map(|documento| documento.id);
+        if let Some(id) = aberto {
+            self.editor_area.session.set_path(id, to.to_path_buf());
+        }
+    }
+
     /// Caminho do documento em foco.
     #[must_use]
     pub fn active_document_path(&self) -> Option<PathBuf> {
@@ -1668,6 +1713,311 @@ impl IdeShell {
             };
             self.set_status_message(format!("{quantos} {nome}(s) gerado(s)"));
         }
+    }
+
+    /// Pede a renomeação do arquivo escolhido na árvore.
+    ///
+    /// O menu só marca; quem responde é a aplicação, que pergunta à linguagem
+    /// onde o nome aparece no projeto — inclusive em arquivos fechados.
+    pub fn request_rename(&mut self, path: PathBuf) {
+        self.editor_area.rename_pending = Some(path);
+    }
+
+    /// Arquivo cuja renomeação a tela quer ver respondida, se houver um.
+    pub fn take_rename_request(&mut self) -> Option<PathBuf> {
+        self.editor_area.rename_pending.take()
+    }
+
+    /// Abre a janela de renomear com o arquivo e o que será reescrito junto.
+    ///
+    /// A lista mostra **os arquivos afetados**, com quantas ocorrências cada um
+    /// tem: é o alcance da mudança, e é o que o usuário confirma ao clicar OK.
+    pub fn show_rename(&mut self, path: PathBuf, references: Vec<Location>) {
+        let old_name = path
+            .file_stem()
+            .and_then(|valor| valor.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let mut por_arquivo: BTreeMap<PathBuf, Vec<DomainTextRange>> = BTreeMap::new();
+        for location in references {
+            por_arquivo
+                .entry(location.path)
+                .or_default()
+                .push(location.range);
+        }
+        let occurrences: Vec<(PathBuf, Vec<DomainTextRange>)> = por_arquivo
+            .into_iter()
+            .map(|(caminho, mut ranges)| {
+                // Do fim para o começo: trocar no começo moveria as seguintes.
+                ranges.sort_by(|esquerda, direita| {
+                    (direita.start.line, direita.start.column)
+                        .cmp(&(esquerda.start.line, esquerda.start.column))
+                });
+                ranges.dedup();
+                (caminho, ranges)
+            })
+            .collect();
+        let rotulos: Vec<String> = occurrences
+            .iter()
+            .map(|(caminho, ranges)| rename_reference_label(caminho, ranges.len()))
+            .collect();
+        let mut input = TextInput::new(RENAME_INPUT_ID, old_name.clone());
+        input.event(&mut EventContext::default(), &UiEvent::FocusGained);
+        self.editor_area.rename = Some(RenameState {
+            input,
+            list: ListView::new(RENAME_LIST_ID, rotulos),
+            path,
+            old_name,
+            occurrences,
+        });
+        self.editor_area.rename_modal.open();
+    }
+
+    #[must_use]
+    pub fn rename_open(&self) -> bool {
+        self.editor_area.rename_modal.is_open()
+    }
+
+    /// Nome que está no campo, que é o que a confirmação aplica.
+    #[must_use]
+    pub fn rename_name(&self) -> String {
+        self.editor_area
+            .rename
+            .as_ref()
+            .map(|state| state.input.value().to_owned())
+            .unwrap_or_default()
+    }
+
+    /// Arquivos afetados, como aparecem na lista.
+    #[must_use]
+    pub fn rename_references(&self) -> Vec<String> {
+        self.editor_area
+            .rename
+            .as_ref()
+            .map(|state| {
+                state
+                    .occurrences
+                    .iter()
+                    .map(|(caminho, ranges)| rename_reference_label(caminho, ranges.len()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn cancel_rename(&mut self) {
+        self.editor_area.rename_modal.close();
+        self.editor_area.rename = None;
+    }
+
+    /// Confirma: manda renomear o arquivo e reescrever tudo o que o cita.
+    ///
+    /// A tela não escreve em disco nem em arquivo fechado — ela entrega o nome
+    /// novo e a lista de onde trocar. Quem escreve é a aplicação, de uma vez só.
+    pub fn apply_rename(&mut self) {
+        let Some(state) = self.editor_area.rename.take() else {
+            return;
+        };
+        self.editor_area.rename_modal.close();
+        let novo = state.input.value().trim().to_owned();
+        if novo.is_empty() || novo == state.old_name {
+            self.set_status_message("Nome inalterado");
+            return;
+        }
+        let extensao = state
+            .path
+            .extension()
+            .and_then(|valor| valor.to_str())
+            .map(|valor| format!(".{valor}"))
+            .unwrap_or_default();
+        let destino = state.path.with_file_name(format!("{novo}{extensao}"));
+        let arquivos = state.occurrences.len();
+        // O que está aberto é reescrito aqui, no buffer: a aba mantém cursor,
+        // desfazer e alterações não salvas. Gravar por cima delas perderia
+        // trabalho que a tela tem e o disco não.
+        let mut fechados = Vec::new();
+        for (caminho, ranges) in state.occurrences {
+            let aberto = self
+                .editor_area
+                .session
+                .tabs()
+                .find(|documento| documento.path == caminho)
+                .map(|documento| documento.id);
+            match aberto {
+                Some(id) => self.rewrite_open_document(id, &ranges, &state.old_name, &novo),
+                None => fechados.push(FileOccurrences {
+                    path: caminho,
+                    ranges,
+                }),
+            }
+        }
+        self.commands
+            .push(ApplicationCommand::RenameDocument(RenameDocumentRequest {
+                from: state.path,
+                to: destino,
+                old_name: state.old_name,
+                new_name: novo,
+                occurrences: fechados,
+            }));
+        self.set_status_message(format!("Renomeando em {arquivos} arquivo(s)"));
+    }
+
+    /// Reescreve um documento aberto, mantendo a aba e o desfazer.
+    fn rewrite_open_document(
+        &mut self,
+        document_id: DocumentId,
+        ranges: &[DomainTextRange],
+        antigo: &str,
+        novo: &str,
+    ) {
+        let Some(document) = self.editor_area.session.document_mut(document_id) else {
+            return;
+        };
+        let texto = rewrite_occurrences(document.buffer.text(), ranges, antigo, novo);
+        let total = document.buffer.text().len();
+        let _ = document.buffer.replace(0..total, &texto);
+    }
+
+    /// Roteia o clique dentro da janela de renomear.
+    fn rename_pointer_down(&mut self, point: Point, size: Size) {
+        self.editor_area.rename_modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = rename_geometry(self.editor_area.rename_modal.panel_bounds());
+        if geometry.ok.contains(point) {
+            self.apply_rename();
+            return;
+        }
+        if geometry.cancel.contains(point) {
+            self.cancel_rename();
+            return;
+        }
+        let contexto = self.layout_context();
+        // O campo sabe onde o cursor cai dentro do texto: a medição é dele.
+        if geometry.input.contains(point)
+            && let Some(state) = self.editor_area.rename.as_mut()
+        {
+            state.input.layout(&contexto, geometry.input);
+            state.input.event(
+                &mut EventContext::default(),
+                &UiEvent::PointerDown(primary_pointer(point)),
+            );
+            return;
+        }
+        if geometry.list.contains(point) {
+            self.rename_list_event(&UiEvent::PointerDown(primary_pointer(point)), size);
+        }
+    }
+
+    /// Entrega um evento de ponteiro à lista da janela de renomear.
+    ///
+    /// A lista é quem tem as barras, e é ela que decide se o gesto é de uma
+    /// delas ou de uma linha.
+    fn rename_list_event(&mut self, event: &UiEvent, size: Size) {
+        self.editor_area.rename_modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = rename_geometry(self.editor_area.rename_modal.panel_bounds());
+        let contexto = self.layout_context();
+        if let Some(state) = self.editor_area.rename.as_mut() {
+            state.list.layout(&contexto, geometry.list);
+            state.list.event(&mut EventContext::default(), event);
+        }
+    }
+
+    /// Teclas da janela de renomear: `Enter` confirma, `Esc` desiste.
+    fn rename_key(&mut self, key: &str, modifiers: Modifiers) -> bool {
+        if !self.editor_area.rename_modal.is_open() {
+            return false;
+        }
+        match key.to_ascii_lowercase().as_str() {
+            "enter" => self.apply_rename(),
+            "escape" => self.cancel_rename(),
+            outra => {
+                if let Some(state) = self.editor_area.rename.as_mut() {
+                    state.input.event(
+                        &mut EventContext::default(),
+                        &UiEvent::KeyDown(KeyEvent {
+                            logical_key: outra.to_owned(),
+                            repeat: false,
+                            modifiers,
+                        }),
+                    );
+                }
+            }
+        }
+        true
+    }
+
+    /// Texto digitado enquanto a janela de renomear está aberta.
+    fn rename_text_input(&mut self, text: &str) -> bool {
+        if !self.editor_area.rename_modal.is_open() {
+            return false;
+        }
+        if let Some(state) = self.editor_area.rename.as_mut() {
+            state.input.event(
+                &mut EventContext::default(),
+                &UiEvent::TextInput(TextInputEvent {
+                    text: text.to_owned(),
+                }),
+            );
+        }
+        true
+    }
+
+    fn paint_rename(&mut self, commands: &mut Vec<PaintCommand>, size: Size) {
+        if !self.editor_area.rename_modal.is_open() || self.editor_area.rename.is_none() {
+            return;
+        }
+        let mut modal = self.editor_area.rename_modal.clone();
+        modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let geometry = rename_geometry(modal.panel_bounds());
+        let mut paint = self.paint_context();
+        modal.paint(&mut paint);
+        let legenda = self
+            .editor_area
+            .rename
+            .as_ref()
+            .map(|state| match state.occurrences.len() {
+                0 => "Nada mais no projeto usa este nome".to_owned(),
+                1 => "1 arquivo será reescrito".to_owned(),
+                quantos => format!("{quantos} arquivos serão reescritos"),
+            })
+            .unwrap_or_default();
+        self.paint_settings_text(
+            &mut paint,
+            RENAME_NAME_CAPTION_ID,
+            "Novo nome",
+            Point::new(geometry.input.origin.x, geometry.input.origin.y - 18.0),
+            13.0,
+            IconTint::Muted,
+        );
+        self.paint_settings_text(
+            &mut paint,
+            RENAME_LIST_CAPTION_ID,
+            &legenda,
+            Point::new(geometry.list.origin.x, geometry.list.origin.y - 18.0),
+            13.0,
+            IconTint::Muted,
+        );
+        let contexto = self.layout_context();
+        if let Some(state) = self.editor_area.rename.as_mut() {
+            state.input.layout(&contexto, geometry.input);
+            state.input.paint(&mut paint);
+            state.list.layout(&contexto, geometry.list);
+            state.list.paint(&mut paint);
+        }
+        let mut cancelar = Button::new(RENAME_CANCEL_ID, "Cancelar");
+        cancelar.layout(&contexto, geometry.cancel);
+        cancelar.paint(&mut paint);
+        let mut ok = Button::new(RENAME_OK_ID, "OK");
+        ok.layout(&contexto, geometry.ok);
+        ok.paint(&mut paint);
+        commands.extend(paint.into_commands());
     }
 
     /// Áreas da janela de geração: a lista e os dois botões.
@@ -2333,6 +2683,12 @@ impl IdeShell {
         if self.context_menu_key("Escape", Modifiers::default()) {
             return;
         }
+        // A janela de renomear vem antes das outras porque é a que está por
+        // cima quando está aberta.
+        if self.editor_area.rename_modal.is_open() {
+            self.cancel_rename();
+            return;
+        }
         if self.editor_area.generate_modal.is_open() {
             self.close_generate();
             return;
@@ -2430,6 +2786,9 @@ impl IdeShell {
         };
         self.context.focus = ShellFocus::Explorer;
         self.explorer.tree.set_selected(Some(explorer_id(&path)));
+        // O arquivo clicado, quando foi um: `target` abaixo é a pasta, porque é
+        // nela que a criação acontece, mas renomear fala do arquivo.
+        self.explorer.context_menu_file = (!is_directory).then(|| path.clone());
         // O alvo é o diretório: clicando em um arquivo, é na pasta dele que a
         // criação acontece.
         let target = if is_directory {
@@ -2443,6 +2802,7 @@ impl IdeShell {
                 &target,
                 &self.catalog.source_root_names,
                 &self.catalog.new_item_templates,
+                !is_directory,
             ));
         self.explorer.context_menu.layout(
             &self.layout_context(),
@@ -2542,6 +2902,12 @@ impl IdeShell {
         let Some(target) = self.explorer.context_menu_target.clone() else {
             return;
         };
+        if command == "explorer.rename" {
+            if let Some(arquivo) = self.explorer.context_menu_file.clone() {
+                self.request_rename(arquivo);
+            }
+            return;
+        }
         if command == "explorer.new.folder" {
             self.context.status_message = format!("Nova pasta em {}", target.display());
             return;
@@ -2657,6 +3023,10 @@ impl IdeShell {
         // O menu aberto tem a primeira palavra: escolher uma ação ou dispensá-lo
         // é o que este clique significa, e não o que está embaixo dele.
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
+            return;
+        }
+        if self.editor_area.rename_modal.is_open() {
+            self.rename_pointer_down(point, size);
             return;
         }
         if self.editor_area.generate_modal.is_open() {
@@ -2946,6 +3316,12 @@ impl IdeShell {
         if self.explorer.context_menu.is_open() {
             return self.context_menu_event(&UiEvent::PointerMove(primary_pointer(point)), size);
         }
+        // Arrastar a barra da janela de renomear precisa do movimento: só o
+        // clique chegando à lista, o indicador é pego e nunca anda.
+        if self.editor_area.rename_modal.is_open() {
+            self.rename_list_event(&UiEvent::PointerMove(primary_pointer(point)), size);
+            return true;
+        }
         if self.settings.modal.is_open() {
             return false;
         }
@@ -3012,6 +3388,12 @@ impl IdeShell {
     }
 
     pub fn pointer_up(&mut self) {
+        // A soltura encerra o arrasto da barra: sem ela a lista continuaria
+        // achando que o gesto está em curso e seguiria o ponteiro.
+        if self.editor_area.rename_modal.is_open() {
+            let size = self.context.last_size;
+            self.rename_list_event(&UiEvent::PointerUp(primary_pointer(Point::ZERO)), size);
+        }
         // Encerrar o gesto é do painel, que sabe se ele virou seleção.
         self.editor_area.pane.pointer_up();
         self.debug_panel.inspection.editor.pointer_up();
@@ -3034,6 +3416,28 @@ impl IdeShell {
     }
 
     pub fn scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
+        // A janela de renomear cobre tudo: a roda ali é da lista dela, e nunca
+        // do editor atrás — rolar o que está coberto é mexer no que não se vê.
+        if self.editor_area.rename_modal.is_open() {
+            self.editor_area.rename_modal.layout(
+                &self.layout_context(),
+                Rect::new(0.0, 0.0, size.width, size.height),
+            );
+            let geometry = rename_geometry(self.editor_area.rename_modal.panel_bounds());
+            let contexto = self.layout_context();
+            if let Some(state) = self.editor_area.rename.as_mut() {
+                state.list.layout(&contexto, geometry.list);
+                state.list.event(
+                    &mut EventContext::default(),
+                    &UiEvent::Scroll(ui_core::ScrollEvent {
+                        position: point,
+                        delta_x: 0.0,
+                        delta_y: delta_lines * GENERATE_ROW_HEIGHT,
+                    }),
+                );
+            }
+            return;
+        }
         // A janela de geração cobre tudo: a roda ali é dela.
         if self.editor_area.generate_modal.is_open() {
             let (lista, ..) = self.generate_geometry(size);
@@ -3238,6 +3642,9 @@ impl IdeShell {
         if self.inspection_text_input(text) {
             return;
         }
+        if self.rename_text_input(text) {
+            return;
+        }
         if self.new_item_text_input(text) {
             return;
         }
@@ -3296,6 +3703,9 @@ impl IdeShell {
                     self.cancel_settings();
                 }
             }
+            return;
+        }
+        if self.rename_key(key, modifiers) {
             return;
         }
         if self.completion_key(key) {
@@ -4281,6 +4691,7 @@ impl IdeShell {
     /// quando o texto muda. Deixar essa reconciliação para os manipuladores de evento faria
     /// cada esquecimento virar um quadro desatualizado.
     pub fn paint(&mut self, size: Size) -> Vec<PaintCommand> {
+        self.context.last_size = size;
         let sidebar = self.sidebar_width(size);
         let editor_x = ACTIVITY_WIDTH + sidebar;
         let geo = self.geometry(size);
@@ -4691,6 +5102,7 @@ impl IdeShell {
         // A janela de criação cobre o conteúdo, e o menu de contexto cobre ela.
         self.paint_new_item_dialog(&mut commands, size);
         self.paint_generate(&mut commands, size);
+        self.paint_rename(&mut commands, size);
         self.paint_type_search(&mut commands, size);
         self.paint_inspection(&mut commands, size);
         // Depois da janela de inspeção, ou a lista ficaria atrás dela.
@@ -5779,6 +6191,64 @@ struct NewItemGeometry {
     cancel: Rect,
 }
 
+/// Áreas da janela de renomear: campo, lista e os dois botões.
+struct RenameGeometry {
+    input: Rect,
+    list: Rect,
+    cancel: Rect,
+    ok: Rect,
+}
+
+fn rename_geometry(panel: Rect) -> RenameGeometry {
+    let largura = (panel.size.width - 48.0).max(120.0);
+    let input = Rect::new(
+        panel.origin.x + 24.0,
+        panel.origin.y + 76.0,
+        largura,
+        34.0,
+    );
+    let ok = Rect::new(
+        panel.origin.x + panel.size.width - 104.0,
+        panel.origin.y + panel.size.height - 48.0,
+        88.0,
+        34.0,
+    );
+    let cancel = Rect::new(ok.origin.x - 98.0, ok.origin.y, 88.0, 34.0);
+    let topo_lista = input.origin.y + input.size.height + 34.0;
+    let list = Rect::new(
+        input.origin.x,
+        topo_lista,
+        largura,
+        (ok.origin.y - topo_lista - 16.0).max(40.0),
+    );
+    RenameGeometry {
+        input,
+        list,
+        cancel,
+        ok,
+    }
+}
+
+/// Como um arquivo afetado aparece na lista.
+///
+/// O nome do arquivo, a pasta — dois pacotes podem ter arquivos homônimos — e
+/// quantas ocorrências serão trocadas ali, que é o que dá a dimensão da mudança
+/// antes de confirmá-la.
+fn rename_reference_label(path: &Path, ocorrencias: usize) -> String {
+    let nome = path
+        .file_name()
+        .and_then(|valor| valor.to_str())
+        .unwrap_or_default();
+    let pasta = path
+        .parent()
+        .and_then(|pai| pai.to_str())
+        .filter(|pai| !pai.is_empty());
+    match pasta {
+        Some(pasta) => format!("{nome}  ({pasta})  —  {ocorrencias}"),
+        None => format!("{nome}  —  {ocorrencias}"),
+    }
+}
+
 fn new_item_geometry(panel: Rect) -> NewItemGeometry {
     let field_width = (panel.size.width - 48.0).max(120.0);
     let package = Rect::new(
@@ -6485,6 +6955,7 @@ mod tests {
                     Path::new(target),
                     &java_source_roots(),
                     &java_catalog().new_item_templates,
+                    false,
                 )),
                 vec!["Novo pacote", "—", "Nova classe", "Nova interface"],
                 "alvo {target}"
@@ -6501,6 +6972,7 @@ mod tests {
                     Path::new(target),
                     &java_source_roots(),
                     &java_catalog().new_item_templates,
+                    false,
                 )),
                 vec!["Nova pasta"],
                 "alvo {target}"
@@ -6554,9 +7026,23 @@ mod tests {
             shell.explorer.context_menu_target,
             Some(PathBuf::from("demo/src/main/java"))
         );
+        // A criação é na pasta do arquivo; renomear é do arquivo clicado, e por
+        // isso as duas coisas convivem no mesmo menu.
         assert_eq!(
             entry_labels(shell.explorer.context_menu.entries()),
-            vec!["Novo pacote", "—", "Nova classe", "Nova interface"]
+            vec![
+                "Novo pacote",
+                "—",
+                "Nova classe",
+                "Nova interface",
+                "—",
+                "Renomear"
+            ]
+        );
+        assert_eq!(
+            shell.explorer.context_menu_file,
+            Some(PathBuf::from("demo/src/main/java/App.java")),
+            "renomear precisa do arquivo, e não da pasta"
         );
     }
 
@@ -6825,6 +7311,7 @@ mod tests {
                 Path::new("workspace/src"),
                 &shell.catalog.source_root_names,
                 &shell.catalog.new_item_templates,
+                false,
             )),
             vec!["Novo módulo fake"]
         );
@@ -7109,6 +7596,7 @@ mod tests {
                 name: "Example".to_owned(),
                 kind: ide_domain::OutlineKind::Class,
                 range: ide_domain::TextRange::default(),
+                name_range: ide_domain::TextRange::default(),
                 children: Vec::new(),
             }],
             highlights: vec![ide_domain::SyntaxHighlight {
@@ -8500,6 +8988,207 @@ mod tests {
                 AccessorKind::Constructor => unreachable!("descartado acima"),
             }
         }
+    }
+
+    /// Clicar e arrastar a barra da janela rola a lista.
+    ///
+    /// O widget já sabia arrastar; o que faltava era a janela entregar o
+    /// **movimento** e a **soltura** a ele — só o clique chegava, e o indicador
+    /// era pego e nunca andava.
+    #[test]
+    fn dragging_the_rename_scrollbar_scrolls_the_list() {
+        let mut shell = shell_editing("public class Pedido {
+}
+");
+        let size = Size::new(1280.0, 800.0);
+        let local = |arquivo: &str, linha: u32| Location {
+            path: PathBuf::from(arquivo),
+            range: DomainTextRange {
+                start: DomainTextPosition { line: linha, column: 0 },
+                end: DomainTextPosition { line: linha, column: 6 },
+            },
+        };
+        shell.show_rename(
+            PathBuf::from("src/Pedido.java"),
+            (0..60)
+                .map(|indice| local(&format!("src/Arquivo{indice}.java"), indice))
+                .collect(),
+        );
+        let _ = shell.paint(size);
+
+        let geometry = {
+            shell.editor_area.rename_modal.layout(
+                &shell.layout_context(),
+                Rect::new(0.0, 0.0, size.width, size.height),
+            );
+            rename_geometry(shell.editor_area.rename_modal.panel_bounds())
+        };
+        let trilha_x = geometry.list.origin.x + geometry.list.size.width - 5.0;
+        let topo = geometry.list.origin.y + 4.0;
+
+        shell.pointer_down(Point::new(trilha_x, topo), size);
+        shell.pointer_move(Point::new(trilha_x, topo + 120.0), size);
+        let rolou = shell
+            .editor_area
+            .rename
+            .as_ref()
+            .map(|state| state.list.scroll_offset())
+            .unwrap_or_default();
+        assert!(rolou > 0.0, "arrastar a barra precisa rolar a lista");
+
+        shell.pointer_up();
+        // Solto o gesto, mover o ponteiro não arrasta mais nada.
+        shell.pointer_move(Point::new(trilha_x, topo), size);
+        let depois = shell
+            .editor_area
+            .rename
+            .as_ref()
+            .map(|state| state.list.scroll_offset())
+            .unwrap_or_default();
+        assert_eq!(depois, rolou, "sem botão pressionado a barra fica onde está");
+    }
+
+    /// Com a janela de renomear aberta, a roda é dela — não do editor atrás.
+    ///
+    /// Rolar o que está coberto é mexer no que não se vê: o usuário achava que
+    /// estava percorrendo a lista e estava movendo o arquivo por baixo dela.
+    #[test]
+    fn the_wheel_belongs_to_the_rename_window_and_not_to_the_editor_behind() {
+        let texto: String = (0..200).map(|linha| format!("linha {linha}\n")).collect();
+        let mut shell = shell_editing(&texto);
+        let size = Size::new(1280.0, 800.0);
+        let _ = shell.paint(size);
+        let antes = shell.editor_scroll_line();
+
+        let local = |arquivo: &str, linha: u32| Location {
+            path: PathBuf::from(arquivo),
+            range: DomainTextRange {
+                start: DomainTextPosition { line: linha, column: 0 },
+                end: DomainTextPosition { line: linha, column: 6 },
+            },
+        };
+        shell.show_rename(
+            PathBuf::from("src/Pedido.java"),
+            (0..40)
+                .map(|indice| local(&format!("src/Arquivo{indice}.java"), indice))
+                .collect(),
+        );
+        let _ = shell.paint(size);
+
+        // A roda sobre a janela não pode mover o editor coberto.
+        let centro = Point::new(size.width / 2.0, size.height / 2.0);
+        for _ in 0..10 {
+            shell.scroll(centro, 3.0, size);
+        }
+        assert_eq!(
+            shell.editor_scroll_line(),
+            antes,
+            "o editor atrás da janela não pode rolar"
+        );
+    }
+
+    /// A janela mostra o nome do arquivo e todos os arquivos afetados.
+    #[test]
+    fn the_rename_window_lists_every_affected_file() {
+        let mut shell = shell_editing("public class Pedido {\n}\n");
+        let local = |arquivo: &str, linha: u32, de: u32, ate: u32| Location {
+            path: PathBuf::from(arquivo),
+            range: DomainTextRange {
+                start: DomainTextPosition { line: linha, column: de },
+                end: DomainTextPosition { line: linha, column: ate },
+            },
+        };
+        shell.show_rename(
+            PathBuf::from("src/Pedido.java"),
+            vec![
+                local("src/Pedido.java", 0, 13, 19),
+                local("src/Servico.java", 4, 8, 14),
+                local("src/Servico.java", 9, 12, 18),
+            ],
+        );
+
+        assert!(shell.rename_open());
+        assert_eq!(shell.rename_name(), "Pedido", "o campo começa com o nome atual");
+        let lista = shell.rename_references();
+        assert_eq!(lista.len(), 2, "dois arquivos afetados: {lista:?}");
+        assert!(
+            lista.iter().any(|item| item.contains("Servico.java") && item.ends_with("2")),
+            "a lista diz quantas ocorrências cada arquivo tem: {lista:?}"
+        );
+        assert!(
+            lista.iter().any(|item| item.contains("Pedido.java")),
+            "o próprio arquivo entra: nele estão a declaração e os construtores"
+        );
+
+        // Pelos dois caminhos: a tecla no shell e o `escape` que a janela usa.
+        shell.key_down("Escape");
+        assert!(!shell.rename_open());
+        shell.show_rename(PathBuf::from("src/Pedido.java"), Vec::new());
+        assert!(shell.rename_open());
+        shell.escape();
+        assert!(!shell.rename_open(), "Esc precisa fechar por `escape` também");
+    }
+
+    /// Confirmar reescreve o que está aberto e manda o resto para a aplicação.
+    #[test]
+    fn confirming_rewrites_open_files_and_delegates_the_closed_ones() {
+        let mut shell = test_shell();
+        let aberto = shell
+            .editor_area
+            .session
+            .open_memory("src/Pedido.java", "public class Pedido {\n    Pedido() {}\n}\n");
+        shell.context.focus = ShellFocus::Editor;
+        let local = |arquivo: &str, linha: u32, de: u32, ate: u32| Location {
+            path: PathBuf::from(arquivo),
+            range: DomainTextRange {
+                start: DomainTextPosition { line: linha, column: de },
+                end: DomainTextPosition { line: linha, column: ate },
+            },
+        };
+        shell.show_rename(
+            PathBuf::from("src/Pedido.java"),
+            vec![
+                local("src/Pedido.java", 0, 13, 19),
+                local("src/Pedido.java", 1, 4, 10),
+                local("src/Servico.java", 4, 8, 14),
+            ],
+        );
+
+        for _ in 0..6 {
+            shell.key_down("Backspace");
+        }
+        shell.text_input("Compra");
+        shell.key_down("Enter");
+        assert!(!shell.rename_open());
+
+        // O arquivo aberto foi reescrito no buffer, com aba e desfazer intactos.
+        let texto = shell
+            .document_text(aberto)
+            .unwrap_or_default();
+        assert!(texto.contains("public class Compra"), "{texto}");
+        assert!(texto.contains("Compra() {}"), "o construtor acompanha: {texto}");
+
+        // O fechado vai no pedido, junto do arquivo a mover.
+        let pedido = shell
+            .drain_application_commands()
+            .into_iter()
+            .find_map(|comando| match comando {
+                ApplicationCommand::RenameDocument(request) => Some(request),
+                _ => None,
+            });
+        let Some(pedido) = pedido else {
+            panic!("confirmar precisa pedir a renomeação do arquivo");
+        };
+        assert_eq!(pedido.from, PathBuf::from("src/Pedido.java"));
+        assert_eq!(pedido.to, PathBuf::from("src/Compra.java"));
+        assert_eq!(pedido.old_name, "Pedido");
+        assert_eq!(pedido.new_name, "Compra");
+        assert_eq!(
+            pedido.occurrences.len(),
+            1,
+            "só o arquivo fechado: o aberto a tela já reescreveu"
+        );
+        assert_eq!(pedido.occurrences[0].path, PathBuf::from("src/Servico.java"));
     }
 
     /// O construtor usa a mesma janela, e a escolha vira o pedido à linguagem.

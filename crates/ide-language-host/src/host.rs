@@ -444,6 +444,21 @@ impl LanguageHost {
             .await
     }
 
+    /// Onde um nome é referenciado no projeto, para renomear um arquivo.
+    ///
+    /// A rota é por extensão, e não por documento: o arquivo pode não estar
+    /// aberto, que é o caso comum ao renomear pela árvore.
+    pub async fn references_to_name(
+        &self,
+        context: LanguageRequestContext,
+        extension: &str,
+        name: String,
+    ) -> Result<Vec<Location>, LanguageHostError> {
+        let provider_id = self.provider_for_extension(extension, LanguageCapabilities::REFERENCES)?;
+        let worker = self.ensure_active(&provider_id)?;
+        worker.references_to_name(context, name).await
+    }
+
     /// Construtor do tipo na posição, com os campos escolhidos.
     pub async fn constructor_source(
         &self,

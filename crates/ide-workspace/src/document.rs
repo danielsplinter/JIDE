@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ide_domain::DocumentId;
+use ide_domain::{DocumentId, TextRange};
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
@@ -55,6 +55,53 @@ impl TextBuffer {
     pub fn mark_saved(&mut self) {
         self.dirty = false;
     }
+}
+
+/// Troca um nome nas posições dadas, do fim para o começo do texto.
+///
+/// Do fim para o começo porque trocar no começo moveria as posições seguintes:
+/// cada uma seria escrita alguns caracteres fora do lugar. Uma posição que já
+/// não contém o nome antigo é ignorada — ela veio de uma análise vencida, e
+/// escrever ali sobrescreveria outra coisa.
+///
+/// Vive aqui, e não na tela nem na aplicação, porque as duas precisam dela: uma
+/// para os arquivos abertos, outra para os fechados.
+#[must_use]
+pub fn rewrite_occurrences(
+    text: &str,
+    ranges: &[TextRange],
+    old_name: &str,
+    new_name: &str,
+) -> String {
+    let mut ordenadas: Vec<&TextRange> = ranges.iter().collect();
+    ordenadas.sort_by(|esquerda, direita| {
+        (direita.start.line, direita.start.column).cmp(&(esquerda.start.line, esquerda.start.column))
+    });
+    let mut resultado = text.to_owned();
+    for range in ordenadas {
+        let inicio = offset_at(&resultado, range.start.line as usize, range.start.column as usize);
+        let fim = offset_at(&resultado, range.end.line as usize, range.end.column as usize);
+        if fim > inicio && resultado.get(inicio..fim) == Some(old_name) {
+            resultado.replace_range(inicio..fim, new_name);
+        }
+    }
+    resultado
+}
+
+/// Deslocamento em bytes de uma posição em linha e coluna de caracteres.
+fn offset_at(text: &str, line: usize, column: usize) -> usize {
+    let mut offset = 0;
+    for (indice, conteudo) in text.split('\n').enumerate() {
+        if indice == line {
+            return offset
+                + conteudo
+                    .char_indices()
+                    .nth(column)
+                    .map_or(conteudo.len(), |(byte, _)| byte);
+        }
+        offset += conteudo.len() + 1;
+    }
+    text.len()
 }
 
 #[derive(Clone, Debug)]
@@ -152,6 +199,18 @@ impl EditorSession {
     pub fn active_mut(&mut self) -> Option<&mut OpenDocument> {
         self.active.and_then(|id| self.documents.get_mut(&id))
     }
+    /// Troca o caminho de um documento aberto, para seguir um arquivo renomeado.
+    pub fn set_path(&mut self, id: DocumentId, path: PathBuf) {
+        if let Some(document) = self.documents.get_mut(&id) {
+            document.path = path;
+        }
+    }
+
+    /// Documento aberto, para quem vai reescrevê-lo.
+    pub fn document_mut(&mut self, id: DocumentId) -> Option<&mut OpenDocument> {
+        self.documents.get_mut(&id)
+    }
+
     pub fn document(&self, id: DocumentId) -> Option<&OpenDocument> {
         self.documents.get(&id)
     }

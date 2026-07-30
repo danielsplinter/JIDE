@@ -117,6 +117,29 @@ a assinatura repetida não compilaria, e a barra de estado diz que ele já exist
 Como nos acessores, quem monta o texto é o provider: a tela decide **quais campos**
 e entrega a lista.
 
+Clicando com o botão direito **sobre um arquivo na árvore**, o menu oferece
+`Renomear` — qualquer arquivo, não só código. Sobre uma pasta a opção não aparece:
+pasta não tem tipo dentro nem referências por nome.
+
+A janela mostra um campo com o nome atual e, abaixo, **todos os arquivos que serão
+reescritos**, com a pasta e quantas ocorrências cada um tem — é o alcance da
+mudança, visível antes de confirmar. `Enter` ou **OK** confirmam; `Esc` ou
+**Cancelar** desistem.
+
+Confirmando, três coisas acontecem juntas: o **arquivo** é renomeado, o **tipo**
+dentro dele também — a declaração e os construtores, que sem isso ficariam com o
+nome antigo e não compilariam — e **todas as referências espalhadas pelo projeto**
+são reescritas, inclusive em arquivos fechados.
+
+A gravação é **tudo ou nada**: os conteúdos novos são calculados antes de qualquer
+escrita, e se uma falhar as já gravadas voltam ao que eram. Meio caminho seria um
+projeto que não compila e ninguém sabendo onde parou. Um nome já ocupado por outro
+arquivo faz a operação parar com aviso, em vez de sobrescrevê-lo.
+
+Arquivos **abertos** são reescritos no editor, não no disco: a aba mantém cursor,
+desfazer e alterações não salvas, e você grava como de costume. Os fechados são
+gravados direto.
+
 `Tab` indenta até a próxima parada de quatro colunas e `Shift+Tab` recolhe a
 indentação da linha. **Com um trecho marcado, os dois deslocam todas as linhas do
 bloco** e mantêm a seleção, para indentar vários níveis sem remarcar; recolher

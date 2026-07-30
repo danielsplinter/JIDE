@@ -19,6 +19,11 @@ pub(super) struct ExplorerState {
     pub(super) tree: TreeView,
     pub(super) context_menu: ContextMenu,
     pub(super) context_menu_target: Option<PathBuf>,
+    /// Arquivo sob o clique, quando não foi uma pasta.
+    ///
+    /// `context_menu_target` guarda a **pasta**, porque é nela que a criação
+    /// acontece; renomear fala do arquivo, e são caminhos diferentes.
+    pub(super) context_menu_file: Option<PathBuf>,
     pub(super) expanded: HashSet<PathBuf>,
     pub(super) scroll_x: f32,
     pub(super) scroll_line: usize,
@@ -54,6 +59,7 @@ impl ExplorerState {
         self.expanded.insert(self.workspace.path.clone());
         self.context_menu.close();
         self.context_menu_target = None;
+        self.context_menu_file = None;
         self.scroll_x = 0.0;
         self.scroll_line = 0;
     }

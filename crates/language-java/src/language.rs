@@ -255,6 +255,57 @@ impl ActiveLanguage for JavaLanguage {
             .ok_or_else(|| LanguageError::Unsupported("nenhum tipo nesta posição".to_owned()))
     }
 
+    async fn references_to_name(&self, name: &str) -> Result<Vec<Location>, LanguageError> {
+        let mut documents = self.documents.lock()?;
+        Documents::ensure_semantics(&mut documents);
+        // O índice é montado na ativação e não acompanha edição: para um arquivo
+        // **aberto** ele fala do texto de antes. Quem responde por esses é o
+        // documento; do índice vem só o que não está aberto. Sem esse corte, a
+        // mesma ocorrência aparecia duas vezes, uma delas em posição vencida.
+        let abertos: HashSet<&Path> = documents
+            .values()
+            .map(|document| document.snapshot.path.as_path())
+            .collect();
+        let do_indice = |location: &Location| !abertos.contains(location.path.as_path());
+        let mut locations = documents
+            .values()
+            .flat_map(|document| document.references.get(name).into_iter().flatten())
+            .cloned()
+            .chain(
+                self.workspace_index
+                    .references
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|location| do_indice(location))
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
+        locations.extend(
+            documents
+                .values()
+                .flat_map(|document| document.semantic.symbols.iter())
+                .filter(|symbol| symbol.name == name)
+                .map(|symbol| symbol.location.clone()),
+        );
+        locations.extend(
+            self.workspace_index
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.name == name)
+                .map(|symbol| symbol.location.clone())
+                .filter(do_indice),
+        );
+        locations.sort_by(|esquerda, direita| {
+            esquerda.path.cmp(&direita.path).then(
+                (esquerda.range.start.line, esquerda.range.start.column)
+                    .cmp(&(direita.range.start.line, direita.range.start.column)),
+            )
+        });
+        locations.dedup();
+        Ok(locations)
+    }
+
     async fn constructor_source(
         &self,
         document_id: DocumentId,
@@ -1002,12 +1053,19 @@ fn collect_analysis(
                 .and_then(|name| name.utf8_text(lines.source().as_bytes()).ok())
                 .unwrap_or("<anonymous>")
                 .to_owned();
+            let nome_node = node
+                .child_by_field_name("name")
+                .or_else(|| declarator_name(node));
             abertos.push((
                 depth,
                 OutlineItem {
                     name,
                     kind,
                     range: node_range(node, lines),
+                    // Sem nó de nome — declaração incompleta enquanto se digita
+                    // — vale a declaração, que é o mais próximo que existe.
+                    name_range: nome_node
+                        .map_or_else(|| node_range(node, lines), |nome| node_range(nome, lines)),
                     children: Vec::new(),
                 },
             ));
@@ -1996,6 +2054,115 @@ int x;";
             "membro privado não é oferecido: {labels:?}"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// O outline diz onde está o **nome**, e não só onde a declaração começa.
+    ///
+    /// Uma anotação acima da classe empurra o começo da declaração para a linha
+    /// dela. Quem precisa saber se o clique caiu no nome — o menu de renomear —
+    /// errava por uma linha justamente nos arquivos anotados, que num projeto
+    /// com Spring ou JPA são quase todos.
+    #[test]
+    fn the_outline_points_at_the_name_and_not_only_at_the_declaration() {
+        let fonte = concat!(
+            "@Entity\n",
+            "public class Pedido {\n",
+            "    private Long id;\n",
+            "}\n",
+        );
+        let snapshot = snapshot(fonte);
+        let (Ok(parser), snapshot) = (crate::parser::JavaParser::new(), snapshot) else {
+            panic!("parser Java indisponível");
+        };
+        let Ok(tree) = parser.parse(&snapshot.text, None) else {
+            panic!("o fonte de teste não parseou");
+        };
+        let outline = analyze(&snapshot, &tree).outline;
+        let Some(classe) = outline.first() else {
+            panic!("a classe precisa estar no outline");
+        };
+
+        assert_eq!(
+            classe.range.start.line, 0,
+            "a declaração começa na anotação"
+        );
+        assert_eq!(classe.name_range.start.line, 1, "mas o nome está abaixo dela");
+        assert_eq!(classe.name_range.start.column, 13);
+        assert_eq!(classe.name_range.end.column, 19);
+    }
+
+    /// Para um arquivo aberto, quem vale é o documento — não o índice.
+    ///
+    /// O índice é montado na ativação e não acompanha edição nem renomeação.
+    /// Somando os dois, a mesma ocorrência vinha duas vezes, uma delas em
+    /// posição vencida — e depois de renomear vinha um arquivo que já não
+    /// existe, com o nome antigo, na lista da janela.
+    #[test]
+    fn an_open_file_answers_for_itself_instead_of_the_stale_index() {
+        let active = active();
+        let source = "public class Pedido {
+    Pedido copiar() { return new Pedido(); }
+}
+";
+        assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
+
+        let Ok(encontrados) = pollster::block_on(active.references_to_name("Pedido")) else {
+            panic!("referências indisponíveis");
+        };
+        let caminho = snapshot(source).path;
+        let deste_arquivo: Vec<_> = encontrados
+            .iter()
+            .filter(|local| local.path == caminho)
+            .collect();
+        let mut posicoes: Vec<_> = deste_arquivo
+            .iter()
+            .map(|local| (local.range.start.line, local.range.start.column))
+            .collect();
+        let antes = posicoes.len();
+        posicoes.sort_unstable();
+        posicoes.dedup();
+        assert_eq!(
+            posicoes.len(),
+            antes,
+            "nenhuma ocorrência pode aparecer duas vezes: {posicoes:?}"
+        );
+    }
+
+    /// As referências por nome cobrem o projeto, não só o arquivo aberto.
+    ///
+    /// Renomear um arquivo fala de um nome que pode não estar aberto em lugar
+    /// nenhum, e por isso a pergunta é pelo **nome**, e não por uma posição.
+    #[test]
+    fn references_to_a_name_cover_declaration_and_uses() {
+        let active = active();
+        let source = concat!(
+            "public class Pedido {\n",
+            "    private Pedido anterior;\n",
+            "    Pedido copiar() { return new Pedido(); }\n",
+            "}\n",
+        );
+        assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
+
+        let encontrados = match pollster::block_on(active.references_to_name("Pedido")) {
+            Ok(encontrados) => encontrados,
+            Err(error) => panic!("referências indisponíveis: {error}"),
+        };
+        assert!(
+            encontrados.len() >= 4,
+            "declaração, campo, retorno e construção: {}",
+            encontrados.len()
+        );
+        assert!(
+            encontrados.iter().any(|local| local.range.start.line == 0),
+            "a declaração entra, porque ela também será trocada"
+        );
+
+        // Um nome que não existe não devolve nada.
+        let vazio = match pollster::block_on(active.references_to_name("Inexistente")) {
+            Ok(vazio) => vazio,
+            Err(error) => panic!("referências indisponíveis: {error}"),
+        };
+        assert!(vazio.is_empty());
     }
 
     /// O construtor sai do conjunto escolhido, e a lista vazia é um construtor

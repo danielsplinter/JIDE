@@ -13,7 +13,8 @@ use std::{
 use ide_domain::{
     AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
     DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location, ProviderId,
-    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextPosition,
+    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot,
+    TextPosition,
 };
 use thiserror::Error;
 
@@ -211,6 +212,15 @@ pub trait ActiveLanguage: Send + Sync {
         _fields: Vec<String>,
     ) -> Result<Option<String>, LanguageError> {
         Err(LanguageError::Unsupported("constructor source".to_owned()))
+    }
+    /// Onde um nome é referenciado no projeto inteiro.
+    ///
+    /// Diferente de `references`, que parte de uma posição num arquivo aberto:
+    /// renomear um arquivo fala de um nome que talvez não esteja aberto em lugar
+    /// nenhum. Quem sabe o que conta como referência — um uso do tipo, e não a
+    /// palavra solta dentro de um comentário — é a linguagem.
+    async fn references_to_name(&self, _name: &str) -> Result<Vec<Location>, LanguageError> {
+        Err(LanguageError::Unsupported("references to name".to_owned()))
     }
     async fn definition(
         &self,

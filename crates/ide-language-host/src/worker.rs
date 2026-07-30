@@ -1,7 +1,8 @@
 ﻿use ide_domain::{
     AccessorKind, AccessorPlan, TextPosition,
     CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
-    DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot, SemanticSymbol,
+    DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot,
+    SemanticSymbol,
     SyntaxSnapshot,
 };
 use ide_language_api::{
@@ -67,6 +68,11 @@ pub(super) enum WorkerRequest {
         position: TextPosition,
         kind: AccessorKind,
         response: oneshot::Sender<Result<AccessorPlan, LanguageHostError>>,
+    },
+    ReferencesToName {
+        context: LanguageRequestContext,
+        name: String,
+        response: oneshot::Sender<Result<Vec<Location>, LanguageHostError>>,
     },
     ConstructorSource {
         context: LanguageRequestContext,
@@ -370,6 +376,23 @@ impl ProviderWorker {
             .map_err(|_| LanguageHostError::WorkerStopped)?
     }
 
+    pub(super) async fn references_to_name(
+        &self,
+        context: LanguageRequestContext,
+        name: String,
+    ) -> Result<Vec<Location>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::ReferencesToName {
+            context,
+            name,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
     pub(super) async fn constructor_source(
         &self,
         context: LanguageRequestContext,
@@ -618,6 +641,20 @@ fn run_worker(
                 } else {
                     runtime
                         .block_on(active.accessor_plan(document_id, position, kind))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::ReferencesToName {
+                context,
+                name,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.references_to_name(&name))
                         .map_err(Into::into)
                 };
                 let _ = response.send(result);

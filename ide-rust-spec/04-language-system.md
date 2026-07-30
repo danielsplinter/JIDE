@@ -198,6 +198,53 @@ São duas operações, e a diferença entre elas é o que motiva a segunda:
 A linha de inserção vem do plano, presa ao corpo do tipo: com o cursor na linha da
 declaração, ou depois da chave que a fecha, o membro sairia fora da classe.
 
+## Renomeação
+
+O gesto parte da **árvore de arquivos**, e o alvo é o arquivo. Renomear
+`Pedido.java` para `Compra.java` renomeia o arquivo, o tipo dentro dele e todas as
+referências ao nome no projeto.
+
+`references_to_name(name)` responde onde o nome aparece — no projeto inteiro,
+inclusive em arquivos fechados, e por isso a pergunta é pelo **nome** e não por uma
+posição num arquivo aberto. A rota até o provider é pela **extensão**: o arquivo
+pode não estar aberto, que é o caso comum ao renomear pela árvore. Sem provider
+para aquela extensão a resposta é vazia, e renomear vira só mover o arquivo — que
+continua sendo uma resposta útil para um `.md` ou um `.properties`.
+
+A escrita é repartida por quem tem o quê:
+
+- **arquivos abertos** são reescritos pela tela, no buffer: a aba mantém cursor,
+  desfazer e alterações não salvas, e gravar por cima delas perderia trabalho que
+  o disco não tem;
+- **arquivos fechados** e o `rename` do arquivo em si são da aplicação, que tem a
+  porta do sistema de arquivos. `WorkspacePort::rename_path` falha se o destino já
+  existir — sobrescrever apagaria o arquivo de outro tipo.
+
+A gravação dos fechados é **tudo ou nada**: os conteúdos novos são calculados antes
+de qualquer escrita, e uma falha no meio restaura os já gravados. Meio caminho é um
+projeto que não compila com o usuário sem saber onde parou.
+
+A troca em si — posições em linha e coluna viram bytes, do fim para o começo do
+texto — vive em `ide_workspace::rewrite_occurrences`, num lugar só, porque a tela e
+a aplicação precisam dela pelos dois lados.
+
+### O índice não acompanha edição
+
+`references_to_name` soma duas fontes, e elas não valem o mesmo. O índice do
+workspace é montado na ativação e **não é incremental** (`ADR-015`): para um
+arquivo aberto ele fala do texto de antes das edições, e depois de uma renomeação
+ele ainda guarda o caminho antigo.
+
+Por isso o documento aberto **vence** o índice: dele vem tudo sobre os arquivos
+abertos, e do índice só o que não está aberto. Sem esse corte a mesma ocorrência
+aparecia duas vezes, uma em posição vencida, e a janela listava um arquivo com o
+nome antigo.
+
+Renomear também **reativa** o provider, o que refaz o índice inteiro. É caro — da
+ordem de um segundo e meio num projeto médio — mas renomear é raro, e sem isso a
+renomeação seguinte partiria de caminhos que não existem mais. Um índice
+incremental tornaria as duas coisas desnecessárias.
+
 ## Estratégia de fallback
 
 Se uma capability não estiver disponível no provider principal, o host pode consultar outro adapter.

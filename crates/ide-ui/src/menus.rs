@@ -62,7 +62,14 @@ pub(super) fn explorer_entries(
     target: &Path,
     source_root_names: &[String],
     templates: &[NewItemTemplate],
+    is_file: bool,
 ) -> Vec<MenuEntry> {
+    // Renomear é de arquivo: uma pasta não tem tipo dentro dela nem referências
+    // por nome, e prometer o mesmo gesto para as duas coisas seria mentira.
+    let renomear = MenuEntry::Item(MenuItem::new(
+        "Renomear",
+        CommandId("explorer.rename".to_owned()),
+    ));
     if is_source_root(target, source_root_names) || is_package(target, source_root_names) {
         let mut entries = Vec::new();
         for (index, template) in templates.iter().enumerate() {
@@ -74,7 +81,14 @@ pub(super) fn explorer_entries(
                 entries.push(MenuEntry::Separator);
             }
         }
+        if is_file {
+            entries.push(MenuEntry::Separator);
+            entries.push(renomear);
+        }
         return entries;
+    }
+    if is_file {
+        return vec![renomear];
     }
     vec![MenuEntry::Item(MenuItem::new(
         "Nova pasta",
@@ -130,6 +144,35 @@ mod generate_tests {
             "Setter",
             "Getter and Setter"
         ]);
+    }
+
+    /// Renomear é do arquivo: aparece sobre um, e não sobre uma pasta.
+    #[test]
+    fn rename_is_offered_for_files_and_not_for_folders() {
+        let templates = Vec::new();
+        let raizes = Vec::new();
+
+        let pasta = labels(&explorer_entries(
+            Path::new("projeto/src"),
+            &raizes,
+            &templates,
+            false,
+        ));
+        assert!(
+            !pasta.iter().any(|item| item == "Renomear"),
+            "pasta não tem tipo dentro nem referências por nome: {pasta:?}"
+        );
+
+        let arquivo = labels(&explorer_entries(
+            Path::new("projeto/src"),
+            &raizes,
+            &templates,
+            true,
+        ));
+        assert!(
+            arquivo.iter().any(|item| item == "Renomear"),
+            "sobre um arquivo a opção aparece: {arquivo:?}"
+        );
     }
 
     /// Depurando e dentro de um tipo, as duas coisas convivem.

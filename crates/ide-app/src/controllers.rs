@@ -65,6 +65,11 @@ impl WorkspaceController {
         self.service.read_document(path)
     }
 
+    /// Move um arquivo do workspace, para seguir um tipo renomeado.
+    pub(super) fn rename_path(&self, from: &Path, to: &Path) -> Result<(), WorkspaceError> {
+        self.service.rename_path(from, to)
+    }
+
     pub(super) fn save_document(&self, path: &Path, text: &str) -> Result<(), WorkspaceError> {
         self.service.save_document(path, text)
     }

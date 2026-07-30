@@ -111,7 +111,16 @@ pub enum OutlineKind {
 pub struct OutlineItem {
     pub name: String,
     pub kind: OutlineKind,
+    /// Toda a declaração, do primeiro modificador ao fecho.
     pub range: TextRange,
+    /// Só o nome, dentro da declaração.
+    ///
+    /// `range` começa onde a declaração começa, que **não** é onde o nome está:
+    /// uma anotação ou um comentário acima empurram o começo para cima. Quem
+    /// precisa saber se o usuário clicou no nome — renomear, por exemplo —
+    /// pergunta por aqui, senão erraria por uma linha justamente nos arquivos
+    /// anotados.
+    pub name_range: TextRange,
     pub children: Vec<OutlineItem>,
 }
 

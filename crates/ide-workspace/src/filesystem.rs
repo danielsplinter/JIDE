@@ -45,6 +45,15 @@ impl WorkspacePort for NativeWorkspaceFileSystem {
         Ok(())
     }
 
+    fn rename_path(&self, from: &Path, to: &Path) -> Result<(), WorkspacePortError> {
+        if to.exists() {
+            return Err(WorkspacePortError {
+                message: format!("{} já existe", to.display()),
+            });
+        }
+        std::fs::rename(from, to).map_err(Into::into)
+    }
+
     fn create_directory(&self, path: &Path) -> Result<(), WorkspacePortError> {
         fs::create_dir_all(path)?;
         Ok(())

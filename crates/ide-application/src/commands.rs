@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use ide_domain::DocumentId;
+use ide_domain::{DocumentId, TextRange};
 use thiserror::Error;
 
 use crate::TaskId;
@@ -30,8 +30,34 @@ pub enum ApplicationCommand {
     CreateItem(NewItemRequest),
     BreakpointsChanged(PathBuf),
     Debug(DebugRequest),
+    /// Renomeia o arquivo de um documento aberto, seguindo o tipo.
+    RenameDocument(RenameDocumentRequest),
     SearchTypes(String),
     SearchContent(String),
+}
+
+/// Arquivo a renomear, com tudo o que precisa ser reescrito junto.
+///
+/// A tela decidiu o nome novo e a linguagem disse onde o antigo aparece; o que
+/// falta é escrever, e escrever em arquivo é da aplicação. As ocorrências vêm
+/// agrupadas por caminho porque é assim que serão aplicadas: um arquivo por vez,
+/// e nenhum pela metade.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenameDocumentRequest {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    /// Nome antigo e novo do símbolo, quando o arquivo declara um.
+    pub old_name: String,
+    pub new_name: String,
+    /// Onde o nome antigo aparece, por arquivo.
+    pub occurrences: Vec<FileOccurrences>,
+}
+
+/// Ocorrências do nome antigo dentro de um arquivo.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileOccurrences {
+    pub path: PathBuf,
+    pub ranges: Vec<TextRange>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
