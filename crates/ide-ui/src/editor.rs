@@ -43,8 +43,23 @@ pub(super) struct EditorAreaState {
     pub(super) generate: Option<GenerateState>,
     /// Acessor pedido cuja resposta da linguagem ainda não chegou.
     pub(super) generate_pending: Option<AccessorKind>,
+    /// Construtor escolhido cuja fonte a linguagem ainda não devolveu.
+    ///
+    /// O construtor sai de **um** texto montado a partir do conjunto marcado, e
+    /// não da soma de trechos por campo: só depois da escolha dá para pedi-lo.
+    pub(super) constructor_pending: Option<ConstructorRequest>,
     /// Janela da geração de acessores.
     pub(super) generate_modal: ui_components::ModalHost,
+}
+
+/// Construtor escolhido, à espera do texto que a linguagem vai montar.
+///
+/// Guarda os campos marcados e onde o texto entra. Lista vazia é um construtor
+/// **sem parâmetros**, e não "nada escolhido": é o que o usuário pede quando
+/// abre a janela e confirma sem marcar nada.
+pub(super) struct ConstructorRequest {
+    pub(super) fields: Vec<String>,
+    pub(super) insert_at: ide_domain::TextPosition,
 }
 
 /// O que a janela de geração mostra e o que o usuário marcou.
@@ -165,6 +180,12 @@ pub struct EditorPane {
     /// Âncora e foco da seleção, em bytes.
     selection: Option<(usize, usize)>,
     selecting: bool,
+    /// Último ponto do ponteiro durante o arrasto.
+    ///
+    /// Guardado para que a rolagem continue com o ponteiro parado fora da
+    /// borda: sem ele, só haveria passo quando chegasse um evento de
+    /// movimento, e segurar não roleria nada.
+    last_pointer: Option<Point>,
     /// Rolagem vertical, em pixels.
     ///
     /// Em pixels, e não em linhas: rolar de linha em linha faz o texto saltar
@@ -232,6 +253,7 @@ impl EditorPane {
             cursor: 0,
             selection: None,
             selecting: false,
+            last_pointer: None,
             scroll_offset: 0.0,
             scroll_x: 0.0,
             revealed_cursor: None,
@@ -385,7 +407,7 @@ impl EditorPane {
         // errava mais a cada coluna — a alguns caracteres de distância do
         // clique já no meio de uma linha.
         if let Some((_, _, view)) = self.view.as_ref() {
-            return byte_at_char(text, view.offset_at_point(point));
+            return Self::cursor_stop(text, byte_at_char(text, view.offset_at_point(point)), false);
         }
         // Antes do primeiro desenho não há view, e a estimativa é o que existe.
         let line_index = self.scroll_line()
@@ -425,6 +447,7 @@ impl EditorPane {
         buffer: &TextBuffer,
         point: Point,
         control: bool,
+        shift: bool,
     ) -> EditorAction {
         if !self.bounds.contains(point) {
             return EditorAction::None;
@@ -434,10 +457,23 @@ impl EditorPane {
             return EditorAction::ToggleBreakpoint(line);
         }
         let offset = self.offset_at_point(buffer, point);
-        self.cursor = offset;
         if control && self.capabilities.navigation {
+            self.cursor = offset;
             return EditorAction::Navigate(offset);
         }
+        // Com `Shift`, o clique **estende** do que já estava marcado até aqui: a
+        // âncora é a que existe, ou o cursor de antes do clique. Fixar uma nova
+        // apagaria a seleção que o usuário quer alargar.
+        if shift {
+            let anchor = self
+                .selection
+                .map_or(self.cursor, |(existente, _)| existente);
+            self.cursor = offset;
+            self.selection = Some((anchor, offset));
+            self.selecting = true;
+            return EditorAction::None;
+        }
+        self.cursor = offset;
         // Pressionar fixa a âncora; o movimento seguinte decide se virou seleção.
         self.selection = Some((offset, offset));
         self.selecting = true;
@@ -457,16 +493,76 @@ impl EditorPane {
         if !self.selecting {
             return false;
         }
+        // Guardado para o relógio: o passo de rolagem é dado por tempo, e não
+        // por movimento, senão parar o ponteiro fora da borda pararia a vista.
+        self.last_pointer = Some(point);
+        self.extend_to(buffer, point);
+        true
+    }
+
+    /// Um passo de rolagem enquanto o arrasto continua fora da área visível.
+    ///
+    /// Chamado pelo relógio da janela, e não por evento de ponteiro: sem isso,
+    /// segurar o botão parado além da borda não levaria a vista a lugar nenhum
+    /// — seria preciso mexer o mouse para arrancar cada linha. Devolve se algo
+    /// mudou, que é o que decide se vale redesenhar.
+    pub fn drag_autoscroll(&mut self, buffer: &TextBuffer) -> bool {
+        let Some(point) = self.last_pointer else {
+            return false;
+        };
+        if !self.selecting || !self.autoscroll(point) {
+            return false;
+        }
+        self.extend_to(buffer, point);
+        true
+    }
+
+    /// Leva o cursor — e o fim da seleção — até o ponto do ponteiro.
+    fn extend_to(&mut self, buffer: &TextBuffer, point: Point) {
         let focus = self.offset_at_point(buffer, point);
         self.cursor = focus;
         if let Some((anchor, _)) = self.selection {
             self.selection = Some((anchor, focus));
         }
-        true
+    }
+
+    /// Move a vista quando o arrasto passa da borda da área.
+    ///
+    /// O passo cresce com a distância além da borda, mas com teto: sem ele o
+    /// ponteiro no canto da tela varreria o arquivo inteiro num piscar. Devolve
+    /// se houve rolagem, isto é, se o ponteiro está mesmo fora.
+    fn autoscroll(&mut self, point: Point) -> bool {
+        let bounds = self.bounds;
+        let linha = CodeEditor::line_height();
+        let mut rolou = false;
+        let acima = bounds.origin.y - point.y;
+        let abaixo = point.y - (bounds.origin.y + bounds.size.height);
+        if acima > 0.0 {
+            self.scroll_offset = (self.scroll_offset - linha * ritmo(acima, linha)).max(0.0);
+            rolou = true;
+        } else if abaixo > 0.0 {
+            self.scroll_offset += linha * ritmo(abaixo, linha);
+            rolou = true;
+        }
+        let coluna = CodeEditor::default_char_width() * AUTOSCROLL_COLUMNS;
+        let gutter = CodeEditor::gutter_width();
+        let esquerda = bounds.origin.x + gutter - point.x;
+        let direita = point.x - (bounds.origin.x + bounds.size.width);
+        if esquerda > 0.0 {
+            self.scroll_x = (self.scroll_x - coluna * ritmo(esquerda, coluna)).max(0.0);
+            rolou = true;
+        } else if direita > 0.0 {
+            self.scroll_x += coluna * ritmo(direita, coluna);
+            rolou = true;
+        }
+        // Os limites são do editor da biblioteca, que conhece o conteúdo; aqui
+        // só o piso, para não pedir rolagem negativa.
+        rolou
     }
 
     pub fn pointer_up(&mut self) {
         self.selecting = false;
+        self.last_pointer = None;
         // Pressionar e soltar no mesmo ponto é um clique, não uma seleção vazia.
         if self
             .selection
@@ -495,6 +591,22 @@ impl EditorPane {
         self.cursor = end;
         self.selection = Some((start, end));
         self.selecting = false;
+    }
+
+    /// Limite da palavra vizinha, em bytes, para o salto com `Ctrl`.
+    ///
+    /// Como no duplo clique, quem sabe onde a palavra começa e acaba é o editor
+    /// da biblioteca; aqui só se converte entre bytes e caracteres.
+    fn word_boundary(&self, buffer: &TextBuffer, forward: bool) -> usize {
+        let text = buffer.text();
+        let editor = CodeEditor::new(SCRATCH_VIEW_ID, text);
+        let from = chars_before(text, self.cursor);
+        let target = if forward {
+            editor.next_word(from)
+        } else {
+            editor.previous_word(from)
+        };
+        byte_at_char(text, target)
     }
 
     /// Estado atual, para guardar antes de mexer no texto.
@@ -845,13 +957,24 @@ impl EditorPane {
                 self.remember(buffer);
                 self.indent(buffer);
             }
+            // Com `Ctrl`, o salto é de palavra em palavra. Onde a palavra
+            // começa e acaba é regra do editor da biblioteca, que é a mesma do
+            // duplo clique — decidir isso aqui daria dois recortes do texto.
+            "arrowleft" if control => {
+                let target = self.word_boundary(buffer, false);
+                self.move_cursor(target, shift);
+            }
+            "arrowright" if control => {
+                let target = self.word_boundary(buffer, true);
+                self.move_cursor(target, shift);
+            }
             "arrowleft" => {
                 let target = previous_boundary(buffer.text(), self.cursor);
-                self.move_cursor(target, shift);
+                self.move_cursor(Self::cursor_stop(buffer.text(), target, false), shift);
             }
             "arrowright" => {
                 let target = next_boundary(buffer.text(), self.cursor);
-                self.move_cursor(target, shift);
+                self.move_cursor(Self::cursor_stop(buffer.text(), target, true), shift);
             }
             "arrowup" => self.move_line(buffer, -1, shift),
             "arrowdown" => self.move_line(buffer, 1, shift),
@@ -871,6 +994,24 @@ impl EditorPane {
         self.cursor = target;
     }
 
+    /// Onde o cursor pode parar, dado onde ele foi mandado.
+    ///
+    /// Num arquivo CRLF o retorno de carro pertence ao fim de linha, e entre ele
+    /// e a quebra não há posição: o que fosse digitado ali entraria **depois** do
+    /// fim da linha, o fragmento desenhado passaria a ter um retorno no meio, e o
+    /// shaper abre outra linha de layout com o que vem depois — o texto recém
+    /// digitado aparecendo repetido sobre a linha de baixo.
+    fn cursor_stop(text: &str, target: usize, forward: bool) -> usize {
+        let bytes = text.as_bytes();
+        if target > 0 && bytes.get(target) == Some(&b'\n') && bytes.get(target - 1) == Some(&b'\r')
+        {
+            // O fim de linha é um lugar só: quem vinha andando o atravessa
+            // inteiro, e quem chega por clique para no fim do que se vê.
+            return if forward { target + 1 } else { target - 1 };
+        }
+        target
+    }
+
     /// Move uma linha acima ou abaixo, preservando a coluna.
     fn move_line(&mut self, buffer: &TextBuffer, delta: isize, selecting: bool) {
         let text = buffer.text().to_owned();
@@ -882,7 +1023,8 @@ impl EditorPane {
         else {
             return;
         };
-        let target = offset_for_line_column(&text, target_line, column);
+        let target =
+            Self::cursor_stop(&text, offset_for_line_column(&text, target_line, column), false);
         self.move_cursor(target, selecting);
     }
 
@@ -1062,6 +1204,19 @@ impl EditorPane {
 
 /// Largura de uma parada de tabulação, em colunas.
 const INDENT_WIDTH: usize = 4;
+/// Colunas percorridas a cada passo do arrasto além da borda lateral.
+const AUTOSCROLL_COLUMNS: f32 = 3.0;
+/// Quantos passos, no máximo, um único tique do arrasto pode dar.
+const AUTOSCROLL_MAX_STEPS: f32 = 4.0;
+
+/// Quantos passos dar, dada a distância do ponteiro até a borda.
+///
+/// Sempre ao menos um, para que encostar já role, e no máximo
+/// [`AUTOSCROLL_MAX_STEPS`], para que afastar o ponteiro acelere sem virar
+/// salto.
+fn ritmo(distancia: f32, unidade: f32) -> f32 {
+    (1.0 + distancia / unidade.max(1.0)).clamp(1.0, AUTOSCROLL_MAX_STEPS)
+}
 const EDITOR_VIEW_ID: ui_core::WidgetId = ui_core::WidgetId(10_024);
 /// Editor de rascunho, criado para aplicar uma regra e descartado em seguida.
 const SCRATCH_VIEW_ID: ui_core::WidgetId = ui_core::WidgetId(10_051);
@@ -1134,6 +1289,46 @@ mod tests {
         (pane, TextBuffer::new("um\ndois\ntres"))
     }
 
+    /// Num arquivo CRLF o cursor não para entre o retorno e a quebra.
+    ///
+    /// Era o que duplicava o texto: com um espaço no fim da linha, o cursor
+    /// chegava depois do retorno, o caractere digitado entrava ali e o fragmento
+    /// desenhado ficava com um retorno no meio — o shaper abre outra linha de
+    /// layout com o que vem depois, e o que foi digitado aparecia repetido sobre
+    /// a linha de baixo.
+    #[test]
+    fn the_cursor_never_stops_between_the_carriage_return_and_the_break() {
+        let (mut pane, _) = pane(EditorCapabilities::plain());
+        let mut buffer = TextBuffer::new("int x = 1; \r\nint y = 2;\r\n");
+
+        // Fim do que se vê na primeira linha: logo antes do retorno.
+        pane.set_cursor(11);
+        pane.key(&mut buffer, "ArrowRight", false, false);
+        assert_eq!(
+            pane.cursor(),
+            13,
+            "a seta pula o fim de linha inteiro, e não para dentro dele"
+        );
+        pane.key(&mut buffer, "ArrowLeft", false, false);
+        assert_eq!(pane.cursor(), 11, "e volta para o fim do que se vê");
+
+        // Digitar aí escreve **antes** do fim de linha, que fica intacto.
+        pane.insert(&mut buffer, "z");
+        assert_eq!(buffer.text(), "int x = 1; z\r\nint y = 2;\r\n");
+        for linha in buffer.text().split('\n') {
+            assert!(
+                !linha.trim_end_matches('\r').contains('\r'),
+                "nenhum retorno no meio de uma linha: {linha:?}"
+            );
+        }
+
+        // Descer e subir preservando a coluna também não para no fim de linha.
+        pane.set_cursor(12);
+        pane.key(&mut buffer, "ArrowDown", false, false);
+        pane.key(&mut buffer, "ArrowUp", false, false);
+        assert!(pane.cursor() <= 12);
+    }
+
     /// O clique consulta a view, que mede a largura na fonte de verdade.
     ///
     /// O painel refazia a conta com a largura estimada, e o erro se acumula por
@@ -1165,6 +1360,180 @@ mod tests {
         );
     }
 
+    /// `Shift` com as quatro setas marca a partir do cursor.
+    ///
+    /// A âncora é onde o cursor estava quando a primeira seta foi pressionada, e
+    /// continua a mesma enquanto `Shift` segurar — é o que faz a seleção crescer
+    /// em vez de recomeçar a cada tecla.
+    #[test]
+    fn shift_with_the_four_arrows_selects_from_the_cursor() {
+        let (mut pane, _) = pane(EditorCapabilities::plain());
+        let mut buffer = TextBuffer::new("um\ndois\ntres");
+
+        // Direita: marca crescendo a partir do cursor.
+        pane.set_cursor(0);
+        pane.key(&mut buffer, "ArrowRight", true, false);
+        pane.key(&mut buffer, "ArrowRight", true, false);
+        assert_eq!(pane.selected_text(&buffer), Some("um"));
+
+        // Baixo: alarga a partir da **mesma** âncora, atravessando a linha.
+        pane.key(&mut buffer, "ArrowDown", true, false);
+        assert_eq!(pane.selected_text(&buffer), Some("um\ndo"));
+
+        // Cima: encolhe de volta, sem trocar a âncora.
+        pane.key(&mut buffer, "ArrowUp", true, false);
+        assert_eq!(pane.selected_text(&buffer), Some("um"));
+
+        // Esquerda: continua da mesma origem.
+        pane.key(&mut buffer, "ArrowLeft", true, false);
+        assert_eq!(pane.selected_text(&buffer), Some("u"));
+
+        // Sem `Shift`, mover desfaz a seleção.
+        pane.key(&mut buffer, "ArrowRight", false, false);
+        assert_eq!(pane.selection_range(), None);
+    }
+
+    /// `Shift+clique` marca do cursor até o ponto clicado.
+    ///
+    /// Fixar uma âncora nova apagaria a seleção que o usuário quer alargar — é
+    /// justamente o gesto de estender que `Shift` pede.
+    #[test]
+    fn shift_click_extends_from_the_cursor_to_the_clicked_point() {
+        let (mut pane, buffer) = pane(EditorCapabilities::plain());
+        let coluna = |index: usize| {
+            Point::new(
+                CodeEditor::gutter_width() + index as f32 * CodeEditor::default_char_width(),
+                4.0,
+            )
+        };
+        // Cursor no começo, e `Shift+clique` na coluna 2 da primeira linha.
+        pane.set_cursor(0);
+        pane.pointer_down(&buffer, coluna(2), false, true);
+        assert_eq!(pane.selection_range(), Some(0..2));
+        assert_eq!(pane.selected_text(&buffer), Some("um"));
+
+        // Outro `Shift+clique` alarga a partir da **mesma** âncora.
+        pane.pointer_down(&buffer, coluna(1), false, true);
+        assert_eq!(pane.selection_range(), Some(0..1));
+
+        // Sem `Shift`, o clique recomeça.
+        pane.pointer_down(&buffer, coluna(1), false, false);
+        assert_eq!(pane.selection_range(), None);
+        assert_eq!(pane.cursor(), 1);
+    }
+
+    /// Texto largo e comprido o bastante para rolar nas duas direções.
+    fn buffer_grande() -> TextBuffer {
+        TextBuffer::new(
+            (0..200)
+                .map(|linha| format!("linha {linha} {}", "x".repeat(200)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    /// Arrastar além da borda leva a vista junto, nas quatro direções.
+    ///
+    /// Sem isso a seleção pararia no que está à mostra, e marcar além da tela
+    /// exigiria soltar, rolar e recomeçar.
+    #[test]
+    fn dragging_past_the_edge_scrolls_towards_the_selection() {
+        let (mut pane, _) = pane(EditorCapabilities::plain());
+        let buffer = buffer_grande();
+        let bounds = pane.bounds();
+
+        // Começa uma seleção e arrasta para baixo, além da borda.
+        pane.pointer_down(&buffer, Point::new(bounds.origin.x + 60.0, 4.0), false, false);
+        pane.pointer_move(
+            &buffer,
+            Point::new(bounds.origin.x + 60.0, bounds.origin.y + bounds.size.height + 20.0),
+        );
+        assert!(pane.drag_autoscroll(&buffer));
+        assert!(pane.scroll_offset() > 0.0, "arrastar para baixo desce a vista");
+
+        // Para a direita, além da borda lateral.
+        pane.pointer_move(
+            &buffer,
+            Point::new(bounds.origin.x + bounds.size.width + 20.0, 10.0),
+        );
+        assert!(pane.drag_autoscroll(&buffer));
+        assert!(pane.scroll_x() > 0.0, "arrastar à direita anda de lado");
+
+        // De volta para cima e para a esquerda, sem passar do começo.
+        pane.pointer_move(&buffer, Point::new(bounds.origin.x - 20.0, bounds.origin.y - 20.0));
+        for _ in 0..20 {
+            pane.drag_autoscroll(&buffer);
+        }
+        assert_eq!(pane.scroll_offset(), 0.0, "não passa do topo");
+        assert_eq!(pane.scroll_x(), 0.0, "nem da margem esquerda");
+
+        // Sem arrasto em curso, mover o ponteiro não rola nada.
+        pane.pointer_up();
+        pane.pointer_move(
+            &buffer,
+            Point::new(bounds.origin.x + 60.0, bounds.origin.y + bounds.size.height + 20.0),
+        );
+        assert!(!pane.drag_autoscroll(&buffer));
+        assert_eq!(pane.scroll_offset(), 0.0);
+    }
+
+    /// Com o ponteiro parado fora da borda, o relógio continua rolando.
+    ///
+    /// É o caso de quem segura o botão junto ao rodapé esperando a vista
+    /// descer: sem tique, nada acontece até o mouse mexer de novo.
+    #[test]
+    fn holding_the_pointer_outside_keeps_scrolling_and_selecting() {
+        let (mut pane, _) = pane(EditorCapabilities::plain());
+        let buffer = buffer_grande();
+        let bounds = pane.bounds();
+        let fora = Point::new(
+            bounds.origin.x + 60.0,
+            bounds.origin.y + bounds.size.height + 20.0,
+        );
+
+        pane.pointer_down(&buffer, Point::new(bounds.origin.x + 60.0, 4.0), false, false);
+        pane.pointer_move(&buffer, fora);
+        // Um único movimento e, daí em diante, só o relógio.
+        assert!(pane.drag_autoscroll(&buffer));
+        let primeiro = pane.scroll_offset();
+        let Some(inicial) = pane.selection_range() else {
+            panic!("o arrasto marcou um trecho");
+        };
+
+        assert!(pane.drag_autoscroll(&buffer), "o tique seguinte também rola");
+        assert!(
+            pane.scroll_offset() > primeiro,
+            "sem mexer o mouse, a vista continua descendo"
+        );
+        let Some(agora) = pane.selection_range() else {
+            panic!("a seleção acompanha o tique");
+        };
+        assert_eq!(
+            agora.start, inicial.start,
+            "a âncora fica onde o gesto começou"
+        );
+        assert!(agora.end > inicial.end, "e o trecho marcado cresce");
+
+        // Soltar encerra: o relógio segue batendo, mas não mexe mais na vista.
+        pane.pointer_up();
+        let parado = pane.scroll_offset();
+        assert!(!pane.drag_autoscroll(&buffer));
+        assert_eq!(pane.scroll_offset(), parado);
+    }
+
+    /// O passo cresce com a distância, mas não vira salto.
+    #[test]
+    fn the_step_grows_with_the_distance_up_to_a_ceiling() {
+        let unidade = CodeEditor::line_height();
+        assert_eq!(ritmo(0.0, unidade), 1.0, "encostar na borda já anda uma vez");
+        assert!(ritmo(unidade, unidade) > 1.0, "mais longe, mais rápido");
+        assert_eq!(
+            ritmo(unidade * 1_000.0, unidade),
+            AUTOSCROLL_MAX_STEPS,
+            "o ponteiro no canto da tela não varre o arquivo"
+        );
+    }
+
     /// Clicar posiciona o cursor pela coluna, e arrastar marca o trecho.
     #[test]
     fn the_pane_selects_by_dragging_inside_its_own_bounds() {
@@ -1175,7 +1544,7 @@ mod tests {
                 CodeEditor::line_height() + 4.0,
             )
         };
-        pane.pointer_down(&buffer, column(0), false);
+        pane.pointer_down(&buffer, column(0), false, false);
         pane.pointer_move(&buffer, column(4));
         pane.pointer_up();
         // Segunda linha, do começo ao fim de `dois`.
@@ -1188,11 +1557,11 @@ mod tests {
     fn navigation_only_answers_when_the_capability_is_on() {
         let (mut plain, buffer) = pane(EditorCapabilities::plain());
         let point = Point::new(CodeEditor::gutter_width() + 4.0, 4.0);
-        assert_eq!(plain.pointer_down(&buffer, point, true), EditorAction::None);
+        assert_eq!(plain.pointer_down(&buffer, point, true, false), EditorAction::None);
 
         let (mut full, buffer) = pane(EditorCapabilities::full());
         assert!(matches!(
-            full.pointer_down(&buffer, point, true),
+            full.pointer_down(&buffer, point, true, false),
             EditorAction::Navigate(_)
         ));
     }
@@ -1203,13 +1572,13 @@ mod tests {
         let point = Point::new(4.0, CodeEditor::line_height() + 4.0);
         let (mut plain, buffer) = pane(EditorCapabilities::plain());
         assert_eq!(
-            plain.pointer_down(&buffer, point, false),
+            plain.pointer_down(&buffer, point, false, false),
             EditorAction::None
         );
 
         let (mut full, buffer) = pane(EditorCapabilities::full());
         assert_eq!(
-            full.pointer_down(&buffer, point, false),
+            full.pointer_down(&buffer, point, false, false),
             EditorAction::ToggleBreakpoint(1)
         );
     }
@@ -1444,6 +1813,34 @@ mod tests {
         }
         pane.insert(&mut buffer, "Z");
         assert_eq!(buffer.text(), "ZnoXYe = ZnoXYe");
+    }
+
+    /// `Ctrl` com as setas laterais salta de palavra em palavra.
+    ///
+    /// Em bytes, que é como o painel guarda o cursor: com acento no caminho, um
+    /// salto contado em caracteres pararia no meio de uma letra.
+    #[test]
+    fn control_with_the_side_arrows_jumps_between_words() {
+        let (mut pane, _) = pane(EditorCapabilities::plain());
+        let mut buffer = TextBuffer::new("int número = valor;");
+        pane.set_cursor(0);
+
+        pane.key(&mut buffer, "ArrowRight", false, true);
+        assert_eq!(pane.cursor(), 3, "fim de `int`");
+        pane.key(&mut buffer, "ArrowRight", false, true);
+        assert_eq!(pane.cursor(), 11, "`número` tem sete bytes, e não seis");
+
+        pane.key(&mut buffer, "ArrowLeft", false, true);
+        assert_eq!(pane.cursor(), 4, "começo de `número`");
+
+        // Com `Shift`, o salto marca em vez de só andar.
+        pane.key(&mut buffer, "ArrowRight", true, true);
+        assert_eq!(pane.selection_range(), Some(4..11));
+
+        // Sem `Ctrl`, continua andando de caractere em caractere.
+        pane.set_cursor(0);
+        pane.key(&mut buffer, "ArrowRight", false, false);
+        assert_eq!(pane.cursor(), 1);
     }
 
     /// As marcas não são seleção, e nenhum caminho de seleção as alcança.

@@ -199,3 +199,124 @@ São três, e nenhuma está resolvida:
 **Consequência:** vale para projetos do tamanho dos que a IDE atende hoje. Os três
 pontos acima são o que precisa mudar antes de ela atender projetos grandes, e o
 primeiro é o mais perigoso, porque falha em silêncio.
+
+Fora do índice, e por isso registrada em `08-storage-and-memory`, há uma quarta
+pendência do mesmo tema: a **árvore do Explorer não tem teto nenhum** e é varrida
+inteira, de forma síncrona, ao abrir o projeto — 2,17 s medidos sobre 56 mil
+arquivos. Os tetos do índice fazem a indexação terminar rápido em qualquer
+projeto; é a varredura do Explorer que decide quanto tempo a janela fica parada
+ao abrir um projeto grande.
+
+## ADR-016 — Análise por tecla: uma passada, sob demanda o resto
+
+**Situação:** cada tecla digitada sincroniza o documento com o provider de
+linguagem e pede o realce novo. Medido na janela em execução, com `ERIDE_PERF=1`,
+uma tecla custava **entre 390 e 460 ms em `release`** — tudo dentro dessa
+sincronização, com o desenho do quadro em saudáveis 5 ms. Digitar ficava
+travado: o caractere aparecia segundos depois.
+
+**Evidência:** reproduzido por tamanho de arquivo, medindo o custo de uma tecla:
+
+| linhas | antes | depois |
+|---|---|---|
+| 200 | 46 ms | 4,0 ms |
+| 1000 | 1,48 s | 19,7 ms |
+| 3000 | 12,5 s | 65 ms |
+
+O crescimento era **quadrático**. Três causas, na ordem em que pesavam:
+
+1. **Conversão de posição varrendo o arquivo.** O tree-sitter dá a posição de um
+   nó em coluna de *bytes*; a IDE fala em coluna de *caracteres*. A conversão
+   procurava a linha do nó com `lines().nth(row)`, que varre o texto desde o
+   começo — e a análise converte a árvore inteira. Um `LineIndex`, montado uma
+   vez por análise, troca a varredura por uma indexação.
+2. **Semântica calculada sem ninguém pedir.** Símbolos, escopos e referências
+   custavam quase tanto quanto o realce e não servem para desenhar: só
+   completação, navegação e busca de usos os consultam. Agora a tecla apenas
+   invalida, e quem pergunta paga — `Documents::ensure_semantics`.
+3. **A árvore percorrida três vezes, criando um cursor por nó.** `Node::walk`
+   aloca, e só andar por uma árvore de 81 mil nós custava 35 ms; realces,
+   diagnósticos e outline andavam cada um por sua conta. `walk_tree` percorre com
+   **um** cursor e `collect_analysis` colhe os três de uma passada.
+
+**Decisão:** a análise por tecla fica com o que é preciso para desenhar — realce,
+diagnósticos, outline e imports — em uma passada; o resto é sob demanda. O campo
+`SyntaxSnapshot::tree`, uma cópia da árvore com uma `String` por nó, foi
+**removido**, e o tipo `SyntaxNode` saiu junto de `ide-domain`: ninguém os lia, e
+preencher o campo custava 48 mil alocações por tecla. Um contrato não pode obrigar
+a pagar por resposta que ninguém pediu; se a árvore voltar a ser necessária, deve
+nascer sob demanda, como a semântica. Os capítulos `03-core-contracts` e
+`05-java-integration` acompanham a mudança.
+
+**Consequência:** o custo da tecla passou a ser linear e cabe num quadro para
+arquivos de tamanho normal. A pendência de a análise ser **síncrona**, da
+ADR-015, continua de pé: num arquivo de 3000 linhas a tecla ainda gasta 65 ms no
+laço da janela. Tirá-la do caminho da tecla é o próximo passo, e só então o
+tamanho do arquivo deixa de aparecer na digitação. A medição que encontrou isto
+fica disponível em `ERIDE_PERF=1`, que imprime o custo por evento e por quadro.
+
+## ADR-017 — A digitação não espera pela análise
+
+**Situação:** depois da ADR-016 a tecla caiu de 400 ms para 60–90 ms, medidos na
+janela com `ERIDE_PERF=1`, e continuava tudo em `sync_languages`. Ainda dava para
+sentir: a 60 ms por caractere, quem digita rápido chega na frente da IDE.
+
+**Descoberta:** o provider de linguagem **sempre teve thread própria** — o
+`ProviderWorker` sobe uma no `spawn` e recebe pedidos por canal, com `try_send`
+que nunca bloqueia. O que punha a análise no meio da digitação era o
+`pollster::block_on` do lado da aplicação, esperando a resposta que já vinha de
+outra thread.
+
+**Decisão:** a mudança de documento e o pedido de realce passam a ser **postados**
+— `LanguageHost::post_change_document` e `post_syntax` devolvem o receptor sem
+esperar. O `LanguageController` guarda os receptores pendentes e o relógio da
+janela recolhe o que ficou pronto, instalando o realce quando ele chega. Abrir
+documento continua esperando: é raro e o resto depende dele.
+
+A fila do worker é ordenada, então o realce pedido depois de uma mudança fala do
+texto **com** ela aplicada, e as consultas que ainda esperam — completação,
+navegação, `Generate` — são processadas depois do que já foi postado, ou seja,
+enxergam o texto atual.
+
+**Consequência:** a tecla custa o que custa mexer no texto, e o realce aparece um
+ou dois quadros depois; o editor já ignorava realce de revisão vencida, então
+chegar tarde não desenha nada errado. Em troca:
+
+- **Contrapressão é visível no código, não no relógio.** Se a fila do worker
+  enche, a mudança não entra, e o registro de "o que o provider já tem" **não**
+  avança — a sincronização seguinte recalcula a diferença do mesmo ponto e tenta
+  outra vez, com um pedaço maior. Nada se perde e nada bloqueia.
+- **Determinismo em teste exige espera explícita.** `NativeIde::settle_syntax`,
+  só em `cfg(test)`, aguarda o pendente; na janela, esperar é justamente o que se
+  quer evitar.
+
+Com isto, o item "ela é síncrona" da ADR-015 fica resolvido para o caminho da
+digitação. Continua de pé para a **ativação**: a primeira consulta a uma
+linguagem ainda espera a indexação inteira.
+
+### Pendência: os ~7 ms que sobraram na tecla
+
+Medido na janela com `ERIDE_PERF=1` depois desta decisão, uma tecla custa **cerca
+de 7 ms**, e ainda quase todos dentro de `sync_languages`. Não é mais a análise —
+ela agora acontece na thread do provider e nada é esperado. O que resta é o
+preparo do que se posta:
+
+`IdeShell::document_snapshots` monta um `DocumentSnapshot` por documento aberto,
+e cada um **clona o texto inteiro**. Num arquivo grande, com algumas abas
+abertas, isso é alguns megabytes copiados a cada caractere digitado, para que no
+fim só um documento tenha mudado e só a diferença seja enviada.
+
+Dois caminhos, nenhum tomado:
+
+- **Só o documento que mudou.** A tecla altera um documento; os outros já foram
+  sincronizados e continuam iguais. Montar o instantâneo apenas do ativo elimina
+  a maior parte da cópia.
+- **Texto emprestado até o ponto de envio.** O instantâneo poderia carregar uma
+  referência, ou um texto compartilhado por `Arc<str>`, e só materializar o que a
+  mudança realmente leva. Muda o tipo de domínio, então é a alternativa mais
+  cara.
+
+A 7 ms por tecla isso não aparece para quem digita, e por isso não foi mexido: a
+correção certa é a primeira, e ela pode ser feita quando o número incomodar ou
+quando arquivos maiores entrarem em jogo. Fica registrado com a medição para que
+a próxima investigação não precise começar do zero.

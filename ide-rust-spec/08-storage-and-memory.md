@@ -39,6 +39,34 @@ Controlar memória explicitamente e evitar crescimento ilimitado.
 - uma entrada `.class` maior que 16 MiB é ignorada;
 - diretórios `.git`, `target`, `node_modules` e `.gradle` não são percorridos.
 
+### Pendência: a árvore do Explorer não tem teto
+
+A varredura que monta a árvore de arquivos — `ide-workspace`, `tree::scan` —
+percorre o projeto **inteiro**, recursivamente e de uma vez, ao abrir, e guarda um
+nó por arquivo em memória. Ela não tem nenhum dos limites acima, e roda de forma
+**síncrona no laço da janela**: enquanto não termina, a IDE não desenha.
+
+Medido em `release`, sobre um diretório com 56.339 arquivos e cache de disco
+quente: **2,17 s**. O tempo acompanha a quantidade de arquivos, não o tamanho
+deles — um projeto Java grande costuma pesar em JARs e saídas de build, e não em
+código.
+
+Dois agravantes, os dois pequenos de corrigir:
+
+- **A lista de diretórios ignorados diverge da do índice.** Aqui só `.git` e
+  `target` são pulados; o índice também pula `node_modules` e `.gradle`. Num
+  projeto Gradle, o Explorer desce por `.gradle/` e `build/` inteiros — justamente
+  onde estão os milhares de arquivos que ninguém quer ver na árvore. Alinhar as
+  duas listas é a correção de maior efeito pelo menor risco.
+- **Nada é preguiçoso.** A árvore é materializada inteira mesmo com todos os nós
+  fechados. Varrer um nível por vez, ao expandir, tiraria a espera e a memória —
+  e é como o painel já se comporta visualmente.
+
+Enquanto isso não mudar, abrir um projeto muito grande custa alguns segundos de
+janela parada e memória proporcional ao número de arquivos. Digitar não é
+afetado: o custo por tecla depende dos documentos abertos, não do tamanho do
+projeto.
+
 ## Configuração do usuário
 
 A IDE mantém um arquivo de configuração por usuário, fora de qualquer projeto:

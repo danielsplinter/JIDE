@@ -56,6 +56,25 @@ do ERLibUi, e vale igual no editor da janela de inspeção do depurador.
 
 Arraste para selecionar um trecho, dê **duplo clique** para selecionar a palavra
 sob o ponteiro, ou use as setas com `Shift`; mover sem `Shift` desfaz a seleção.
+As setas laterais com `Ctrl` **saltam de palavra em palavra** em vez de andar um
+caractere, e com `Ctrl+Shift` o salto marca o caminho. O que é palavra é a mesma
+regra do duplo clique, que vem do editor do ERLibUi.
+
+Em arquivo com fim de linha CRLF, o cursor não para **entre o retorno e a quebra**:
+o fim de linha é um lugar só, que as setas atravessam inteiro e onde o clique para
+no fim do que se vê. Sem isso, digitar no fim de uma linha terminada em espaço
+escrevia depois do fim de linha, e o texto recém digitado aparecia repetido sobre a
+linha de baixo — o retorno no meio do trecho faz o shaper abrir outra linha.
+**`Shift+clique`** marca do cursor até o ponto clicado, e outro `Shift+clique`
+alarga a partir da mesma âncora — é o gesto de estender, não o de recomeçar.
+
+Se o arrasto passar da borda da área, **a vista acompanha** nas quatro direções,
+e continua acompanhando **com o ponteiro parado** — basta segurar o botão além da
+borda para a seleção seguir crescendo. Quanto mais longe da borda, mais rápido,
+até um teto: o ponteiro no canto da tela acelera, mas não varre o arquivo de uma
+vez. Sem isso a seleção pararia no que está à mostra, e marcar além da tela
+exigiria soltar, rolar e recomeçar. Soltar o botão encerra o gesto — e perder o
+foco da janela no meio dele também, para a vista não continuar andando sozinha.
 Digitar ou apagar com um trecho marcado age sobre ele. `Ctrl+C` copia e `Ctrl+V`
 cola, usando a área de transferência **do sistema** — o mesmo que o clique com o
 botão direito sobre o editor oferece em Copiar e Colar. Sem seleção, Copiar
@@ -84,8 +103,19 @@ mostra nomes e insere trechos, sem saber o que é um getter.
 `Setter` e `Getter and Setter` usam **a mesma janela**: o que muda é o que a
 linguagem escreve, não a tela. No par, um campo entra na lista quando falta
 **algum** dos dois, e o texto gerado traz só o que falta — repetir o que a classe
-já tem seria erro de compilação, não conveniência. `Constructor` ainda não tem
-gerador.
+já tem seria erro de compilação, não conveniência.
+
+`Constructor` usa **a mesma janela**, com uma diferença: ela lista **todos** os
+campos, porque a escolha não é sobre o que falta, e sim sobre quais entram por
+parâmetro. Os campos marcados viram parâmetros e atribuições, na ordem em que
+foram **declarados** — é assim que se lê a classe depois. **All** gera o construtor
+com todos os campos. E **OK sem marcar nada gera um construtor sem parâmetros**:
+não marcar é um pedido legítimo, e não a ausência de um.
+
+Um construtor com a mesma lista de tipos de um que a classe já tem não é gerado —
+a assinatura repetida não compilaria, e a barra de estado diz que ele já existe.
+Como nos acessores, quem monta o texto é o provider: a tela decide **quais campos**
+e entrega a lista.
 
 `Tab` indenta até a próxima parada de quatro colunas e `Shift+Tab` recolhe a
 indentação da linha. **Com um trecho marcado, os dois deslocam todas as linhas do
@@ -386,3 +416,29 @@ painel: o mesmo nome vale coisas diferentes em quadros diferentes.
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+### Medindo o custo por tecla e por quadro
+
+Com `ERIDE_PERF=1` a janela imprime, para cada evento acima de 4 ms, quanto ele
+custou e onde — no tratamento do evento, no realce ou na completação — e o custo
+de cada quadro separado em pintura, GPU e espera do vsync:
+
+```text
+$env:ERIDE_PERF=1; cargo run -p ide-app --release
+```
+
+Foi o que localizou a digitação travada: a tecla gastava mais de 400 ms na análise
+do documento enquanto o quadro custava 5 ms. O que se descobriu ali está na
+ADR-016 e na ADR-017, e a medição fica de pé para a próxima suspeita — sem a
+variável, o custo é uma leitura de `OnceLock`.
+
+A análise da linguagem **não está mais no caminho da tecla**: a mudança e o pedido
+de realce são postados ao provider, que sempre teve thread própria, e o realce é
+recolhido pelo relógio da janela quando fica pronto — um ou dois quadros depois. O
+editor ignora realce de revisão vencida, então chegar tarde não desenha nada
+errado, e a linha `tecla` do log passa a medir apenas mexer no texto.
+
+Sobram aí **cerca de 7 ms por tecla**, e eles não são análise: é o instantâneo de
+cada documento aberto, que clona o texto inteiro para que no fim só a diferença de
+um deles seja enviada. Está **pendente**, com o caminho de correção anotado na
+ADR-017 — montar o instantâneo apenas do documento que mudou.

@@ -137,14 +137,24 @@ parser recebe a árvore editada para reutilizar as regiões inalteradas.
 
 O snapshot produzido contém:
 
-- árvore sintática neutra com tipos de nó, intervalos, filhos e indicação de
-  erro;
 - outline hierárquico de classes, interfaces, enums, annotations,
   construtores, métodos e campos;
 - spans de highlighting para keywords, tipos, funções, campos, variáveis,
   strings, números, comentários, annotations e operadores;
 - imports comuns, estáticos e wildcard;
 - diagnósticos para nós `ERROR` e tokens ausentes produzidos pela gramática.
+
+O snapshot **não** carrega mais uma cópia neutra da árvore sintática. Ela existiu
+até a `ADR-016`, custava uma `String` por nó — dezenas de milhares por análise, a
+cada tecla — e nenhum consumidor a lia. Se voltar a ser necessária, deve nascer
+sob demanda, como a semântica.
+
+Outline, realces e diagnósticos saem de **uma passada só** pela árvore, com um
+único cursor. `Node::walk` cria um cursor por nó, e três percursos separados
+custavam três vezes esse preço. As posições dos nós, que o Tree-sitter dá em
+coluna de bytes, são convertidas para coluna de caracteres por um índice de
+linhas montado uma vez por análise — procurar a linha de cada nó varrendo o texto
+fazia o custo crescer com o quadrado do arquivo. Ver `ADR-016`.
 
 O provider declara `SYNTAX | DIAGNOSTICS`, é registrado no composition root e
 executa dentro do worker do Language Host. O editor envia abertura e alterações
@@ -163,6 +173,11 @@ O provider passa a declarar também `SEMANTICS`, `COMPLETION`, `DEFINITION` e
   cláusulas `catch`;
 - tipos declarados, dimensões de array e argumentos genéricos;
 - mapa de referências por identificador.
+
+Esses quatro são calculados **sob demanda**, e não a cada alteração do documento:
+eles não servem para desenhar, e só completação, navegação e busca de usos os
+consultam. A mudança apenas os invalida; quem pergunta paga o cálculo e o resultado
+vale até a alteração seguinte. Ver `ADR-016`.
 
 Ao ativar, o provider cria um índice limitado das fontes Java, class files e
 JARs do workspace. Fontes abertas substituem os resultados estáveis do índice

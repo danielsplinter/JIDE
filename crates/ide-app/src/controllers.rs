@@ -16,13 +16,14 @@ use ide_application::{
     TaskExecutionContext, TaskId, ToolchainRegistry,
 };
 use ide_domain::{DocumentId, DocumentSnapshot, SyntaxSnapshot};
-use ide_language_host::LanguageHost;
+use ide_language_host::{LanguageHost, LanguageHostError};
 use ide_project::{
     build::{BuildCommandRequest, BuildSystemAdapter, BuildSystemRegistry},
     model::{ProjectDescriptor, ProjectModel},
 };
 use ide_ui::DebugView;
 use ide_workspace::{FileNode, WorkspaceError, WorkspaceService};
+use tokio::sync::oneshot;
 use ui_core::Point;
 use ui_render_wgpu::WgpuRenderer;
 use ui_window_winit::WinitWindow;
@@ -42,6 +43,12 @@ pub(super) struct NativeWindowState {
     pub(super) click_tracker: ClickTracker,
     pub(super) control_pressed: bool,
     pub(super) shift_pressed: bool,
+    /// Botão primário segurado, o que caracteriza um arrasto em curso.
+    ///
+    /// É o que autoriza o relógio a continuar rolando a seleção; sem essa
+    /// guarda, uma soltura perdida — a janela some do foco no meio do gesto —
+    /// deixaria a vista rolando sozinha para sempre.
+    pub(super) primary_pressed: bool,
 }
 
 #[derive(Default)]
@@ -126,11 +133,51 @@ pub(super) struct LanguageController {
     pub(super) host: Option<LanguageHost>,
     pub(super) contributions: ContributionRegistry,
     pub(super) toolchains: ToolchainRegistry,
+    /// Realces pedidos e ainda não entregues.
+    ///
+    /// Guardá-los é o que permite não esperar: a tecla posta o pedido, e o
+    /// resultado é colhido quando o provider terminar.
+    pending_syntax: Vec<oneshot::Receiver<Result<SyntaxSnapshot, LanguageHostError>>>,
 }
 
 impl LanguageController {
+    /// Recolhe os realces que já chegaram do provider, sem esperar por nenhum.
+    ///
+    /// A análise roda na thread do provider desde sempre; o que a punha no meio
+    /// da digitação era esperar por ela. Agora a tecla posta o pedido e o
+    /// resultado é colhido aqui, um ou dois quadros depois — o editor já ignora
+    /// realce de revisão vencida, então chegar tarde não desenha nada errado.
+    pub(super) fn collect_syntax(&mut self) -> Vec<SyntaxSnapshot> {
+        let mut prontos = Vec::new();
+        self.pending_syntax.retain_mut(|receiver| {
+            match receiver.try_recv() {
+                Ok(Ok(snapshot)) => {
+                    prontos.push(snapshot);
+                    false
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "syntax snapshot failed");
+                    false
+                }
+                // Vazio significa que o provider ainda está analisando.
+                Err(oneshot::error::TryRecvError::Empty) => true,
+                Err(oneshot::error::TryRecvError::Closed) => false,
+            }
+        });
+        prontos
+    }
+
+    /// Quantos realces ainda estão sendo esperados.
+    ///
+    /// Só os testes precisam disso: é como se afirma que a tecla deixou a
+    /// análise pendente em vez de esperar por ela.
+    #[cfg(test)]
+    pub(super) fn pending_syntax(&self) -> usize {
+        self.pending_syntax.len()
+    }
+
     pub(super) fn synchronize_documents(
-        &self,
+        &mut self,
         documents: &mut DocumentController,
         snapshots: &[DocumentSnapshot],
     ) -> Vec<SyntaxSnapshot> {
@@ -166,6 +213,8 @@ impl LanguageController {
                 .language
                 .get(&snapshot.id)
                 .is_none_or(|previous| previous.version != snapshot.version);
+            // Abrir é raro e o resto depende dele: esse ainda espera. A mudança,
+            // que é o que acontece a cada tecla, apenas entra na fila.
             let result = match documents.language.get(&snapshot.id) {
                 None => {
                     pollster::block_on(host.open_document(host.request_context(), snapshot.clone()))
@@ -173,24 +222,31 @@ impl LanguageController {
                 }
                 Some(previous) if previous.version != snapshot.version => {
                     let change = document_change(previous, snapshot);
-                    pollster::block_on(host.change_document(host.request_context(), change))
+                    host.post_change_document(host.request_context(), change)
+                        .map(|_| ())
                 }
                 Some(_) => Ok(()),
             };
             if let Err(error) = result {
+                // A fila cheia deixa o documento como estava do lado do provider,
+                // e é por isso que o registro **não** avança: a próxima
+                // sincronização calcula a diferença do mesmo ponto e tenta de
+                // novo, com um pedaço maior.
                 tracing::warn!(%error, document_id = snapshot.id.0, "syntax update failed");
                 continue;
             }
             documents.language.insert(snapshot.id, snapshot.clone());
             if changed {
-                match pollster::block_on(host.syntax(host.request_context(), snapshot.id)) {
-                    Ok(snapshot) => syntax.push(snapshot),
+                match host.post_syntax(host.request_context(), snapshot.id) {
+                    Ok(receiver) => self.pending_syntax.push(receiver),
                     Err(error) => {
                         tracing::warn!(%error, document_id = snapshot.id.0, "syntax snapshot failed");
                     }
                 }
             }
         }
+        // O que já estava pronto de rodadas anteriores entra agora.
+        syntax.extend(self.collect_syntax());
         syntax
     }
 }

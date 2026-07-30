@@ -124,18 +124,9 @@ pub struct ImportItem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SyntaxNode {
-    pub kind: String,
-    pub range: TextRange,
-    pub has_error: bool,
-    pub children: Vec<SyntaxNode>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyntaxSnapshot {
     pub document_id: DocumentId,
     pub version: u64,
-    pub tree: SyntaxNode,
     pub outline: Vec<OutlineItem>,
     pub highlights: Vec<SyntaxHighlight>,
     pub imports: Vec<ImportItem>,
@@ -229,6 +220,14 @@ pub struct AccessorPlan {
 pub enum AccessorKind {
     Getter,
     Setter,
+    /// Um construtor com os campos escolhidos como parâmetros.
+    ///
+    /// Diferente dos outros: eles geram um trecho **por campo**, e este gera um
+    /// trecho só a partir do conjunto marcado — nenhum campo marcado é um
+    /// construtor sem parâmetros, que é uma resposta legítima e não a ausência
+    /// de resposta. Por isso o texto não vem no plano; é pedido à linguagem
+    /// depois da escolha, por `constructor_source`.
+    Constructor,
     /// Os dois de uma vez.
     ///
     /// Um campo entra na lista quando falta **algum** dos dois, e o texto

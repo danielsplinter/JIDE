@@ -7,8 +7,8 @@ use crate::debugging::{
     InspectionState, InspectionView,
 };
 use crate::editor::{
-    CachedSyntax, EditorAction, EditorAreaState, EditorCapabilities, EditorPane, GenerateState,
-    SyntaxView,
+    CachedSyntax, ConstructorRequest, EditorAction, EditorAreaState, EditorCapabilities, EditorPane,
+    GenerateState, SyntaxView,
 };
 use crate::explorer::{
     ExplorerState, id as explorer_id, is_source_root, items as explorer_items,
@@ -309,6 +309,18 @@ impl IdeShell {
         self.sync_explorer_tree();
     }
 
+    /// Revisão do documento ativo, para quem precisa notar que o texto mudou.
+    ///
+    /// Um clique pode alterar o texto — gerar acessores, por exemplo —, e quem
+    /// mantém o realce precisa perceber isso sem depender de uma tecla.
+    #[must_use]
+    pub fn active_revision(&self) -> u64 {
+        self.editor_area
+            .session
+            .active()
+            .map_or(0, |document| document.buffer.revision())
+    }
+
     /// A aba ativa tem alteração ainda não gravada.
     ///
     /// É o que a marca na aba anuncia, e o que decide se fechar sem salvar
@@ -431,6 +443,7 @@ impl IdeShell {
                 completion_selected: 0,
                 generate: None,
                 generate_pending: None,
+                constructor_pending: None,
                 generate_modal: ModalHost::new(
                     GENERATE_MODAL_ID,
                     "Generate",
@@ -1485,17 +1498,65 @@ impl IdeShell {
         self.editor_area.generate_pending.take()
     }
 
+    /// Campos escolhidos para o construtor, se houver um pedido esperando.
+    ///
+    /// Devolve a lista e onde o texto entra; quem tem a linguagem monta o
+    /// construtor e responde por [`IdeShell::insert_constructor`].
+    pub fn take_constructor_request(&mut self) -> Option<(Vec<String>, DomainTextPosition)> {
+        self.editor_area
+            .constructor_pending
+            .take()
+            .map(|pedido| (pedido.fields, pedido.insert_at))
+    }
+
+    /// Escreve o construtor que a linguagem montou.
+    ///
+    /// `None` é o tipo já ter um construtor com a mesma assinatura: escrever
+    /// outro não compilaria, e avisar é melhor do que entregar arquivo quebrado.
+    ///
+    /// Devolve se o documento mudou — é o que diz a quem chamou que o realce
+    /// precisa ser pedido de novo, senão o código gerado fica sem cor até a
+    /// primeira tecla.
+    pub fn insert_constructor(
+        &mut self,
+        source: Option<String>,
+        insert_at: DomainTextPosition,
+    ) -> bool {
+        let Some(source) = source else {
+            self.set_status_message("Esse construtor já existe");
+            return false;
+        };
+        let Some(document) = self.editor_area.session.active_mut() else {
+            return false;
+        };
+        // A linha vem da linguagem, que sabe onde o tipo abre e fecha.
+        let texto = document.buffer.text();
+        let inicio = offset_of_line(texto, insert_at.line as usize);
+        if document.buffer.replace(inicio..inicio, &source).is_err() {
+            return false;
+        }
+        self.set_status_message("Construtor gerado");
+        true
+    }
+
     /// Abre a janela com o que a linguagem propôs gerar.
     ///
     /// Só entram os campos que ainda **não têm** o acessor: listar o que já
     /// existe daria a escolher algo que não seria escrito.
     pub fn show_accessor_plan(&mut self, kind: AccessorKind, plan: AccessorPlan) {
-        let candidates: Vec<AccessorCandidate> = plan
-            .candidates
-            .into_iter()
-            .filter(|candidate| candidate.source.is_some())
-            .collect();
-        if candidates.is_empty() {
+        // O construtor lista **todos** os campos: nenhum deles "já existe", e a
+        // escolha é sobre quais entram por parâmetro. Os acessores listam só o
+        // que falta, porque oferecer o que já existe daria a escolher algo que
+        // não seria escrito.
+        let candidates: Vec<AccessorCandidate> = match kind {
+            AccessorKind::Constructor => plan.candidates,
+            _ => plan
+                .candidates
+                .into_iter()
+                .filter(|candidate| candidate.source.is_some())
+                .collect(),
+        };
+        if candidates.is_empty() && kind != AccessorKind::Constructor {
             self.set_status_message("Todos os campos já têm esse acessor");
             return;
         }
@@ -1512,6 +1573,7 @@ impl IdeShell {
             AccessorKind::Getter => "Generate — Getter",
             AccessorKind::Setter => "Generate — Setter",
             AccessorKind::Both => "Generate — Getter and Setter",
+            AccessorKind::Constructor => "Generate — Constructor",
         });
         self.editor_area.generate_modal.open();
     }
@@ -1550,6 +1612,26 @@ impl IdeShell {
         let Some(state) = self.editor_area.generate.take() else {
             return;
         };
+        // O construtor é um texto só, montado a partir do conjunto: quem monta é
+        // a linguagem, e por isso ele é pedido agora, com a escolha na mão. Sem
+        // nada marcado o pedido vai vazio, que é o construtor sem parâmetros.
+        if state.kind == AccessorKind::Constructor {
+            let fields = state
+                .candidates
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    todos || state.checked.get(*index).copied().unwrap_or_default()
+                })
+                .map(|(_, candidate)| candidate.field.clone())
+                .collect();
+            self.editor_area.generate_modal.close();
+            self.editor_area.constructor_pending = Some(ConstructorRequest {
+                fields,
+                insert_at: state.insert_at,
+            });
+            return;
+        }
         let escolhidos: String = state
             .candidates
             .iter()
@@ -1581,7 +1663,8 @@ impl IdeShell {
             let nome = match state.kind {
                 AccessorKind::Getter => "getter",
                 AccessorKind::Setter => "setter",
-                AccessorKind::Both => "acessor",
+                // O construtor não passa por aqui: ele tem caminho próprio.
+                AccessorKind::Both | AccessorKind::Constructor => "acessor",
             };
             self.set_status_message(format!("{quantos} {nome}(s) gerado(s)"));
         }
@@ -2293,7 +2376,7 @@ impl IdeShell {
     }
 
     pub fn pointer_down(&mut self, point: Point, size: Size) {
-        self.pointer_down_with_modifiers(point, size, false);
+        self.pointer_down_with_modifiers(point, size, false, false);
     }
 
     /// Clique secundário: abre o menu de contexto sobre o item do Explorer.
@@ -2438,9 +2521,8 @@ impl IdeShell {
                 self.request_accessors(AccessorKind::Both);
                 return;
             }
-            comando if comando.starts_with("editor.generate.") => {
-                // Construtor e o par getter+setter ainda não têm gerador.
-                self.set_status_message("Ainda não implementado");
+            "editor.generate.constructor" => {
+                self.request_accessors(AccessorKind::Constructor);
                 return;
             }
             "editor.copy" => {
@@ -2565,7 +2647,13 @@ impl IdeShell {
             }));
     }
 
-    pub fn pointer_down_with_modifiers(&mut self, point: Point, size: Size, control: bool) {
+    pub fn pointer_down_with_modifiers(
+        &mut self,
+        point: Point,
+        size: Size,
+        control: bool,
+        shift: bool,
+    ) {
         // O menu aberto tem a primeira palavra: escolher uma ação ou dispensá-lo
         // é o que este clique significa, e não o que está embaixo dele.
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
@@ -2768,7 +2856,7 @@ impl IdeShell {
             let action = self
                 .editor_area
                 .pane
-                .pointer_down(&document.buffer, point, control);
+                .pointer_down(&document.buffer, point, control, shift);
             self.handle_editor_action(action);
         } else if point.x >= editor_x && point.y >= geometry.editor_bottom {
             self.context.focus = ShellFocus::Terminal;
@@ -2909,6 +2997,18 @@ impl IdeShell {
         // Parado, o retorno diz se o ponteiro está sobre o divisor do terminal,
         // para a janela trocar o cursor.
         !self.terminal.minimized && self.terminal.splitter.hit_area().contains(point)
+    }
+
+    /// Continua a rolagem de um arrasto que saiu da área visível do editor.
+    ///
+    /// A janela chama isto a cada tique do relógio, porque um arrasto parado
+    /// fora da borda não gera evento nenhum — e ainda assim deve seguir
+    /// rolando e marcando. Devolve se algo mudou, para a janela redesenhar
+    /// só quando há o que mostrar.
+    pub fn drag_autoscroll(&mut self, size: Size) -> bool {
+        self.place_focused_editor(size);
+        self.focused_editor()
+            .is_some_and(|(pane, buffer)| pane.drag_autoscroll(buffer))
     }
 
     pub fn pointer_up(&mut self) {
@@ -4800,6 +4900,7 @@ impl IdeShell {
             self.debug_panel.inspection.editor.pointer_down(
                 &self.debug_panel.inspection.source,
                 point,
+                false,
                 false,
             );
             self.debug_panel.inspection.focus = InspectionFocus::Source;
@@ -7004,12 +7105,6 @@ mod tests {
         shell.set_syntax_snapshot(ide_domain::SyntaxSnapshot {
             document_id,
             version: 0,
-            tree: ide_domain::SyntaxNode {
-                kind: "program".to_owned(),
-                range: ide_domain::TextRange::default(),
-                has_error: false,
-                children: Vec::new(),
-            },
             outline: vec![ide_domain::OutlineItem {
                 name: "Example".to_owned(),
                 kind: ide_domain::OutlineKind::Class,
@@ -7098,12 +7193,6 @@ mod tests {
         shell.set_syntax_snapshot(ide_domain::SyntaxSnapshot {
             document_id,
             version: 0,
-            tree: ide_domain::SyntaxNode {
-                kind: "program".to_owned(),
-                range: ide_domain::TextRange::default(),
-                has_error: false,
-                children: Vec::new(),
-            },
             outline: Vec::new(),
             highlights: vec![
                 realce(0, 4, SyntaxHighlightKind::Keyword),
@@ -7142,12 +7231,6 @@ mod tests {
         shell.set_syntax_snapshot(ide_domain::SyntaxSnapshot {
             document_id,
             version: 0,
-            tree: ide_domain::SyntaxNode {
-                kind: "program".to_owned(),
-                range: ide_domain::TextRange::default(),
-                has_error: false,
-                children: Vec::new(),
-            },
             outline: Vec::new(),
             highlights: vec![ide_domain::SyntaxHighlight {
                 range: ide_domain::TextRange {
@@ -7724,6 +7807,7 @@ mod tests {
             Point::new(target_x, TITLE_HEIGHT + TAB_HEIGHT + 15.0),
             size,
             true,
+            false,
         );
         assert_eq!(
             shell.take_navigation_request(),
@@ -8288,6 +8372,85 @@ mod tests {
         assert_eq!(marcados, 1, "clicar numa linha marca uma");
     }
 
+    /// O `Shift` das setas chega ao editor pela shell.
+    ///
+    /// O defeito estava no despacho: as setas eram enviadas com modificadores
+    /// vazios, e o editor — que sempre soube estender — nunca via o `Shift`.
+    #[test]
+    fn shift_arrows_reach_the_editor_through_the_shell() {
+        let mut shell = shell_editing("primeiro\nsegundo");
+        shell.editor_area.pane.set_cursor(0);
+        let com_shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        shell.key_down_with_modifiers("ArrowRight", com_shift);
+        shell.key_down_with_modifiers("ArrowRight", com_shift);
+        assert_eq!(
+            shell.editor_area.pane.selection_range(),
+            Some(0..2),
+            "as setas com Shift precisam marcar"
+        );
+        shell.key_down_with_modifiers("ArrowDown", com_shift);
+        assert!(
+            shell
+                .editor_area
+                .pane
+                .selection_range()
+                .is_some_and(|range| range.end > 2),
+            "a seleção cresce pela mesma âncora"
+        );
+        shell.key_down("ArrowRight");
+        assert_eq!(shell.editor_area.pane.selection_range(), None);
+    }
+
+    /// O `Ctrl` das setas laterais também precisa atravessar o shell.
+    ///
+    /// É a mesma costura do `Shift`: o painel sabe saltar de palavra em palavra,
+    /// mas de nada adianta se o modificador se perder no caminho.
+    #[test]
+    fn control_arrows_reach_the_editor_through_the_shell() {
+        let mut shell = shell_editing("int total = valor;");
+        shell.editor_area.pane.set_cursor(0);
+        let com_control = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        shell.key_down_with_modifiers("ArrowRight", com_control);
+        assert_eq!(shell.editor_area.pane.cursor(), 3, "parou no fim de `int`");
+        shell.key_down_with_modifiers("ArrowRight", com_control);
+        assert_eq!(shell.editor_area.pane.cursor(), 9, "e no fim de `total`");
+        shell.key_down_with_modifiers("ArrowLeft", com_control);
+        assert_eq!(shell.editor_area.pane.cursor(), 4, "voltou ao começo dele");
+    }
+
+    /// Gerar muda a revisão do documento, que é o que pede realce novo.
+    ///
+    /// Sem isso o código gerado aparecia sem cor até a primeira tecla: o realce
+    /// é invalidado pela revisão, e ninguém pedia um novo depois do clique.
+    #[test]
+    fn generating_changes_the_revision_so_the_highlight_is_asked_again() {
+        let mut shell = shell_editing("class Matricula {\n}\n");
+        let size = Size::new(1280.0, 800.0);
+        let antes = shell.active_revision();
+        shell.show_accessor_plan(AccessorKind::Getter, AccessorPlan {
+            candidates: vec![AccessorCandidate {
+                field: "id".to_owned(),
+                source: Some("\n    public Long getId() { return id; }\n".to_owned()),
+            }],
+            insert_at: DomainTextPosition { line: 1, column: 0 },
+        });
+        let (_, todos, _) = shell.generate_geometry(size);
+        shell.pointer_down(
+            Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
+            size,
+        );
+        assert!(
+            shell.active_revision() > antes,
+            "escrever no documento precisa avançar a revisão"
+        );
+    }
+
     /// Os três itens do menu usam a mesma janela.
     ///
     /// Getter, setter e o par diferem no que a linguagem escreve, não na tela:
@@ -8307,6 +8470,9 @@ mod tests {
                 AccessorKind::Both => {
                     "\n    public Long getId() { return id; }\n    public void setId(Long id) {}\n"
                 }
+                // O construtor não gera texto por campo, e por isso tem teste
+                // próprio: aqui ele não teria o que comparar.
+                AccessorKind::Constructor => continue,
             };
             shell.show_accessor_plan(kind, AccessorPlan {
                 candidates: vec![AccessorCandidate {
@@ -8331,8 +8497,94 @@ mod tests {
                     assert!(texto.contains("getId"), "o par gera os dois: {texto}");
                     assert!(texto.contains("setId"), "o par gera os dois: {texto}");
                 }
+                AccessorKind::Constructor => unreachable!("descartado acima"),
             }
         }
+    }
+
+    /// O construtor usa a mesma janela, e a escolha vira o pedido à linguagem.
+    ///
+    /// A tela não escreve construtor nenhum: ela decide **quais campos** e
+    /// entrega a lista. Marcar nada é um pedido vazio — o construtor sem
+    /// parâmetros —, e o botão que gera tudo manda todos os campos.
+    #[test]
+    fn the_constructor_uses_the_same_window_and_asks_the_language() {
+        let plano = || AccessorPlan {
+            candidates: vec![
+                AccessorCandidate {
+                    field: "id".to_owned(),
+                    // O construtor não traz texto por campo: ele é montado depois.
+                    source: None,
+                },
+                AccessorCandidate {
+                    field: "nome".to_owned(),
+                    source: None,
+                },
+            ],
+            insert_at: DomainTextPosition { line: 1, column: 0 },
+        };
+        let size = Size::new(1280.0, 800.0);
+
+        // Sem marcar nada, o OK pede um construtor sem parâmetros.
+        let mut shell = shell_editing("class Pedido {\n}\n");
+        shell.show_accessor_plan(AccessorKind::Constructor, plano());
+        assert!(shell.generate_open(), "a janela é a mesma");
+        assert_eq!(
+            shell.generate_fields(),
+            vec!["id", "nome"],
+            "o construtor lista todos os campos, e não só os que faltam"
+        );
+        let (_, _, ok) = shell.generate_geometry(size);
+        shell.pointer_down(Point::new(ok.origin.x + 10.0, ok.origin.y + 10.0), size);
+        let Some((campos, onde)) = shell.take_constructor_request() else {
+            panic!("o OK precisa deixar um pedido de construtor");
+        };
+        assert!(campos.is_empty(), "nada marcado é o construtor sem parâmetros");
+        assert_eq!(onde.line, 1);
+
+        // Marcando um campo, só ele vai no pedido.
+        let mut shell = shell_editing("class Pedido {\n}\n");
+        shell.show_accessor_plan(AccessorKind::Constructor, plano());
+        let (lista, _, ok) = shell.generate_geometry(size);
+        shell.pointer_down(
+            Point::new(lista.origin.x + 20.0, lista.origin.y + 12.0),
+            size,
+        );
+        shell.pointer_down(Point::new(ok.origin.x + 10.0, ok.origin.y + 10.0), size);
+        let Some((campos, _)) = shell.take_constructor_request() else {
+            panic!("o OK precisa deixar um pedido de construtor");
+        };
+        assert_eq!(campos, vec!["id"], "só o campo marcado entra");
+
+        // O botão que gera tudo manda todos, sem depender da marcação.
+        let mut shell = shell_editing("class Pedido {\n}\n");
+        shell.show_accessor_plan(AccessorKind::Constructor, plano());
+        let (_, todos, _) = shell.generate_geometry(size);
+        shell.pointer_down(
+            Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
+            size,
+        );
+        let Some((campos, _)) = shell.take_constructor_request() else {
+            panic!("o botão All precisa deixar um pedido de construtor");
+        };
+        assert_eq!(campos, vec!["id", "nome"]);
+    }
+
+    /// O texto do construtor vem da linguagem e é escrito onde ela mandou.
+    #[test]
+    fn the_constructor_text_from_the_language_is_written_at_the_given_line() {
+        let mut shell = shell_editing("class Pedido {\n}\n");
+        let onde = DomainTextPosition { line: 1, column: 0 };
+        let fonte = "\n    public Pedido(Long id) {\n        this.id = id;\n    }\n";
+        assert!(shell.insert_constructor(Some(fonte.to_owned()), onde));
+        let texto = shell.active_text().unwrap_or_default();
+        assert!(texto.contains("public Pedido(Long id)"), "{texto}");
+
+        // Assinatura repetida: a linguagem devolve nada, e nada é escrito.
+        let antes = shell.active_text().unwrap_or_default().to_owned();
+        assert!(!shell.insert_constructor(None, onde));
+        assert_eq!(shell.active_text().unwrap_or_default(), antes);
+        assert!(shell.status_message().contains("já existe"));
     }
 
     /// Sem nada a gerar, a janela nem abre.

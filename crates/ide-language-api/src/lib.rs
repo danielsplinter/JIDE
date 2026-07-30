@@ -197,6 +197,21 @@ pub trait ActiveLanguage: Send + Sync {
     ) -> Result<AccessorPlan, LanguageError> {
         Err(LanguageError::Unsupported("accessor plan".to_owned()))
     }
+    /// Construtor do tipo que contém a posição, com os campos escolhidos.
+    ///
+    /// Separado do plano porque o texto **depende da escolha**: os acessores dão
+    /// um trecho por campo, e o construtor dá um só, a partir do conjunto. Lista
+    /// vazia é um construtor sem parâmetros — resposta legítima, e não ausência
+    /// de resposta. `None` é o tipo já ter um construtor de mesma assinatura,
+    /// caso em que escrever outro não compilaria.
+    async fn constructor_source(
+        &self,
+        _document_id: DocumentId,
+        _position: TextPosition,
+        _fields: Vec<String>,
+    ) -> Result<Option<String>, LanguageError> {
+        Err(LanguageError::Unsupported("constructor source".to_owned()))
+    }
     async fn definition(
         &self,
         _request: DefinitionRequest,

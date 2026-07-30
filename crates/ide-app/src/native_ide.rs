@@ -202,12 +202,15 @@ impl NativeIde {
             .shell
             .as_mut()
             .ok_or_else(|| "shell unavailable".to_owned())?;
+        let iniciado = Instant::now();
         let commands = shell.paint(size);
+        let pintura = iniciado.elapsed();
         let renderer = self
             .window
             .renderer
             .as_mut()
             .ok_or_else(|| "renderer unavailable".to_owned())?;
+        let marca = Instant::now();
         renderer
             .begin_frame(FrameInfo {
                 window_id: window.handle().id,
@@ -215,10 +218,25 @@ impl NativeIde {
                 scale_factor: window.scale_factor(),
             })
             .map_err(|error| error.to_string())?;
+        let abertura = marca.elapsed();
+        let marca = Instant::now();
         renderer
             .submit(&commands)
             .map_err(|error| error.to_string())?;
-        renderer.end_frame().map_err(|error| error.to_string())
+        let submissao = marca.elapsed();
+        let marca = Instant::now();
+        let resultado = renderer.end_frame().map_err(|error| error.to_string());
+        if perf_enabled() {
+            let metricas = renderer.metrics();
+            eprintln!(
+                "[perf] quadro: pintura {pintura:?} | begin_frame {abertura:?} | submit {submissao:?} | present {:?} | {} comandos | moldes reaproveitados {} de {} guardados",
+                marca.elapsed(),
+                commands.len(),
+                metricas.text_cache_hits,
+                metricas.text_cache_entries,
+            );
+        }
+        resultado
     }
 
     fn publish_event(&self, event: IdeEvent) {
@@ -381,6 +399,26 @@ impl NativeIde {
         }
     }
 
+    /// Espera o realce pendente e o instala.
+    ///
+    /// Só para testes: na janela, quem recolhe é o relógio, e esperar seria
+    /// justamente o que se quer evitar.
+    #[cfg(test)]
+    fn settle_syntax(&mut self) {
+        while self.languages.pending_syntax() > 0 {
+            let realces = self.languages.collect_syntax();
+            if realces.is_empty() {
+                std::thread::yield_now();
+                continue;
+            }
+            if let Some(shell) = self.ui.shell.as_mut() {
+                for snapshot in realces {
+                    shell.set_syntax_snapshot(snapshot);
+                }
+            }
+        }
+    }
+
     fn sync_document_events(&mut self, snapshots: &[DocumentSnapshot]) {
         for event in self.documents.synchronize_application(snapshots) {
             self.publish_event(event);
@@ -538,6 +576,53 @@ impl NativeIde {
             match plano {
                 Ok(plano) => shell.show_accessor_plan(kind, plano),
                 Err(error) => shell.set_status_message(error.to_string()),
+            }
+        }
+    }
+
+    /// Monta o construtor escolhido na janela e o entrega à tela.
+    ///
+    /// Separado do plano porque o texto depende da escolha: a tela sabe **quais**
+    /// campos foram marcados, e só a linguagem sabe escrever o construtor.
+    fn answer_constructor_request(&mut self) {
+        let Some((fields, insert_at)) = self
+            .ui
+            .shell
+            .as_mut()
+            .and_then(IdeShell::take_constructor_request)
+        else {
+            return;
+        };
+        let (Some(host), Some(shell)) = (self.languages.host.as_ref(), self.ui.shell.as_ref())
+        else {
+            return;
+        };
+        let (Some(document_id), Some(position)) =
+            (shell.active_document(), shell.cursor_position())
+        else {
+            return;
+        };
+        let fonte = pollster::block_on(host.constructor_source(
+            host.request_context(),
+            document_id,
+            position,
+            fields,
+        ));
+        let escreveu = match (fonte, self.ui.shell.as_mut()) {
+            (Ok(fonte), Some(shell)) => shell.insert_constructor(fonte, insert_at),
+            (Err(error), Some(shell)) => {
+                shell.set_status_message(error.to_string());
+                false
+            }
+            _ => false,
+        };
+        // O texto gerado entra depois da checagem de revisão do evento, então é
+        // aqui que o realce novo precisa ser pedido: sem isso o construtor fica
+        // sem cor até a primeira tecla.
+        if escreveu {
+            self.sync_languages();
+            if let Some(window) = self.window.window.as_ref() {
+                window.request_redraw();
             }
         }
     }
@@ -1507,6 +1592,17 @@ impl ApplicationHandler for NativeIde {
             std::time::Instant::now() + std::time::Duration::from_millis(30),
         ));
         let mut changed = false;
+        // O realce vem da thread do provider e chega quando fica pronto: é aqui
+        // que ele encontra a tela, sem que a tecla tenha esperado por ele.
+        let realces = self.languages.collect_syntax();
+        if !realces.is_empty() {
+            if let Some(shell) = self.ui.shell.as_mut() {
+                for snapshot in realces {
+                    shell.set_syntax_snapshot(snapshot);
+                }
+            }
+            changed = true;
+        }
         if let Some(events) = &self.tasks.events {
             while let Ok(event) = events.try_recv() {
                 if let Some(shell) = self.ui.shell.as_mut() {
@@ -1527,6 +1623,12 @@ impl ApplicationHandler for NativeIde {
         self.drain_application_events();
         if let (Some(window), Some(shell)) = (self.window.window.as_ref(), self.ui.shell.as_mut()) {
             changed |= shell.update_terminals(window.logical_size());
+            // Um arrasto que saiu da janela não manda mais movimento nenhum, e
+            // é justamente aí que a vista precisa continuar andando. O relógio
+            // já bate por causa das ferramentas; o passo pega carona nele.
+            if self.window.primary_pressed {
+                changed |= shell.drag_autoscroll(window.logical_size());
+            }
             if changed {
                 window.request_redraw();
             }
@@ -1554,6 +1656,9 @@ impl ApplicationHandler for NativeIde {
         if window.inner().id() != id {
             return;
         }
+        let medindo = perf_enabled();
+        let etiqueta = medindo.then(|| event_label(&event));
+        let iniciado = Instant::now();
         let mut sync_languages = false;
         let mut completion_requested = false;
         let mut direct_commands = Vec::new();
@@ -1617,6 +1722,7 @@ impl ApplicationHandler for NativeIde {
                 // tempo entre os dois cliques e distância entre eles. Sem a
                 // distância, mover o ponteiro entre cliques distantes ainda
                 // contaria como duplo.
+                self.window.primary_pressed = true;
                 let now = Instant::now();
                 let double = self.window.click_tracker.register(
                     now,
@@ -1632,18 +1738,21 @@ impl ApplicationHandler for NativeIde {
                     return;
                 }
                 let tab_count = self.ui.shell.as_ref().map_or(0, IdeShell::tab_count);
+                let revisao = self.ui.shell.as_ref().map_or(0, IdeShell::active_revision);
                 if let Some(shell) = self.ui.shell.as_mut() {
                     shell.pointer_down_with_modifiers(
                         self.window.cursor,
                         window.logical_size(),
                         self.window.control_pressed,
+                        self.window.shift_pressed,
                     );
                 }
-                sync_languages = self
-                    .ui
-                    .shell
-                    .as_ref()
-                    .is_some_and(|shell| shell.tab_count() != tab_count);
+                // Abrir ou fechar aba muda o conjunto de documentos; um clique
+                // que altera o texto — gerar acessores — muda o conteúdo. Os
+                // dois pedem realce novo; mover o cursor, não.
+                sync_languages = self.ui.shell.as_ref().is_some_and(|shell| {
+                    shell.tab_count() != tab_count || shell.active_revision() != revisao
+                });
                 window.request_redraw();
             }
             WindowEvent::MouseInput {
@@ -1661,10 +1770,20 @@ impl ApplicationHandler for NativeIde {
                 button: MouseButton::Left,
                 ..
             } => {
+                self.window.primary_pressed = false;
                 if let Some(shell) = self.ui.shell.as_mut() {
                     shell.pointer_up();
                 }
                 window.request_redraw();
+            }
+            // Perder o foco no meio de um arrasto — alt-tab, a janela sai da
+            // frente — nunca traz a soltura. Encerrar o gesto aqui evita a
+            // seleção que continua andando depois que o usuário já foi embora.
+            WindowEvent::Focused(false) => {
+                self.window.primary_pressed = false;
+                if let Some(shell) = self.ui.shell.as_mut() {
+                    shell.pointer_up();
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Sem arredondar: o delta em pixels de um touchpad ou de um mouse
@@ -1728,13 +1847,33 @@ impl ApplicationHandler for NativeIde {
                             }
                         }
                         Key::Named(NamedKey::ArrowDown) => {
+                            // Com os modificadores: `Shift` é o que
+                            // distingue mover o cursor de estender a
+                            // seleção, e sem ele a tecla chegava vazia.
                             if let Some(shell) = self.ui.shell.as_mut() {
-                                shell.key_down("ArrowDown");
+                                shell.key_down_with_modifiers(
+                                    "ArrowDown",
+                                    Modifiers {
+                                        shift: self.window.shift_pressed,
+                                        control: self.window.control_pressed,
+                                        ..Modifiers::default()
+                                    },
+                                );
                             }
                         }
                         Key::Named(NamedKey::ArrowUp) => {
+                            // Com os modificadores: `Shift` é o que
+                            // distingue mover o cursor de estender a
+                            // seleção, e sem ele a tecla chegava vazia.
                             if let Some(shell) = self.ui.shell.as_mut() {
-                                shell.key_down("ArrowUp");
+                                shell.key_down_with_modifiers(
+                                    "ArrowUp",
+                                    Modifiers {
+                                        shift: self.window.shift_pressed,
+                                        control: self.window.control_pressed,
+                                        ..Modifiers::default()
+                                    },
+                                );
                             }
                         }
                         _ => {}
@@ -1891,23 +2030,63 @@ impl ApplicationHandler for NativeIde {
                             }
                         }
                         Key::Named(NamedKey::ArrowLeft) => {
+                            // Com os modificadores: `Shift` é o que
+                            // distingue mover o cursor de estender a
+                            // seleção, e sem ele a tecla chegava vazia.
                             if let Some(shell) = self.ui.shell.as_mut() {
-                                shell.key_down("ArrowLeft");
+                                shell.key_down_with_modifiers(
+                                    "ArrowLeft",
+                                    Modifiers {
+                                        shift: self.window.shift_pressed,
+                                        control: self.window.control_pressed,
+                                        ..Modifiers::default()
+                                    },
+                                );
                             }
                         }
                         Key::Named(NamedKey::ArrowRight) => {
+                            // Com os modificadores: `Shift` é o que
+                            // distingue mover o cursor de estender a
+                            // seleção, e sem ele a tecla chegava vazia.
                             if let Some(shell) = self.ui.shell.as_mut() {
-                                shell.key_down("ArrowRight");
+                                shell.key_down_with_modifiers(
+                                    "ArrowRight",
+                                    Modifiers {
+                                        shift: self.window.shift_pressed,
+                                        control: self.window.control_pressed,
+                                        ..Modifiers::default()
+                                    },
+                                );
                             }
                         }
                         Key::Named(NamedKey::ArrowDown) => {
+                            // Com os modificadores: `Shift` é o que
+                            // distingue mover o cursor de estender a
+                            // seleção, e sem ele a tecla chegava vazia.
                             if let Some(shell) = self.ui.shell.as_mut() {
-                                shell.key_down("ArrowDown");
+                                shell.key_down_with_modifiers(
+                                    "ArrowDown",
+                                    Modifiers {
+                                        shift: self.window.shift_pressed,
+                                        control: self.window.control_pressed,
+                                        ..Modifiers::default()
+                                    },
+                                );
                             }
                         }
                         Key::Named(NamedKey::ArrowUp) => {
+                            // Com os modificadores: `Shift` é o que
+                            // distingue mover o cursor de estender a
+                            // seleção, e sem ele a tecla chegava vazia.
                             if let Some(shell) = self.ui.shell.as_mut() {
-                                shell.key_down("ArrowUp");
+                                shell.key_down_with_modifiers(
+                                    "ArrowUp",
+                                    Modifiers {
+                                        shift: self.window.shift_pressed,
+                                        control: self.window.control_pressed,
+                                        ..Modifiers::default()
+                                    },
+                                );
                             }
                         }
                         // Nem todo teclado entrega Tab como tecla nomeada; em
@@ -1961,6 +2140,7 @@ impl ApplicationHandler for NativeIde {
             }
             _ => {}
         }
+        let antes_da_linguagem = iniciado.elapsed();
         if sync_languages {
             self.sync_languages();
             // O realce que acabou de chegar precisa de um quadro para aparecer.
@@ -1968,13 +2148,50 @@ impl ApplicationHandler for NativeIde {
                 window.request_redraw();
             }
         }
+        let linguagem = iniciado.elapsed() - antes_da_linguagem;
         if completion_requested {
             self.request_completion();
         }
+        let completacao = iniciado.elapsed() - antes_da_linguagem - linguagem;
         self.dispatch_application_commands(direct_commands);
         // O menu `Generate` só marca o pedido; quem tem a linguagem responde.
         self.answer_accessor_request();
+        self.answer_constructor_request();
         self.drain_application_events();
+        if let Some(etiqueta) = etiqueta
+            && iniciado.elapsed() >= PERF_THRESHOLD
+        {
+            eprintln!(
+                "[perf] {etiqueta}: total {:?} | evento {antes_da_linguagem:?} | linguagem {linguagem:?} | completação {completacao:?}",
+                iniciado.elapsed()
+            );
+        }
+    }
+}
+
+/// Medição de tempo ligada por `ERIDE_PERF`, para investigar travamento.
+///
+/// Fora dela o custo é uma leitura de `OnceLock`: medir não pode ser o motivo de
+/// a janela ficar lenta.
+fn perf_enabled() -> bool {
+    static LIGADO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LIGADO.get_or_init(|| std::env::var_os("ERIDE_PERF").is_some())
+}
+
+/// Abaixo disto o evento não interessa: o alvo é o que trava, não o ruído.
+const PERF_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// Nome curto do evento, para a linha de medição.
+fn event_label(event: &WindowEvent) -> &'static str {
+    match event {
+        WindowEvent::RedrawRequested => "redraw",
+        WindowEvent::KeyboardInput { .. } => "tecla",
+        WindowEvent::CursorMoved { .. } => "ponteiro",
+        WindowEvent::MouseInput { .. } => "clique",
+        WindowEvent::MouseWheel { .. } => "roda",
+        WindowEvent::Resized(_) => "redimensionar",
+        WindowEvent::ModifiersChanged(_) => "modificadores",
+        _ => "outro",
     }
 }
 
@@ -2104,6 +2321,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Digitar não espera pela análise da linguagem.
+    ///
+    /// Era o que travava a digitação: a tecla ficava presa esperando o provider
+    /// analisar o arquivo — mais de 400 ms num arquivo grande, e ainda 60 ms
+    /// depois de a análise emagrecer. O provider sempre teve thread própria; o
+    /// que faltava era não esperar por ela.
+    #[test]
+    fn typing_does_not_wait_for_the_language_analysis() {
+        let root = std::env::temp_dir().join(format!("er-ide-async-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let pacote = root.join("src");
+        assert!(std::fs::create_dir_all(&pacote).is_ok());
+        // Grande o bastante para a análise não caber num quadro.
+        let corpo: String = (0..3000)
+            .map(|indice| format!("    int metodo{indice}() {{ return {indice}; }}
+"))
+            .collect();
+        let alvo = pacote.join("Grande.java");
+        assert!(std::fs::write(&alvo, format!("public class Grande {{
+{corpo}}}
+")).is_ok());
+
+        let language_host = LanguageHost::new(&root);
+        let java = java_contribution::contribution(Arc::new(NativeProcessSupervisor::default()));
+        assert!(language_host.register(java.provider).is_ok());
+        let mut ide = NativeIde::default();
+        ide.languages.host = Some(language_host);
+        ide.ui.shell = Some(test_shell(&root));
+        if let Some(shell) = ide.ui.shell.as_mut() {
+            open_test_document(shell, &alvo);
+        }
+        ide.sync_languages();
+        ide.settle_syntax();
+
+        // Uma tecla, e o tempo que ela custa no laço da janela.
+        if let Some(shell) = ide.ui.shell.as_mut() {
+            shell.text_input("a");
+        }
+        let inicio = std::time::Instant::now();
+        ide.sync_languages();
+        let gasto = inicio.elapsed();
+
+        assert!(
+            ide.languages.pending_syntax() > 0,
+            "a tecla deixou a análise pendente em vez de esperar por ela"
+        );
+        // Folgado de propósito: o que se afirma é que a tecla não paga a análise,
+        // e não quanto a máquina que roda o teste é rápida.
+        assert!(
+            gasto < std::time::Duration::from_millis(30),
+            "a tecla custou {gasto:?}, como se ainda esperasse a análise"
+        );
+
+        // E o realce chega, ainda que depois.
+        ide.settle_syntax();
+        assert_eq!(ide.languages.pending_syntax(), 0);
+        let realcado = ide
+            .ui
+            .shell
+            .as_ref()
+            .and_then(|shell| shell.syntax_snapshot(DocumentId(1)).map(|s| s.highlights.len()))
+            .unwrap_or_default();
+        assert!(realcado > 0, "o realce chegou pela thread do provider");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// O código já aparece colorido no primeiro quadro.
     ///
     /// O realce era pedido só dentro do tratamento de eventos, então o texto
@@ -2148,8 +2432,11 @@ mod tests {
             "sem o realce pedido, o texto sai sem cor"
         );
 
-        // É isto que a inicialização passou a fazer.
+        // É isto que a inicialização passou a fazer. O realce vem da thread do
+        // provider, então o teste espera por ele; na janela, quem o recolhe é o
+        // relógio, uns 30 ms depois — sem a digitação ter esperado.
         ide.sync_languages();
+        ide.settle_syntax();
         assert!(
             keyword_colored(&mut ide),
             "depois de pedir o realce, o código aparece colorido"

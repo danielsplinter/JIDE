@@ -146,7 +146,6 @@ O resultado sintático público é neutro em relação à linguagem:
 pub struct SyntaxSnapshot {
     pub document_id: DocumentId,
     pub version: u64,
-    pub tree: SyntaxNode,
     pub outline: Vec<OutlineItem>,
     pub highlights: Vec<SyntaxHighlight>,
     pub imports: Vec<ImportItem>,
@@ -154,9 +153,14 @@ pub struct SyntaxSnapshot {
 }
 ```
 
-`SyntaxNode` usa nomes de nós como texto e intervalos genéricos. Highlights,
-outline, imports e diagnósticos também usam tipos de `ide-domain`; nenhum tipo
-do Tree-sitter ou específico de Java atravessa o contrato público.
+Highlights, outline, imports e diagnósticos usam tipos de `ide-domain`; nenhum
+tipo do Tree-sitter ou específico de Java atravessa o contrato público.
+
+O snapshot já teve um campo `tree`, com uma cópia neutra da árvore. Ele saiu na
+`ADR-016`: custava uma `String` por nó — dezenas de milhares por análise, a cada
+tecla digitada — e nenhum consumidor o lia. Um contrato não pode obrigar a pagar
+por resposta que ninguém pediu; se a árvore voltar a ser necessária, deve ser uma
+operação **sob demanda**, como a semântica.
 
 `ActiveLanguage::syntax` retorna o snapshot correspondente à versão atual do
 documento. O Language Host transporta essa operação pelo mesmo worker isolado

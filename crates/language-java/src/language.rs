@@ -16,7 +16,7 @@ use ide_domain::{
     CompletionItem, CompletionKind, CompletionRequest, DefinitionRequest, Diagnostic,
     DiagnosticSeverity, DocumentChange, DocumentId, DocumentSnapshot, ImportItem, LanguageId,
     Location, OutlineItem, OutlineKind, ProviderId, ReferencesRequest, SemanticScope,
-    SemanticSnapshot, SemanticSymbol, SymbolKind, SyntaxHighlight, SyntaxHighlightKind, SyntaxNode,
+    SemanticSnapshot, SemanticSymbol, SymbolKind, SyntaxHighlight, SyntaxHighlightKind,
     SyntaxSnapshot, TextPosition, TextRange, TypeDescriptor,
 };
 #[cfg(test)]
@@ -255,6 +255,27 @@ impl ActiveLanguage for JavaLanguage {
             .ok_or_else(|| LanguageError::Unsupported("nenhum tipo nesta posição".to_owned()))
     }
 
+    async fn constructor_source(
+        &self,
+        document_id: DocumentId,
+        position: TextPosition,
+        fields: Vec<String>,
+    ) -> Result<Option<String>, LanguageError> {
+        let documents = self
+            .documents
+            .lock()
+            .map_err(|_| LanguageError::Provider("Java document lock poisoned".to_owned()))?;
+        let document = documents
+            .get(&document_id)
+            .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))?;
+        Ok(constructor_source_for(
+            &document.snapshot.text,
+            &document.tree,
+            position,
+            &fields,
+        ))
+    }
+
     async fn workspace_types(
         &self,
         query: &str,
@@ -304,7 +325,9 @@ impl ActiveLanguage for JavaLanguage {
         &self,
         request: CompletionRequest,
     ) -> Result<Vec<CompletionItem>, LanguageError> {
-        let documents = self.documents.lock()?;
+        let mut documents = self.documents.lock()?;
+        // A semântica é calculada sob demanda, e a demanda é esta.
+        Documents::ensure_semantics(&mut documents);
         let document = documents
             .get(&request.document_id)
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))?;
@@ -351,7 +374,8 @@ impl ActiveLanguage for JavaLanguage {
     }
 
     async fn definition(&self, request: DefinitionRequest) -> Result<Vec<Location>, LanguageError> {
-        let documents = self.documents.lock()?;
+        let mut documents = self.documents.lock()?;
+        Documents::ensure_semantics(&mut documents);
         let document = documents
             .get(&request.document_id)
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))?;
@@ -398,7 +422,8 @@ impl ActiveLanguage for JavaLanguage {
     }
 
     async fn references(&self, request: ReferencesRequest) -> Result<Vec<Location>, LanguageError> {
-        let documents = self.documents.lock()?;
+        let mut documents = self.documents.lock()?;
+        Documents::ensure_semantics(&mut documents);
         let document = documents
             .get(&request.document_id)
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))?;
@@ -451,9 +476,12 @@ pub(super) fn analyze_semantics(
     tree: &Tree,
 ) -> (SemanticSnapshot, HashMap<String, Vec<Location>>) {
     let root = tree.root_node();
+    // O índice de linhas é feito uma vez por análise: é ele que evita procurar a
+    // linha de cada nó varrendo o arquivo desde o começo.
+    let lines = LineIndex::new(&document.text);
     let mut symbols = Vec::new();
     let mut scopes = vec![SemanticScope {
-        range: node_range(root, &document.text),
+        range: node_range(root, &lines),
         depth: 0,
         symbols: Vec::new(),
     }];
@@ -461,6 +489,7 @@ pub(super) fn analyze_semantics(
     visit_semantics(
         root,
         document,
+        &lines,
         0,
         &mut symbols,
         &mut scopes,
@@ -480,6 +509,7 @@ pub(super) fn analyze_semantics(
 fn visit_semantics(
     node: Node<'_>,
     document: &DocumentSnapshot,
+    lines: &LineIndex<'_>,
     parent_scope: usize,
     symbols: &mut Vec<SemanticSymbol>,
     scopes: &mut Vec<SemanticScope>,
@@ -488,7 +518,7 @@ fn visit_semantics(
     let scope_index = if node.kind() != "program" && is_scope(node.kind()) {
         let index = scopes.len();
         scopes.push(SemanticScope {
-            range: node_range(node, &document.text),
+            range: node_range(node, lines),
             depth: scopes[parent_scope].depth + 1,
             symbols: Vec::new(),
         });
@@ -509,7 +539,7 @@ fn visit_semantics(
                 kind,
                 location: Location {
                     path: document.path.clone(),
-                    range: node_range(name_node, &document.text),
+                    range: node_range(name_node, lines),
                 },
                 type_descriptor,
                 scope_depth: scopes[scope_index].depth,
@@ -528,13 +558,21 @@ fn visit_semantics(
             .or_default()
             .push(Location {
                 path: document.path.clone(),
-                range: node_range(node, &document.text),
+                range: node_range(node, lines),
             });
     }
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        visit_semantics(child, document, scope_index, symbols, scopes, references);
+        visit_semantics(
+            child,
+            document,
+            lines,
+            scope_index,
+            symbols,
+            scopes,
+            references,
+        );
     }
 }
 
@@ -873,10 +911,137 @@ fn completion_for_symbol(symbol: &SemanticSymbol) -> CompletionItem {
 
 pub(super) fn analyze(document: &DocumentSnapshot, tree: &Tree) -> SyntaxSnapshot {
     let root = tree.root_node();
+    let lines = LineIndex::new(&document.text);
+    let (highlights, diagnostics, outline) = collect_analysis(root, &lines);
+    SyntaxSnapshot {
+        document_id: document.id,
+        version: document.version,
+        outline,
+        highlights,
+        imports: collect_imports(root, &lines),
+        diagnostics,
+    }
+}
+
+/// Percorre a árvore com **um** cursor, chamando `visit` em cada nó.
+///
+/// `Node::walk` cria um cursor novo, e a análise fazia isso uma vez por nó: só
+/// andar por uma árvore de 81 mil nós custava 35 ms, e a análise andava três
+/// vezes — realces, diagnósticos e outline. Um cursor e uma passada.
+///
+/// `visit` recebe a profundidade, que é o que permite fechar o que estava aberto
+/// ao subir de novo.
+fn walk_tree(root: Node<'_>, mut visit: impl FnMut(Node<'_>, usize)) {
+    let mut cursor = root.walk();
+    let mut depth = 0usize;
+    loop {
+        visit(cursor.node(), depth);
+        if cursor.goto_first_child() {
+            depth += 1;
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            // Voltar ao ponto de partida encerra: subir além dele sairia da
+            // subárvore que foi pedida.
+            if depth == 0 || !cursor.goto_parent() {
+                return;
+            }
+            depth -= 1;
+        }
+    }
+}
+
+/// Realces, diagnósticos e outline de uma só passada pela árvore.
+///
+/// Os três precisam do mesmo percurso e cada um custava o seu; juntos, custam um.
+fn collect_analysis(
+    root: Node<'_>,
+    lines: &LineIndex<'_>,
+) -> (Vec<SyntaxHighlight>, Vec<Diagnostic>, Vec<OutlineItem>) {
     let mut highlights = Vec::new();
     let mut diagnostics = Vec::new();
-    collect_highlights(root, &document.text, &mut highlights);
-    collect_diagnostics(root, &document.text, &mut diagnostics);
+    // Itens de outline abertos, do mais raso ao mais profundo. Um item fecha
+    // quando o percurso volta ao nível dele, e aí entra como filho de quem o
+    // contém.
+    let mut abertos: Vec<(usize, OutlineItem)> = Vec::new();
+    let mut raiz: Vec<OutlineItem> = Vec::new();
+    // Profundidade do nó que já respondeu pelo realce de tudo abaixo dele — é
+    // como um comentário ou uma string ficam de uma cor só, sem que os filhos
+    // pintem por cima. Não vale para diagnósticos, que continuam descendo.
+    let mut coberto: Option<usize> = None;
+
+    walk_tree(root, |node, depth| {
+        if coberto.is_some_and(|limite| depth <= limite) {
+            coberto = None;
+        }
+        fechar_outline(&mut abertos, &mut raiz, depth);
+
+        if node.is_error() || node.is_missing() {
+            let message = if node.is_missing() {
+                format!("Esperado `{}`", node.kind())
+            } else {
+                "Sintaxe Java inválida".to_owned()
+            };
+            diagnostics.push(Diagnostic {
+                range: node_range(node, lines),
+                severity: DiagnosticSeverity::Error,
+                message,
+                source: Some(JAVA_PROVIDER_ID.to_owned()),
+            });
+        }
+
+        if let Some(kind) = outline_kind(node.kind()) {
+            // Um campo não tem `name` próprio: o nome mora no declarador. Sem
+            // isto todo campo saía como `<anonymous>` no outline.
+            let name = node
+                .child_by_field_name("name")
+                .or_else(|| declarator_name(node))
+                .and_then(|name| name.utf8_text(lines.source().as_bytes()).ok())
+                .unwrap_or("<anonymous>")
+                .to_owned();
+            abertos.push((
+                depth,
+                OutlineItem {
+                    name,
+                    kind,
+                    range: node_range(node, lines),
+                    children: Vec::new(),
+                },
+            ));
+        }
+
+        if coberto.is_some() {
+            return;
+        }
+        let whole_node = node.kind().contains("comment")
+            || matches!(
+                node.kind(),
+                "string_literal"
+                    | "character_literal"
+                    | "text_block"
+                    | "marker_annotation"
+                    | "annotation"
+            );
+        if (whole_node || node.child_count() == 0)
+            && let Some(kind) = highlight_kind(node)
+            && node.end_byte() > node.start_byte()
+        {
+            highlights.push(SyntaxHighlight {
+                range: node_range(node, lines),
+                kind,
+            });
+            if whole_node {
+                coberto = Some(depth);
+            }
+        }
+    });
+    fechar_outline(&mut abertos, &mut raiz, 0);
+
+    // O realce sai em ordem de nó, que não é ordem de texto: quem consome busca
+    // por linha, e busca binária exige ordenação.
     highlights.sort_by_key(|highlight| {
         (
             highlight.range.start.line,
@@ -885,55 +1050,149 @@ pub(super) fn analyze(document: &DocumentSnapshot, tree: &Tree) -> SyntaxSnapsho
             highlight.range.end.column,
         )
     });
-    SyntaxSnapshot {
-        document_id: document.id,
-        version: document.version,
-        tree: syntax_node(root, &document.text),
-        outline: collect_outline(root, &document.text),
-        highlights,
-        imports: collect_imports(root, &document.text),
-        diagnostics,
-    }
+    (highlights, diagnostics, raiz)
 }
 
-fn syntax_node(node: Node<'_>, source: &str) -> SyntaxNode {
-    let mut cursor = node.walk();
-    let children = node
-        .named_children(&mut cursor)
-        .map(|child| syntax_node(child, source))
-        .collect();
-    SyntaxNode {
-        kind: node.kind().to_owned(),
-        range: node_range(node, source),
-        has_error: node.has_error(),
-        children,
-    }
-}
-
-fn collect_outline(node: Node<'_>, source: &str) -> Vec<OutlineItem> {
-    let mut result = Vec::new();
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Some(kind) = outline_kind(child.kind()) {
-            // Um campo não tem `name` próprio: o nome mora no declarador. Sem
-            // isto todo campo saía como `<anonymous>` no outline.
-            let name = child
-                .child_by_field_name("name")
-                .or_else(|| declarator_name(child))
-                .and_then(|name| name.utf8_text(source.as_bytes()).ok())
-                .unwrap_or("<anonymous>")
-                .to_owned();
-            result.push(OutlineItem {
-                name,
-                kind,
-                range: node_range(child, source),
-                children: collect_outline(child, source),
-            });
-        } else {
-            result.extend(collect_outline(child, source));
+/// Fecha os itens de outline que o percurso deixou para trás.
+fn fechar_outline(
+    abertos: &mut Vec<(usize, OutlineItem)>,
+    raiz: &mut Vec<OutlineItem>,
+    depth: usize,
+) {
+    while abertos.last().is_some_and(|(nivel, _)| *nivel >= depth) {
+        let Some((_, item)) = abertos.pop() else {
+            return;
+        };
+        match abertos.last_mut() {
+            Some((_, pai)) => pai.children.push(item),
+            None => raiz.push(item),
         }
     }
-    result
+}
+
+/// O tipo que contém a posição, com seu corpo e seus membros.
+///
+/// O plano de acessores e o construtor precisam exatamente disto, e procurar o
+/// tipo duas vezes por caminhos diferentes acabaria em duas respostas.
+fn enclosing_type<'a>(
+    source: &str,
+    tree: &'a Tree,
+    position: TextPosition,
+) -> Option<(Node<'a>, Node<'a>)> {
+    let ponto = Point {
+        row: position.line as usize,
+        column: byte_column_of(source, position),
+    };
+    let mut tipo = tree.root_node().descendant_for_point_range(ponto, ponto)?;
+    while !matches!(
+        tipo.kind(),
+        "class_declaration" | "interface_declaration" | "enum_declaration"
+    ) {
+        tipo = tipo.parent()?;
+    }
+    let corpo = tipo.child_by_field_name("body")?;
+    Some((tipo, corpo))
+}
+
+/// Campos declarados no corpo do tipo, em ordem, como `(nome, tipo)`.
+fn declared_fields<'a>(corpo: Node<'a>, bytes: &'a [u8]) -> Vec<(&'a str, &'a str)> {
+    let mut cursor = corpo.walk();
+    let mut campos = Vec::new();
+    for campo in corpo
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() == "field_declaration")
+    {
+        let Some(tipo_texto) = campo
+            .child_by_field_name("type")
+            .and_then(|node| node.utf8_text(bytes).ok())
+        else {
+            continue;
+        };
+        let mut interno = campo.walk();
+        for declarador in campo
+            .named_children(&mut interno)
+            .filter(|node| node.kind() == "variable_declarator")
+        {
+            if let Some(nome) = declarador
+                .child_by_field_name("name")
+                .and_then(|node| node.utf8_text(bytes).ok())
+            {
+                campos.push((nome, tipo_texto));
+            }
+        }
+    }
+    campos
+}
+
+/// Construtor do tipo que contém a posição, com os campos escolhidos.
+///
+/// Lista vazia é um construtor **sem parâmetros** — uma resposta legítima, e não
+/// a ausência de resposta. Devolve `None` quando o tipo já tem um construtor com
+/// a mesma lista de tipos: repetir a assinatura não compila, e escrever isso
+/// seria entregar um arquivo quebrado.
+///
+/// Toda a convenção é daqui: a ordem dos parâmetros segue a **declaração dos
+/// campos**, e não a ordem em que foram marcados, porque é assim que se lê a
+/// classe depois.
+fn constructor_source_for(
+    source: &str,
+    tree: &Tree,
+    position: TextPosition,
+    fields: &[String],
+) -> Option<String> {
+    let bytes = source.as_bytes();
+    let (tipo, corpo) = enclosing_type(source, tree, position)?;
+    let nome_tipo = tipo
+        .child_by_field_name("name")
+        .and_then(|node| node.utf8_text(bytes).ok())?;
+    let escolhidos: Vec<(&str, &str)> = declared_fields(corpo, bytes)
+        .into_iter()
+        .filter(|(nome, _)| fields.iter().any(|escolhido| escolhido == nome))
+        .collect();
+
+    let assinatura: Vec<String> = escolhidos
+        .iter()
+        .map(|(_, tipo_texto)| (*tipo_texto).to_owned())
+        .collect();
+    let mut cursor = corpo.walk();
+    let repetido = corpo
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() == "constructor_declaration")
+        .any(|node| constructor_parameter_types(node, bytes) == assinatura);
+    if repetido {
+        return None;
+    }
+
+    let parametros = escolhidos
+        .iter()
+        .map(|(nome, tipo_texto)| format!("{tipo_texto} {nome}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let atribuicoes: String = escolhidos
+        .iter()
+        .map(|(nome, _)| format!("        this.{nome} = {nome};\n"))
+        .collect();
+    Some(format!(
+        "\n    public {nome_tipo}({parametros}) {{\n{atribuicoes}    }}\n"
+    ))
+}
+
+/// Tipos dos parâmetros de um construtor, na ordem declarada.
+fn constructor_parameter_types(node: Node<'_>, bytes: &[u8]) -> Vec<String> {
+    let Some(lista) = node.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+    let mut cursor = lista.walk();
+    lista
+        .named_children(&mut cursor)
+        .filter(|parametro| parametro.kind() == "formal_parameter")
+        .filter_map(|parametro| {
+            parametro
+                .child_by_field_name("type")
+                .and_then(|tipo| tipo.utf8_text(bytes).ok())
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 /// Acessores que faltam ao tipo que contém a posição.
@@ -996,6 +1255,10 @@ fn accessor_plan_for(
                 AccessorKind::Both => &[AccessorKind::Getter, AccessorKind::Setter],
                 AccessorKind::Getter => &[AccessorKind::Getter],
                 AccessorKind::Setter => &[AccessorKind::Setter],
+                // O construtor não gera nada por campo: o texto sai do conjunto
+                // escolhido, depois, em `constructor_source`. Aqui o campo entra
+                // na lista apenas para poder ser escolhido.
+                AccessorKind::Constructor => &[],
             };
             let fonte: String = partes
                 .iter()
@@ -1037,8 +1300,9 @@ fn accessor_name(field: &str, type_name: &str, kind: AccessorKind) -> String {
         AccessorKind::Getter if type_name == "boolean" => format!("is{capitalizado}"),
         AccessorKind::Getter => format!("get{capitalizado}"),
         AccessorKind::Setter => format!("set{capitalizado}"),
-        // `Both` é desdobrado nos dois antes de chegar aqui.
-        AccessorKind::Both => format!("get{capitalizado}"),
+        // `Both` é desdobrado nos dois antes de chegar aqui, e o construtor não
+        // passa por aqui: ele não tem nome de acessor.
+        AccessorKind::Both | AccessorKind::Constructor => format!("get{capitalizado}"),
     }
 }
 
@@ -1050,7 +1314,7 @@ fn accessor_source(field: &str, type_name: &str, method: &str, kind: AccessorKin
         AccessorKind::Setter => format!(
             "\n    public void {method}({type_name} {field}) {{\n        this.{field} = {field};\n    }}\n"
         ),
-        AccessorKind::Both => String::new(),
+        AccessorKind::Both | AccessorKind::Constructor => String::new(),
     }
 }
 
@@ -1090,7 +1354,7 @@ fn outline_kind(kind: &str) -> Option<OutlineKind> {
     }
 }
 
-fn collect_imports(root: Node<'_>, source: &str) -> Vec<ImportItem> {
+fn collect_imports(root: Node<'_>, lines: &LineIndex<'_>) -> Vec<ImportItem> {
     let mut imports = Vec::new();
     let mut cursor = root.walk();
     for node in root.named_children(&mut cursor) {
@@ -1098,7 +1362,7 @@ fn collect_imports(root: Node<'_>, source: &str) -> Vec<ImportItem> {
             continue;
         }
         let text = node
-            .utf8_text(source.as_bytes())
+            .utf8_text(lines.source().as_bytes())
             .unwrap_or_default()
             .trim()
             .trim_end_matches(';')
@@ -1111,38 +1375,10 @@ fn collect_imports(root: Node<'_>, source: &str) -> Vec<ImportItem> {
             path: path.trim_end_matches(".*").to_owned(),
             is_static,
             wildcard: path.ends_with(".*"),
-            range: node_range(node, source),
+            range: node_range(node, lines),
         });
     }
     imports
-}
-
-fn collect_highlights(node: Node<'_>, source: &str, output: &mut Vec<SyntaxHighlight>) {
-    let whole_node = node.kind().contains("comment")
-        || matches!(
-            node.kind(),
-            "string_literal"
-                | "character_literal"
-                | "text_block"
-                | "marker_annotation"
-                | "annotation"
-        );
-    if (whole_node || node.child_count() == 0)
-        && let Some(kind) = highlight_kind(node)
-        && node.end_byte() > node.start_byte()
-    {
-        output.push(SyntaxHighlight {
-            range: node_range(node, source),
-            kind,
-        });
-        if whole_node {
-            return;
-        }
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_highlights(child, source, output);
-    }
 }
 
 fn highlight_kind(node: Node<'_>) -> Option<SyntaxHighlightKind> {
@@ -1260,42 +1496,69 @@ const JAVA_OPERATORS: &[&str] = &[
     "~", "<<", ">>", ">>>", "++", "--", "+=", "-=", "*=", "/=", "%=", "->", "::",
 ];
 
-fn collect_diagnostics(node: Node<'_>, source: &str, output: &mut Vec<Diagnostic>) {
-    if node.is_error() || node.is_missing() {
-        let message = if node.is_missing() {
-            format!("Esperado `{}`", node.kind())
-        } else {
-            "Sintaxe Java inválida".to_owned()
+/// Onde cada linha começa, para converter posições sem varrer o arquivo.
+///
+/// O tree-sitter dá a posição de um nó em linha e **coluna de bytes**; a IDE fala
+/// em coluna de caracteres. A conversão precisa da linha onde o nó está, e
+/// procurá-la com `lines().nth(row)` varre o texto desde o começo a cada nó —
+/// com a árvore inteira sendo convertida por análise, o custo crescia com o
+/// **quadrado** do tamanho do arquivo: medimos 46 ms para 200 linhas, 1,5 s para
+/// 1000 e 12,5 s para 3000, a cada tecla digitada. Guardando o início de cada
+/// linha uma vez, cada conversão passa a ser uma indexação.
+pub(super) struct LineIndex<'a> {
+    source: &'a str,
+    starts: Vec<usize>,
+}
+
+impl<'a> LineIndex<'a> {
+    pub(super) fn new(source: &'a str) -> Self {
+        let mut starts = vec![0];
+        starts.extend(
+            source
+                .bytes()
+                .enumerate()
+                .filter(|(_, byte)| *byte == b'\n')
+                .map(|(offset, _)| offset + 1),
+        );
+        Self { source, starts }
+    }
+
+    pub(super) const fn source(&self) -> &'a str {
+        self.source
+    }
+
+    /// Converte o ponto do tree-sitter em posição de caracteres.
+    fn position(&self, point: Point) -> TextPosition {
+        let line = self.line(point.row);
+        let byte_column = point.column.min(line.len());
+        let column = line
+            .get(..byte_column)
+            .map_or(0, |prefix| prefix.chars().count());
+        TextPosition {
+            line: point.row as u32,
+            column: column as u32,
+        }
+    }
+
+    /// A linha, sem a quebra — como `str::lines` a entregaria.
+    fn line(&self, row: usize) -> &'a str {
+        let Some(start) = self.starts.get(row).copied() else {
+            return "";
         };
-        output.push(Diagnostic {
-            range: node_range(node, source),
-            severity: DiagnosticSeverity::Error,
-            message,
-            source: Some(JAVA_PROVIDER_ID.to_owned()),
-        });
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_diagnostics(child, source, output);
+        let end = self
+            .starts
+            .get(row + 1)
+            .map_or(self.source.len(), |next| next.saturating_sub(1));
+        let line = self.source.get(start..end).unwrap_or_default();
+        // O `\r` do CRLF não conta como coluna, igual ao que `lines` faz.
+        line.strip_suffix('\r').unwrap_or(line)
     }
 }
 
-fn node_range(node: Node<'_>, source: &str) -> TextRange {
+fn node_range(node: Node<'_>, lines: &LineIndex<'_>) -> TextRange {
     TextRange {
-        start: text_position(source, node.start_position()),
-        end: text_position(source, node.end_position()),
-    }
-}
-
-fn text_position(source: &str, point: Point) -> TextPosition {
-    let line = source.lines().nth(point.row).unwrap_or_default();
-    let byte_column = point.column.min(line.len());
-    let column = line
-        .get(..byte_column)
-        .map_or(0, |prefix| prefix.chars().count());
-    TextPosition {
-        line: point.row as u32,
-        column: column as u32,
+        start: lines.position(node.start_position()),
+        end: lines.position(node.end_position()),
     }
 }
 
@@ -1354,6 +1617,154 @@ pub(super) fn point_after_text(start: Point, inserted: &str) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A conversão de posição não varre o arquivo, e continua correta.
+    ///
+    /// O índice existe por causa de desempenho, mas o que ele substitui era
+    /// `lines().nth(row)` — se ele errar a linha, o realce sai deslocado.
+    #[test]
+    fn the_line_index_converts_byte_columns_into_character_columns() {
+        let texto = "int número = 1;
+String s = \"olá\";
+int x;";
+        let lines = LineIndex::new(texto);
+        assert_eq!(lines.source(), texto);
+
+        // `número` tem um caractere de dois bytes: a coluna de bytes 10 é a
+        // coluna de caracteres 9.
+        let posicao = lines.position(Point { row: 0, column: 10 });
+        assert_eq!((posicao.line, posicao.column), (0, 9));
+
+        // A segunda linha termina em CRLF, e o retorno não conta como coluna.
+        let fim = lines.position(Point { row: 1, column: 18 });
+        assert_eq!(fim.line, 1);
+        assert_eq!(
+            fim.column, 17,
+            "a linha tem 18 bytes e 17 caracteres, porque o acento ocupa dois"
+        );
+
+        let ultima = lines.position(Point { row: 2, column: 4 });
+        assert_eq!((ultima.line, ultima.column), (2, 4));
+
+        // Linha inexistente não estoura: o texto pode ter mudado sob a árvore.
+        let fora = lines.position(Point { row: 99, column: 3 });
+        assert_eq!((fora.line, fora.column), (99, 0));
+    }
+
+    /// A análise de um arquivo grande não pode custar o quadrado do tamanho.
+    ///
+    /// Foi o defeito que travava a digitação: cada nó da árvore procurava a sua
+    /// linha varrendo o arquivo desde o começo, e uma tecla num arquivo de 3000
+    /// linhas custava mais de 12 segundos. O limite é folgado de propósito —
+    /// máquina lenta ou build de depuração não podem reprovar o teste —, mas
+    /// voltar ao comportamento quadrático o estoura com sobra.
+    #[test]
+    fn analyzing_a_large_file_stays_far_from_quadratic() {
+        let corpo: String = (0..2000)
+            .map(|indice| format!("    int metodo{indice}() {{ return {indice}; }}
+"))
+            .collect();
+        let snapshot = snapshot(&format!("public class Grande {{
+{corpo}}}
+"));
+        let (Ok(parser), snapshot) = (crate::parser::JavaParser::new(), snapshot) else {
+            panic!("parser Java indisponível");
+        };
+        let Ok(tree) = parser.parse(&snapshot.text, None) else {
+            panic!("o fonte de teste não parseou");
+        };
+
+        let inicio = std::time::Instant::now();
+        let analise = analyze(&snapshot, &tree);
+        let gasto = inicio.elapsed();
+
+        assert!(!analise.highlights.is_empty());
+        assert!(
+            gasto < std::time::Duration::from_secs(3),
+            "análise de 2000 linhas levou {gasto:?}; o custo voltou a crescer com o quadrado do arquivo"
+        );
+    }
+
+    /// O outline da passada única aninha como a recursão aninhava.
+    #[test]
+    fn the_single_pass_outline_keeps_members_inside_their_type() {
+        let fonte = "public class Pedido {
+    private int id;
+    public int getId() { return id; }
+    class Interna { void f() {} }
+}
+";
+        let snapshot = snapshot(fonte);
+        let (Ok(parser), snapshot) = (crate::parser::JavaParser::new(), snapshot) else {
+            panic!("parser Java indisponível");
+        };
+        let Ok(tree) = parser.parse(&snapshot.text, None) else {
+            panic!("o fonte de teste não parseou");
+        };
+        let outline = analyze(&snapshot, &tree).outline;
+
+        assert_eq!(outline.len(), 1, "só a classe fica na raiz");
+        let classe = &outline[0];
+        assert_eq!(classe.name, "Pedido");
+        let nomes: Vec<&str> = classe
+            .children
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect();
+        assert_eq!(nomes, vec!["id", "getId", "Interna"]);
+        let Some(interna) = classe.children.iter().find(|item| item.name == "Interna") else {
+            panic!("classe interna ausente do outline");
+        };
+        assert_eq!(
+            interna.children.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+            vec!["f"],
+            "o membro da classe interna fica dentro dela"
+        );
+    }
+
+    /// A semântica é calculada sob demanda e refeita depois de cada mudança.
+    ///
+    /// Ela não serve para desenhar, então sair do caminho da tecla é o ponto;
+    /// mas quem pergunta tem de receber a resposta do texto **atual**, senão a
+    /// navegação apontaria para onde o símbolo estava.
+    #[test]
+    fn semantics_are_computed_on_demand_and_refreshed_after_a_change() {
+        let active = active();
+        let fonte = "public class Alvo { int primeiro; }";
+        assert!(pollster::block_on(active.open_document(snapshot(fonte))).is_ok());
+
+        let antes = match pollster::block_on(active.semantic(DocumentId(1))) {
+            Ok(semantic) => semantic,
+            Err(error) => panic!("semântica indisponível: {error}"),
+        };
+        assert!(
+            antes.symbols.iter().any(|symbol| symbol.name == "primeiro"),
+            "a primeira pergunta calcula"
+        );
+
+        // Reescreve o arquivo inteiro trocando o nome do campo.
+        assert!(
+            pollster::block_on(active.change_document(DocumentChange {
+                document_id: DocumentId(1),
+                version: 2,
+                range: None,
+                text: "public class Alvo { int segundo; }".to_owned(),
+            }))
+            .is_ok()
+        );
+        let depois = match pollster::block_on(active.semantic(DocumentId(1))) {
+            Ok(semantic) => semantic,
+            Err(error) => panic!("semântica indisponível: {error}"),
+        };
+        assert!(
+            depois.symbols.iter().any(|symbol| symbol.name == "segundo"),
+            "a mudança invalida o que estava guardado"
+        );
+        assert!(
+            !depois.symbols.iter().any(|symbol| symbol.name == "primeiro"),
+            "e não devolve o símbolo que deixou de existir"
+        );
+    }
 
     fn active() -> Box<dyn ActiveLanguage> {
         active_with_jdk(None)
@@ -1585,6 +1996,97 @@ mod tests {
             "membro privado não é oferecido: {labels:?}"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// O construtor sai do conjunto escolhido, e a lista vazia é um construtor
+    /// sem parâmetros — resposta legítima, e não ausência de resposta.
+    #[test]
+    fn the_constructor_is_built_from_the_chosen_fields() {
+        let active = active();
+        let source = concat!(
+            "public class Pedido {\n",
+            "    private Long id;\n",
+            "    private String nome;\n",
+            "    private boolean ativo;\n",
+            "}\n",
+        );
+        assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
+        let dentro = TextPosition { line: 2, column: 4 };
+        let gerar = |campos: Vec<String>| {
+            match pollster::block_on(active.constructor_source(DocumentId(1), dentro, campos)) {
+                Ok(fonte) => fonte,
+                Err(error) => panic!("construtor indisponível: {error}"),
+            }
+        };
+
+        // Dois campos marcados: parâmetros e atribuições na ordem em que os
+        // campos foram **declarados**, e não na ordem em que foram marcados.
+        assert_eq!(
+            gerar(vec!["nome".to_owned(), "id".to_owned()]).as_deref(),
+            Some(concat!(
+                "\n",
+                "    public Pedido(Long id, String nome) {\n",
+                "        this.id = id;\n",
+                "        this.nome = nome;\n",
+                "    }\n",
+            ))
+        );
+
+        // Nenhum campo: construtor sem parâmetros.
+        assert_eq!(
+            gerar(Vec::new()).as_deref(),
+            Some("\n    public Pedido() {\n    }\n")
+        );
+
+        // Todos os campos.
+        let Some(todos) = gerar(vec![
+            "id".to_owned(),
+            "nome".to_owned(),
+            "ativo".to_owned(),
+        ]) else {
+            panic!("o construtor com todos os campos precisa existir");
+        };
+        assert!(todos.contains("public Pedido(Long id, String nome, boolean ativo)"));
+        assert!(todos.contains("this.ativo = ativo;"));
+    }
+
+    /// Um construtor de mesma assinatura não é gerado duas vezes.
+    ///
+    /// Repetir a assinatura não compila: entregar isso seria quebrar o arquivo
+    /// em nome da conveniência.
+    #[test]
+    fn a_constructor_with_the_same_signature_is_not_generated_again() {
+        let active = active();
+        let source = concat!(
+            "public class Pedido {\n",
+            "    private Long id;\n",
+            "    private String nome;\n",
+            "\n",
+            "    public Pedido(Long id) { this.id = id; }\n",
+            "}\n",
+        );
+        assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
+        let dentro = TextPosition { line: 2, column: 4 };
+        let gerar = |campos: Vec<String>| {
+            match pollster::block_on(active.constructor_source(DocumentId(1), dentro, campos)) {
+                Ok(fonte) => fonte,
+                Err(error) => panic!("construtor indisponível: {error}"),
+            }
+        };
+
+        assert_eq!(
+            gerar(vec!["id".to_owned()]),
+            None,
+            "já existe um construtor que recebe só `Long`"
+        );
+        assert!(
+            gerar(vec!["id".to_owned(), "nome".to_owned()]).is_some(),
+            "outra assinatura continua sendo gerada"
+        );
+        assert!(
+            gerar(Vec::new()).is_some(),
+            "o sem parâmetros também é outra assinatura"
+        );
     }
 
     /// O plano de acessores conhece a convenção e o que já existe.
@@ -2053,7 +2555,7 @@ mod tests {
             Err(error) => panic!("syntax unavailable: {error}"),
         };
         assert!(syntax.diagnostics.is_empty(), "{:?}", syntax.diagnostics);
-        assert!(!syntax.tree.children.is_empty());
+        assert!(!syntax.outline.is_empty(), "o outline sai da árvore analisada");
     }
 
     #[test]
@@ -2154,7 +2656,7 @@ mod tests {
         let point = point_for_offset(text, offset);
         TextPosition {
             line: point.row as u32,
-            column: text_position(text, point).column,
+            column: LineIndex::new(text).position(point).column,
         }
     }
 

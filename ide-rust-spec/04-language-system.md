@@ -173,6 +173,31 @@ compactado**, e não decodificando cada classe: um único módulo do JDK passa d
 mil classes, e o índice precisa apenas do nome. Os membros de um tipo são lidos sob
 demanda, um tipo por vez.
 
+## Geração de membros
+
+A IDE oferece `Generate` com `Constructor`, `Getter`, `Setter` e `Getter and
+Setter`, e **não sabe** o que é nenhum deles: a tela mostra nomes de campos e
+escreve o texto que recebe. Toda a convenção — `getNome` mas `isAtivo` para
+`boolean`, tipo de retorno, indentação, ordem dos parâmetros, onde o trecho entra
+— é da linguagem.
+
+São duas operações, e a diferença entre elas é o que motiva a segunda:
+
+- `accessor_plan(document_id, position, kind)` devolve os campos do tipo que
+  contém a posição, cada um com o texto pronto do acessor, ou `None` quando ele
+  já existe. Cada campo gera um trecho **independente**, então dá para entregar
+  tudo de uma vez e deixar a tela escolher quais usar;
+- `constructor_source(document_id, position, fields)` devolve **um** texto,
+  montado a partir do conjunto escolhido. Um construtor não é a soma de trechos
+  por campo, e a escolha muda a assinatura inteira: por isso ele é pedido depois
+  da janela, com os campos marcados na mão. Lista vazia é um construtor sem
+  parâmetros — uma resposta legítima, e não a ausência de resposta. `None` é o
+  tipo já ter um construtor de mesma assinatura, caso em que escrever outro não
+  compilaria.
+
+A linha de inserção vem do plano, presa ao corpo do tipo: com o cursor na linha da
+declaração, ou depois da chave que a fecha, o membro sairia fora da classe.
+
 ## Estratégia de fallback
 
 Se uma capability não estiver disponível no provider principal, o host pode consultar outro adapter.
@@ -235,3 +260,21 @@ documento seja fechado ou o provider seja desativado.
 `disable` executa `shutdown`, encerra o worker, remove as rotas de documentos e
 termina em `Disabled`. `enable` devolve um provider desativado ou falho para
 `Registered`, permitindo uma nova ativação sob demanda.
+
+## Pedidos sem espera
+
+O worker de cada provider vive em thread própria e recebe pedidos por canal, com
+envio que **nunca bloqueia**: fila cheia devolve `Backpressure` em vez de esperar.
+
+Duas operações do caminho da digitação têm forma postada — `post_change_document`
+e `post_syntax` —, que enfileiram e devolvem o receptor sem aguardar a resposta.
+Quem digita segue com a tecla, e quem chamou recolhe o resultado quando o provider
+terminar. A fila é ordenada, então o realce pedido depois de uma mudança fala do
+texto **com** ela aplicada, e as consultas que ainda esperam — completação,
+navegação, geração de acessores — são processadas depois do que já foi postado,
+ou seja, enxergam o texto atual.
+
+Quando o envio falha por contrapressão, a mudança **não** entrou na fila, e quem
+mantém o registro de "o que o provider já tem" não deve avançá-lo: a sincronização
+seguinte recalcula a diferença do mesmo ponto e tenta outra vez, com um pedaço
+maior. Nada se perde e nada bloqueia. Ver `ADR-017`.

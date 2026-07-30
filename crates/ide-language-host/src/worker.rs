@@ -68,6 +68,13 @@ pub(super) enum WorkerRequest {
         kind: AccessorKind,
         response: oneshot::Sender<Result<AccessorPlan, LanguageHostError>>,
     },
+    ConstructorSource {
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        position: TextPosition,
+        fields: Vec<String>,
+        response: oneshot::Sender<Result<Option<String>, LanguageHostError>>,
+    },
     WorkspaceTypes {
         context: LanguageRequestContext,
         query: String,
@@ -178,6 +185,45 @@ impl ProviderWorker {
         receiver
             .await
             .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    /// Enfileira a mudança e devolve por onde vem a resposta, sem esperar.
+    ///
+    /// O provider já roda em thread própria; era a **espera** que punha a
+    /// análise no meio da digitação. Quem posta segue com a tecla e recolhe o
+    /// resultado depois.
+    pub(super) fn post_change(
+        &self,
+        context: LanguageRequestContext,
+        change: DocumentChange,
+    ) -> Result<oneshot::Receiver<Result<(), LanguageHostError>>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Change {
+            context,
+            change,
+            response,
+        })?;
+        Ok(receiver)
+    }
+
+    /// Pede o realce e devolve por onde ele vem. O espelho de [`Self::post_change`].
+    ///
+    /// A fila do worker é ordenada, então o realce pedido depois de uma mudança
+    /// fala do texto **com** ela aplicada.
+    pub(super) fn post_syntax(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+    ) -> Result<oneshot::Receiver<Result<SyntaxSnapshot, LanguageHostError>>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Syntax {
+            context,
+            document_id,
+            response,
+        })?;
+        Ok(receiver)
     }
 
     pub(super) async fn close_document(
@@ -317,6 +363,27 @@ impl ProviderWorker {
             document_id,
             position,
             kind,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    pub(super) async fn constructor_source(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        position: TextPosition,
+        fields: Vec<String>,
+    ) -> Result<Option<String>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::ConstructorSource {
+            context,
+            document_id,
+            position,
+            fields,
             response,
         })?;
         receiver
@@ -551,6 +618,22 @@ fn run_worker(
                 } else {
                     runtime
                         .block_on(active.accessor_plan(document_id, position, kind))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::ConstructorSource {
+                context,
+                document_id,
+                position,
+                fields,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.constructor_source(document_id, position, fields))
                         .map_err(Into::into)
                 };
                 let _ = response.send(result);

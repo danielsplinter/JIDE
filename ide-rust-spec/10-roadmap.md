@@ -84,6 +84,39 @@ com o renderer WGPU do ERLibUi.
   pelo PTY;
 - a execução do terminal não altera o shell do processo principal.
 
+### Comportamento do cursor e da seleção
+
+- arrastar além da borda leva a vista junto nas quatro direções, e **continua
+  levando com o ponteiro parado**: o passo é dado pelo relógio da janela, não por
+  evento de movimento. Quanto mais longe da borda, mais rápido, até um teto.
+  Soltar encerra o gesto, e perder o foco da janela também — senão uma soltura
+  perdida deixaria a vista rolando sozinha;
+- `Shift+clique` estende a seleção do cursor até o ponto clicado, e as setas com
+  `Shift` marcam a partir do cursor;
+- as setas laterais com `Ctrl` saltam de palavra em palavra, pela mesma regra do
+  duplo clique, que vem do editor do ERLibUi;
+- em arquivo com fim de linha CRLF o cursor não para **entre o retorno e a
+  quebra**: o fim de linha é um lugar só, que as setas atravessam inteiro e onde
+  o clique para no fim do que se vê. Sem isso, digitar no fim de uma linha
+  terminada em espaço escrevia depois do fim de linha, e o texto recém digitado
+  aparecia repetido sobre a linha de baixo.
+
+### Desempenho da digitação
+
+- a análise da linguagem não roda no laço da janela: a mudança e o pedido de
+  realce são postados ao provider e o resultado é recolhido quando fica pronto
+  (`ADR-017`);
+- a análise por tecla percorre a árvore **uma vez** e converte posições por um
+  índice de linhas, o que tirou o custo quadrático no tamanho do arquivo
+  (`ADR-016`);
+- `ERIDE_PERF=1` imprime o custo por evento e por quadro, para que a próxima
+  suspeita comece com medição e não com palpite;
+- **pendente:** sobram ~7 ms por tecla montando o instantâneo de cada documento
+  aberto, que clona o texto inteiro — ver a pendência registrada na `ADR-017`;
+- **pendente:** a árvore do Explorer é varrida inteira e de forma síncrona ao
+  abrir o projeto, sem teto de arquivos — 2,17 s medidos sobre 56 mil arquivos,
+  com a janela parada nesse tempo. Ver `08-storage-and-memory`.
+
 ## Fase 2 — Language Host ✅ Concluída
 
 Concluída em 25/07/2026. Validada com testes de contrato e ciclo de vida do

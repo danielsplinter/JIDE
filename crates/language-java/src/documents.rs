@@ -24,6 +24,26 @@ pub(super) struct ParsedDocument {
     pub(super) analysis: SyntaxSnapshot,
     pub(super) semantic: SemanticSnapshot,
     pub(super) references: HashMap<String, Vec<Location>>,
+    /// Se a semântica acima vale para o texto atual.
+    ///
+    /// Símbolos, escopos e referências custam quase tanto quanto o realce e não
+    /// servem para desenhar: só completação, navegação e busca de usos os
+    /// consultam. Calculá-los a cada tecla era pagar por resposta que ninguém
+    /// tinha pedido — agora a tecla apenas invalida, e quem pergunta paga.
+    semantics_ready: bool,
+}
+
+impl ParsedDocument {
+    /// Calcula a semântica se ela ainda não valer para o texto atual.
+    fn ensure_semantics(&mut self) {
+        if self.semantics_ready {
+            return;
+        }
+        let (semantic, references) = analyze_semantics(&self.snapshot, &self.tree);
+        self.semantic = semantic;
+        self.references = references;
+        self.semantics_ready = true;
+    }
 }
 
 pub(super) struct Documents {
@@ -57,13 +77,20 @@ impl Documents {
     ) -> Result<ParsedDocument, LanguageError> {
         let tree = self.parser.parse(&snapshot.text, previous)?;
         let analysis = analyze(&snapshot, &tree);
-        let (semantic, references) = analyze_semantics(&snapshot, &tree);
+        // A semântica fica para quem a pedir; ver `ParsedDocument`.
+        let semantic = SemanticSnapshot {
+            document_id: snapshot.id,
+            version: snapshot.version,
+            symbols: Vec::new(),
+            scopes: Vec::new(),
+        };
         Ok(ParsedDocument {
             snapshot,
             tree,
             analysis,
             semantic,
-            references,
+            references: HashMap::new(),
+            semantics_ready: false,
         })
     }
 
@@ -139,9 +166,22 @@ impl Documents {
         document_id: DocumentId,
     ) -> Result<SemanticSnapshot, LanguageError> {
         self.lock()?
-            .get(&document_id)
-            .map(|document| document.semantic.clone())
+            .get_mut(&document_id)
+            .map(|document| {
+                document.ensure_semantics();
+                document.semantic.clone()
+            })
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))
+    }
+
+    /// Prepara a semântica de todos os documentos abertos.
+    ///
+    /// Quem responde por completação, navegação e usos olha o conjunto dos
+    /// arquivos abertos, e não só o da vez; é aqui que a conta adiada é paga.
+    pub(super) fn ensure_semantics(documents: &mut HashMap<DocumentId, ParsedDocument>) {
+        for document in documents.values_mut() {
+            document.ensure_semantics();
+        }
     }
 
     pub(super) fn clear(&self) -> Result<(), LanguageError> {

@@ -24,6 +24,7 @@ use ide_language_api::{
     LanguageProvider, LanguageRequestContext, MemberAccess, ProviderState,
 };
 use thiserror::Error;
+use tokio::sync::oneshot;
 
 #[derive(Clone, Debug)]
 pub struct LanguageHostConfig {
@@ -324,6 +325,31 @@ impl LanguageHost {
         worker.change_document(context, change).await
     }
 
+    /// Enfileira a mudança sem esperar a resposta.
+    ///
+    /// É o que a digitação usa: o receptor devolvido diz depois se deu certo, e
+    /// enquanto isso a janela não fica parada esperando a análise. Falhar aqui
+    /// significa que a mudança **não** entrou na fila, e quem chamou não deve
+    /// avançar o que considera já enviado.
+    pub fn post_change_document(
+        &self,
+        context: LanguageRequestContext,
+        change: DocumentChange,
+    ) -> Result<oneshot::Receiver<Result<(), LanguageHostError>>, LanguageHostError> {
+        let worker = self.worker_for_document(change.document_id, LanguageCapabilities::empty())?;
+        worker.post_change(context, change)
+    }
+
+    /// Pede o realce sem esperar. Ver [`Self::post_change_document`].
+    pub fn post_syntax(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+    ) -> Result<oneshot::Receiver<Result<SyntaxSnapshot, LanguageHostError>>, LanguageHostError> {
+        let worker = self.worker_for_document(document_id, LanguageCapabilities::SYNTAX)?;
+        worker.post_syntax(context, document_id)
+    }
+
     pub async fn close_document(
         &self,
         context: LanguageRequestContext,
@@ -415,6 +441,20 @@ impl LanguageHost {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
         worker
             .accessor_plan(context, document_id, position, kind)
+            .await
+    }
+
+    /// Construtor do tipo na posição, com os campos escolhidos.
+    pub async fn constructor_source(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        position: TextPosition,
+        fields: Vec<String>,
+    ) -> Result<Option<String>, LanguageHostError> {
+        let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
+        worker
+            .constructor_source(context, document_id, position, fields)
             .await
     }
 
