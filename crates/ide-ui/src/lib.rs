@@ -8,6 +8,7 @@ mod layout;
 mod menus;
 mod search;
 mod settings;
+mod text;
 mod shell;
 mod terminal;
 

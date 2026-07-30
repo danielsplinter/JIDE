@@ -10,9 +10,10 @@
 //! assim a janela principal continua editando o documento aberto enquanto uma
 //! segunda tela edita um rascunho, sem cópia nem sincronização entre os dois.
 
+use crate::text::{byte_at_column, line_column, next_boundary, offset_for_line_column, previous_boundary};
 use std::collections::HashMap;
 
-use ide_domain::{AccessorCandidate, AccessorKind, CompletionItem, DocumentId, SyntaxSnapshot};
+use ide_domain::{CompletionItem, DocumentId, SyntaxSnapshot};
 use ide_workspace::{EditorSession, TextBuffer};
 use ui_api::{LayoutContext, PaintContext, Widget};
 use ui_components::Scrollbar;
@@ -39,71 +40,6 @@ pub(super) struct EditorAreaState {
     pub(super) syntax_spans: HashMap<DocumentId, CachedSyntax>,
     pub(super) completion_items: Vec<CompletionItem>,
     pub(super) completion_selected: usize,
-    /// Geração de acessores em curso, aberta pelo menu `Generate`.
-    pub(super) generate: Option<GenerateState>,
-    /// Acessor pedido cuja resposta da linguagem ainda não chegou.
-    pub(super) generate_pending: Option<AccessorKind>,
-    /// Construtor escolhido cuja fonte a linguagem ainda não devolveu.
-    ///
-    /// O construtor sai de **um** texto montado a partir do conjunto marcado, e
-    /// não da soma de trechos por campo: só depois da escolha dá para pedi-lo.
-    pub(super) constructor_pending: Option<ConstructorRequest>,
-    /// Janela da geração de acessores.
-    pub(super) generate_modal: ui_components::ModalHost,
-    /// Renomeação em curso, aberta pelo menu do editor.
-    pub(super) rename: Option<RenameState>,
-    /// Arquivo cuja renomeação foi pedida e ainda não foi respondida.
-    ///
-    /// Quem responde é a aplicação: ela pergunta à linguagem onde o nome é
-    /// referenciado — no projeto inteiro, inclusive em arquivos fechados.
-    pub(super) rename_pending: Option<std::path::PathBuf>,
-    /// Janela da renomeação. Própria: renomear não é gerar.
-    pub(super) rename_modal: ui_components::ModalHost,
-}
-
-/// Renomeação em curso: o nome novo e quem referencia o tipo.
-///
-/// Os componentes são os da biblioteca — `TextInput` para o nome e `ListView`
-/// para as referências —, porque caixa de texto e lista são dela; a IDE só diz
-/// o que mostrar e o que fazer com a resposta.
-pub(super) struct RenameState {
-    /// Arquivo a renomear, e o nome que ele tem hoje.
-    pub(super) path: std::path::PathBuf,
-    pub(super) old_name: String,
-    /// Onde o nome antigo aparece, agrupado por arquivo.
-    ///
-    /// Inclui o próprio arquivo: nele estão a declaração e os construtores, que
-    /// sem a troca ficariam com o nome antigo e não compilariam.
-    pub(super) occurrences: Vec<(std::path::PathBuf, Vec<ide_domain::TextRange>)>,
-    pub(super) input: ui_components::TextInput,
-    pub(super) list: ui_components::ListView,
-}
-
-/// Construtor escolhido, à espera do texto que a linguagem vai montar.
-///
-/// Guarda os campos marcados e onde o texto entra. Lista vazia é um construtor
-/// **sem parâmetros**, e não "nada escolhido": é o que o usuário pede quando
-/// abre a janela e confirma sem marcar nada.
-pub(super) struct ConstructorRequest {
-    pub(super) fields: Vec<String>,
-    pub(super) insert_at: ide_domain::TextPosition,
-}
-
-/// O que a janela de geração mostra e o que o usuário marcou.
-///
-/// Os textos vêm prontos da linguagem; a tela só decide quais entram. É o que
-/// mantém a IDE sem saber o que é um getter.
-pub(super) struct GenerateState {
-    pub(super) kind: AccessorKind,
-    pub(super) candidates: Vec<AccessorCandidate>,
-    pub(super) insert_at: ide_domain::TextPosition,
-    /// Marcados, um por candidato gerável.
-    pub(super) checked: Vec<bool>,
-    /// A lista, mantida entre quadros.
-    ///
-    /// Recriá-la a cada pintura jogava fora a rolagem e a deixava sem receber
-    /// evento nenhum — a barra não se movia e o clique não chegava.
-    pub(super) list: ui_components::ComposedList,
 }
 
 pub(super) struct CachedSyntax {
@@ -1259,51 +1195,6 @@ fn byte_at_char(text: &str, chars: usize) -> usize {
     text.char_indices()
         .nth(chars)
         .map_or(text.len(), |(index, _)| index)
-}
-
-fn byte_at_column(text: &str, column: usize) -> usize {
-    text.char_indices()
-        .nth(column)
-        .map_or(text.len(), |(index, _)| index)
-}
-
-fn line_column(text: &str, cursor: usize) -> (usize, usize) {
-    let prefix = &text[..cursor.min(text.len())];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
-    let column = prefix
-        .rsplit('\n')
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .count();
-    (line, column)
-}
-
-fn offset_for_line_column(text: &str, target_line: usize, target_column: usize) -> usize {
-    let mut offset = 0;
-    for (line, value) in text.split('\n').enumerate() {
-        if line == target_line {
-            return offset + byte_at_column(value, target_column);
-        }
-        offset += value.len() + 1;
-    }
-    text.len()
-}
-
-fn previous_boundary(text: &str, offset: usize) -> usize {
-    let offset = offset.min(text.len());
-    text[..offset]
-        .char_indices()
-        .next_back()
-        .map_or(0, |(index, _)| index)
-}
-
-fn next_boundary(text: &str, offset: usize) -> usize {
-    let offset = offset.min(text.len());
-    text[offset..]
-        .char_indices()
-        .nth(1)
-        .map_or(text.len(), |(index, _)| offset + index)
 }
 
 #[cfg(test)]

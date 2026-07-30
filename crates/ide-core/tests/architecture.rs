@@ -808,7 +808,10 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
 
     let line_limits = [
         ("crates/ide-app/src/main.rs", 15),
-        ("crates/ide-ui/src/lib.rs", 30),
+        // 31 desde a fase 2 da decomposição do shell: o módulo `text` reúne
+        // funções que viviam duplicadas no shell e no editor. O teto existe para
+        // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.
+        ("crates/ide-ui/src/lib.rs", 31),
         ("crates/language-java/src/lib.rs", 12),
         ("crates/ide-language-host/src/lib.rs", 10),
     ];
@@ -830,9 +833,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         9,
         "NativeIde divergiu da linha final"
     );
+    // Cresce durante a fase 3 da decomposição — cada janela que sai do arquivo
+    // vira um campo aqui —, e volta a encolher na fase 4, quando as superfícies
+    // passam a viver numa lista só. Ver `14-ide-shell-decomposition`.
     assert_eq!(
         struct_field_count(&shell, "IdeShell"),
-        10,
+        12,
         "IdeShell divergiu da linha final"
     );
 }
