@@ -179,9 +179,11 @@ impl NativeIde {
         window.show();
         self.window.window = Some(window);
         // As abas restauradas já estão abertas, mas ninguém pediu o realce
-        // delas: `sync_languages` só rodava dentro do tratamento de eventos, e
-        // por isso o código aparecia sem cor até o primeiro clique.
-        self.sync_languages();
+        // delas. Isso fica para **depois do primeiro quadro**: ativar o provider
+        // indexa o JDK e os fontes do projeto, e feito aqui deixava a janela já
+        // visível em branco por mais de um segundo. Primeiro a IDE aparece
+        // montada; o realce chega no quadro seguinte.
+        self.runtime.languages_pending = true;
         if let Some(window) = self.window.window.as_ref() {
             window.request_redraw();
         }
@@ -504,6 +506,39 @@ impl NativeIde {
                     })
                     .collect(),
             );
+        }
+    }
+
+    /// Pede à linguagem o plano de acessores que a tela solicitou.
+    fn answer_accessor_request(&mut self) {
+        let Some(kind) = self
+            .ui
+            .shell
+            .as_mut()
+            .and_then(IdeShell::take_accessor_request)
+        else {
+            return;
+        };
+        let (Some(host), Some(shell)) = (self.languages.host.as_ref(), self.ui.shell.as_ref())
+        else {
+            return;
+        };
+        let (Some(document_id), Some(position)) =
+            (shell.active_document(), shell.cursor_position())
+        else {
+            return;
+        };
+        let plano = pollster::block_on(host.accessor_plan(
+            host.request_context(),
+            document_id,
+            position,
+            kind,
+        ));
+        if let Some(shell) = self.ui.shell.as_mut() {
+            match plano {
+                Ok(plano) => shell.show_accessor_plan(kind, plano),
+                Err(error) => shell.set_status_message(error.to_string()),
+            }
         }
     }
 
@@ -1919,16 +1954,26 @@ impl ApplicationHandler for NativeIde {
                     self.runtime.startup_error = Some(error);
                     event_loop.exit();
                 }
+                // Com a IDE já desenhada, a espera da indexação acontece com o
+                // usuário vendo a tela montada em vez de um retângulo vazio.
+                sync_languages |= self.runtime.languages_pending;
+                self.runtime.languages_pending = false;
             }
             _ => {}
         }
         if sync_languages {
             self.sync_languages();
+            // O realce que acabou de chegar precisa de um quadro para aparecer.
+            if let Some(window) = self.window.window.as_ref() {
+                window.request_redraw();
+            }
         }
         if completion_requested {
             self.request_completion();
         }
         self.dispatch_application_commands(direct_commands);
+        // O menu `Generate` só marca o pedido; quem tem a linguagem responde.
+        self.answer_accessor_request();
         self.drain_application_events();
     }
 }

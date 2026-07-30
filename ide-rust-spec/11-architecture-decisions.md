@@ -150,7 +150,52 @@ Ela clona o texto de todas as abas na thread da interface; o que a justifica é 
 **conjunto de documentos mudar** — uma aba aberta ou fechada —, e não o ponteiro
 ter tocado o editor. Mover o cursor não muda documento nenhum.
 
+A mesma regra vale na abertura. Ativar o provider indexa o JDK e os fontes do
+projeto — mais de um segundo em compilação de depuração, medido sobre um projeto
+real. Feito antes do primeiro quadro, isso deixava a janela **já visível** em
+branco todo esse tempo. A primeira sincronização de linguagens passou a acontecer
+depois do primeiro desenho: a IDE aparece montada, e o realce chega no quadro
+seguinte.
+
 **Consequência:** o custo do realce passa a ser proporcional ao arquivo, e só
 quando ele muda. Em troca, quem produzir realce por outro caminho precisa invalidar
 a entrada — a revisão do buffer é o que decide, e um realce novo com revisão antiga
 é ignorado em vez de exibido fora de lugar.
+
+## ADR-015 — Indexação Java: síncrona, integral e com tetos silenciosos
+
+**Situação:** a completação, a navegação e a busca por nome se apoiam num índice
+montado uma vez, quando o provider Java é ativado. Ele tem duas metades: os nomes
+das classes do JDK, lidos do diretório de cada `jmods/*.jmod` sem descompactar — os
+membros vêm depois, sob demanda —, e os fontes do projeto, que são lidos, parseados
+e analisados semanticamente para render símbolos, referências e o mapa de qual
+arquivo declara cada tipo.
+
+**Evidência:** medido sobre um projeto real de 121 arquivos, 92 deles `.java`, com
+o JDK 17 e seus 71 `jmods`, a ativação leva cerca de **1,6 s em compilação de
+depuração**. O peso está em parsear e analisar os fontes, não em ler os `jmods`.
+
+**Decisão:** por ora a indexação continua assim, e a primeira sincronização de
+linguagens acontece depois do primeiro quadro, para que a espera aconteça com a
+IDE já desenhada.
+
+### Pendências conhecidas
+
+São três, e nenhuma está resolvida:
+
+- **Os tetos são silenciosos.** A varredura para em 600 caminhos, 500 arquivos
+  `.java`, 64 jars e 24.000 classes do JDK. Passando disso, o índice fica
+  incompleto **sem avisar**: a completação simplesmente não conhece parte do
+  código, e quem usa não tem como distinguir isso de um tipo que não existe. Um
+  monorepo cruza esses limites com facilidade.
+- **A indexação não é incremental.** Ela roda inteira na ativação e é refeita do
+  zero ao trocar o JDK. Salvar um arquivo não reindexa, então uma classe nova só
+  entra no índice na ativação seguinte.
+- **Ela é síncrona.** Adiá-la para depois do primeiro quadro tirou a janela em
+  branco, mas não o bloqueio: a primeira consulta à linguagem ainda espera o
+  índice inteiro. O caminho é o provider responder *ainda indexando* e completar
+  em segundo plano, e aí nem o realce esperaria.
+
+**Consequência:** vale para projetos do tamanho dos que a IDE atende hoje. Os três
+pontos acima são o que precisa mudar antes de ela atender projetos grandes, e o
+primeiro é o mais perigoso, porque falha em silêncio.

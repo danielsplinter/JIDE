@@ -13,12 +13,39 @@ pub(super) struct MenuState {
     pub(super) bar: MenuBar,
 }
 
-pub(super) fn editor_entries(has_selection: bool, debugging: bool) -> Vec<MenuEntry> {
+pub(super) fn editor_entries(
+    has_selection: bool,
+    debugging: bool,
+    inside_type: bool,
+) -> Vec<MenuEntry> {
     let copy = MenuItem::new("Copiar", CommandId("editor.copy".to_owned()));
     let mut entries = vec![
         MenuEntry::Item(if has_selection { copy } else { copy.disabled() }),
         MenuEntry::Item(MenuItem::new("Colar", CommandId("editor.paste".to_owned()))),
     ];
+    // Só dentro de um tipo: gerar construtor ou acessor fora de uma classe não
+    // teria onde escrever, e oferecer a opção prometeria o que não se cumpre.
+    if inside_type {
+        entries.push(MenuEntry::Separator);
+        entries.push(MenuEntry::submenu("Generate", vec![
+            MenuEntry::Item(MenuItem::new(
+                "Constructor",
+                CommandId("editor.generate.constructor".to_owned()),
+            )),
+            MenuEntry::Item(MenuItem::new(
+                "Getter",
+                CommandId("editor.generate.getter".to_owned()),
+            )),
+            MenuEntry::Item(MenuItem::new(
+                "Setter",
+                CommandId("editor.generate.setter".to_owned()),
+            )),
+            MenuEntry::Item(MenuItem::new(
+                "Getter and Setter",
+                CommandId("editor.generate.accessors".to_owned()),
+            )),
+        ]));
+    }
     if debugging {
         entries.push(MenuEntry::Separator);
         let inspect = MenuItem::new("Inspecionar", CommandId("debug.inspect".to_owned()));
@@ -64,5 +91,53 @@ pub(super) fn debug_request(command: &str) -> Option<DebugRequest> {
         "debug.out" => Some(DebugRequest::StepOut),
         "debug.detach" => Some(DebugRequest::Detach),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod generate_tests {
+    use super::*;
+
+    fn labels(entries: &[MenuEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| match entry {
+                MenuEntry::Item(item) => item.label.clone(),
+                MenuEntry::Submenu { label, .. } => label.clone(),
+                MenuEntry::Separator => "—".to_owned(),
+            })
+            .collect()
+    }
+
+    /// Dentro de um tipo o menu oferece `Generate`; fora, não.
+    ///
+    /// Oferecer fora prometeria o que não se cumpre: não há onde escrever um
+    /// construtor ou um acessor.
+    #[test]
+    fn generate_is_offered_only_inside_a_type() {
+        let fora = editor_entries(false, false, false);
+        assert_eq!(labels(&fora), vec!["Copiar", "Colar"]);
+
+        let dentro = editor_entries(false, false, true);
+        assert_eq!(labels(&dentro), vec!["Copiar", "Colar", "—", "Generate"]);
+
+        let Some(MenuEntry::Submenu { entries, .. }) = dentro.last() else {
+            panic!("`Generate` precisa ser um submenu, não um comando");
+        };
+        assert_eq!(labels(entries), vec![
+            "Constructor",
+            "Getter",
+            "Setter",
+            "Getter and Setter"
+        ]);
+    }
+
+    /// Depurando e dentro de um tipo, as duas coisas convivem.
+    #[test]
+    fn generate_and_inspect_live_together() {
+        let entries = editor_entries(true, true, true);
+        let rotulos = labels(&entries);
+        assert!(rotulos.contains(&"Generate".to_owned()));
+        assert!(rotulos.contains(&"Inspecionar".to_owned()));
     }
 }

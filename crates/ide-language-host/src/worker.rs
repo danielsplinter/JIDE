@@ -1,4 +1,5 @@
 ﻿use ide_domain::{
+    AccessorKind, AccessorPlan, TextPosition,
     CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
     DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot, SemanticSymbol,
     SyntaxSnapshot,
@@ -59,6 +60,13 @@ pub(super) enum WorkerRequest {
         type_name: String,
         prefix: String,
         response: oneshot::Sender<Result<Vec<CompletionItem>, LanguageHostError>>,
+    },
+    AccessorPlanFor {
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        position: TextPosition,
+        kind: AccessorKind,
+        response: oneshot::Sender<Result<AccessorPlan, LanguageHostError>>,
     },
     WorkspaceTypes {
         context: LanguageRequestContext,
@@ -295,6 +303,27 @@ impl ProviderWorker {
             .map_err(|_| LanguageHostError::WorkerStopped)?
     }
 
+    pub(super) async fn accessor_plan(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        position: TextPosition,
+        kind: AccessorKind,
+    ) -> Result<AccessorPlan, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::AccessorPlanFor {
+            context,
+            document_id,
+            position,
+            kind,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
     pub(super) async fn workspace_types(
         &self,
         context: LanguageRequestContext,
@@ -506,6 +535,22 @@ fn run_worker(
                 } else {
                     runtime
                         .block_on(active.type_members(&type_name, &prefix))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::AccessorPlanFor {
+                context,
+                document_id,
+                position,
+                kind,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.accessor_plan(document_id, position, kind))
                         .map_err(Into::into)
                 };
                 let _ = response.send(result);

@@ -169,6 +169,9 @@ JARs do workspace. Fontes abertas substituem os resultados estáveis do índice
 na resolução. Definições no mesmo arquivo e no escopo mais profundo têm
 prioridade; depois são consultadas outras fontes do workspace.
 
+Esse índice é **síncrono, integral e limitado por tetos silenciosos**, e as três
+coisas são pendências abertas — ver `ADR-015` em `11-architecture-decisions`.
+
 `Ctrl+Click` usa `DefinitionRequest` e abre a localização retornada, **rolando o
 editor até ela**. Sem isso, um destino no mesmo arquivo mas fora da área visível
 movia o cursor e mais nada: a navegação parecia não funcionar justamente para

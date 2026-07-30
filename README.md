@@ -61,6 +61,32 @@ cola, usando a área de transferência **do sistema** — o mesmo que o clique c
 botão direito sobre o editor oferece em Copiar e Colar. Sem seleção, Copiar
 aparece desabilitado em vez de sumir do menu.
 
+Com o cursor **dentro de uma classe, interface, enum ou anotação**, o mesmo menu
+traz `Generate`, que abre um submenu com `Constructor`, `Getter`, `Setter` e
+`Getter and Setter`. Fora de um tipo a opção não aparece: não haveria onde
+escrever.
+
+`Getter` e `Setter` abrem uma janela com **os campos que ainda não têm aquele
+acessor** — o que já existe não é oferecido, porque escolhê-lo não escreveria
+nada. Cada linha traz uma caixa de marcação. **OK** gera os marcados; **All** gera
+todos, marcados ou não, para quando se quer a classe inteira sem marcar campo por
+campo. `Esc` desiste.
+
+Os métodos entram **na posição do cursor**, no começo da linha em que ele está —
+a linha atual desce. Inserir no meio dela partiria um token. O ponto fica preso ao
+corpo do tipo: com o cursor na linha da declaração da classe, ou depois da chave
+que a fecha, o método sairia fora dela e nem compilaria.
+
+Quem sabe Java é o provider: a convenção de nome — `getNome`, mas `isAtivo` para
+`boolean` —, o tipo de retorno e a linha de inserção vêm dele prontos. A tela
+mostra nomes e insere trechos, sem saber o que é um getter.
+
+`Setter` e `Getter and Setter` usam **a mesma janela**: o que muda é o que a
+linguagem escreve, não a tela. No par, um campo entra na lista quando falta
+**algum** dos dois, e o texto gerado traz só o que falta — repetir o que a classe
+já tem seria erro de compilação, não conveniência. `Constructor` ainda não tem
+gerador.
+
 `Tab` indenta até a próxima parada de quatro colunas e `Shift+Tab` recolhe a
 indentação da linha. **Com um trecho marcado, os dois deslocam todas as linhas do
 bloco** e mantêm a seleção, para indentar vários níveis sem remarcar; recolher

@@ -203,6 +203,40 @@ pub enum CompletionKind {
     Variable,
 }
 
+/// Um acessor que a linguagem sabe escrever para um campo.
+///
+/// O texto vem pronto da linguagem, e a tela só escolhe quais entram. É o que
+/// mantém a IDE sem saber Java: ela mostra `nome` numa lista e insere o trecho
+/// que recebeu, sem opinar sobre `get`, `is` ou tipo de retorno.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessorCandidate {
+    /// Nome do campo, que é o que a tela mostra.
+    pub field: String,
+    /// Corpo do acessor, pronto para ser inserido. `None` quando já existe.
+    pub source: Option<String>,
+}
+
+/// O que a linguagem propõe gerar, e onde.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessorPlan {
+    pub candidates: Vec<AccessorCandidate>,
+    /// Linha onde os trechos entram, antes do fecho do tipo.
+    pub insert_at: TextPosition,
+}
+
+/// Qual acessor gerar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessorKind {
+    Getter,
+    Setter,
+    /// Os dois de uma vez.
+    ///
+    /// Um campo entra na lista quando falta **algum** dos dois, e o texto
+    /// gerado traz só o que falta: repetir o que a classe já tem seria erro
+    /// de compilação, não conveniência.
+    Both,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompletionItem {
     pub label: String,

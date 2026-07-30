@@ -7,7 +7,8 @@ use crate::debugging::{
     InspectionState, InspectionView,
 };
 use crate::editor::{
-    CachedSyntax, EditorAction, EditorAreaState, EditorCapabilities, EditorPane, SyntaxView,
+    CachedSyntax, EditorAction, EditorAreaState, EditorCapabilities, EditorPane, GenerateState,
+    SyntaxView,
 };
 use crate::explorer::{
     ExplorerState, id as explorer_id, is_source_root, items as explorer_items,
@@ -49,7 +50,8 @@ use crate::settings::SettingsDialog;
 #[cfg(test)]
 use ide_domain::Location;
 use ide_domain::{
-    CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, OutlineItem,
+    AccessorCandidate, AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DocumentId,
+    DocumentSnapshot, OutlineItem, OutlineKind,
     SyntaxHighlightKind, SyntaxSnapshot, TextPosition as DomainTextPosition,
 };
 use ide_terminal::{ShellKind, TerminalSession};
@@ -58,7 +60,8 @@ use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 #[cfg(test)]
 use ui_components::MenuEntry;
 use ui_components::{
-    Button, ComboBox, ComboBoxItem, ContextMenu, Icon, IconTint, Label, ListSelection, ListView,
+    Button, CellWidth, Checkbox, ComboBox, ComboBoxItem, ComposedCell, ComposedList, ComposedRow,
+    ContextMenu, Icon, IconTint, Label, ListSelection, ListView,
     MenuBar, MenuBarItem, MenuItem, ModalHost, Popup, Scrollbar, ScrollbarOrientation,
     SplitOrientation, Splitter, StatusBar, TabItem, Tabs, TextInput, TreeItem, TreeView,
 };
@@ -116,6 +119,14 @@ const NEW_ITEM_NAME_CAPTION_ID: WidgetId = WidgetId(10_042);
 const NEW_ITEM_MESSAGE_ID: WidgetId = WidgetId(10_043);
 /// A janela é pequena de propósito: dois campos e duas ações.
 const NEW_ITEM_PANEL_SIZE: Size = Size::new(460.0, 230.0);
+const GENERATE_MODAL_ID: WidgetId = WidgetId(10_070);
+const GENERATE_LIST_ID: WidgetId = WidgetId(10_071);
+const GENERATE_ALL_ID: WidgetId = WidgetId(10_072);
+const GENERATE_OK_ID: WidgetId = WidgetId(10_073);
+const GENERATE_PANEL_SIZE: Size = Size::new(420.0, 380.0);
+const GENERATE_ROW_HEIGHT: f32 = 28.0;
+/// Faixa de ids das células da lista, para não colidir com outros componentes.
+const GENERATE_CELL_BASE: u64 = 10_200;
 const TYPE_SEARCH_MODAL_ID: WidgetId = WidgetId(10_060);
 const TYPE_SEARCH_INPUT_ID: WidgetId = WidgetId(10_061);
 const TYPE_SEARCH_LIST_ID: WidgetId = WidgetId(10_062);
@@ -418,6 +429,13 @@ impl IdeShell {
                 syntax_spans: HashMap::new(),
                 completion_items: Vec::new(),
                 completion_selected: 0,
+                generate: None,
+                generate_pending: None,
+                generate_modal: ModalHost::new(
+                    GENERATE_MODAL_ID,
+                    "Generate",
+                    GENERATE_PANEL_SIZE,
+                ),
             },
             terminal: TerminalPanelState {
                 tabs: terminals,
@@ -1444,6 +1462,269 @@ impl IdeShell {
         }
     }
 
+    /// Onde o cursor está, em linha e coluna.
+    ///
+    /// É o que a linguagem precisa para saber de qual tipo se está falando.
+    #[must_use]
+    pub fn cursor_position(&self) -> Option<DomainTextPosition> {
+        let text = self.active_text()?;
+        let (line, column) = line_column(text, self.editor_area.pane.cursor());
+        Some(DomainTextPosition {
+            line: line as u32,
+            column: column as u32,
+        })
+    }
+
+    /// Pede à linguagem o plano de acessores. É o que o menu `Generate` aciona.
+    pub fn request_accessors(&mut self, kind: AccessorKind) {
+        self.editor_area.generate_pending = Some(kind);
+    }
+
+    /// Pedido que a tela quer ver respondido, se houver um esperando.
+    pub fn take_accessor_request(&mut self) -> Option<AccessorKind> {
+        self.editor_area.generate_pending.take()
+    }
+
+    /// Abre a janela com o que a linguagem propôs gerar.
+    ///
+    /// Só entram os campos que ainda **não têm** o acessor: listar o que já
+    /// existe daria a escolher algo que não seria escrito.
+    pub fn show_accessor_plan(&mut self, kind: AccessorKind, plan: AccessorPlan) {
+        let candidates: Vec<AccessorCandidate> = plan
+            .candidates
+            .into_iter()
+            .filter(|candidate| candidate.source.is_some())
+            .collect();
+        if candidates.is_empty() {
+            self.set_status_message("Todos os campos já têm esse acessor");
+            return;
+        }
+        let checked = vec![false; candidates.len()];
+        let list = generate_list(&candidates, &checked);
+        self.editor_area.generate = Some(GenerateState {
+            kind,
+            checked,
+            candidates,
+            insert_at: plan.insert_at,
+            list,
+        });
+        self.editor_area.generate_modal.set_title(match kind {
+            AccessorKind::Getter => "Generate — Getter",
+            AccessorKind::Setter => "Generate — Setter",
+            AccessorKind::Both => "Generate — Getter and Setter",
+        });
+        self.editor_area.generate_modal.open();
+    }
+
+    #[must_use]
+    pub fn generate_open(&self) -> bool {
+        self.editor_area.generate_modal.is_open()
+    }
+
+    /// Campos oferecidos na janela, na ordem em que aparecem.
+    #[must_use]
+    pub fn generate_fields(&self) -> Vec<String> {
+        self.editor_area
+            .generate
+            .as_ref()
+            .map(|state| {
+                state
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.field.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn close_generate(&mut self) {
+        self.editor_area.generate_modal.close();
+        self.editor_area.generate = None;
+    }
+
+    /// Escreve os acessores escolhidos no documento.
+    ///
+    /// `todos` ignora a marcação — é o botão que gera tudo de uma vez, sem
+    /// obrigar a marcar campo por campo quando se quer a classe inteira.
+    pub fn apply_generate(&mut self, todos: bool) {
+        let Some(state) = self.editor_area.generate.take() else {
+            return;
+        };
+        let escolhidos: String = state
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| todos || state.checked.get(*index).copied().unwrap_or_default())
+            .filter_map(|(_, candidate)| candidate.source.clone())
+            .collect();
+        self.editor_area.generate_modal.close();
+        if escolhidos.is_empty() {
+            self.set_status_message("Nenhum campo marcado");
+            return;
+        }
+        let Some(document) = self.editor_area.session.active_mut() else {
+            return;
+        };
+        // A linha vem da linguagem, que sabe onde o tipo fecha.
+        let texto = document.buffer.text();
+        let inicio = offset_of_line(texto, state.insert_at.line as usize);
+        if document.buffer.replace(inicio..inicio, &escolhidos).is_ok() {
+            let quantos = state
+                .candidates
+                .iter()
+                .enumerate()
+                .filter(|(index, candidate)| {
+                    candidate.source.is_some()
+                        && (todos || state.checked.get(*index).copied().unwrap_or_default())
+                })
+                .count();
+            let nome = match state.kind {
+                AccessorKind::Getter => "getter",
+                AccessorKind::Setter => "setter",
+                AccessorKind::Both => "acessor",
+            };
+            self.set_status_message(format!("{quantos} {nome}(s) gerado(s)"));
+        }
+    }
+
+    /// Áreas da janela de geração: a lista e os dois botões.
+    fn generate_geometry(&mut self, size: Size) -> (Rect, Rect, Rect) {
+        self.editor_area.generate_modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let panel = self.editor_area.generate_modal.panel_bounds();
+        let botoes_y = panel.origin.y + panel.size.height - 52.0;
+        let lista = Rect::new(
+            panel.origin.x + 16.0,
+            panel.origin.y + 56.0,
+            panel.size.width - 32.0,
+            botoes_y - (panel.origin.y + 56.0) - 12.0,
+        );
+        let ok = Rect::new(
+            panel.origin.x + panel.size.width - 116.0,
+            botoes_y,
+            100.0,
+            36.0,
+        );
+        let todos = Rect::new(ok.origin.x - 112.0, botoes_y, 100.0, 36.0);
+        (lista, todos, ok)
+    }
+
+    fn generate_pointer_down(&mut self, point: Point, size: Size) {
+        let (lista, todos, ok) = self.generate_geometry(size);
+        if todos.contains(point) {
+            self.apply_generate(true);
+            return;
+        }
+        if ok.contains(point) {
+            self.apply_generate(false);
+            return;
+        }
+        if lista.contains(point) {
+            // A lista trata a trilha e diz qual linha foi clicada; a marcação
+            // é da tela, que é quem sabe o que está marcado.
+            let contexto = self.layout_context();
+            let Some(state) = self.editor_area.generate.as_mut() else {
+                return;
+            };
+            state.list.layout(&contexto, lista);
+            let antes = state.list.selected();
+            state.list.event(
+                &mut EventContext::default(),
+                &UiEvent::PointerDown(primary_pointer(point)),
+            );
+            let agora = state.list.selected();
+            if (agora != antes || !state.list.scrolls())
+                && let Some(linha) = agora
+                && let Some(marcado) = state.checked.get_mut(linha)
+            {
+                *marcado = !*marcado;
+                state.list = generate_list(&state.candidates, &state.checked);
+            }
+            return;
+        }
+        if !self.editor_area.generate_modal.panel_bounds().contains(point) {
+            self.close_generate();
+        }
+    }
+
+    /// Desenha a janela de geração.
+    ///
+    /// A lista é a `ComposedList` da biblioteca, e **quem escolhe as células é
+    /// esta tela**: uma caixa de marcação e o nome do campo.
+    fn paint_generate(&mut self, commands: &mut Vec<PaintCommand>, size: Size) {
+        if !self.editor_area.generate_modal.is_open() {
+            return;
+        }
+        if self.editor_area.generate.is_none() {
+            return;
+        }
+        let mut modal = self.editor_area.generate_modal.clone();
+        modal.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        let mut paint = self.paint_context();
+        modal.paint(&mut paint);
+        let panel = modal.panel_bounds();
+        let botoes_y = panel.origin.y + panel.size.height - 52.0;
+        let lista_rect = Rect::new(
+            panel.origin.x + 16.0,
+            panel.origin.y + 56.0,
+            panel.size.width - 32.0,
+            botoes_y - (panel.origin.y + 56.0) - 12.0,
+        );
+        let contexto = self.layout_context();
+        // A lista é a mesma entre quadros: recriá-la aqui jogaria fora a
+        // rolagem e a deixaria sem receber evento nenhum.
+        if let Some(state) = self.editor_area.generate.as_mut() {
+            state.list.layout(&contexto, lista_rect);
+            state.list.paint(&mut paint);
+        }
+
+        let ok_rect = Rect::new(
+            panel.origin.x + panel.size.width - 116.0,
+            botoes_y,
+            100.0,
+            36.0,
+        );
+        let todos_rect = Rect::new(ok_rect.origin.x - 112.0, botoes_y, 100.0, 36.0);
+        let mut todos = Button::new(GENERATE_ALL_ID, "All");
+        todos.layout(&self.layout_context(), todos_rect);
+        todos.paint(&mut paint);
+        let mut ok = Button::new(GENERATE_OK_ID, "OK");
+        ok.layout(&self.layout_context(), ok_rect);
+        ok.paint(&mut paint);
+        commands.extend(paint.into_commands());
+    }
+
+    /// O ponto clicado cai dentro de uma classe, interface, enum ou anotação.
+    ///
+    /// A estrutura vem do outline que a linguagem já publica: perguntar de novo
+    /// ao provider no meio de um clique seria uma ida síncrona à linguagem para
+    /// decidir o que mostrar num menu.
+    fn cursor_inside_type(&mut self, point: Point, size: Size) -> bool {
+        self.place_focused_editor(size);
+        let Some(buffer) = self
+            .editor_area
+            .session
+            .active()
+            .map(|document| &document.buffer)
+        else {
+            return false;
+        };
+        let offset = self.editor_area.pane.offset_at_point(buffer, point);
+        let (line, column) = line_column(buffer.text(), offset);
+        let posicao = DomainTextPosition {
+            line: line as u32,
+            column: column as u32,
+        };
+        self.active_outline()
+            .iter()
+            .any(|item| encloses_type(item, posicao))
+    }
+
     /// Há linha passando da área visível, e portanto barra lateral.
     fn editor_scrolls_sideways(&self, size: Size) -> bool {
         self.editor_area.pane.content_width() > self.editor_view_rect(size).size.width
@@ -1969,6 +2250,10 @@ impl IdeShell {
         if self.context_menu_key("Escape", Modifiers::default()) {
             return;
         }
+        if self.editor_area.generate_modal.is_open() {
+            self.close_generate();
+            return;
+        }
         if self.search.modal.is_open() {
             self.close_type_search();
             return;
@@ -2033,9 +2318,11 @@ impl IdeShell {
             && point.y < geometry.editor_bottom
         {
             self.context.focus = ShellFocus::Editor;
+            let dentro_de_tipo = self.cursor_inside_type(point, size);
             self.explorer.context_menu.set_entries(editor_menu_entries(
                 self.editor_area.pane.selection_range().is_some(),
                 self.debug_panel.view.attached,
+                dentro_de_tipo,
             ));
             self.explorer.context_menu.layout(
                 &self.layout_context(),
@@ -2137,6 +2424,25 @@ impl IdeShell {
 
     fn run_explorer_command(&mut self, command: &str) {
         match command {
+            // A geração em si ainda não existe: o menu já escolhe o que gerar, e
+            // dizer isso é melhor do que um clique que não faz nada.
+            "editor.generate.getter" => {
+                self.request_accessors(AccessorKind::Getter);
+                return;
+            }
+            "editor.generate.setter" => {
+                self.request_accessors(AccessorKind::Setter);
+                return;
+            }
+            "editor.generate.accessors" => {
+                self.request_accessors(AccessorKind::Both);
+                return;
+            }
+            comando if comando.starts_with("editor.generate.") => {
+                // Construtor e o par getter+setter ainda não têm gerador.
+                self.set_status_message("Ainda não implementado");
+                return;
+            }
             "editor.copy" => {
                 self.copy_selection();
                 return;
@@ -2263,6 +2569,10 @@ impl IdeShell {
         // O menu aberto tem a primeira palavra: escolher uma ação ou dispensá-lo
         // é o que este clique significa, e não o que está embaixo dele.
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
+            return;
+        }
+        if self.editor_area.generate_modal.is_open() {
+            self.generate_pointer_down(point, size);
             return;
         }
         if self.search.modal.is_open() {
@@ -2624,6 +2934,23 @@ impl IdeShell {
     }
 
     pub fn scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
+        // A janela de geração cobre tudo: a roda ali é dela.
+        if self.editor_area.generate_modal.is_open() {
+            let (lista, ..) = self.generate_geometry(size);
+            let contexto = self.layout_context();
+            if let Some(state) = self.editor_area.generate.as_mut() {
+                state.list.layout(&contexto, lista);
+                state.list.event(
+                    &mut EventContext::default(),
+                    &UiEvent::Scroll(ui_core::ScrollEvent {
+                        position: point,
+                        delta_x: 0.0,
+                        delta_y: delta_lines * GENERATE_ROW_HEIGHT,
+                    }),
+                );
+            }
+            return;
+        }
         if self.search.modal.is_open() {
             self.type_search_scroll(point, delta_lines, size);
             return;
@@ -4263,6 +4590,7 @@ impl IdeShell {
         }
         // A janela de criação cobre o conteúdo, e o menu de contexto cobre ela.
         self.paint_new_item_dialog(&mut commands, size);
+        self.paint_generate(&mut commands, size);
         self.paint_type_search(&mut commands, size);
         self.paint_inspection(&mut commands, size);
         // Depois da janela de inspeção, ou a lista ficaria atrás dela.
@@ -5561,8 +5889,69 @@ fn position_in_range(line: usize, column: usize, range: ide_domain::TextRange) -
     (line, column) >= start && (line, column) < end
 }
 
+/// O item do outline é um tipo e contém a posição — ou algum filho dele é.
+///
+/// A busca desce a árvore porque classes aninhadas existem, e estar dentro de
+/// uma interna continua sendo estar dentro de um tipo.
+fn encloses_type(item: &OutlineItem, position: DomainTextPosition) -> bool {
+    let dentro = position_in_range(position.line as usize, position.column as usize, item.range);
+    let tipo = matches!(
+        item.kind,
+        OutlineKind::Class | OutlineKind::Interface | OutlineKind::Enum | OutlineKind::Annotation
+    );
+    (dentro && tipo)
+        || item
+            .children
+            .iter()
+            .any(|child| encloses_type(child, position))
+}
+
 fn is_identifier_character(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
+}
+
+/// Monta a lista da janela de geração.
+///
+/// **Esta tela é quem escolhe as células**: uma caixa de marcação e o nome do
+/// campo. A biblioteca não decide nada disso.
+fn generate_list(candidates: &[AccessorCandidate], checked: &[bool]) -> ComposedList {
+    let linhas: Vec<ComposedRow> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let base = GENERATE_CELL_BASE + index as u64 * 2;
+            ComposedRow::new(vec![
+                ComposedCell::new(
+                    Box::new(Checkbox::new(
+                        WidgetId(base),
+                        "",
+                        checked.get(index).copied().unwrap_or_default(),
+                    )),
+                    CellWidth::Fixed(30.0),
+                ),
+                ComposedCell::new(
+                    Box::new(Label::new(WidgetId(base + 1), candidate.field.clone())),
+                    CellWidth::Fill,
+                ),
+            ])
+        })
+        .collect();
+    ComposedList::new(GENERATE_LIST_ID, linhas).with_row_height(GENERATE_ROW_HEIGHT)
+}
+
+/// Deslocamento em bytes onde uma linha começa.
+///
+/// Além da última, devolve o fim do texto: inserir depois do fim é acrescentar,
+/// e é o que se quer quando o tipo fecha na última linha.
+fn offset_of_line(text: &str, line: usize) -> usize {
+    let mut offset = 0;
+    for (index, value) in text.split('\n').enumerate() {
+        if index == line {
+            return offset;
+        }
+        offset += value.len() + 1;
+    }
+    text.len()
 }
 
 fn fill(rect: Rect, color: Color) -> PaintCommand {
@@ -5975,6 +6364,7 @@ mod tests {
             .iter()
             .map(|entry| match entry {
                 MenuEntry::Item(item) => item.label.clone(),
+                MenuEntry::Submenu { label, .. } => label.clone(),
                 MenuEntry::Separator => "—".to_owned(),
             })
             .collect()
@@ -7771,6 +8161,195 @@ mod tests {
         shell
     }
 
+    fn accessor_plan_para_teste() -> AccessorPlan {
+        let candidato = |campo: &str, fonte: Option<&str>| AccessorCandidate {
+            field: campo.to_owned(),
+            source: fonte.map(str::to_owned),
+        };
+        AccessorPlan {
+            candidates: vec![
+                candidato("id", Some("\n    public Long getId() {\n        return id;\n    }\n")),
+                // Já tem getter: não deve nem aparecer na janela.
+                candidato("nome", None),
+                candidato(
+                    "ativo",
+                    Some("\n    public boolean isAtivo() {\n        return ativo;\n    }\n"),
+                ),
+            ],
+            insert_at: DomainTextPosition { line: 2, column: 0 },
+        }
+    }
+
+    /// A janela lista só o que falta, e `OK` gera o que foi marcado.
+    #[test]
+    fn the_generate_window_lists_what_is_missing_and_writes_what_was_checked() {
+        let mut shell = shell_editing("class Matricula {\n    private Long id;\n}\n");
+        let size = Size::new(1280.0, 800.0);
+        shell.show_accessor_plan(AccessorKind::Getter, accessor_plan_para_teste());
+        assert!(shell.generate_open());
+        assert_eq!(
+            shell.generate_fields(),
+            vec!["id", "ativo"],
+            "o campo que já tem getter não é oferecido"
+        );
+
+        // Os nomes aparecem na janela.
+        let texts = painted_texts(&mut shell, size);
+        assert!(texts.iter().any(|text| text == "id"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "All"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "OK"), "{texts:?}");
+
+        // Marcar a segunda linha e confirmar gera só ela.
+        let (lista, _, ok) = shell.generate_geometry(size);
+        shell.pointer_down(
+            Point::new(lista.origin.x + 40.0, lista.origin.y + GENERATE_ROW_HEIGHT + 4.0),
+            size,
+        );
+        shell.pointer_down(
+            Point::new(ok.origin.x + 10.0, ok.origin.y + 10.0),
+            size,
+        );
+        assert!(!shell.generate_open(), "confirmar fecha a janela");
+        let texto = shell.active_text().unwrap_or_default();
+        assert!(texto.contains("isAtivo"), "o marcado foi gerado: {texto}");
+        assert!(!texto.contains("getId"), "o não marcado ficou de fora");
+    }
+
+    /// `All` gera todos, esteja marcado ou não.
+    #[test]
+    fn the_all_button_ignores_the_checkboxes() {
+        let mut shell = shell_editing("class Matricula {\n    private Long id;\n}\n");
+        let size = Size::new(1280.0, 800.0);
+        shell.show_accessor_plan(AccessorKind::Getter, accessor_plan_para_teste());
+        let (_, todos, _) = shell.generate_geometry(size);
+        shell.pointer_down(
+            Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
+            size,
+        );
+        let texto = shell.active_text().unwrap_or_default();
+        assert!(texto.contains("getId"), "{texto}");
+        assert!(texto.contains("isAtivo"), "{texto}");
+        assert!(!shell.generate_open());
+    }
+
+    /// A lista da janela sobrevive aos quadros: roda e clique funcionam.
+    ///
+    /// Recriá-la a cada pintura jogava fora a rolagem e a deixava sem receber
+    /// evento nenhum — a barra não se movia e o clique não chegava.
+    #[test]
+    fn the_generate_list_keeps_its_scroll_between_frames() {
+        let mut shell = shell_editing("class Muitos {}\n");
+        let size = Size::new(1280.0, 800.0);
+        let candidatos: Vec<AccessorCandidate> = (0..40)
+            .map(|index| AccessorCandidate {
+                field: format!("campo{index}"),
+                source: Some(format!("\n    public int getCampo{index}() {{ return 0; }}\n")),
+            })
+            .collect();
+        shell.show_accessor_plan(AccessorKind::Getter, AccessorPlan {
+            candidates: candidatos,
+            insert_at: DomainTextPosition { line: 1, column: 0 },
+        });
+        let _ = shell.paint(size);
+
+        let rolagem = |shell: &IdeShell| {
+            shell
+                .editor_area
+                .generate
+                .as_ref()
+                .map_or(0.0, |state| state.list.scroll_offset())
+        };
+        assert_eq!(rolagem(&shell), 0.0);
+
+        // A roda rola a lista da janela.
+        let (lista, ..) = shell.generate_geometry(size);
+        shell.scroll(
+            Point::new(lista.origin.x + 40.0, lista.origin.y + 40.0),
+            5.0,
+            size,
+        );
+        let apos_roda = rolagem(&shell);
+        assert!(apos_roda > 0.0, "a roda precisa mover a lista");
+
+        // Pintar de novo não desfaz a rolagem.
+        let _ = shell.paint(size);
+        assert_eq!(rolagem(&shell), apos_roda, "a lista sobrevive ao quadro");
+
+        // E o clique numa linha visível continua marcando.
+        shell.pointer_down(
+            Point::new(lista.origin.x + 40.0, lista.origin.y + 4.0),
+            size,
+        );
+        let marcados = shell
+            .editor_area
+            .generate
+            .as_ref()
+            .map_or(0, |state| state.checked.iter().filter(|item| **item).count());
+        assert_eq!(marcados, 1, "clicar numa linha marca uma");
+    }
+
+    /// Os três itens do menu usam a mesma janela.
+    ///
+    /// Getter, setter e o par diferem no que a linguagem escreve, não na tela:
+    /// duplicar a janela daria duas cópias que divergiriam na primeira correção.
+    #[test]
+    fn the_three_generate_options_share_one_window() {
+        for kind in [
+            AccessorKind::Getter,
+            AccessorKind::Setter,
+            AccessorKind::Both,
+        ] {
+            let mut shell = shell_editing("class Matricula {\n}\n");
+            let size = Size::new(1280.0, 800.0);
+            let fonte = match kind {
+                AccessorKind::Getter => "\n    public Long getId() { return id; }\n",
+                AccessorKind::Setter => "\n    public void setId(Long id) {}\n",
+                AccessorKind::Both => {
+                    "\n    public Long getId() { return id; }\n    public void setId(Long id) {}\n"
+                }
+            };
+            shell.show_accessor_plan(kind, AccessorPlan {
+                candidates: vec![AccessorCandidate {
+                    field: "id".to_owned(),
+                    source: Some(fonte.to_owned()),
+                }],
+                insert_at: DomainTextPosition { line: 1, column: 0 },
+            });
+            assert!(shell.generate_open(), "a mesma janela abre para {kind:?}");
+            assert_eq!(shell.generate_fields(), vec!["id"]);
+
+            let (_, todos, _) = shell.generate_geometry(size);
+            shell.pointer_down(
+                Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
+                size,
+            );
+            let texto = shell.active_text().unwrap_or_default();
+            match kind {
+                AccessorKind::Getter => assert!(texto.contains("getId"), "{texto}"),
+                AccessorKind::Setter => assert!(texto.contains("setId"), "{texto}"),
+                AccessorKind::Both => {
+                    assert!(texto.contains("getId"), "o par gera os dois: {texto}");
+                    assert!(texto.contains("setId"), "o par gera os dois: {texto}");
+                }
+            }
+        }
+    }
+
+    /// Sem nada a gerar, a janela nem abre.
+    #[test]
+    fn nothing_to_generate_does_not_open_a_window() {
+        let mut shell = shell_editing("class Matricula {}\n");
+        shell.show_accessor_plan(AccessorKind::Getter, AccessorPlan {
+            candidates: vec![AccessorCandidate {
+                field: "nome".to_owned(),
+                source: None,
+            }],
+            insert_at: DomainTextPosition { line: 0, column: 0 },
+        });
+        assert!(!shell.generate_open());
+        assert_eq!(shell.status_message(), "Todos os campos já têm esse acessor");
+    }
+
     /// A rolagem vertical é contínua, e não de linha em linha.
     ///
     /// Meio passo de roda — o que um touchpad manda o tempo todo — precisa
@@ -7989,7 +8568,7 @@ mod tests {
         assert_eq!(entry_labels(entries), vec!["Copiar", "Colar"]);
         let copy_enabled = |entries: &[MenuEntry]| match &entries[0] {
             MenuEntry::Item(item) => item.enabled,
-            MenuEntry::Separator => false,
+            MenuEntry::Separator | MenuEntry::Submenu { .. } => false,
         };
         assert!(!copy_enabled(entries), "sem seleção não há o que copiar");
 
@@ -9046,7 +9625,7 @@ mod tests {
         let entries = shell.explorer.context_menu.entries();
         let enabled = match &entries[3] {
             MenuEntry::Item(item) => item.enabled,
-            MenuEntry::Separator => true,
+            MenuEntry::Separator | MenuEntry::Submenu { .. } => true,
         };
         assert!(!enabled, "sem seleção não há o que inspecionar");
 

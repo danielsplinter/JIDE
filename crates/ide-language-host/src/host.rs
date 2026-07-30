@@ -13,6 +13,7 @@ use crate::routing::{
 };
 use crate::worker::ProviderWorker;
 use ide_domain::{
+    AccessorKind, AccessorPlan, TextPosition,
     CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
     DocumentSnapshot, LanguageId, Location, ProviderId, ReferencesRequest, RequestId,
     SemanticSnapshot, SemanticSymbol, SyntaxSnapshot,
@@ -401,6 +402,20 @@ impl LanguageHost {
     ) -> Result<Vec<CompletionItem>, LanguageHostError> {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
         worker.type_members(context, type_name, prefix).await
+    }
+
+    /// Acessores que faltam ao tipo sob a posição.
+    pub async fn accessor_plan(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        position: TextPosition,
+        kind: AccessorKind,
+    ) -> Result<AccessorPlan, LanguageHostError> {
+        let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
+        worker
+            .accessor_plan(context, document_id, position, kind)
+            .await
     }
 
     /// Tipos do projeto que casam com a consulta, para a busca por nome.

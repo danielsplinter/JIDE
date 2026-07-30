@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use ide_domain::{CompletionItem, DocumentId, SyntaxSnapshot};
+use ide_domain::{AccessorCandidate, AccessorKind, CompletionItem, DocumentId, SyntaxSnapshot};
 use ide_workspace::{EditorSession, TextBuffer};
 use ui_api::{LayoutContext, PaintContext, Widget};
 use ui_components::Scrollbar;
@@ -39,6 +39,29 @@ pub(super) struct EditorAreaState {
     pub(super) syntax_spans: HashMap<DocumentId, CachedSyntax>,
     pub(super) completion_items: Vec<CompletionItem>,
     pub(super) completion_selected: usize,
+    /// Geração de acessores em curso, aberta pelo menu `Generate`.
+    pub(super) generate: Option<GenerateState>,
+    /// Acessor pedido cuja resposta da linguagem ainda não chegou.
+    pub(super) generate_pending: Option<AccessorKind>,
+    /// Janela da geração de acessores.
+    pub(super) generate_modal: ui_components::ModalHost,
+}
+
+/// O que a janela de geração mostra e o que o usuário marcou.
+///
+/// Os textos vêm prontos da linguagem; a tela só decide quais entram. É o que
+/// mantém a IDE sem saber o que é um getter.
+pub(super) struct GenerateState {
+    pub(super) kind: AccessorKind,
+    pub(super) candidates: Vec<AccessorCandidate>,
+    pub(super) insert_at: ide_domain::TextPosition,
+    /// Marcados, um por candidato gerável.
+    pub(super) checked: Vec<bool>,
+    /// A lista, mantida entre quadros.
+    ///
+    /// Recriá-la a cada pintura jogava fora a rolagem e a deixava sem receber
+    /// evento nenhum — a barra não se movia e o clique não chegava.
+    pub(super) list: ui_components::ComposedList,
 }
 
 pub(super) struct CachedSyntax {

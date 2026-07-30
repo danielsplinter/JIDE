@@ -12,6 +12,7 @@ use crate::semantics::receiver_type;
 use crate::symbols::simple_class_name;
 use async_trait::async_trait;
 use ide_domain::{
+    AccessorCandidate, AccessorKind, AccessorPlan,
     CompletionItem, CompletionKind, CompletionRequest, DefinitionRequest, Diagnostic,
     DiagnosticSeverity, DocumentChange, DocumentId, DocumentSnapshot, ImportItem, LanguageId,
     Location, OutlineItem, OutlineKind, ProviderId, ReferencesRequest, SemanticScope,
@@ -235,6 +236,23 @@ impl ActiveLanguage for JavaLanguage {
 
     async fn semantic(&self, document_id: DocumentId) -> Result<SemanticSnapshot, LanguageError> {
         self.documents.semantic(document_id)
+    }
+
+    async fn accessor_plan(
+        &self,
+        document_id: DocumentId,
+        position: TextPosition,
+        kind: AccessorKind,
+    ) -> Result<AccessorPlan, LanguageError> {
+        let documents = self
+            .documents
+            .lock()
+            .map_err(|_| LanguageError::Provider("Java document lock poisoned".to_owned()))?;
+        let document = documents
+            .get(&document_id)
+            .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))?;
+        accessor_plan_for(&document.snapshot.text, &document.tree, position, kind)
+            .ok_or_else(|| LanguageError::Unsupported("nenhum tipo nesta posição".to_owned()))
     }
 
     async fn workspace_types(
@@ -897,8 +915,11 @@ fn collect_outline(node: Node<'_>, source: &str) -> Vec<OutlineItem> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if let Some(kind) = outline_kind(child.kind()) {
+            // Um campo não tem `name` próprio: o nome mora no declarador. Sem
+            // isto todo campo saía como `<anonymous>` no outline.
             let name = child
                 .child_by_field_name("name")
+                .or_else(|| declarator_name(child))
                 .and_then(|name| name.utf8_text(source.as_bytes()).ok())
                 .unwrap_or("<anonymous>")
                 .to_owned();
@@ -913,6 +934,147 @@ fn collect_outline(node: Node<'_>, source: &str) -> Vec<OutlineItem> {
         }
     }
     result
+}
+
+/// Acessores que faltam ao tipo que contém a posição.
+///
+/// Tudo o que é Java mora aqui: a convenção de nome — `getNome`, mas `isAtivo`
+/// para `boolean` —, o tipo de retorno e a indentação do corpo. Quem chama
+/// recebe texto pronto e um lugar para pô-lo.
+fn accessor_plan_for(
+    source: &str,
+    tree: &Tree,
+    position: TextPosition,
+    kind: AccessorKind,
+) -> Option<AccessorPlan> {
+    let bytes = source.as_bytes();
+    let ponto = Point {
+        row: position.line as usize,
+        column: byte_column_of(source, position),
+    };
+    let mut tipo = tree.root_node().descendant_for_point_range(ponto, ponto)?;
+    while !matches!(
+        tipo.kind(),
+        "class_declaration" | "interface_declaration" | "enum_declaration"
+    ) {
+        tipo = tipo.parent()?;
+    }
+    let corpo = tipo.child_by_field_name("body")?;
+    let mut cursor = corpo.walk();
+    let membros: Vec<Node<'_>> = corpo.named_children(&mut cursor).collect();
+    let existentes: Vec<String> = membros
+        .iter()
+        .filter(|node| node.kind() == "method_declaration")
+        .filter_map(|node| node.child_by_field_name("name"))
+        .filter_map(|name| name.utf8_text(bytes).ok())
+        .map(str::to_owned)
+        .collect();
+
+    let mut candidates = Vec::new();
+    for campo in membros.iter().filter(|node| node.kind() == "field_declaration") {
+        let Some(declarado) = campo.child_by_field_name("type") else {
+            continue;
+        };
+        let Ok(tipo_texto) = declarado.utf8_text(bytes) else {
+            continue;
+        };
+        let mut interno = campo.walk();
+        for declarador in campo
+            .named_children(&mut interno)
+            .filter(|node| node.kind() == "variable_declarator")
+        {
+            let Some(nome) = declarador
+                .child_by_field_name("name")
+                .and_then(|node| node.utf8_text(bytes).ok())
+            else {
+                continue;
+            };
+            // Com os dois, o campo entra se faltar **algum**, e o texto traz só
+            // o que falta: repetir o que a classe já tem seria erro de
+            // compilação, não conveniência.
+            let partes: &[AccessorKind] = match kind {
+                AccessorKind::Both => &[AccessorKind::Getter, AccessorKind::Setter],
+                AccessorKind::Getter => &[AccessorKind::Getter],
+                AccessorKind::Setter => &[AccessorKind::Setter],
+            };
+            let fonte: String = partes
+                .iter()
+                .filter_map(|parte| {
+                    let metodo = accessor_name(nome, tipo_texto, *parte);
+                    (!existentes.contains(&metodo))
+                        .then(|| accessor_source(nome, tipo_texto, &metodo, *parte))
+                })
+                .collect();
+            candidates.push(AccessorCandidate {
+                field: nome.to_owned(),
+                source: (!fonte.is_empty()).then_some(fonte),
+            });
+        }
+    }
+    // Onde o cursor está, e no começo da linha: inserir no meio dela partiria
+    // um token. A linha em que o cursor estava desce, que é o que se espera de
+    // "gerar aqui".
+    //
+    // Preso ao corpo do tipo: com o cursor na linha da declaração, ou depois do
+    // fecho, o método sairia fora da classe e nem compilaria.
+    let abertura = corpo.start_position().row as u32;
+    let fecho = corpo.end_position().row as u32;
+    let linha = position.line.clamp(abertura.saturating_add(1), fecho);
+    Some(AccessorPlan {
+        candidates,
+        insert_at: TextPosition { line: linha, column: 0 },
+    })
+}
+
+/// Nome do acessor pela convenção da linguagem.
+fn accessor_name(field: &str, type_name: &str, kind: AccessorKind) -> String {
+    let mut chars = field.chars();
+    let capitalizado = chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + chars.as_str()
+    });
+    match kind {
+        // `boolean` usa `is`, e é a única exceção que a convenção tem.
+        AccessorKind::Getter if type_name == "boolean" => format!("is{capitalizado}"),
+        AccessorKind::Getter => format!("get{capitalizado}"),
+        AccessorKind::Setter => format!("set{capitalizado}"),
+        // `Both` é desdobrado nos dois antes de chegar aqui.
+        AccessorKind::Both => format!("get{capitalizado}"),
+    }
+}
+
+fn accessor_source(field: &str, type_name: &str, method: &str, kind: AccessorKind) -> String {
+    match kind {
+        AccessorKind::Getter => format!(
+            "\n    public {type_name} {method}() {{\n        return {field};\n    }}\n"
+        ),
+        AccessorKind::Setter => format!(
+            "\n    public void {method}({type_name} {field}) {{\n        this.{field} = {field};\n    }}\n"
+        ),
+        AccessorKind::Both => String::new(),
+    }
+}
+
+/// Coluna em bytes, que é como o tree-sitter conta.
+fn byte_column_of(source: &str, position: TextPosition) -> usize {
+    source
+        .lines()
+        .nth(position.line as usize)
+        .map_or(0, |line| {
+            line.char_indices()
+                .nth(position.column as usize)
+                .map_or(line.len(), |(index, _)| index)
+        })
+}
+
+/// Nome do primeiro declarador de um campo.
+///
+/// `private int a, b;` declara dois no mesmo nó; o outline mostra o primeiro,
+/// que é o que dá nome à linha.
+fn declarator_name<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find(|child| child.kind() == "variable_declarator")
+        .and_then(|declarator| declarator.child_by_field_name("name"))
 }
 
 fn outline_kind(kind: &str) -> Option<OutlineKind> {
@@ -1425,6 +1587,127 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// O plano de acessores conhece a convenção e o que já existe.
+    ///
+    /// É aqui que mora tudo o que é Java: `get` para quase tudo e `is` para
+    /// `boolean`, o tipo de retorno, e não repetir o que a classe já tem.
+    #[test]
+    fn the_accessor_plan_knows_the_convention_and_what_already_exists() {
+        let active = active();
+        let source = concat!(
+            "public class Matricula {\n",
+            "    private Long id;\n",
+            "    private String nome;\n",
+            "    private boolean ativo;\n",
+            "\n",
+            "    public String getNome() { return nome; }\n",
+            "}\n",
+        );
+        assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
+        let plano = match pollster::block_on(active.accessor_plan(
+            DocumentId(1),
+            TextPosition { line: 1, column: 4 },
+            AccessorKind::Getter,
+        )) {
+            Ok(plano) => plano,
+            Err(error) => panic!("plano indisponível: {error}"),
+        };
+
+        let campos: Vec<&str> = plano
+            .candidates
+            .iter()
+            .map(|item| item.field.as_str())
+            .collect();
+        assert_eq!(campos, vec!["id", "nome", "ativo"]);
+
+        // `nome` já tem getter: entra na lista, mas sem texto para gerar.
+        let por_campo = |nome: &str| {
+            plano
+                .candidates
+                .iter()
+                .find(|item| item.field == nome)
+                .and_then(|item| item.source.clone())
+        };
+        assert!(por_campo("nome").is_none(), "o que já existe não é gerado");
+        let id = por_campo("id").unwrap_or_default();
+        assert!(id.contains("public Long getId()"), "{id}");
+        assert!(id.contains("return id;"), "{id}");
+        // `boolean` usa `is`, que é a única exceção da convenção.
+        let ativo = por_campo("ativo").unwrap_or_default();
+        assert!(ativo.contains("public boolean isAtivo()"), "{ativo}");
+
+        // O ponto de inserção é a linha do cursor, e no começo dela.
+        assert_eq!(plano.insert_at.line, 1);
+        assert_eq!(plano.insert_at.column, 0);
+
+        // Preso ao corpo do tipo: na linha da declaração, desce para dentro.
+        let na_declaracao = pollster::block_on(active.accessor_plan(
+            DocumentId(1),
+            TextPosition { line: 0, column: 2 },
+            AccessorKind::Getter,
+        ));
+        assert_eq!(
+            na_declaracao.map(|plano| plano.insert_at.line).ok(),
+            Some(1),
+            "com o cursor na linha da classe, o método não pode sair dela"
+        );
+
+        // Depois do fecho, também: o limite é a linha da chave que fecha.
+        let apos_fecho = pollster::block_on(active.accessor_plan(
+            DocumentId(1),
+            TextPosition {
+                line: 5,
+                column: 10,
+            },
+            AccessorKind::Getter,
+        ));
+        assert_eq!(apos_fecho.map(|plano| plano.insert_at.line).ok(), Some(5));
+
+        // O setter usa a mesma máquina, com outra convenção.
+        let setters = match pollster::block_on(active.accessor_plan(
+            DocumentId(1),
+            TextPosition { line: 1, column: 4 },
+            AccessorKind::Setter,
+        )) {
+            Ok(plano) => plano,
+            Err(error) => panic!("plano indisponível: {error}"),
+        };
+        let nome = setters
+            .candidates
+            .iter()
+            .find(|item| item.field == "nome")
+            .and_then(|item| item.source.clone())
+            .unwrap_or_default();
+        assert!(nome.contains("public void setNome(String nome)"), "{nome}");
+        assert!(nome.contains("this.nome = nome;"), "{nome}");
+
+        // Os dois de uma vez: o campo entra se faltar algum, e sai só o que
+        // falta — repetir o que existe seria erro de compilação.
+        let ambos = match pollster::block_on(active.accessor_plan(
+            DocumentId(1),
+            TextPosition { line: 1, column: 4 },
+            AccessorKind::Both,
+        )) {
+            Ok(plano) => plano,
+            Err(error) => panic!("plano indisponível: {error}"),
+        };
+        let fonte = |campo: &str| {
+            ambos
+                .candidates
+                .iter()
+                .find(|item| item.field == campo)
+                .and_then(|item| item.source.clone())
+                .unwrap_or_default()
+        };
+        let id = fonte("id");
+        assert!(id.contains("public Long getId()"), "{id}");
+        assert!(id.contains("public void setId(Long id)"), "{id}");
+        // `nome` já tem o getter: só o setter é gerado.
+        let nome = fonte("nome");
+        assert!(!nome.contains("getNome"), "o getter existente não se repete: {nome}");
+        assert!(nome.contains("public void setNome(String nome)"), "{nome}");
+    }
+
     /// A busca por nome encontra os tipos do projeto e diz onde eles estão.
     ///
     /// Só tipos, e só com arquivo: o resultado existe para ser aberto.
@@ -1792,6 +2075,19 @@ mod tests {
         assert!(syntax.imports[0].is_static);
         assert!(syntax.imports[0].wildcard);
         assert!(syntax.outline.iter().any(|item| item.name == "Example"));
+        // O campo precisa aparecer pelo nome: `field_declaration` não tem `name`
+        // próprio, e sem procurar no declarador todo campo saía `<anonymous>`.
+        let membros: Vec<(&str, OutlineKind)> = syntax
+            .outline
+            .iter()
+            .flat_map(|item| item.children.iter())
+            .map(|item| (item.name.as_str(), item.kind))
+            .collect();
+        assert!(
+            membros.contains(&("name", OutlineKind::Field)),
+            "o campo precisa ser nomeado: {membros:?}"
+        );
+        assert!(membros.contains(&("run", OutlineKind::Method)));
         assert!(
             syntax
                 .highlights

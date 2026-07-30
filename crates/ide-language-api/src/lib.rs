@@ -11,9 +11,9 @@ use std::{
 };
 
 use ide_domain::{
-    CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
-    DocumentSnapshot, LanguageId, Location, ProviderId, ReferencesRequest, RequestId,
-    SemanticSnapshot, SemanticSymbol, SyntaxSnapshot,
+    AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
+    DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location, ProviderId,
+    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextPosition,
 };
 use thiserror::Error;
 
@@ -183,6 +183,19 @@ pub trait ActiveLanguage: Send + Sync {
         _limit: usize,
     ) -> Result<Vec<SemanticSymbol>, LanguageError> {
         Err(LanguageError::Unsupported("workspace types".to_owned()))
+    }
+    /// Acessores que faltam ao tipo que contém a posição.
+    ///
+    /// A linguagem devolve o texto pronto e onde ele entra; quem chama escolhe
+    /// quais usar. É o que permite a tela oferecer "gerar getter" sem saber o
+    /// que é um getter.
+    async fn accessor_plan(
+        &self,
+        _document_id: DocumentId,
+        _position: TextPosition,
+        _kind: AccessorKind,
+    ) -> Result<AccessorPlan, LanguageError> {
+        Err(LanguageError::Unsupported("accessor plan".to_owned()))
     }
     async fn definition(
         &self,

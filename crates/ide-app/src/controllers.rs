@@ -342,6 +342,13 @@ pub(super) struct RuntimeState {
     pub(super) startup_error: Option<String>,
     pub(super) config: ide_core::AppConfig,
     pub(super) config_path: Option<PathBuf>,
+    /// A primeira sincronização de linguagens ainda não aconteceu.
+    ///
+    /// Ela ativa o provider, que indexa o JDK e os fontes do projeto — mais de
+    /// um segundo. Feita antes do primeiro quadro, deixava a janela já visível
+    /// em branco todo esse tempo. Depois do primeiro quadro, o usuário vê a IDE
+    /// montada e o realce chega em seguida.
+    pub(super) languages_pending: bool,
 }
 
 #[cfg(test)]
