@@ -1,6 +1,6 @@
 //! Composição embutida da linguagem Java.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use ide_application::{
@@ -241,6 +241,7 @@ pub fn contribution(processes: Arc<dyn ProcessSupervisor>) -> LanguageContributi
         title: "Compilador e VM".to_owned(),
         field_caption: "JDK".to_owned(),
         browse_button_title: "Procurar...".to_owned(),
+            secondary_caption: Some("Maven".to_owned()),
     }];
     contribution.tasks = vec![
         TaskDescriptor {
@@ -268,8 +269,11 @@ pub fn contribution(processes: Arc<dyn ProcessSupervisor>) -> LanguageContributi
 pub fn register_build_systems(
     registry: &mut BuildSystemRegistry,
     processes: Arc<dyn ProcessSupervisor>,
+    maven_home: Option<PathBuf>,
 ) {
-    registry.register(Arc::new(MavenAdapter::new(processes.clone())));
+    registry.register(Arc::new(
+        MavenAdapter::new(processes.clone()).with_home(maven_home),
+    ));
     registry.register(Arc::new(GradleAdapter::new(processes)));
 }
 

@@ -263,9 +263,52 @@ pub(super) struct ImportedProject {
     pub(super) manifest_modified: Option<SystemTime>,
 }
 
+/// Instalações do Maven encontradas e a escolhida.
+///
+/// Fica junto do projeto porque é dele que o Maven serve: compilar, importar e
+/// executar passam pelo mesmo executável.
+#[derive(Default)]
+pub(super) struct MavenController {
+    pub(super) installations: Vec<java_maven_adapter::MavenInstallation>,
+    pub(super) selected: Option<usize>,
+}
+
+impl MavenController {
+    /// Casa do Maven escolhido, se houver escolha válida.
+    pub(super) fn home(&self) -> Option<PathBuf> {
+        self.selected
+            .and_then(|index| self.installations.get(index))
+            .map(|instalacao| instalacao.home.clone())
+    }
+
+    /// Rótulos para a lista da janela de configurações.
+    pub(super) fn labels(&self) -> Vec<String> {
+        self.installations
+            .iter()
+            .map(java_maven_adapter::MavenInstallation::label)
+            .collect()
+    }
+
+    /// Põe uma instalação na lista, sem repetir, e a deixa escolhida.
+    pub(super) fn adopt(&mut self, instalacao: java_maven_adapter::MavenInstallation) -> usize {
+        let indice = self
+            .installations
+            .iter()
+            .position(|outra| outra.home == instalacao.home)
+            .unwrap_or_else(|| {
+                self.installations.push(instalacao);
+                self.installations.len() - 1
+            });
+        self.selected = Some(indice);
+        indice
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ProjectController {
     pub(super) build_systems: BuildSystemRegistry,
+    /// Instalações do Maven e a escolhida.
+    pub(super) maven: MavenController,
     pub(super) imported: Option<ImportedProject>,
     pub(super) last_manifest_check: Option<Instant>,
 }

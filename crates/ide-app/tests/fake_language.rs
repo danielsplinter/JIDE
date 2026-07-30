@@ -149,6 +149,7 @@ fn application_contracts_accept_a_fake_language_without_java_dependencies() {
         title: "Fake runtime".to_owned(),
         field_caption: "Runtime".to_owned(),
         browse_button_title: "Browse...".to_owned(),
+        secondary_caption: None,
     });
     contribution.tasks.push(TaskDescriptor {
         id: TaskId("fake.run".to_owned()),

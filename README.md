@@ -281,7 +281,21 @@ tipos do próprio projeto.
 
 ## Toolchain e build
 
-`Ctrl+Shift+J` abre `Configurações → Compilador e VM` para escolher o JDK. A
+`Ctrl+Shift+J` abre `Configurações → Compilador e VM`. Ali há **duas escolhas**:
+o JDK e, logo abaixo, o **Maven** — cada uma com sua lista e seu `Procurar...`,
+que aceita apontar a pasta da instalação à mão. A lista traz o que foi encontrado
+em `MAVEN_HOME`, `M2_HOME`, no `PATH` e nos diretórios convencionais, com a versão
+lida do nome do jar do núcleo — sem executar o Maven só para preencher uma lista.
+
+**Salvar grava as duas no arquivo de configuração do usuário**, o mesmo do projeto
+aberto, e a próxima inicialização as carrega. Antes disso o JDK era redetectado a
+cada início e a escolha se perdia: quem decidia era a ordem em que a máquina
+respondia. Um caminho que deixou de existir é ignorado na leitura, e a IDE volta a
+detectar em vez de recusar-se a abrir.
+
+O Maven escolhido vale acima do `PATH` e das variáveis de ambiente, mas **abaixo
+do wrapper do projeto**: `mvnw` existe para fixar a versão com que aquele projeto
+compila, e a preferência do usuário não passa por cima disso sem avisar. A
 janela de Configurações só aplica ao **Salvar**; `Cancelar` e `Esc` descartam o
 que foi mexido e restauram o que estava valendo na abertura.
 

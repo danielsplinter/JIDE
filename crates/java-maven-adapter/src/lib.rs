@@ -3,6 +3,10 @@
 mod pom;
 mod xml;
 
+mod installations;
+
+pub use installations::{MavenInstallation, detect_installations, installation_from_home};
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -34,6 +38,13 @@ pub struct MavenAdapter {
     processes: Arc<dyn ProcessSupervisor>,
     timeout: Duration,
     repository: Option<PathBuf>,
+    /// Instalação escolhida na janela de configurações.
+    ///
+    /// Vale acima do `PATH` e das variáveis de ambiente, mas **abaixo** do
+    /// wrapper do projeto: `mvnw` existe para fixar a versão com que aquele
+    /// projeto compila, e a preferência do usuário não pode passar por cima
+    /// disso sem avisar.
+    home: Option<PathBuf>,
 }
 
 impl MavenAdapter {
@@ -43,6 +54,7 @@ impl MavenAdapter {
             processes,
             timeout: Duration::from_secs(600),
             repository: local_repository(),
+            home: None,
         }
     }
 
@@ -59,11 +71,29 @@ impl MavenAdapter {
         self
     }
 
+    /// Fixa a instalação a usar, como escolhida nas configurações.
+    #[must_use]
+    pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home;
+        self
+    }
+
+    /// Nome do executável do Maven na plataforma.
     fn executable(&self, descriptor: &ProjectDescriptor) -> Result<PathBuf, BuildError> {
         if let Some(wrapper) = &descriptor.wrapper
             && wrapper.is_file()
         {
             return Ok(wrapper.clone());
+        }
+        // A escolha do usuário vem antes da máquina: ele apontou uma instalação
+        // justamente porque a do `PATH` não era a que queria.
+        if let Some(home) = &self.home {
+            let executavel = home
+                .join("bin")
+                .join(if cfg!(windows) { "mvn.cmd" } else { "mvn" });
+            if executavel.is_file() {
+                return Ok(executavel);
+            }
         }
         if let Some(found) = find_in_path("mvn") {
             return Ok(found);

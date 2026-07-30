@@ -21,6 +21,10 @@ pub enum ApplicationCommand {
     OpenToolchainSettings,
     BrowseToolchain,
     SelectToolchain(usize),
+    /// Escolhe a segunda ferramenta da seção pelo índice na lista.
+    SelectSecondaryTool(usize),
+    /// Abre o seletor de pasta para apontar a segunda ferramenta.
+    BrowseSecondaryTool,
     BuildProject,
     ReimportProject,
     RunProject,

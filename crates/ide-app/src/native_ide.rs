@@ -155,11 +155,16 @@ impl NativeIde {
         self.documents.remembered = shell.open_document_paths();
         self.ui.shell = Some(shell);
         self.publish_event(IdeEvent::WorkspaceOpened { root: root.clone() });
-        java_contribution::register_build_systems(&mut self.project.build_systems, processes);
+        java_contribution::register_build_systems(
+            &mut self.project.build_systems,
+            processes,
+            self.runtime.config.toolchains.resolved_maven_home(),
+        );
         let (tool_sender, tool_events) = mpsc::channel();
         self.tasks.sender = Some(tool_sender);
         self.tasks.events = Some(tool_events);
         self.detect_toolchains(&java_contribution::language_id(), &root);
+        self.detect_maven();
         self.import_project(&root);
         if let Some(shell) = self.ui.shell.as_mut() {
             shell.set_debug_target(
@@ -817,6 +822,93 @@ impl NativeIde {
         }
     }
 
+    /// Encontra as instalações do Maven e restaura a escolhida.
+    ///
+    /// O que estava gravado tem prioridade sobre o que foi detectado: a escolha
+    /// do usuário vale mais do que a ordem em que a máquina responde. Um caminho
+    /// que deixou de existir é ignorado, e a IDE volta ao primeiro encontrado.
+    fn detect_maven(&mut self) {
+        self.project.maven.installations = java_maven_adapter::detect_installations();
+        let gravado = self.runtime.config.toolchains.resolved_maven_home();
+        self.project.maven.selected = match gravado {
+            Some(home) => match java_maven_adapter::installation_from_home(&home) {
+                Some(instalacao) => Some(self.project.maven.adopt(instalacao)),
+                None => (!self.project.maven.installations.is_empty()).then_some(0),
+            },
+            None => (!self.project.maven.installations.is_empty()).then_some(0),
+        };
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_secondary_tool_options(self.project.maven.labels(), self.project.maven.selected);
+        }
+    }
+
+    /// Abre o seletor de pasta para apontar uma instalação do Maven.
+    fn choose_maven_home(&mut self) {
+        let Some(home) = rfd::FileDialog::new()
+            .set_title("Escolher instalação do Maven")
+            .pick_folder()
+        else {
+            return;
+        };
+        let Some(instalacao) = java_maven_adapter::installation_from_home(&home) else {
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_status_message(format!(
+                    "{} não tem bin/mvn: não é uma instalação do Maven",
+                    home.display()
+                ));
+            }
+            return;
+        };
+        let indice = self.project.maven.adopt(instalacao);
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_secondary_tool_options(self.project.maven.labels(), Some(indice));
+        }
+    }
+
+    /// Aplica e grava o Maven escolhido na janela.
+    fn select_maven(&mut self, index: usize) {
+        let Some(instalacao) = self.project.maven.installations.get(index).cloned() else {
+            return;
+        };
+        self.project.maven.selected = Some(index);
+        self.remember_toolchains();
+        // O adaptador guarda a instalação: sem refazer o registro, o build
+        // continuaria chamando o Maven anterior.
+        java_contribution::register_build_systems(
+            &mut self.project.build_systems,
+            Arc::new(NativeProcessSupervisor::default()),
+            self.project.maven.home(),
+        );
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(format!("Maven: {}", instalacao.home.display()));
+        }
+    }
+
+    /// Grava JDK e Maven escolhidos no arquivo de configuração do usuário.
+    ///
+    /// Os dois juntos, no mesmo arquivo: são a mesma decisão — com que
+    /// ferramentas este usuário compila — e separá-los faria uma sobreviver ao
+    /// reinício e a outra não.
+    fn remember_toolchains(&mut self) {
+        let Some(path) = self.runtime.config_path.clone() else {
+            return;
+        };
+        self.runtime.config.toolchains.jdk_home = self.selected_jdk_home();
+        self.runtime.config.toolchains.maven_home = self.project.maven.home();
+        if let Err(error) = self.runtime.config.save(&path) {
+            tracing::warn!(%error, "configuração de ferramentas não pôde ser gravada");
+        }
+    }
+
+    /// Casa do JDK em uso, para gravar junto do Maven.
+    fn selected_jdk_home(&self) -> Option<PathBuf> {
+        self.languages
+            .toolchains
+            .selection(&java_contribution::language_id())
+            .and_then(|selection| selection.selected())
+            .map(|installation| installation.home.clone())
+    }
+
     fn detect_toolchains(&mut self, language_id: &LanguageId, workspace_root: &Path) {
         let display_name = self
             .languages
@@ -892,7 +984,12 @@ impl NativeIde {
             })
             .unwrap_or(0);
         let items = self.toolchain_labels(language_id);
+        // O Maven é reposto antes de abrir: a janela guarda o que estava
+        // escolhido para poder desfazer no Cancelar, e ela precisa disso pronto.
+        let maven_items = self.project.maven.labels();
+        let maven_selected = self.project.maven.selected;
         if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_secondary_tool_options(maven_items, maven_selected);
             shell.open_settings_dialog(items, selected_index);
         }
     }
@@ -1061,6 +1158,7 @@ impl NativeIde {
             shell.set_status_message(format!("Selected JDK: {}", installation.home.display()));
         }
         self.apply_selected_toolchain(language_id.clone());
+        self.remember_toolchains();
     }
 
     /// Detecta o build system da raiz e importa módulos e dependências.
@@ -1435,6 +1533,8 @@ impl NativeIde {
                 UiAction::SelectToolchain(index) => {
                     self.select_toolchain(&java_contribution::language_id(), index);
                 }
+                UiAction::SelectSecondaryTool(index) => self.select_maven(index),
+                UiAction::BrowseSecondaryTool => self.choose_maven_home(),
                 UiAction::BuildProject => self.start_project_build(),
                 UiAction::ReimportProject => self.reimport_project(),
                 UiAction::RunProject => self.run_application(),

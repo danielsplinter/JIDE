@@ -17,6 +17,8 @@ pub(super) enum UiAction {
     OpenToolchainSettings,
     BrowseToolchain,
     SelectToolchain(usize),
+    SelectSecondaryTool(usize),
+    BrowseSecondaryTool,
     BuildProject,
     ReimportProject,
     RunProject,
@@ -35,6 +37,8 @@ impl From<ApplicationCommand> for UiAction {
     fn from(command: ApplicationCommand) -> Self {
         match command {
             ApplicationCommand::OpenDocument(value) => Self::OpenDocument(value),
+            ApplicationCommand::SelectSecondaryTool(value) => Self::SelectSecondaryTool(value),
+            ApplicationCommand::BrowseSecondaryTool => Self::BrowseSecondaryTool,
             ApplicationCommand::RenameDocument(value) => Self::RenameDocument(value),
             ApplicationCommand::SaveDocument(value) => Self::SaveDocument(value),
             ApplicationCommand::ReloadWorkspace => Self::ReloadWorkspace,

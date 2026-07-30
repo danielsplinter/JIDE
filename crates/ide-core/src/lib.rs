@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub run: RunConfig,
     #[serde(default)]
     pub debug: DebugConfig,
+    #[serde(default)]
+    pub toolchains: ToolchainConfig,
 }
 
 impl Default for AppConfig {
@@ -28,7 +30,41 @@ impl Default for AppConfig {
             workspace: WorkspaceConfig::default(),
             run: RunConfig::default(),
             debug: DebugConfig::default(),
+            toolchains: ToolchainConfig::default(),
         }
+    }
+}
+
+/// Ferramentas escolhidas à mão, que valem por cima da detecção automática.
+///
+/// A IDE sabe encontrar JDK e Maven sozinha, mas a máquina de quem desenvolve
+/// costuma ter mais de um de cada, e a escolha precisa sobreviver ao fechamento
+/// da janela. Um caminho que deixou de existir é ignorado na leitura: a IDE
+/// volta a detectar em vez de recusar-se a abrir.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolchainConfig {
+    /// Raiz do JDK escolhido.
+    #[serde(default)]
+    pub jdk_home: Option<PathBuf>,
+    /// Raiz do Maven escolhido.
+    #[serde(default)]
+    pub maven_home: Option<PathBuf>,
+}
+
+impl ToolchainConfig {
+    /// JDK escolhido, apenas quando o diretório ainda existe.
+    #[must_use]
+    pub fn resolved_jdk_home(&self) -> Option<PathBuf> {
+        self.jdk_home.as_ref().filter(|home| home.is_dir()).cloned()
+    }
+
+    /// Maven escolhido, apenas quando o diretório ainda existe.
+    #[must_use]
+    pub fn resolved_maven_home(&self) -> Option<PathBuf> {
+        self.maven_home
+            .as_ref()
+            .filter(|home| home.is_dir())
+            .cloned()
     }
 }
 
@@ -150,6 +186,18 @@ impl AppConfig {
         self.save(path)
     }
 
+    /// Registra o JDK escolhido e grava a configuração.
+    pub fn remember_jdk(&mut self, home: Option<&Path>, path: &Path) -> Result<(), ConfigError> {
+        self.toolchains.jdk_home = home.map(Path::to_path_buf);
+        self.save(path)
+    }
+
+    /// Registra o Maven escolhido e grava a configuração.
+    pub fn remember_maven(&mut self, home: Option<&Path>, path: &Path) -> Result<(), ConfigError> {
+        self.toolchains.maven_home = home.map(Path::to_path_buf);
+        self.save(path)
+    }
+
     /// Projeto a reabrir na inicialização, se ainda existir.
     #[must_use]
     pub fn resolved_project(&self) -> Option<PathBuf> {
@@ -260,6 +308,40 @@ pub struct LoggingError(String);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// JDK e Maven escolhidos sobrevivem ao fechamento da janela.
+    ///
+    /// Antes disso o JDK era redetectado a cada início, e a escolha do usuário
+    /// se perdia — a ordem em que a máquina responde decidia por ele.
+    #[test]
+    fn chosen_toolchains_survive_a_restart() {
+        let raiz = std::env::temp_dir().join(format!("er-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raiz);
+        let arquivo = raiz.join("config.toml");
+        let jdk = raiz.join("jdk-21");
+        let maven = raiz.join("maven-3.9");
+        assert!(std::fs::create_dir_all(&jdk).is_ok());
+        assert!(std::fs::create_dir_all(&maven).is_ok());
+
+        let mut config = AppConfig::default();
+        assert!(config.remember_jdk(Some(&jdk), &arquivo).is_ok());
+        assert!(config.remember_maven(Some(&maven), &arquivo).is_ok());
+
+        // O que se lê de volta é o que foi escolhido, no mesmo arquivo.
+        let Ok(relido) = AppConfig::load(&arquivo) else {
+            panic!("configuração precisa ser relida");
+        };
+        assert_eq!(relido.toolchains.resolved_jdk_home(), Some(jdk));
+        assert_eq!(relido.toolchains.resolved_maven_home(), Some(maven.clone()));
+
+        // Um caminho que deixou de existir é ignorado: a IDE volta a detectar
+        // em vez de recusar-se a abrir.
+        assert!(std::fs::remove_dir_all(&maven).is_ok());
+        assert_eq!(relido.toolchains.resolved_maven_home(), None);
+
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
 
     fn temporary(name: &str) -> PathBuf {
         let root =

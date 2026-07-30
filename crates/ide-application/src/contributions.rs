@@ -79,6 +79,13 @@ pub struct SettingsSection {
     pub title: String,
     pub field_caption: String,
     pub browse_button_title: String,
+    /// Rótulo de uma **segunda** escolha na mesma seção, quando existir.
+    ///
+    /// Em Java é a instalação do Maven, ao lado da do JDK; em outra linguagem
+    /// será outra coisa, ou nenhuma. A tela desenha o que a seção declarar, sem
+    /// saber o que é: é o que a mantém neutra.
+    #[allow(clippy::struct_field_names)]
+    pub secondary_caption: Option<String>,
 }
 
 /// Dados de apresentação agregados das contribuições registradas.
@@ -653,6 +660,7 @@ mod tests {
             title: "Runtime".to_owned(),
             field_caption: "SDK".to_owned(),
             browse_button_title: "Browse".to_owned(),
+            secondary_caption: None,
         });
         let mut registry = ContributionRegistry::default();
         assert!(registry.register(fake).is_ok());

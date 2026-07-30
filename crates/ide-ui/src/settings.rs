@@ -19,6 +19,9 @@ pub(super) struct SettingsDialog {
     pub(super) message: Option<String>,
     pub(super) pending_toolchain: Option<usize>,
     pub(super) original_toolchain: Option<usize>,
+    /// Segunda ferramenta escolhida na janela e ainda não aplicada.
+    pub(super) pending_secondary: Option<usize>,
+    pub(super) original_secondary: Option<usize>,
     pub(super) original_debug_host: String,
     pub(super) original_debug_port: String,
 }
@@ -28,6 +31,9 @@ pub(super) struct SettingsState {
     pub(super) modal: ModalHost,
     pub(super) toolchain_combo: ComboBox,
     pub(super) toolchain_browse_button: Button,
+    /// Segunda escolha da seção, ao lado da primeira e com o mesmo gesto.
+    pub(super) secondary_combo: ComboBox,
+    pub(super) secondary_browse_button: Button,
     pub(super) close_button: Button,
     pub(super) save_button: Button,
     pub(super) pages: ListView,

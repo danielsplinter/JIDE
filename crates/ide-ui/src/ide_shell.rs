@@ -100,6 +100,9 @@ const MENU_BAR_ID: WidgetId = WidgetId(10_001);
 const SETTINGS_MODAL_ID: WidgetId = WidgetId(10_002);
 const TOOLCHAIN_COMBO_ID: WidgetId = WidgetId(10_003);
 const TOOLCHAIN_BROWSE_ID: WidgetId = WidgetId(10_004);
+const SECONDARY_TOOL_COMBO_ID: WidgetId = WidgetId(10_070);
+const SECONDARY_TOOL_BROWSE_ID: WidgetId = WidgetId(10_071);
+const SECONDARY_TOOL_CAPTION_ID: WidgetId = WidgetId(10_072);
 const SETTINGS_CLOSE_ID: WidgetId = WidgetId(10_005);
 const SETTINGS_SAVE_ID: WidgetId = WidgetId(10_030);
 const SETTINGS_TITLE_ID: WidgetId = WidgetId(10_031);
@@ -507,6 +510,10 @@ impl IdeShell {
                 modal: ModalHost::new(SETTINGS_MODAL_ID, "Configurações", Size::new(780.0, 460.0)),
                 toolchain_combo: ComboBox::new(TOOLCHAIN_COMBO_ID, Vec::new())
                     .with_command_prefix("toolchain.select."),
+                secondary_combo: ComboBox::new(SECONDARY_TOOL_COMBO_ID, Vec::new())
+                    .with_command_prefix("tool.select."),
+                secondary_browse_button: Button::new(SECONDARY_TOOL_BROWSE_ID, "Procurar...")
+                    .with_command("tool.browse"),
                 toolchain_browse_button: Button::new(TOOLCHAIN_BROWSE_ID, "Procurar...")
                     .with_command("toolchain.browse"),
                 close_button: Button::new(SETTINGS_CLOSE_ID, "Cancelar")
@@ -855,13 +862,44 @@ impl IdeShell {
         self.settings.modal.open();
         // Reabrir a janela recomeça a transação: o que ficou pendente de uma
         // abertura anterior foi descartado com ela.
+        let segunda = (self.settings.secondary_combo.item_count() > 0)
+            .then(|| self.settings.secondary_combo.selected_index());
         self.settings.dialog = Some(SettingsDialog {
             message: None,
             pending_toolchain: None,
             original_toolchain: Some(selected_toolchain),
+            pending_secondary: None,
+            original_secondary: segunda,
             original_debug_host: self.settings.debug_host.value().to_owned(),
             original_debug_port: self.settings.debug_port.value().to_owned(),
         });
+    }
+
+    /// Repõe a lista da segunda escolha da seção, com uma delas marcada.
+    ///
+    /// Mesma mecânica da primeira: o `Procurar...` põe o que foi apontado na
+    /// lista e o deixa pendente, sem recomeçar a transação da janela.
+    pub fn set_secondary_tool_options(&mut self, items: Vec<String>, selected: Option<usize>) {
+        self.settings.secondary_combo.set_items(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
+                .collect(),
+        );
+        if let Some(index) = selected {
+            self.settings.secondary_combo.set_selected(index);
+        }
+        if let Some(dialog) = self.settings.dialog.as_mut() {
+            dialog.pending_secondary = selected;
+        }
+    }
+
+    /// Segunda ferramenta escolhida na janela, para quem for aplicar.
+    #[must_use]
+    pub fn selected_secondary_tool(&self) -> Option<usize> {
+        (self.settings.secondary_combo.item_count() > 0)
+            .then(|| self.settings.secondary_combo.selected_index())
     }
 
     /// Repõe a lista de toolchains e deixa uma delas escolhida, sem sair da transação.
@@ -3695,6 +3733,13 @@ impl IdeShell {
             });
             let mut context = EventContext::default();
             let result = self.settings.toolchain_combo.event(&mut context, &event);
+            let atendida = self.handle_settings_action(result);
+            let result = if atendida {
+                EventResult::Handled
+            } else {
+                // Com a segunda lista aberta, as setas e o Enter são dela.
+                self.settings.secondary_combo.event(&mut context, &event)
+            };
             if !self.handle_settings_action(result) {
                 let _ = self.settings.modal.event(&mut context, &event);
                 // A janela fechada por dentro do componente — Esc no
@@ -5062,6 +5107,32 @@ impl IdeShell {
                     let mut browse = self.settings.toolchain_browse_button.clone();
                     browse.layout(&self.layout_context(), geometry.browse);
                     browse.paint(&mut component_paint);
+                    // A segunda escolha só existe se a seção declarar uma: a
+                    // tela desenha o que lhe dizem, sem saber o que é.
+                    if let Some(caption) = self
+                        .catalog
+                        .settings_sections
+                        .first()
+                        .and_then(|section| section.secondary_caption.clone())
+                    {
+                        self.paint_settings_text(
+                            &mut component_paint,
+                            SECONDARY_TOOL_CAPTION_ID,
+                            &caption,
+                            Point::new(
+                                geometry.secondary_combo.origin.x,
+                                geometry.secondary_combo.origin.y - 16.0,
+                            ),
+                            13.0,
+                            IconTint::Muted,
+                        );
+                        let mut combo = self.settings.secondary_combo.clone();
+                        combo.layout(&self.layout_context(), geometry.secondary_combo);
+                        combo.paint(&mut component_paint);
+                        let mut browse = self.settings.secondary_browse_button.clone();
+                        browse.layout(&self.layout_context(), geometry.secondary_browse);
+                        browse.paint(&mut component_paint);
+                    }
                 }
                 SettingsPage::Debug => {
                     commands.extend(self.paint_debug_settings(&geometry, colors));
@@ -5697,6 +5768,14 @@ impl IdeShell {
         self.settings
             .toolchain_browse_button
             .layout(&self.layout_context(), geometry.browse);
+        // A segunda escolha da seção recebe o clique pelo mesmo caminho: sem
+        // isso ela é desenhada e nunca respondia.
+        self.settings
+            .secondary_combo
+            .layout(&self.layout_context(), geometry.secondary_combo);
+        self.settings
+            .secondary_browse_button
+            .layout(&self.layout_context(), geometry.secondary_browse);
         self.settings
             .close_button
             .layout(&self.layout_context(), geometry.close);
@@ -5712,6 +5791,15 @@ impl IdeShell {
         }
         let browse_result = click_widget(&mut self.settings.toolchain_browse_button, point);
         if self.handle_settings_action(browse_result) {
+            return;
+        }
+        let segunda = self.settings.secondary_combo.event(&mut context, &event);
+        let segunda_consumiu = !matches!(segunda, EventResult::Ignored);
+        if self.handle_settings_action(segunda) || segunda_consumiu {
+            return;
+        }
+        let segunda_browse = click_widget(&mut self.settings.secondary_browse_button, point);
+        if self.handle_settings_action(segunda_browse) {
             return;
         }
         let close_result = click_widget(&mut self.settings.close_button, point);
@@ -5948,9 +6036,24 @@ impl IdeShell {
             }
             return true;
         }
+        if let Some(index) = command
+            .0
+            .strip_prefix("tool.select.")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            // Como na primeira escolha: fica pendente, e quem aplica é o Salvar.
+            if let Some(dialog) = self.settings.dialog.as_mut() {
+                dialog.pending_secondary = Some(index);
+            }
+            return true;
+        }
         match command.0.as_str() {
             "toolchain.browse" => {
                 self.commands.push(ApplicationCommand::BrowseToolchain);
+                true
+            }
+            "tool.browse" => {
+                self.commands.push(ApplicationCommand::BrowseSecondaryTool);
                 true
             }
             "settings.save" => {
@@ -5978,6 +6081,13 @@ impl IdeShell {
             self.commands
                 .push(ApplicationCommand::SelectToolchain(index));
         }
+        if let Some(dialog) = self.settings.dialog.as_ref()
+            && let Some(index) = dialog.pending_secondary
+            && dialog.original_secondary != Some(index)
+        {
+            self.commands
+                .push(ApplicationCommand::SelectSecondaryTool(index));
+        }
         self.settings.modal.close();
         self.settings.dialog = None;
     }
@@ -5987,6 +6097,9 @@ impl IdeShell {
         if let Some(dialog) = self.settings.dialog.take() {
             if let Some(original) = dialog.original_toolchain {
                 self.settings.toolchain_combo.set_selected(original);
+            }
+            if let Some(original) = dialog.original_secondary {
+                self.settings.secondary_combo.set_selected(original);
             }
             self.settings
                 .debug_host
@@ -6004,6 +6117,8 @@ struct SettingsDialogGeometry {
     /// Primeira linha da navegação; as demais seguem por altura de linha.
     compiler_option: Rect,
     combo: Rect,
+    secondary_combo: Rect,
+    secondary_browse: Rect,
     browse: Rect,
     close: Rect,
     save: Rect,
@@ -6304,6 +6419,20 @@ fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
         112.0,
         36.0,
     );
+    // O Maven vem logo abaixo do JDK, com a mesma largura: são a mesma escolha
+    // feita duas vezes, e alinhá-las é o que deixa isso evidente.
+    let secondary_combo = Rect::new(
+        combo.origin.x,
+        combo.origin.y + combo.size.height + 46.0,
+        combo.size.width,
+        combo.size.height,
+    );
+    let secondary_browse = Rect::new(
+        secondary_combo.origin.x + secondary_combo.size.width + 10.0,
+        secondary_combo.origin.y,
+        browse.size.width,
+        browse.size.height,
+    );
     // Salvar à direita, encostado na borda, e Cancelar à esquerda dele: a ação
     // que confirma fica no canto que a leitura alcança por último.
     let save = Rect::new(
@@ -6330,6 +6459,8 @@ fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
         sidebar,
         compiler_option,
         combo,
+        secondary_combo,
+        secondary_browse,
         browse,
         close,
         save,
@@ -6656,6 +6787,7 @@ mod tests {
                 title: "Compilador e VM".to_owned(),
                 field_caption: "JDK".to_owned(),
                 browse_button_title: "Procurar...".to_owned(),
+                secondary_caption: None,
             }],
             tasks: vec![TaskDescriptor {
                 id: TaskId("java.run".to_owned()),
@@ -6682,6 +6814,7 @@ mod tests {
                 title: "Runtime fake".to_owned(),
                 field_caption: "Runtime".to_owned(),
                 browse_button_title: "Localizar...".to_owned(),
+                secondary_caption: None,
             }],
             tasks: vec![TaskDescriptor {
                 id: TaskId("fake.run".to_owned()),
@@ -9084,6 +9217,73 @@ mod tests {
             shell.editor_scroll_line(),
             antes,
             "o editor atrás da janela não pode rolar"
+        );
+    }
+
+    /// A segunda escolha da seção recebe clique no combo e no botão.
+    ///
+    /// Ela era desenhada e não respondia: a janela roteava o clique só para a
+    /// primeira. É a mesma falha de costura de sempre — o widget certo, o
+    /// caminho até ele faltando.
+    #[test]
+    fn the_secondary_tool_answers_the_pointer() {
+        let mut shell = test_shell();
+        let mut catalog = java_catalog();
+        if let Some(section) = catalog.settings_sections.first_mut() {
+            section.secondary_caption = Some("Maven".to_owned());
+        }
+        shell.set_ui_catalog(catalog);
+        let size = Size::new(1280.0, 800.0);
+        shell.set_secondary_tool_options(
+            vec!["Maven 3.9.6 — /opt/maven".to_owned(), "Maven 3.8.8 — /usr/share/maven".to_owned()],
+            Some(0),
+        );
+        shell.open_settings_dialog(vec!["JDK 21".to_owned()], 0);
+        let _ = shell.paint(size);
+
+        let geometry = {
+            let mut modal = shell.settings.modal.clone();
+            modal.layout(
+                &shell.layout_context(),
+                Rect::new(0.0, 0.0, size.width, size.height),
+            );
+            settings_dialog_geometry(modal.panel_bounds())
+        };
+
+        // Abrir a lista e escolher a segunda opção.
+        let combo = geometry.secondary_combo;
+        shell.pointer_down(
+            Point::new(combo.origin.x + 20.0, combo.origin.y + combo.size.height / 2.0),
+            size,
+        );
+        shell.pointer_down(
+            Point::new(
+                combo.origin.x + 20.0,
+                combo.origin.y + combo.size.height + combo.size.height * 1.5,
+            ),
+            size,
+        );
+        assert_eq!(
+            shell.selected_secondary_tool(),
+            Some(1),
+            "clicar na lista precisa mudar a escolha"
+        );
+
+        // O botão põe o pedido de procurar na fila da aplicação.
+        let browse = geometry.secondary_browse;
+        shell.pointer_down(
+            Point::new(
+                browse.origin.x + browse.size.width / 2.0,
+                browse.origin.y + browse.size.height / 2.0,
+            ),
+            size,
+        );
+        assert!(
+            shell
+                .drain_application_commands()
+                .iter()
+                .any(|comando| matches!(comando, ApplicationCommand::BrowseSecondaryTool)),
+            "o botão precisa pedir o seletor de pasta"
         );
     }
 
