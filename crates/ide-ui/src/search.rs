@@ -1,10 +1,11 @@
-//! Estado e apresentação da busca por tipos e conteúdo.
+//! O que a busca por tipos e conteúdo encontra, e como cada acerto se lê.
+//!
+//! A janela em si mora em `ide_shell::type_search`; aqui ficam os tipos que
+//! atravessam a fronteira com a aplicação.
 
 use std::path::{Path, PathBuf};
 
-use ide_application::NewItemTemplate;
 use ide_domain::Location;
-use ui_components::{Button, ModalHost, TextInput};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypeSearchHit {
@@ -29,56 +30,6 @@ impl ContentSearchHit {
             self.location.range.start.line + 1,
             self.preview
         )
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum WorkspaceSearchMode {
-    Types,
-    Content,
-}
-
-/// Janela de criação enquanto está aberta.
-pub(super) struct NewItemDialog {
-    pub(super) template: NewItemTemplate,
-    pub(super) source_root: PathBuf,
-    pub(super) message: Option<String>,
-    pub(super) naming: bool,
-}
-
-/// Estado das pesquisas e dos modais de criação.
-pub(super) struct SearchState {
-    pub(super) modal: ModalHost,
-    pub(super) mode: WorkspaceSearchMode,
-    pub(super) query: String,
-    pub(super) type_results: Vec<TypeSearchHit>,
-    pub(super) content_results: Vec<ContentSearchHit>,
-    pub(super) selected: usize,
-    pub(super) first_visible: usize,
-    pub(super) new_item_modal: ModalHost,
-    pub(super) new_item_dialog: Option<NewItemDialog>,
-    pub(super) new_item_package: TextInput,
-    pub(super) new_item_name: TextInput,
-    pub(super) new_item_create_button: Button,
-    pub(super) new_item_cancel_button: Button,
-}
-
-impl SearchState {
-    #[must_use]
-    pub(super) fn result_len(&self) -> usize {
-        match self.mode {
-            WorkspaceSearchMode::Types => self.type_results.len(),
-            WorkspaceSearchMode::Content => self.content_results.len(),
-        }
-    }
-
-    pub(super) fn reset(&mut self, mode: WorkspaceSearchMode) {
-        self.mode = mode;
-        self.query.clear();
-        self.type_results.clear();
-        self.content_results.clear();
-        self.selected = 0;
-        self.first_visible = 0;
     }
 }
 

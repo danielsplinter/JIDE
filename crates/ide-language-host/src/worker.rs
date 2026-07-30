@@ -1,9 +1,7 @@
-﻿use ide_domain::{
-    AccessorKind, AccessorPlan, TextPosition,
-    CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
-    DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot,
-    SemanticSymbol,
-    SyntaxSnapshot,
+use ide_domain::{
+    AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
+    DocumentChange, DocumentId, DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot,
+    SemanticSymbol, SyntaxSnapshot, TextPosition,
 };
 use ide_language_api::{
     ActiveLanguage, LanguageActivationContext, LanguageMetadata, LanguageProvider,
@@ -221,7 +219,8 @@ impl ProviderWorker {
         &self,
         context: LanguageRequestContext,
         document_id: DocumentId,
-    ) -> Result<oneshot::Receiver<Result<SyntaxSnapshot, LanguageHostError>>, LanguageHostError> {
+    ) -> Result<oneshot::Receiver<Result<SyntaxSnapshot, LanguageHostError>>, LanguageHostError>
+    {
         ensure_not_cancelled(&context)?;
         let (response, receiver) = oneshot::channel();
         self.send(WorkerRequest::Syntax {

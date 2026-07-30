@@ -8,9 +8,9 @@ mod layout;
 mod menus;
 mod search;
 mod settings;
-mod text;
 mod shell;
 mod terminal;
+mod text;
 
 pub use debugging::{DebugFrameView, DebugVariableView, DebugView};
 pub use editor::{EditorAction, EditorCapabilities, EditorPane};

@@ -75,12 +75,21 @@ pub fn rewrite_occurrences(
 ) -> String {
     let mut ordenadas: Vec<&TextRange> = ranges.iter().collect();
     ordenadas.sort_by(|esquerda, direita| {
-        (direita.start.line, direita.start.column).cmp(&(esquerda.start.line, esquerda.start.column))
+        (direita.start.line, direita.start.column)
+            .cmp(&(esquerda.start.line, esquerda.start.column))
     });
     let mut resultado = text.to_owned();
     for range in ordenadas {
-        let inicio = offset_at(&resultado, range.start.line as usize, range.start.column as usize);
-        let fim = offset_at(&resultado, range.end.line as usize, range.end.column as usize);
+        let inicio = offset_at(
+            &resultado,
+            range.start.line as usize,
+            range.start.column as usize,
+        );
+        let fim = offset_at(
+            &resultado,
+            range.end.line as usize,
+            range.end.column as usize,
+        );
         if fim > inicio && resultado.get(inicio..fim) == Some(old_name) {
             resultado.replace_range(inicio..fim, new_name);
         }

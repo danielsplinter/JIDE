@@ -149,7 +149,8 @@ impl GenerateSurface {
         if let Some(modal) = self.modal.as_mut() {
             modal.close();
         }
-        let escolhido = |index: usize| todos || state.checked.get(index).copied().unwrap_or_default();
+        let escolhido =
+            |index: usize| todos || state.checked.get(index).copied().unwrap_or_default();
         if state.kind == AccessorKind::Constructor {
             let fields = state
                 .candidates
@@ -300,9 +301,9 @@ impl GenerateSurface {
 
     #[cfg(test)]
     pub(super) fn checked_count(&self) -> usize {
-        self.state
-            .as_ref()
-            .map_or(0, |state| state.checked.iter().filter(|item| **item).count())
+        self.state.as_ref().map_or(0, |state| {
+            state.checked.iter().filter(|item| **item).count()
+        })
     }
 
     /// Áreas da janela, para os testes apontarem um gesto dentro dela.

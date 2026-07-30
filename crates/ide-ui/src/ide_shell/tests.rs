@@ -6,7 +6,10 @@
 use super::*;
 // Tipos que o shell deixou de importar quando as funções puras saíram; os
 // testes continuam falando deles.
+use crate::ide_shell::geometry::{InspectionGeometry, SettingsDialogGeometry};
+use ide_application::{NewItemRequest, NewItemTemplate};
 use ide_domain::{AccessorCandidate, SyntaxHighlightKind};
+use ui_components::TreeItem;
 use ui_editor::TokenKind;
 
 fn java_source_roots() -> Vec<String> {
@@ -906,17 +909,13 @@ fn debug_settings_page_validates_the_target_before_connecting() {
     let mut shell = test_shell();
     let size = Size::new(1_000.0, 700.0);
     open_java_settings(&mut shell, vec!["JDK 8".to_owned()], 0);
-    shell.settings.modal.layout(
-        &LayoutContext::default(),
-        Rect::new(0.0, 0.0, size.width, size.height),
-    );
-    let geometry = settings_dialog_geometry(shell.settings.modal.panel_bounds());
+    let geometry = shell.settings.geometry(&LayoutContext::default(), size);
 
     // Segunda linha da navegação é a página de Depuração.
     shell.pointer_down(
         Point::new(
             geometry.compiler_option.origin.x + 20.0,
-            geometry.compiler_option.origin.y + SETTINGS_PAGE_ROW_HEIGHT + 10.0,
+            geometry.compiler_option.origin.y + settings::PAGE_ROW_HEIGHT + 10.0,
         ),
         size,
     );
@@ -1971,11 +1970,7 @@ fn settings_jdk_combo_and_browse_button_emit_requests() {
     let mut shell = test_shell();
     let size = Size::new(1_000.0, 700.0);
     open_java_settings(&mut shell, vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
-    shell.settings.modal.layout(
-        &LayoutContext::default(),
-        Rect::new(0.0, 0.0, size.width, size.height),
-    );
-    let geometry = settings_dialog_geometry(shell.settings.modal.panel_bounds());
+    let geometry = shell.settings.geometry(&LayoutContext::default(), size);
     shell.pointer_down(
         Point::new(
             geometry.combo.origin.x + 10.0,
@@ -2036,7 +2031,7 @@ fn cancelling_the_settings_discards_every_change() {
     );
     assert_eq!(shell.take_settings_jdk_result(), None);
     assert!(!shell.settings_dialog_open());
-    assert_eq!(shell.settings.toolchain_combo.selected_index(), 0);
+    assert_eq!(shell.settings.selected_toolchain(), 0);
 }
 
 /// Projeto Maven com um pacote já criado, para o menu agir sobre ele.
@@ -2065,8 +2060,7 @@ fn the_new_item_dialog_opens_with_the_clicked_package() {
     shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
     shell.run_explorer_command("explorer.new.java.class");
     assert!(shell.new_item_dialog_open());
-    assert_eq!(shell.search.new_item_package.value(), "br.com");
-    assert_eq!(shell.search.new_item_name.value(), "");
+    assert_eq!(shell.new_item.values(), ("br.com", ""));
 }
 
 /// A mesma janela serve as três ações, mudando só o título e a legenda.
@@ -2080,13 +2074,8 @@ fn the_three_menu_actions_share_one_window() {
         ("explorer.new.java.interface", "Nova interface"),
     ] {
         shell.run_explorer_command(command);
-        let actual_title = shell
-            .search
-            .new_item_dialog
-            .as_ref()
-            .map(|dialog| dialog.template.title.as_str());
-        assert_eq!(actual_title, Some(title));
-        assert_eq!(shell.search.new_item_package.value(), "br.com");
+        assert_eq!(shell.new_item.title(), Some(title));
+        assert_eq!(shell.new_item.values().0, "br.com");
     }
 }
 
@@ -2162,7 +2151,10 @@ fn the_generate_window_lists_what_is_missing_and_writes_what_was_checked() {
     assert!(texts.iter().any(|text| text == "OK"), "{texts:?}");
 
     // Marcar a segunda linha e confirmar gera só ela.
-    let (lista, _, ok) = { let context = shell.layout_context(); shell.generate.areas(&context, size) };
+    let (lista, _, ok) = {
+        let context = shell.layout_context();
+        shell.generate.areas(&context, size)
+    };
     shell.pointer_down(
         Point::new(
             lista.origin.x + 40.0,
@@ -2183,7 +2175,10 @@ fn the_all_button_ignores_the_checkboxes() {
     let mut shell = shell_editing("class Matricula {\n    private Long id;\n}\n");
     let size = Size::new(1280.0, 800.0);
     shell.show_accessor_plan(AccessorKind::Getter, accessor_plan_para_teste());
-    let (_, todos, _) = { let context = shell.layout_context(); shell.generate.areas(&context, size) };
+    let (_, todos, _) = {
+        let context = shell.layout_context();
+        shell.generate.areas(&context, size)
+    };
     shell.pointer_down(
         Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
         size,
@@ -2223,7 +2218,10 @@ fn the_generate_list_keeps_its_scroll_between_frames() {
     assert_eq!(rolagem(&shell), 0.0);
 
     // A roda rola a lista da janela.
-    let (lista, ..) = { let context = shell.layout_context(); shell.generate.areas(&context, size) };
+    let (lista, ..) = {
+        let context = shell.layout_context();
+        shell.generate.areas(&context, size)
+    };
     shell.scroll(
         Point::new(lista.origin.x + 40.0, lista.origin.y + 40.0),
         5.0,
@@ -2316,7 +2314,10 @@ fn generating_changes_the_revision_so_the_highlight_is_asked_again() {
             insert_at: DomainTextPosition { line: 1, column: 0 },
         },
     );
-    let (_, todos, _) = { let context = shell.layout_context(); shell.generate.areas(&context, size) };
+    let (_, todos, _) = {
+        let context = shell.layout_context();
+        shell.generate.areas(&context, size)
+    };
     shell.pointer_down(
         Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
         size,
@@ -2363,7 +2364,10 @@ fn the_three_generate_options_share_one_window() {
         assert!(shell.generate_open(), "a mesma janela abre para {kind:?}");
         assert_eq!(shell.generate_fields(), vec!["id"]);
 
-        let (_, todos, _) = { let context = shell.layout_context(); shell.generate.areas(&context, size) };
+        let (_, todos, _) = {
+            let context = shell.layout_context();
+            shell.generate.areas(&context, size)
+        };
         shell.pointer_down(
             Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
             size,
@@ -2509,12 +2513,8 @@ fn the_secondary_tool_answers_the_pointer() {
     let _ = shell.paint(size);
 
     let geometry = {
-        let mut modal = shell.settings.modal.clone();
-        modal.layout(
-            &shell.layout_context(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        settings_dialog_geometry(modal.panel_bounds())
+        let context = shell.layout_context();
+        shell.settings.geometry(&context, size)
     };
 
     // Abrir a lista e escolher a segunda opção.
@@ -2718,7 +2718,10 @@ fn the_constructor_uses_the_same_window_and_asks_the_language() {
         vec!["id", "nome"],
         "o construtor lista todos os campos, e não só os que faltam"
     );
-    let (_, _, ok) = { let context = shell.layout_context(); shell.generate.areas(&context, size) };
+    let (_, _, ok) = {
+        let context = shell.layout_context();
+        shell.generate.areas(&context, size)
+    };
     shell.pointer_down(Point::new(ok.origin.x + 10.0, ok.origin.y + 10.0), size);
     let Some((campos, onde)) = shell.take_constructor_request() else {
         panic!("o OK precisa deixar um pedido de construtor");
@@ -2732,7 +2735,10 @@ fn the_constructor_uses_the_same_window_and_asks_the_language() {
     // Marcando um campo, só ele vai no pedido.
     let mut shell = shell_editing("class Pedido {\n}\n");
     shell.show_accessor_plan(AccessorKind::Constructor, plano());
-    let (lista, _, ok) = { let context = shell.layout_context(); shell.generate.areas(&context, size) };
+    let (lista, _, ok) = {
+        let context = shell.layout_context();
+        shell.generate.areas(&context, size)
+    };
     shell.pointer_down(
         Point::new(lista.origin.x + 20.0, lista.origin.y + 12.0),
         size,
@@ -2746,7 +2752,10 @@ fn the_constructor_uses_the_same_window_and_asks_the_language() {
     // O botão que gera tudo manda todos, sem depender da marcação.
     let mut shell = shell_editing("class Pedido {\n}\n");
     shell.show_accessor_plan(AccessorKind::Constructor, plano());
-    let (_, todos, _) = { let context = shell.layout_context(); shell.generate.areas(&context, size) };
+    let (_, todos, _) = {
+        let context = shell.layout_context();
+        shell.generate.areas(&context, size)
+    };
     shell.pointer_down(
         Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
         size,
@@ -3094,12 +3103,15 @@ fn clicking_a_field_changes_the_detail_panel() {
     shell.pointer_down(
         Point::new(
             geometry.list.origin.x + 30.0,
-            geometry.list.origin.y + INSPECTION_ROW_HEIGHT + 4.0,
+            geometry.list.origin.y + inspection::ROW_HEIGHT + 4.0,
         ),
         size,
     );
     assert_eq!(
-        shell.inspection_selected().map(|entry| entry.name.clone()),
+        shell
+            .inspection
+            .selected_variable()
+            .map(|entry| entry.name.clone()),
         Some("total".to_owned())
     );
 }
@@ -3118,7 +3130,7 @@ fn expanding_a_nested_object_asks_the_target_for_its_fields() {
     shell.pointer_down(
         Point::new(
             geometry.list.origin.x + 30.0,
-            geometry.list.origin.y + INSPECTION_ROW_HEIGHT * 2.0 + 4.0,
+            geometry.list.origin.y + inspection::ROW_HEIGHT * 2.0 + 4.0,
         ),
         size,
     );
@@ -3154,11 +3166,11 @@ fn expanding_a_nested_object_asks_the_target_for_its_fields() {
 fn running_without_a_live_session_explains_itself() {
     let mut shell = shell_editing("int total = 10;");
     shell.show_inspection("pedido", inspection_value(), inspection_fields());
-    shell.debug_panel.inspection.source = TextBuffer::new("m.setId(4L);");
+    shell.inspection.set_source("m.setId(4L);");
     shell.run_inspection_source();
     assert!(shell.take_debug_requests().is_empty());
     assert_eq!(
-        shell.debug_panel.inspection.message.as_deref(),
+        shell.inspection.message(),
         Some("A sessão de depuração terminou; reconecte para executar")
     );
 }
@@ -3171,7 +3183,7 @@ fn the_inspection_editor_reuses_the_pane_without_file_behaviours() {
     let size = Size::new(1280.0, 800.0);
     shell.show_inspection("pedido", inspection_value(), inspection_fields());
     let geometry = inspection_layout(&mut shell, size);
-    let capabilities = shell.debug_panel.inspection.editor.capabilities();
+    let capabilities = shell.inspection.editor_and_source_ref().0.capabilities();
     assert!(!capabilities.save, "não há arquivo para salvar");
     assert!(!capabilities.navigation, "não há definição para navegar");
     assert!(!capabilities.breakpoint_gutter, "não há linha onde parar");
@@ -3232,13 +3244,13 @@ fn running_keeps_the_tree_and_only_refreshes_its_values() {
     shell.pointer_down(
         Point::new(
             geometry.list.origin.x + 30.0,
-            geometry.list.origin.y + INSPECTION_ROW_HEIGHT * 2.0 + 4.0,
+            geometry.list.origin.y + inspection::ROW_HEIGHT * 2.0 + 4.0,
         ),
         size,
     );
     let _ = shell.take_debug_requests();
 
-    shell.debug_panel.inspection.source = TextBuffer::new("pedido.pagar()");
+    shell.inspection.set_source("pedido.pagar()");
     shell.run_inspection_source();
     assert_eq!(
         shell.take_debug_requests(),
@@ -3256,7 +3268,7 @@ fn running_keeps_the_tree_and_only_refreshes_its_values() {
         "a árvore deveria continuar mostrando o objeto: {texts:?}"
     );
     assert_eq!(
-        shell.debug_panel.inspection.message.as_deref(),
+        shell.inspection.message(),
         Some("pedido.pagar() → void"),
         "o retorno aparece na linha de mensagem, não na árvore"
     );
@@ -3578,12 +3590,12 @@ fn type_search_scroll_stays_inside_the_modal_and_reveals_keyboard_selection() {
             .collect(),
     );
 
-    for _ in 0..(TYPE_SEARCH_VISIBLE_ROWS + 3) {
+    for _ in 0..(type_search::VISIBLE_ROWS + 3) {
         shell.key_down("ArrowDown");
     }
-    assert_eq!(shell.search.selected, TYPE_SEARCH_VISIBLE_ROWS + 3);
+    assert_eq!(shell.search.scroll_state().0, type_search::VISIBLE_ROWS + 3);
     assert!(
-        shell.search.first_visible > 0,
+        shell.search.scroll_state().1 > 0,
         "a seleção que passou do viewport precisa trazer a lista junto"
     );
     let texts = painted_texts(&mut shell, size);
@@ -3593,7 +3605,7 @@ fn type_search_scroll_stays_inside_the_modal_and_reveals_keyboard_selection() {
     );
 
     let editor_before = shell.editor_area.pane.scroll_line();
-    let (_, list) = shell.type_search_geometry(size);
+    let (_, list) = shell.search.geometry(&LayoutContext::default(), size);
     shell.scroll(
         Point::new(list.origin.x + 20.0, list.origin.y + 20.0),
         3.0,
@@ -3605,7 +3617,7 @@ fn type_search_scroll_stays_inside_the_modal_and_reveals_keyboard_selection() {
         "a roda no modal não pode rolar o editor atrás"
     );
     assert!(
-        shell.search.first_visible > 0,
+        shell.search.scroll_state().1 > 0,
         "a própria lista precisa receber a roda"
     );
     let _ = std::fs::remove_dir_all(root);
@@ -3725,8 +3737,8 @@ fn a_dot_in_the_inspection_editor_asks_for_the_members_of_a_type() {
     let mut shell = shell_editing("int total = 10;");
     shell.debug_panel.view.attached = true;
     shell.show_inspection("m", inspection_value(), inspection_fields());
-    shell.debug_panel.inspection.source = TextBuffer::new("m.");
-    shell.debug_panel.inspection.editor.set_cursor(2);
+    shell.inspection.set_source("m.");
+    shell.inspection.editor_and_source().0.set_cursor(2);
     assert_eq!(
         shell.inspection_member_context(),
         Some(("m.".to_owned(), 2)),
@@ -3759,9 +3771,9 @@ fn the_completion_list_takes_the_keys_inside_the_inspection() {
     let mut shell = shell_editing("int total = 10;");
     shell.debug_panel.view.attached = true;
     shell.show_inspection("m", inspection_value(), inspection_fields());
-    shell.debug_panel.inspection.focus = InspectionFocus::Source;
-    shell.debug_panel.inspection.source = TextBuffer::new("m.");
-    shell.debug_panel.inspection.editor.set_cursor(2);
+    shell.inspection.focus_source();
+    shell.inspection.set_source("m.");
+    shell.inspection.editor_and_source().0.set_cursor(2);
     shell.set_completions(vec![
         CompletionItem {
             label: "getCliente()".to_owned(),
@@ -3801,7 +3813,7 @@ fn the_inspection_editor_selects_and_uses_the_clipboard() {
     shell.set_clipboard(clipboard.clone());
     let size = Size::new(1280.0, 800.0);
     shell.show_inspection("pedido", inspection_value(), inspection_fields());
-    shell.debug_panel.inspection.source = TextBuffer::new("pedido.total");
+    shell.inspection.set_source("pedido.total");
     let geometry = inspection_layout(&mut shell, size);
     let column = |index: usize| {
         Point::new(
@@ -3816,14 +3828,7 @@ fn the_inspection_editor_selects_and_uses_the_clipboard() {
     shell.pointer_down(column(0), size);
     shell.pointer_move(column(6), size);
     shell.pointer_up();
-    assert_eq!(
-        shell
-            .debug_panel
-            .inspection
-            .editor
-            .selected_text(&shell.debug_panel.inspection.source),
-        Some("pedido")
-    );
+    assert_eq!(inspection_selection(&shell), Some("pedido"));
 
     // Copiar leva o que está selecionado ali, e não o documento de trás.
     assert!(shell.copy_selection());
@@ -3844,17 +3849,10 @@ fn the_inspection_editor_selects_and_uses_the_clipboard() {
 
     // Duplo clique seleciona a palavra sob o ponteiro.
     shell.select_word_at_point(column(1), size);
-    assert_eq!(
-        shell
-            .debug_panel
-            .inspection
-            .editor
-            .selected_text(&shell.debug_panel.inspection.source),
-        Some("m")
-    );
+    assert_eq!(inspection_selection(&shell), Some("m"));
 
     // Shift com as setas também marca, como no editor principal.
-    shell.debug_panel.inspection.editor.set_cursor(0);
+    shell.inspection.editor_and_source().0.set_cursor(0);
     for _ in 0..4 {
         shell.key_down_with_modifiers(
             "ArrowRight",
@@ -3864,14 +3862,7 @@ fn the_inspection_editor_selects_and_uses_the_clipboard() {
             },
         );
     }
-    assert_eq!(
-        shell
-            .debug_panel
-            .inspection
-            .editor
-            .selected_text(&shell.debug_panel.inspection.source),
-        Some("m.id")
-    );
+    assert_eq!(inspection_selection(&shell), Some("m.id"));
 }
 
 /// Várias instruções rodam em sequência, uma esperando a outra.
@@ -3883,8 +3874,9 @@ fn several_statements_run_one_after_the_other() {
     let mut shell = shell_editing("int total = 10;");
     shell.debug_panel.view.attached = true;
     shell.show_inspection("m", inspection_value(), inspection_fields());
-    shell.debug_panel.inspection.source =
-        TextBuffer::new("m.setId(5L);\nm.setNome(\"Mario\");\nm.somar(1, 2)");
+    shell
+        .inspection
+        .set_source("m.setId(5L);\nm.setNome(\"Mario\");\nm.somar(1, 2)");
     shell.run_inspection_source();
 
     // Só a primeira vai ao alvo.
@@ -3919,7 +3911,7 @@ fn several_statements_run_one_after_the_other() {
         Vec::new(),
     );
     assert_eq!(
-        shell.debug_panel.inspection.message.as_deref(),
+        shell.inspection.message(),
         Some("3 instruções executadas — m.somar(1, 2) → 3")
     );
     assert_eq!(
@@ -3934,8 +3926,9 @@ fn a_failing_statement_stops_the_rest_and_says_where() {
     let mut shell = shell_editing("int total = 10;");
     shell.debug_panel.view.attached = true;
     shell.show_inspection("m", inspection_value(), inspection_fields());
-    shell.debug_panel.inspection.source =
-        TextBuffer::new("m.setId(5L);\nm.naoExiste();\nm.setId(6L);");
+    shell
+        .inspection
+        .set_source("m.setId(5L);\nm.naoExiste();\nm.setId(6L);");
     shell.run_inspection_source();
     let _ = shell.take_debug_requests();
     shell.inspection_result("m.setId(5L)".to_owned(), inspection_void(), Vec::new());
@@ -3943,7 +3936,7 @@ fn a_failing_statement_stops_the_rest_and_says_where() {
 
     shell.set_inspection_message("m.naoExiste(): método não encontrado");
     assert_eq!(
-        shell.debug_panel.inspection.message.as_deref(),
+        shell.inspection.message(),
         Some("parou na instrução 2 de 3: m.naoExiste(): método não encontrado")
     );
     // A terceira não foi pedida; a releitura, sim, porque a primeira teve
@@ -3957,15 +3950,15 @@ fn a_failing_statement_stops_the_rest_and_says_where() {
 /// O ponto e vírgula dentro de aspas não termina instrução.
 #[test]
 fn statements_are_split_outside_quoted_text() {
-    assert_eq!(inspection_statements("a(); b()"), vec!["a()", "b()"]);
-    assert_eq!(inspection_statements("a(\"x; y\")"), vec!["a(\"x; y\")"]);
+    assert_eq!(inspection::statements("a(); b()"), vec!["a()", "b()"]);
+    assert_eq!(inspection::statements("a(\"x; y\")"), vec!["a(\"x; y\")"]);
     assert_eq!(
-        inspection_statements("a(\"x\\\"; y\")"),
+        inspection::statements("a(\"x\\\"; y\")"),
         vec!["a(\"x\\\"; y\")"],
         "aspas escapadas não fecham o texto"
     );
-    assert_eq!(inspection_statements("  ;\n \n a() ;"), vec!["a()"]);
-    assert!(inspection_statements("  \n ; ").is_empty());
+    assert_eq!(inspection::statements("  ;\n \n a() ;"), vec!["a()"]);
+    assert!(inspection::statements("  \n ; ").is_empty());
 }
 
 /// Sem nada escrito, Executar avisa em vez de pedir a avaliação do vazio.
@@ -4001,11 +3994,15 @@ fn the_inspection_window_closes() {
 }
 
 fn inspection_layout(shell: &mut IdeShell, size: Size) -> InspectionGeometry {
-    shell.debug_panel.inspection.modal.layout(
-        &LayoutContext::default(),
-        Rect::new(0.0, 0.0, size.width, size.height),
-    );
-    inspection_geometry(shell.debug_panel.inspection.modal.panel_bounds())
+    shell
+        .inspection
+        .layout_editor(&LayoutContext::default(), size)
+}
+
+/// O que está marcado no editor da inspeção.
+fn inspection_selection(shell: &IdeShell) -> Option<&str> {
+    let (editor, source) = shell.inspection.editor_and_source_ref();
+    editor.selected_text(source)
 }
 
 fn painted_texts(shell: &mut IdeShell, size: Size) -> Vec<String> {
@@ -4327,7 +4324,7 @@ fn the_new_item_dialog_opens_centered() {
             PaintCommand::FillRect(fill) if fill.color == surface => Some(fill.rect),
             _ => None,
         })
-        .find(|rect| rect.size == NEW_ITEM_PANEL_SIZE)
+        .find(|rect| rect.size == new_item::PANEL_SIZE)
         .unwrap_or_default();
     let center_x = panel.origin.x + panel.size.width / 2.0;
     let center_y = panel.origin.y + panel.size.height / 2.0;
@@ -4385,11 +4382,7 @@ fn clicking_a_field_moves_the_cursor_before_typing() {
     let size = Size::new(1_000.0, 700.0);
     shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
     shell.run_explorer_command("explorer.new.java.package");
-    shell.search.new_item_modal.layout(
-        &LayoutContext::default(),
-        Rect::new(0.0, 0.0, size.width, size.height),
-    );
-    let geometry = new_item_geometry(shell.search.new_item_modal.panel_bounds());
+    let geometry = shell.new_item.geometry(&LayoutContext::default(), size);
     // Clique antes do primeiro caractere leva o cursor para o começo.
     shell.pointer_down(
         Point::new(
@@ -4457,14 +4450,7 @@ fn a_type_without_a_name_is_refused_without_closing() {
     shell.key_down("Enter");
     assert_eq!(shell.take_new_item_request(), None);
     assert!(shell.new_item_dialog_open());
-    assert_eq!(
-        shell
-            .search
-            .new_item_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.message.clone()),
-        Some("Informe o nome.".to_owned())
-    );
+    assert_eq!(shell.new_item.message(), Some("Informe o nome.".to_owned()));
 }
 
 /// Esc fecha sem pedir nada.
@@ -4489,15 +4475,11 @@ fn escape_in_the_settings_discards_every_change() {
     shell.escape();
     assert_eq!(shell.take_settings_jdk_result(), None);
     assert!(!shell.settings_dialog_open());
-    assert_eq!(shell.settings.toolchain_combo.selected_index(), 0);
+    assert_eq!(shell.settings.selected_toolchain(), 0);
 }
 
 fn open_settings_geometry(shell: &mut IdeShell, size: Size) -> SettingsDialogGeometry {
-    shell.settings.modal.layout(
-        &LayoutContext::default(),
-        Rect::new(0.0, 0.0, size.width, size.height),
-    );
-    settings_dialog_geometry(shell.settings.modal.panel_bounds())
+    shell.settings.geometry(&LayoutContext::default(), size)
 }
 
 /// Abre o combo e clica na segunda linha.

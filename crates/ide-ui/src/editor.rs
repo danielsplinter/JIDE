@@ -10,7 +10,9 @@
 //! assim a janela principal continua editando o documento aberto enquanto uma
 //! segunda tela edita um rascunho, sem cópia nem sincronização entre os dois.
 
-use crate::text::{byte_at_column, line_column, next_boundary, offset_for_line_column, previous_boundary};
+use crate::text::{
+    byte_at_column, line_column, next_boundary, offset_for_line_column, previous_boundary,
+};
 use std::collections::HashMap;
 
 use ide_domain::{CompletionItem, DocumentId, SyntaxSnapshot};
@@ -286,7 +288,9 @@ impl EditorPane {
 
     #[must_use]
     pub fn scroll_line(&self) -> usize {
-        (self.scroll_offset / CodeEditor::line_height()).round().max(0.0) as usize
+        (self.scroll_offset / CodeEditor::line_height())
+            .round()
+            .max(0.0) as usize
     }
 
     /// Rolagem vertical em pixels, que é como ela é guardada.
@@ -986,8 +990,11 @@ impl EditorPane {
         else {
             return;
         };
-        let target =
-            Self::cursor_stop(&text, offset_for_line_column(&text, target_line, column), false);
+        let target = Self::cursor_stop(
+            &text,
+            offset_for_line_column(&text, target_line, column),
+            false,
+        );
         self.move_cursor(target, selecting);
     }
 
@@ -1361,13 +1368,24 @@ mod tests {
         let bounds = pane.bounds();
 
         // Começa uma seleção e arrasta para baixo, além da borda.
-        pane.pointer_down(&buffer, Point::new(bounds.origin.x + 60.0, 4.0), false, false);
+        pane.pointer_down(
+            &buffer,
+            Point::new(bounds.origin.x + 60.0, 4.0),
+            false,
+            false,
+        );
         pane.pointer_move(
             &buffer,
-            Point::new(bounds.origin.x + 60.0, bounds.origin.y + bounds.size.height + 20.0),
+            Point::new(
+                bounds.origin.x + 60.0,
+                bounds.origin.y + bounds.size.height + 20.0,
+            ),
         );
         assert!(pane.drag_autoscroll(&buffer));
-        assert!(pane.scroll_offset() > 0.0, "arrastar para baixo desce a vista");
+        assert!(
+            pane.scroll_offset() > 0.0,
+            "arrastar para baixo desce a vista"
+        );
 
         // Para a direita, além da borda lateral.
         pane.pointer_move(
@@ -1378,7 +1396,10 @@ mod tests {
         assert!(pane.scroll_x() > 0.0, "arrastar à direita anda de lado");
 
         // De volta para cima e para a esquerda, sem passar do começo.
-        pane.pointer_move(&buffer, Point::new(bounds.origin.x - 20.0, bounds.origin.y - 20.0));
+        pane.pointer_move(
+            &buffer,
+            Point::new(bounds.origin.x - 20.0, bounds.origin.y - 20.0),
+        );
         for _ in 0..20 {
             pane.drag_autoscroll(&buffer);
         }
@@ -1389,7 +1410,10 @@ mod tests {
         pane.pointer_up();
         pane.pointer_move(
             &buffer,
-            Point::new(bounds.origin.x + 60.0, bounds.origin.y + bounds.size.height + 20.0),
+            Point::new(
+                bounds.origin.x + 60.0,
+                bounds.origin.y + bounds.size.height + 20.0,
+            ),
         );
         assert!(!pane.drag_autoscroll(&buffer));
         assert_eq!(pane.scroll_offset(), 0.0);
@@ -1409,7 +1433,12 @@ mod tests {
             bounds.origin.y + bounds.size.height + 20.0,
         );
 
-        pane.pointer_down(&buffer, Point::new(bounds.origin.x + 60.0, 4.0), false, false);
+        pane.pointer_down(
+            &buffer,
+            Point::new(bounds.origin.x + 60.0, 4.0),
+            false,
+            false,
+        );
         pane.pointer_move(&buffer, fora);
         // Um único movimento e, daí em diante, só o relógio.
         assert!(pane.drag_autoscroll(&buffer));
@@ -1418,7 +1447,10 @@ mod tests {
             panic!("o arrasto marcou um trecho");
         };
 
-        assert!(pane.drag_autoscroll(&buffer), "o tique seguinte também rola");
+        assert!(
+            pane.drag_autoscroll(&buffer),
+            "o tique seguinte também rola"
+        );
         assert!(
             pane.scroll_offset() > primeiro,
             "sem mexer o mouse, a vista continua descendo"
@@ -1443,7 +1475,11 @@ mod tests {
     #[test]
     fn the_step_grows_with_the_distance_up_to_a_ceiling() {
         let unidade = CodeEditor::line_height();
-        assert_eq!(ritmo(0.0, unidade), 1.0, "encostar na borda já anda uma vez");
+        assert_eq!(
+            ritmo(0.0, unidade),
+            1.0,
+            "encostar na borda já anda uma vez"
+        );
         assert!(ritmo(unidade, unidade) > 1.0, "mais longe, mais rápido");
         assert_eq!(
             ritmo(unidade * 1_000.0, unidade),
@@ -1475,7 +1511,10 @@ mod tests {
     fn navigation_only_answers_when_the_capability_is_on() {
         let (mut plain, buffer) = pane(EditorCapabilities::plain());
         let point = Point::new(CodeEditor::gutter_width() + 4.0, 4.0);
-        assert_eq!(plain.pointer_down(&buffer, point, true, false), EditorAction::None);
+        assert_eq!(
+            plain.pointer_down(&buffer, point, true, false),
+            EditorAction::None
+        );
 
         let (mut full, buffer) = pane(EditorCapabilities::full());
         assert!(matches!(

@@ -342,7 +342,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&raiz);
     }
 
-
     fn temporary(name: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("er-ide-config-{name}-{}", std::process::id()));

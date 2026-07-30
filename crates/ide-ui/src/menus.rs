@@ -27,24 +27,27 @@ pub(super) fn editor_entries(
     // teria onde escrever, e oferecer a opção prometeria o que não se cumpre.
     if inside_type {
         entries.push(MenuEntry::Separator);
-        entries.push(MenuEntry::submenu("Generate", vec![
-            MenuEntry::Item(MenuItem::new(
-                "Constructor",
-                CommandId("editor.generate.constructor".to_owned()),
-            )),
-            MenuEntry::Item(MenuItem::new(
-                "Getter",
-                CommandId("editor.generate.getter".to_owned()),
-            )),
-            MenuEntry::Item(MenuItem::new(
-                "Setter",
-                CommandId("editor.generate.setter".to_owned()),
-            )),
-            MenuEntry::Item(MenuItem::new(
-                "Getter and Setter",
-                CommandId("editor.generate.accessors".to_owned()),
-            )),
-        ]));
+        entries.push(MenuEntry::submenu(
+            "Generate",
+            vec![
+                MenuEntry::Item(MenuItem::new(
+                    "Constructor",
+                    CommandId("editor.generate.constructor".to_owned()),
+                )),
+                MenuEntry::Item(MenuItem::new(
+                    "Getter",
+                    CommandId("editor.generate.getter".to_owned()),
+                )),
+                MenuEntry::Item(MenuItem::new(
+                    "Setter",
+                    CommandId("editor.generate.setter".to_owned()),
+                )),
+                MenuEntry::Item(MenuItem::new(
+                    "Getter and Setter",
+                    CommandId("editor.generate.accessors".to_owned()),
+                )),
+            ],
+        ));
     }
     if debugging {
         entries.push(MenuEntry::Separator);
@@ -138,12 +141,10 @@ mod generate_tests {
         let Some(MenuEntry::Submenu { entries, .. }) = dentro.last() else {
             panic!("`Generate` precisa ser um submenu, não um comando");
         };
-        assert_eq!(labels(entries), vec![
-            "Constructor",
-            "Getter",
-            "Setter",
-            "Getter and Setter"
-        ]);
+        assert_eq!(
+            labels(entries),
+            vec!["Constructor", "Getter", "Setter", "Getter and Setter"]
+        );
     }
 
     /// Renomear é do arquivo: aparece sobre um, e não sobre uma pasta.

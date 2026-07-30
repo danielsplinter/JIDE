@@ -86,17 +86,25 @@ elas na fase 3.
 teto do teste de arquitetura foi ajustado junto. O teto existe para a raiz
 continuar um manifesto — e uma linha de `mod` é exatamente o que ela deve ter.
 
-### Fase 3 — Uma superfície, um módulo 🔶 Em andamento (2 de 6)
+### Fase 3 — Uma superfície, um módulo ✅ Concluída
 
 Cada janela leva consigo o **seu** estado, geometria, pintura e tratamento de
 evento, para `ide_shell/<superfície>.rs`:
 
 - ✅ `rename` — 419 linhas;
-- ✅ `generate` — 348 linhas;
-- ⬜ `type_search`, `new_item`, `inspection`, `settings`.
+- ✅ `generate` — 369 linhas;
+- ✅ `new_item` — 403 linhas;
+- ✅ `type_search` — 330 linhas;
+- ✅ `settings` — 741 linhas;
+- ✅ `inspection` — 744 linhas.
 
-O estado sai de `EditorAreaState` e `SettingsState` e passa a viver no módulo da
-superfície. O `IdeShell` guarda a instância; ninguém mais alcança os campos.
+`ide_shell.rs` saiu de 5.909 para **4.451 linhas**, com os mesmos 315 testes.
+
+O estado saiu de `EditorAreaState`, `SearchState`, `SettingsState` e
+`InspectionState` e passou a viver no módulo da superfície. O `IdeShell` guarda a
+instância; ninguém mais alcança os campos. O que restou nos arquivos antigos é só
+o que atravessa a fronteira: `search.rs` guarda os acertos da busca e o caminho
+encurtado, `settings.rs` guarda a página, e `debugging.rs` caiu para 66 linhas.
 
 **A fronteira é um `Outcome`.** A janela não alcança a sessão de edição, a fila
 de comandos nem a barra de estado: ela devolve o que decidiu — `Idle`,
@@ -107,7 +115,7 @@ lateral.
 **Critério:** cada módulo expõe abrir, fechar, e os tratadores de evento; o
 `ide_shell.rs` não menciona mais nenhum widget dessas janelas.
 
-**O que a execução ensinou**, para as quatro que faltam:
+**O que a execução ensinou:**
 
 - **o teste alcança o estado interno.** Vários apontavam cliques por
   `shell.editor_area.<janela>.…` e pela geometria livre. A janela passa a expor,
@@ -116,9 +124,19 @@ lateral.
 - **portar exige ler o original inteiro.** No `generate` eu havia simplificado
   duas regras sem perceber: o clique na trilha não marca a linha, e o clique fora
   do painel dispensa a janela. Fase que muda comportamento é fase para desfazer;
-- **`IdeShell` engorda antes de emagrecer.** Cada janela extraída vira um campo,
-  e a métrica do teste de arquitetura sobe junto. Ela volta a cair na fase 4,
-  quando as superfícies passarem a viver numa lista só.
+- **`IdeShell` engorda antes de emagrecer.** Cada janela extraída vira um campo:
+  12 → 14, e a métrica do teste de arquitetura subiu junto. Ela volta a cair na
+  fase 4, quando as superfícies passarem a viver numa lista só;
+- **o guarda de arquitetura aponta para o arquivo, não para a ideia.** Ele exigia
+  `SearchState` em `search.rs` e `SettingsState` em `settings.rs`. O estado mudou
+  de arquivo, não de dono, e o guarda passou a apontar para o novo endereço —
+  `ide_shell/type_search.rs` e `ide_shell/settings.rs`. Vale reler o guarda a cada
+  mudança de endereço: ele guarda o desenho, e o desenho tem endereço;
+- **nem toda janela desacopla igual.** A inspeção conversa com a sessão de
+  depuração viva, então o `Outcome` dela é uma **lista** de pedidos
+  (`Status`, `Evaluate`, `Expand`) — uma releitura pode disparar vários. E o que
+  ela compartilha com o editor principal (a lista de completação, o painel em
+  foco) ficou no shell, que é quem arbitra entre os dois.
 
 ### Fase 4 — O funil de eventos
 

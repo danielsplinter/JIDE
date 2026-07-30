@@ -7,9 +7,8 @@ pub mod workspace;
 
 pub use commands::{
     ApplicationCommand, Command, CommandError, CommandRegistry, DebugRequest, FileOccurrences,
-    NavigationRequest,
-    NewItemRequest, NewItemTemplateId, OpenDocumentRequest, RenameDocumentRequest,
-    SaveDocumentRequest, SearchScope,
+    NavigationRequest, NewItemRequest, NewItemTemplateId, OpenDocumentRequest,
+    RenameDocumentRequest, SaveDocumentRequest, SearchScope,
 };
 pub use contributions::{
     ContributionError, ContributionRegistry, LanguageContribution, LanguageDescriptor,

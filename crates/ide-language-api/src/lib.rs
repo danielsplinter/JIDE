@@ -13,8 +13,7 @@ use std::{
 use ide_domain::{
     AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
     DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location, ProviderId,
-    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot,
-    TextPosition,
+    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextPosition,
 };
 use thiserror::Error;
 

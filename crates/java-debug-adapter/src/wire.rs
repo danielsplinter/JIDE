@@ -239,11 +239,10 @@ impl Encoder {
                 .u8(b'C')
                 .u8((*value >> 8) as u8)
                 .u8((*value & 0xff) as u8),
-            Value::Short(value) => {
-                self.u8(b'S')
-                    .u8((*value >> 8) as u8)
-                    .u8((*value & 0xff) as u8)
-            }
+            Value::Short(value) => self
+                .u8(b'S')
+                .u8((*value >> 8) as u8)
+                .u8((*value & 0xff) as u8),
             Value::Int(value) => self.u8(b'I').i32(*value),
             Value::Long(value) => self.u8(b'J').i64(*value),
             Value::Float(value) => self.u8(b'F').i32(value.to_bits() as i32),

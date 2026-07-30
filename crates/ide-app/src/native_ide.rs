@@ -615,12 +615,8 @@ impl NativeIde {
             .host
             .as_ref()
             .map(|host| {
-                pollster::block_on(host.references_to_name(
-                    host.request_context(),
-                    &extensao,
-                    nome,
-                ))
-                .unwrap_or_default()
+                pollster::block_on(host.references_to_name(host.request_context(), &extensao, nome))
+                    .unwrap_or_default()
             })
             .unwrap_or_default();
         if let Some(shell) = self.ui.shell.as_mut() {
@@ -674,7 +670,8 @@ impl NativeIde {
 
         if let Err(error) = self.workspace.rename_path(&request.from, &request.to) {
             for gravado in &gravados {
-                if let Some((_, original)) = originais.iter().find(|(caminho, _)| caminho == gravado)
+                if let Some((_, original)) =
+                    originais.iter().find(|(caminho, _)| caminho == gravado)
                 {
                     let _ = self.workspace.save_document(gravado, original);
                 }
@@ -838,7 +835,10 @@ impl NativeIde {
             None => (!self.project.maven.installations.is_empty()).then_some(0),
         };
         if let Some(shell) = self.ui.shell.as_mut() {
-            shell.set_secondary_tool_options(self.project.maven.labels(), self.project.maven.selected);
+            shell.set_secondary_tool_options(
+                self.project.maven.labels(),
+                self.project.maven.selected,
+            );
         }
     }
 
@@ -2559,13 +2559,25 @@ mod tests {
         assert!(std::fs::create_dir_all(&pacote).is_ok());
         // Grande o bastante para a análise não caber num quadro.
         let corpo: String = (0..3000)
-            .map(|indice| format!("    int metodo{indice}() {{ return {indice}; }}
-"))
+            .map(|indice| {
+                format!(
+                    "    int metodo{indice}() {{ return {indice}; }}
+"
+                )
+            })
             .collect();
         let alvo = pacote.join("Grande.java");
-        assert!(std::fs::write(&alvo, format!("public class Grande {{
+        assert!(
+            std::fs::write(
+                &alvo,
+                format!(
+                    "public class Grande {{
 {corpo}}}
-")).is_ok());
+"
+                )
+            )
+            .is_ok()
+        );
 
         let language_host = LanguageHost::new(&root);
         let java = java_contribution::contribution(Arc::new(NativeProcessSupervisor::default()));
@@ -2605,7 +2617,11 @@ mod tests {
             .ui
             .shell
             .as_ref()
-            .and_then(|shell| shell.syntax_snapshot(DocumentId(1)).map(|s| s.highlights.len()))
+            .and_then(|shell| {
+                shell
+                    .syntax_snapshot(DocumentId(1))
+                    .map(|s| s.highlights.len())
+            })
             .unwrap_or_default();
         assert!(realcado > 0, "o realce chegou pela thread do provider");
 

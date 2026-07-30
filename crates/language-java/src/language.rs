@@ -12,12 +12,11 @@ use crate::semantics::receiver_type;
 use crate::symbols::simple_class_name;
 use async_trait::async_trait;
 use ide_domain::{
-    AccessorCandidate, AccessorKind, AccessorPlan,
-    CompletionItem, CompletionKind, CompletionRequest, DefinitionRequest, Diagnostic,
-    DiagnosticSeverity, DocumentChange, DocumentId, DocumentSnapshot, ImportItem, LanguageId,
-    Location, OutlineItem, OutlineKind, ProviderId, ReferencesRequest, SemanticScope,
-    SemanticSnapshot, SemanticSymbol, SymbolKind, SyntaxHighlight, SyntaxHighlightKind,
-    SyntaxSnapshot, TextPosition, TextRange, TypeDescriptor,
+    AccessorCandidate, AccessorKind, AccessorPlan, CompletionItem, CompletionKind,
+    CompletionRequest, DefinitionRequest, Diagnostic, DiagnosticSeverity, DocumentChange,
+    DocumentId, DocumentSnapshot, ImportItem, LanguageId, Location, OutlineItem, OutlineKind,
+    ProviderId, ReferencesRequest, SemanticScope, SemanticSnapshot, SemanticSymbol, SymbolKind,
+    SyntaxHighlight, SyntaxHighlightKind, SyntaxSnapshot, TextPosition, TextRange, TypeDescriptor,
 };
 #[cfg(test)]
 use ide_language_api::LanguageToolchainConfig;
@@ -1288,7 +1287,10 @@ fn accessor_plan_for(
         .collect();
 
     let mut candidates = Vec::new();
-    for campo in membros.iter().filter(|node| node.kind() == "field_declaration") {
+    for campo in membros
+        .iter()
+        .filter(|node| node.kind() == "field_declaration")
+    {
         let Some(declarado) = campo.child_by_field_name("type") else {
             continue;
         };
@@ -1343,7 +1345,10 @@ fn accessor_plan_for(
     let linha = position.line.clamp(abertura.saturating_add(1), fecho);
     Some(AccessorPlan {
         candidates,
-        insert_at: TextPosition { line: linha, column: 0 },
+        insert_at: TextPosition {
+            line: linha,
+            column: 0,
+        },
     })
 }
 
@@ -1366,9 +1371,9 @@ fn accessor_name(field: &str, type_name: &str, kind: AccessorKind) -> String {
 
 fn accessor_source(field: &str, type_name: &str, method: &str, kind: AccessorKind) -> String {
     match kind {
-        AccessorKind::Getter => format!(
-            "\n    public {type_name} {method}() {{\n        return {field};\n    }}\n"
-        ),
+        AccessorKind::Getter => {
+            format!("\n    public {type_name} {method}() {{\n        return {field};\n    }}\n")
+        }
         AccessorKind::Setter => format!(
             "\n    public void {method}({type_name} {field}) {{\n        this.{field} = {field};\n    }}\n"
         ),
@@ -1719,12 +1724,18 @@ int x;";
     #[test]
     fn analyzing_a_large_file_stays_far_from_quadratic() {
         let corpo: String = (0..2000)
-            .map(|indice| format!("    int metodo{indice}() {{ return {indice}; }}
-"))
+            .map(|indice| {
+                format!(
+                    "    int metodo{indice}() {{ return {indice}; }}
+"
+                )
+            })
             .collect();
-        let snapshot = snapshot(&format!("public class Grande {{
+        let snapshot = snapshot(&format!(
+            "public class Grande {{
 {corpo}}}
-"));
+"
+        ));
         let (Ok(parser), snapshot) = (crate::parser::JavaParser::new(), snapshot) else {
             panic!("parser Java indisponível");
         };
@@ -1774,7 +1785,11 @@ int x;";
             panic!("classe interna ausente do outline");
         };
         assert_eq!(
-            interna.children.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+            interna
+                .children
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["f"],
             "o membro da classe interna fica dentro dela"
         );
@@ -1819,7 +1834,10 @@ int x;";
             "a mudança invalida o que estava guardado"
         );
         assert!(
-            !depois.symbols.iter().any(|symbol| symbol.name == "primeiro"),
+            !depois
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "primeiro"),
             "e não devolve o símbolo que deixou de existir"
         );
     }
@@ -2086,7 +2104,10 @@ int x;";
             classe.range.start.line, 0,
             "a declaração começa na anotação"
         );
-        assert_eq!(classe.name_range.start.line, 1, "mas o nome está abaixo dela");
+        assert_eq!(
+            classe.name_range.start.line, 1,
+            "mas o nome está abaixo dela"
+        );
         assert_eq!(classe.name_range.start.column, 13);
         assert_eq!(classe.name_range.end.column, 19);
     }
@@ -2179,11 +2200,13 @@ int x;";
         );
         assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
         let dentro = TextPosition { line: 2, column: 4 };
-        let gerar = |campos: Vec<String>| {
-            match pollster::block_on(active.constructor_source(DocumentId(1), dentro, campos)) {
-                Ok(fonte) => fonte,
-                Err(error) => panic!("construtor indisponível: {error}"),
-            }
+        let gerar = |campos: Vec<String>| match pollster::block_on(active.constructor_source(
+            DocumentId(1),
+            dentro,
+            campos,
+        )) {
+            Ok(fonte) => fonte,
+            Err(error) => panic!("construtor indisponível: {error}"),
         };
 
         // Dois campos marcados: parâmetros e atribuições na ordem em que os
@@ -2206,11 +2229,8 @@ int x;";
         );
 
         // Todos os campos.
-        let Some(todos) = gerar(vec![
-            "id".to_owned(),
-            "nome".to_owned(),
-            "ativo".to_owned(),
-        ]) else {
+        let Some(todos) = gerar(vec!["id".to_owned(), "nome".to_owned(), "ativo".to_owned()])
+        else {
             panic!("o construtor com todos os campos precisa existir");
         };
         assert!(todos.contains("public Pedido(Long id, String nome, boolean ativo)"));
@@ -2234,11 +2254,13 @@ int x;";
         );
         assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
         let dentro = TextPosition { line: 2, column: 4 };
-        let gerar = |campos: Vec<String>| {
-            match pollster::block_on(active.constructor_source(DocumentId(1), dentro, campos)) {
-                Ok(fonte) => fonte,
-                Err(error) => panic!("construtor indisponível: {error}"),
-            }
+        let gerar = |campos: Vec<String>| match pollster::block_on(active.constructor_source(
+            DocumentId(1),
+            dentro,
+            campos,
+        )) {
+            Ok(fonte) => fonte,
+            Err(error) => panic!("construtor indisponível: {error}"),
         };
 
         assert_eq!(
@@ -2373,7 +2395,10 @@ int x;";
         assert!(id.contains("public void setId(Long id)"), "{id}");
         // `nome` já tem o getter: só o setter é gerado.
         let nome = fonte("nome");
-        assert!(!nome.contains("getNome"), "o getter existente não se repete: {nome}");
+        assert!(
+            !nome.contains("getNome"),
+            "o getter existente não se repete: {nome}"
+        );
         assert!(nome.contains("public void setNome(String nome)"), "{nome}");
     }
 
@@ -2722,7 +2747,10 @@ int x;";
             Err(error) => panic!("syntax unavailable: {error}"),
         };
         assert!(syntax.diagnostics.is_empty(), "{:?}", syntax.diagnostics);
-        assert!(!syntax.outline.is_empty(), "o outline sai da árvore analisada");
+        assert!(
+            !syntax.outline.is_empty(),
+            "o outline sai da árvore analisada"
+        );
     }
 
     #[test]

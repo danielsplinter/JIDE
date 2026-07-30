@@ -278,10 +278,7 @@ pub(crate) fn parameter_signatures(signature: &str) -> Vec<String> {
 /// parâmetro aceita qualquer objeto, vem do literal.
 /// O sinalizador diz se a classe veio declarada no parâmetro; escolhida pelo
 /// literal, ela vale menos na comparação entre sobrecargas.
-fn box_for(
-    literal: &Literal,
-    parameter: &str,
-) -> Option<(bool, (&'static str, u8, &'static str))> {
+fn box_for(literal: &Literal, parameter: &str) -> Option<(bool, (&'static str, u8, &'static str))> {
     if let Some(box_type) = BOXES.iter().find(|(class, ..)| *class == parameter) {
         return Some((true, *box_type));
     }
@@ -466,7 +463,10 @@ mod tests {
         assert!(coerce(&Literal::Bool(true), "Ljava/lang/Long;").is_none());
         assert!(coerce(&Literal::Long(4), "Ljava/util/List;").is_none());
         assert!(coerce(&Literal::Text("a".to_owned()), "I").is_none());
-        assert!(coerce(&Literal::Null, "I").is_none(), "null não é primitivo");
+        assert!(
+            coerce(&Literal::Null, "I").is_none(),
+            "null não é primitivo"
+        );
         // Estreitar um número só passa quando ele cabe.
         assert!(coerce(&Literal::Int(300), "B").is_none());
         assert_eq!(
@@ -495,9 +495,10 @@ mod tests {
             vec!["J", "Ljava/lang/String;", "[I", "Z"]
         );
         assert!(parameter_signatures("()V").is_empty());
-        assert_eq!(parameter_signatures("([[Ljava/lang/Object;)I"), vec![
-            "[[Ljava/lang/Object;"
-        ]);
+        assert_eq!(
+            parameter_signatures("([[Ljava/lang/Object;)I"),
+            vec!["[[Ljava/lang/Object;"]
+        );
     }
 
     #[test]

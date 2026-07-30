@@ -241,7 +241,7 @@ pub fn contribution(processes: Arc<dyn ProcessSupervisor>) -> LanguageContributi
         title: "Compilador e VM".to_owned(),
         field_caption: "JDK".to_owned(),
         browse_button_title: "Procurar...".to_owned(),
-            secondary_caption: Some("Maven".to_owned()),
+        secondary_caption: Some("Maven".to_owned()),
     }];
     contribution.tasks = vec![
         TaskDescriptor {

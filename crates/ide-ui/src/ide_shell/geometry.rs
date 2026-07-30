@@ -6,7 +6,8 @@
 
 use ui_core::Rect;
 
-use super::{INSPECTION_DETAIL_FRACTION, INSPECTION_LIST_FRACTION, SETTINGS_PAGE_ROW_HEIGHT};
+use super::settings::PAGE_ROW_HEIGHT as SETTINGS_PAGE_ROW_HEIGHT;
+use super::{INSPECTION_DETAIL_FRACTION, INSPECTION_LIST_FRACTION};
 
 pub(super) struct SettingsDialogGeometry {
     pub(super) sidebar: Rect,
@@ -149,36 +150,5 @@ pub(super) fn inspection_geometry(panel: Rect) -> InspectionGeometry {
         message,
         run,
         close,
-    }
-}
-/// Onde cada peça da janela de criação fica dentro do painel.
-pub(super) struct NewItemGeometry {
-    pub(super) package: Rect,
-    pub(super) name: Rect,
-    pub(super) create: Rect,
-    pub(super) cancel: Rect,
-}
-pub(super) fn new_item_geometry(panel: Rect) -> NewItemGeometry {
-    let field_width = (panel.size.width - 48.0).max(120.0);
-    let package = Rect::new(
-        panel.origin.x + 24.0,
-        panel.origin.y + 76.0,
-        field_width,
-        34.0,
-    );
-    let name = Rect::new(package.origin.x, package.origin.y + 64.0, field_width, 34.0);
-    // Criar à direita, encostado na borda, como o Salvar das Configurações.
-    let create = Rect::new(
-        panel.origin.x + panel.size.width - 104.0,
-        panel.origin.y + panel.size.height - 48.0,
-        88.0,
-        34.0,
-    );
-    let cancel = Rect::new(create.origin.x - 98.0, create.origin.y, 88.0, 34.0);
-    NewItemGeometry {
-        package,
-        name,
-        create,
-        cancel,
     }
 }

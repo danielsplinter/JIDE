@@ -47,7 +47,11 @@ pub(crate) fn line_column(text: &str, cursor: usize) -> (usize, usize) {
         .count();
     (line, column)
 }
-pub(crate) fn offset_for_line_column(text: &str, target_line: usize, target_column: usize) -> usize {
+pub(crate) fn offset_for_line_column(
+    text: &str,
+    target_line: usize,
+    target_column: usize,
+) -> usize {
     let mut offset = 0;
     for (line, value) in text.split('\n').enumerate() {
         if line == target_line {
@@ -147,7 +151,10 @@ pub(crate) fn count_outline(items: &[OutlineItem]) -> usize {
 /// início e tamanho de cada linha transforma cada extremo de token em consulta
 /// O(1); percorrer desde a primeira linha para cada token tornava a pintura
 /// quadrática em classes grandes.
-pub(crate) fn converted_syntax(text: &str, snapshot: &SyntaxSnapshot) -> Vec<(usize, usize, TokenKind)> {
+pub(crate) fn converted_syntax(
+    text: &str,
+    snapshot: &SyntaxSnapshot,
+) -> Vec<(usize, usize, TokenKind)> {
     let mut starts = Vec::new();
     let mut lengths = Vec::new();
     let mut offset = 0;

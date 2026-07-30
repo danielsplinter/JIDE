@@ -13,10 +13,9 @@ use crate::routing::{
 };
 use crate::worker::ProviderWorker;
 use ide_domain::{
-    AccessorKind, AccessorPlan, TextPosition,
-    CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
-    DocumentSnapshot, LanguageId, Location, ProviderId, ReferencesRequest, RequestId,
-    SemanticSnapshot, SemanticSymbol, SyntaxSnapshot,
+    AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
+    DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location, ProviderId,
+    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextPosition,
 };
 use ide_language_api::LanguageToolchainConfig;
 use ide_language_api::{
@@ -345,7 +344,8 @@ impl LanguageHost {
         &self,
         context: LanguageRequestContext,
         document_id: DocumentId,
-    ) -> Result<oneshot::Receiver<Result<SyntaxSnapshot, LanguageHostError>>, LanguageHostError> {
+    ) -> Result<oneshot::Receiver<Result<SyntaxSnapshot, LanguageHostError>>, LanguageHostError>
+    {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::SYNTAX)?;
         worker.post_syntax(context, document_id)
     }
@@ -454,7 +454,8 @@ impl LanguageHost {
         extension: &str,
         name: String,
     ) -> Result<Vec<Location>, LanguageHostError> {
-        let provider_id = self.provider_for_extension(extension, LanguageCapabilities::REFERENCES)?;
+        let provider_id =
+            self.provider_for_extension(extension, LanguageCapabilities::REFERENCES)?;
         let worker = self.ensure_active(&provider_id)?;
         worker.references_to_name(context, name).await
     }

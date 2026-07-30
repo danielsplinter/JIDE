@@ -2,47 +2,40 @@
 
 #[cfg(test)]
 use crate::debugging::DebugFrameView;
-use crate::debugging::{
-    DebugPanelState, DebugVariableView, DebugView, InspectionFocus, InspectionNode, InspectionRun,
-    InspectionState, InspectionView,
-};
+use crate::debugging::{DebugPanelState, DebugVariableView, DebugView};
+use crate::ide_shell::generate::{GenerateOutcome, GenerateSurface};
+use crate::ide_shell::inspection::{InspectionRequest, InspectionSurface};
+use crate::ide_shell::new_item::{NewItemOutcome, NewItemSurface};
+use crate::ide_shell::rename::{RenameOutcome, RenameSurface};
+use crate::ide_shell::settings::{SettingsOutcome, SettingsSurface, ToolSlot};
 use crate::text::{
     converted_syntax, count_outline, encloses_type, identifier_prefix, is_identifier_character,
     is_navigable, line_column, offset_for_line_column, offset_of_line, position_in_range, token_at,
 };
-use crate::ide_shell::generate::{GenerateOutcome, GenerateSurface};
-use crate::ide_shell::rename::{RenameOutcome, RenameSurface};
-use crate::ide_shell::geometry::{
-    InspectionGeometry, SettingsDialogGeometry, inspection_geometry, new_item_geometry,
-    settings_dialog_geometry, settings_pages_rect,
-};
+
 use crate::editor::{
     CachedSyntax, EditorAction, EditorAreaState, EditorCapabilities, EditorPane, SyntaxView,
 };
 use crate::explorer::{
-    ExplorerState, id as explorer_id, is_source_root, items as explorer_items,
-    visible_row as visible_tree_row,
+    ExplorerState, id as explorer_id, items as explorer_items, visible_row as visible_tree_row,
 };
-use crate::search::{
-    ContentSearchHit, NewItemDialog, SearchState, TypeSearchHit, WorkspaceSearchMode,
-};
-use crate::settings::{SettingsPage, SettingsState};
+use crate::ide_shell::type_search::{TypeSearchOutcome, TypeSearchSurface, WorkspaceSearchMode};
+use crate::search::{ContentSearchHit, TypeSearchHit};
+use crate::settings::SettingsPage;
 use crate::shell::{ShellCommandQueue, ShellFocus};
 use crate::terminal::{
     ScrollTarget, TerminalPanelState, TerminalSelection, TerminalTab, TextPosition,
     ordered_selection, selection_columns,
 };
 use ide_application::{
-    ApplicationCommand, DebugRequest, FileOccurrences, NavigationRequest, NewItemRequest,
-    NewItemTemplate, OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, TaskId,
-    UiContributionCatalog,
+    ApplicationCommand, DebugRequest, FileOccurrences, NavigationRequest, OpenDocumentRequest,
+    RenameDocumentRequest, SaveDocumentRequest, TaskId, UiContributionCatalog,
 };
 #[cfg(test)]
 use ide_application::{NewItemTemplateId, SettingsSection, TaskDescriptor};
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -56,11 +49,10 @@ use crate::menus::{
 };
 #[cfg(test)]
 use crate::search::search_display_path;
-use crate::settings::SettingsDialog;
 use ide_domain::{
-    AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DocumentId,
-    DocumentSnapshot, Location, OutlineItem, SyntaxSnapshot,
-    TextPosition as DomainTextPosition, TextRange as DomainTextRange,
+    AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot,
+    Location, OutlineItem, SyntaxSnapshot, TextPosition as DomainTextPosition,
+    TextRange as DomainTextRange,
 };
 use ide_terminal::{ShellKind, TerminalSession};
 use ide_workspace::{EditorSession, FileNode, TextBuffer, rewrite_occurrences};
@@ -68,14 +60,13 @@ use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 #[cfg(test)]
 use ui_components::MenuEntry;
 use ui_components::{
-    Button, ComboBox, ComboBoxItem,
-    ContextMenu, Icon, IconTint, Label, ListSelection, ListView, MenuBar, MenuBarItem, MenuItem,
-    ModalHost, Popup, Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter, StatusBar,
-    TabItem, Tabs, TextInput, TreeItem, TreeView,
+    Button, ContextMenu, Icon, IconTint, ListView, MenuBar, MenuBarItem, MenuItem, Popup,
+    Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter, StatusBar, TabItem, Tabs,
+    TextInput, TreeView,
 };
 use ui_core::{
     Color, ColorTokens, CommandId, EventResult, FontId, KeyEvent, Modifiers, Point, PointerButton,
-    PointerEvent, Rect, Size, TextInputEvent, Theme, UiEvent, WidgetAction, WidgetId,
+    PointerEvent, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_editor::{CodeEditor, GutterMark, LineDecoration};
 use ui_render_api::{DrawTextCommand, FillRectCommand, PaintCommand, StrokeRectCommand};
@@ -105,62 +96,14 @@ const TERMINAL_CHAR_WIDTH: f32 = 8.4;
 const DEBUG_PANEL_WIDTH: f32 = 320.0;
 pub(super) const DEBUG_ROW_HEIGHT: f32 = 21.0;
 const MENU_BAR_ID: WidgetId = WidgetId(10_001);
-const SETTINGS_MODAL_ID: WidgetId = WidgetId(10_002);
-const TOOLCHAIN_COMBO_ID: WidgetId = WidgetId(10_003);
-const TOOLCHAIN_BROWSE_ID: WidgetId = WidgetId(10_004);
-const SECONDARY_TOOL_COMBO_ID: WidgetId = WidgetId(10_070);
-const SECONDARY_TOOL_BROWSE_ID: WidgetId = WidgetId(10_071);
-const SECONDARY_TOOL_CAPTION_ID: WidgetId = WidgetId(10_072);
-const SETTINGS_CLOSE_ID: WidgetId = WidgetId(10_005);
-const SETTINGS_SAVE_ID: WidgetId = WidgetId(10_030);
-const SETTINGS_TITLE_ID: WidgetId = WidgetId(10_031);
-const SETTINGS_CAPTION_ID: WidgetId = WidgetId(10_032);
-const SETTINGS_MESSAGE_ID: WidgetId = WidgetId(10_033);
-const SETTINGS_PAGES_ID: WidgetId = WidgetId(10_034);
-/// Páginas da janela de configurações, na ordem em que aparecem.
-const DEBUG_SETTINGS_TITLE: &str = "Depuração";
-const SETTINGS_PAGE_ROW_HEIGHT: f32 = 42.0;
-const NEW_ITEM_MODAL_ID: WidgetId = WidgetId(10_035);
-const NEW_ITEM_PACKAGE_ID: WidgetId = WidgetId(10_036);
-const NEW_ITEM_NAME_ID: WidgetId = WidgetId(10_037);
-const NEW_ITEM_CREATE_ID: WidgetId = WidgetId(10_038);
-const NEW_ITEM_CANCEL_ID: WidgetId = WidgetId(10_039);
-const NEW_ITEM_PACKAGE_CAPTION_ID: WidgetId = WidgetId(10_041);
-const NEW_ITEM_NAME_CAPTION_ID: WidgetId = WidgetId(10_042);
-const NEW_ITEM_MESSAGE_ID: WidgetId = WidgetId(10_043);
-/// A janela é pequena de propósito: dois campos e duas ações.
-const NEW_ITEM_PANEL_SIZE: Size = Size::new(460.0, 230.0);
 /// Faixa de ids das células da lista, para não colidir com outros componentes.
-const TYPE_SEARCH_MODAL_ID: WidgetId = WidgetId(10_060);
-const TYPE_SEARCH_INPUT_ID: WidgetId = WidgetId(10_061);
-const TYPE_SEARCH_LIST_ID: WidgetId = WidgetId(10_062);
-/// Janela larga: o que ela mostra são caminhos, e caminho cortado não localiza.
-const TYPE_SEARCH_PANEL_SIZE: Size = Size::new(760.0, 420.0);
-const TYPE_SEARCH_ROW_HEIGHT: f32 = 26.0;
-/// Linhas que cabem na lista de 302 pontos de altura, incluindo a última parcial.
-const TYPE_SEARCH_VISIBLE_ROWS: usize = 12;
-const INSPECTION_MODAL_ID: WidgetId = WidgetId(10_044);
-const INSPECTION_TREE_ID: WidgetId = WidgetId(10_045);
-const INSPECTION_CLOSE_ID: WidgetId = WidgetId(10_046);
-const INSPECTION_NAME_ID: WidgetId = WidgetId(10_047);
-const INSPECTION_TYPE_ID: WidgetId = WidgetId(10_048);
-const INSPECTION_VALUE_ID: WidgetId = WidgetId(10_049);
-const INSPECTION_EMPTY_ID: WidgetId = WidgetId(10_050);
-const INSPECTION_RUN_ID: WidgetId = WidgetId(10_052);
-const INSPECTION_SOURCE_CAPTION_ID: WidgetId = WidgetId(10_053);
-const INSPECTION_MESSAGE_ID: WidgetId = WidgetId(10_054);
 /// Largura média de caractere na fonte da mensagem, para saber onde cortar.
 const INSPECTION_MESSAGE_CHAR_WIDTH: f32 = 6.6;
 /// A janela é larga porque o valor de um objeto costuma ser longo.
-const INSPECTION_PANEL_SIZE: Size = Size::new(720.0, 420.0);
-const INSPECTION_ROW_HEIGHT: f32 = 26.0;
 /// Fatia da janela ocupada pela lista, à esquerda.
 const INSPECTION_LIST_FRACTION: f32 = 0.42;
 /// Fatia do painel direito ocupada pelo detalhe; o resto é o editor.
 const INSPECTION_DETAIL_FRACTION: f32 = 0.45;
-const DEBUG_HOST_ID: WidgetId = WidgetId(10_006);
-const DEBUG_PORT_ID: WidgetId = WidgetId(10_007);
-const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
 const STOP_BUTTON_ID: WidgetId = WidgetId(10_009);
 const RUN_BUTTON_ID: WidgetId = WidgetId(10_010);
 const DEBUG_BUTTON_ID: WidgetId = WidgetId(10_011);
@@ -216,12 +159,14 @@ pub struct IdeShell {
     explorer: ExplorerState,
     editor_area: EditorAreaState,
     terminal: TerminalPanelState,
-    search: SearchState,
-    settings: SettingsState,
+    search: TypeSearchSurface,
+    inspection: InspectionSurface,
+    settings: SettingsSurface,
     debug_panel: DebugPanelState,
     /// As janelas de gerar e de renomear, cada uma com seu estado e seus
     /// eventos. Ver `14-ide-shell-decomposition`.
     generate: GenerateSurface,
+    new_item: NewItemSurface,
     rename: RenameSurface,
     menu: MenuState,
     catalog: UiContributionCatalog,
@@ -468,72 +413,10 @@ impl IdeShell {
                 selecting: false,
                 running_terminal: None,
             },
-            search: SearchState {
-                modal: ModalHost::new(
-                    TYPE_SEARCH_MODAL_ID,
-                    "Ir para o tipo",
-                    TYPE_SEARCH_PANEL_SIZE,
-                ),
-                mode: WorkspaceSearchMode::Types,
-                query: String::new(),
-                type_results: Vec::new(),
-                content_results: Vec::new(),
-                selected: 0,
-                first_visible: 0,
-                new_item_modal: ModalHost::new(NEW_ITEM_MODAL_ID, "", NEW_ITEM_PANEL_SIZE),
-                new_item_dialog: None,
-                new_item_package: TextInput::new(NEW_ITEM_PACKAGE_ID, String::new())
-                    .with_placeholder("br.com.exemplo"),
-                new_item_name: TextInput::new(NEW_ITEM_NAME_ID, String::new()),
-                new_item_create_button: Button::new(NEW_ITEM_CREATE_ID, "Criar")
-                    .with_command("new.create"),
-                new_item_cancel_button: Button::new(NEW_ITEM_CANCEL_ID, "Cancelar")
-                    .with_command("new.cancel"),
-            },
-            settings: SettingsState {
-                modal: ModalHost::new(SETTINGS_MODAL_ID, "Configurações", Size::new(780.0, 460.0)),
-                toolchain_combo: ComboBox::new(TOOLCHAIN_COMBO_ID, Vec::new())
-                    .with_command_prefix("toolchain.select."),
-                secondary_combo: ComboBox::new(SECONDARY_TOOL_COMBO_ID, Vec::new())
-                    .with_command_prefix("tool.select."),
-                secondary_browse_button: Button::new(SECONDARY_TOOL_BROWSE_ID, "Procurar...")
-                    .with_command("tool.browse"),
-                toolchain_browse_button: Button::new(TOOLCHAIN_BROWSE_ID, "Procurar...")
-                    .with_command("toolchain.browse"),
-                close_button: Button::new(SETTINGS_CLOSE_ID, "Cancelar")
-                    .with_command("settings.cancel"),
-                save_button: Button::new(SETTINGS_SAVE_ID, "Salvar").with_command("settings.save"),
-                pages: ListView::new(SETTINGS_PAGES_ID, [DEBUG_SETTINGS_TITLE])
-                    .with_row_height(SETTINGS_PAGE_ROW_HEIGHT)
-                    .with_selection(ListSelection::Marker),
-                dialog: None,
-                page: SettingsPage::default(),
-                focus: None,
-                debug_host: TextInput::new(DEBUG_HOST_ID, "127.0.0.1").with_placeholder("host"),
-                debug_port: TextInput::new(DEBUG_PORT_ID, "8000").with_placeholder("porta"),
-                debug_attach_button: Button::new(DEBUG_ATTACH_ID, "Conectar")
-                    .with_command("debug.attach"),
-            },
+            search: TypeSearchSurface::default(),
+            inspection: InspectionSurface::default(),
+            settings: SettingsSurface::default(),
             debug_panel: DebugPanelState {
-                inspection: InspectionState {
-                    modal: ModalHost::new(
-                        INSPECTION_MODAL_ID,
-                        "Inspecionar",
-                        INSPECTION_PANEL_SIZE,
-                    ),
-                    view: None,
-                    tree: TreeView::new(INSPECTION_TREE_ID, Vec::new())
-                        .with_row_height(INSPECTION_ROW_HEIGHT),
-                    close_button: Button::new(INSPECTION_CLOSE_ID, "Fechar")
-                        .with_command("inspect.close"),
-                    editor: EditorPane::new(EditorCapabilities::plain()),
-                    source: TextBuffer::new(String::new()),
-                    run_button: Button::new(INSPECTION_RUN_ID, "Executar")
-                        .with_command("inspect.run"),
-                    focus: InspectionFocus::Tree,
-                    message: None,
-                    run: None,
-                },
                 stop_button: Button::icon(STOP_BUTTON_ID, Icon::Stop, "Parar aplicação")
                     .with_tint(IconTint::Muted)
                     .with_command("project.stop"),
@@ -552,6 +435,7 @@ impl IdeShell {
                     .with_row_height(DEBUG_ROW_HEIGHT),
             },
             generate: GenerateSurface::default(),
+            new_item: NewItemSurface::default(),
             rename: RenameSurface::default(),
             menu: MenuState {
                 bar: MenuBar::new(
@@ -804,14 +688,11 @@ impl IdeShell {
             .iter()
             .map(|section| section.title.clone())
             .collect::<Vec<_>>();
-        settings_titles.push(DEBUG_SETTINGS_TITLE.to_owned());
-        self.settings.pages = ListView::new(SETTINGS_PAGES_ID, settings_titles)
-            .with_row_height(SETTINGS_PAGE_ROW_HEIGHT)
-            .with_selection(ListSelection::Marker);
+        settings_titles.push(settings::DEBUG_PAGE_TITLE.to_owned());
+        self.settings.set_pages(settings_titles);
         if let Some(section) = catalog.settings_sections.first() {
-            self.settings.toolchain_browse_button =
-                Button::new(TOOLCHAIN_BROWSE_ID, section.browse_button_title.clone())
-                    .with_command("toolchain.browse");
+            self.settings
+                .set_browse_title(section.browse_button_title.clone());
         }
         if let Some(task) = catalog.tasks.iter().find(|task| task.show_in_toolbar) {
             self.debug_panel.run_button =
@@ -835,77 +716,24 @@ impl IdeShell {
         toolchain_items: Vec<String>,
         selected_toolchain: usize,
     ) {
-        self.settings.toolchain_combo.set_items(
-            toolchain_items
-                .into_iter()
-                .enumerate()
-                .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
-                .collect(),
-        );
-        self.settings
-            .toolchain_combo
-            .set_selected(selected_toolchain);
-        self.settings.modal.open();
-        // Reabrir a janela recomeça a transação: o que ficou pendente de uma
-        // abertura anterior foi descartado com ela.
-        let segunda = (self.settings.secondary_combo.item_count() > 0)
-            .then(|| self.settings.secondary_combo.selected_index());
-        self.settings.dialog = Some(SettingsDialog {
-            message: None,
-            pending_toolchain: None,
-            original_toolchain: Some(selected_toolchain),
-            pending_secondary: None,
-            original_secondary: segunda,
-            original_debug_host: self.settings.debug_host.value().to_owned(),
-            original_debug_port: self.settings.debug_port.value().to_owned(),
-        });
+        self.settings.open(toolchain_items, selected_toolchain);
     }
 
     /// Repõe a lista da segunda escolha da seção, com uma delas marcada.
-    ///
-    /// Mesma mecânica da primeira: o `Procurar...` põe o que foi apontado na
-    /// lista e o deixa pendente, sem recomeçar a transação da janela.
     pub fn set_secondary_tool_options(&mut self, items: Vec<String>, selected: Option<usize>) {
-        self.settings.secondary_combo.set_items(
-            items
-                .into_iter()
-                .enumerate()
-                .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
-                .collect(),
-        );
-        if let Some(index) = selected {
-            self.settings.secondary_combo.set_selected(index);
-        }
-        if let Some(dialog) = self.settings.dialog.as_mut() {
-            dialog.pending_secondary = selected;
-        }
+        self.settings.set_secondary_options(items, selected);
     }
 
     /// Segunda ferramenta escolhida na janela, para quem for aplicar.
     #[must_use]
     pub fn selected_secondary_tool(&self) -> Option<usize> {
-        (self.settings.secondary_combo.item_count() > 0)
-            .then(|| self.settings.secondary_combo.selected_index())
+        self.settings.selected_secondary()
     }
 
     /// Repõe a lista de toolchains e deixa uma delas escolhida, sem sair da transação.
-    ///
-    /// É o que o `Procurar...` precisa: a instalação apontada entra na lista e
-    /// fica pendente como qualquer escolha feita no combo. Reabrir a janela
-    /// recomeçaria a transação e apagaria o que já estava pendente.
     pub fn set_toolchain_options(&mut self, toolchain_items: Vec<String>, pending: usize) {
-        self.settings.toolchain_combo.set_items(
-            toolchain_items
-                .into_iter()
-                .enumerate()
-                .map(|(index, label)| ComboBoxItem::new(label, index.to_string()))
-                .collect(),
-        );
-        self.settings.toolchain_combo.set_selected(pending);
-        if let Some(dialog) = self.settings.dialog.as_mut() {
-            dialog.pending_toolchain = Some(pending);
-            dialog.message = None;
-        }
+        self.settings
+            .set_toolchain_options(toolchain_items, pending);
     }
 
     pub const fn settings_dialog_open(&self) -> bool {
@@ -927,21 +755,12 @@ impl IdeShell {
 
     /// Alvo de depuração apresentado na janela e usado pelo botão de depurar.
     pub fn set_debug_target(&mut self, host: &str, port: u16) {
-        self.settings.debug_host.set_value(host);
-        self.settings.debug_port.set_value(port.to_string());
+        self.settings.set_debug_target(host, port);
     }
 
     #[must_use]
     pub fn debug_target(&self) -> Option<(String, u16)> {
-        let host = self.settings.debug_host.value().trim().to_owned();
-        let port = self
-            .settings
-            .debug_port
-            .value()
-            .trim()
-            .parse::<u16>()
-            .ok()?;
-        (!host.is_empty() && port > 0).then_some((host, port))
+        self.settings.debug_target()
     }
 
     /// Executa um comando na aba de terminal ativa, como se o usuário digitasse.
@@ -981,7 +800,7 @@ impl IdeShell {
     }
     #[must_use]
     pub const fn settings_page(&self) -> SettingsPage {
-        self.settings.page
+        self.settings.page()
     }
     /// Retira, em ordem, todas as intenções produzidas desde a última consulta.
     pub fn drain_application_commands(&mut self) -> Vec<ApplicationCommand> {
@@ -1082,7 +901,7 @@ impl IdeShell {
     }
 
     #[cfg(test)]
-    fn take_new_item_request(&mut self) -> Option<NewItemRequest> {
+    fn take_new_item_request(&mut self) -> Option<ide_application::NewItemRequest> {
         match self.take_test_command(|command| matches!(command, ApplicationCommand::CreateItem(_)))
         {
             Some(ApplicationCommand::CreateItem(request)) => Some(request),
@@ -1110,9 +929,7 @@ impl IdeShell {
         }
     }
     pub fn set_settings_message(&mut self, message: impl Into<String>) {
-        if let Some(dialog) = self.settings.dialog.as_mut() {
-            dialog.message = Some(message.into());
-        }
+        self.settings.set_message(message);
     }
     pub fn append_tool_output(&mut self, text: &str, is_error: bool) {
         let active = self.terminal.active;
@@ -2374,22 +2191,22 @@ impl IdeShell {
             self.close_generate();
             return;
         }
-        if self.search.modal.is_open() {
+        if self.search.is_open() {
             self.close_type_search();
             return;
         }
-        if self.debug_panel.inspection.modal.is_open() {
+        if self.inspection.is_open() {
             self.close_inspection();
             return;
         }
-        if self.search.new_item_modal.is_open() {
+        if self.new_item.is_open() {
             self.close_new_item_dialog();
             return;
         }
         // Esc na janela de configurações é cancelar: fechar sem descartar o que
         // foi mexido salvaria pela porta dos fundos.
-        if self.settings.modal.is_open() {
-            self.cancel_settings();
+        if self.settings.is_open() {
+            self.settings.cancel();
             return;
         }
         if !self.editor_area.completion_items.is_empty() {
@@ -2426,7 +2243,7 @@ impl IdeShell {
         self.explorer.context_menu_target = None;
         // O clique secundário nunca escolhe da lista, então ele só a dispensa.
         self.clear_completions();
-        if self.settings.modal.is_open() {
+        if self.settings.is_open() {
             return;
         }
         let geometry = self.geometry(size);
@@ -2605,93 +2422,37 @@ impl IdeShell {
         else {
             return;
         };
-        self.open_new_item_dialog(template, &target);
+        let source_roots = self.catalog.source_root_names.clone();
+        if let Some(refusal) = self.new_item.open(template, &target, &source_roots) {
+            self.context.status_message = refusal;
+        }
     }
 
-    /// Abre a janela de criação com o pacote do alvo já preenchido.
-    ///
-    /// O pacote vem do caminho clicado, em notação de ponto: é o que o usuário vê
-    /// no Explorer e o que ele vai editar para criar um pacote abaixo. Sem raiz de
-    /// fontes não há pacote, e a janela não abre — o menu que oferece essas ações
-    /// só aparece dentro dela.
-    fn open_new_item_dialog(&mut self, template: NewItemTemplate, target: &Path) {
-        let Some(source_root) = target
-            .ancestors()
-            .find(|ancestor| is_source_root(ancestor, &self.catalog.source_root_names))
-            .map(Path::to_path_buf)
-        else {
-            self.context.status_message = "Fora de uma raiz de fontes registrada".to_owned();
-            return;
-        };
-        let package = target
-            .strip_prefix(&source_root)
-            .map(|relative| {
-                relative
-                    .components()
-                    .filter_map(|component| component.as_os_str().to_str())
-                    .collect::<Vec<_>>()
-                    .join(".")
-            })
-            .unwrap_or_default();
-        self.search.new_item_package.set_value(package);
-        self.search.new_item_name.set_value(String::new());
-        self.search.new_item_modal.set_title(template.title.clone());
-        self.search.new_item_modal.open();
-        self.search.new_item_dialog = Some(NewItemDialog {
-            template: template.clone(),
-            source_root,
-            message: None,
-            naming: false,
-        });
-        // O pacote já vem preenchido, então o que falta digitar é o nome —
-        // exceto ao criar pacote, em que o nome é justamente o que se edita.
-        self.focus_new_item_field(!template.allows_empty_name);
-    }
-
+    #[must_use]
     pub const fn new_item_dialog_open(&self) -> bool {
-        self.search.new_item_modal.is_open()
+        self.new_item.is_open()
     }
 
     /// Relata o que impediu a criação, mantendo a janela aberta.
     pub fn set_new_item_message(&mut self, message: impl Into<String>) {
-        if let Some(dialog) = self.search.new_item_dialog.as_mut() {
-            dialog.message = Some(message.into());
-        }
+        self.new_item.set_message(message);
     }
 
     pub fn close_new_item_dialog(&mut self) {
-        self.search.new_item_modal.close();
-        self.search.new_item_dialog = None;
+        self.new_item.close();
     }
 
-    /// Monta o pedido a partir do que está nos campos.
+    /// Executa o que a janela de criação decidiu.
     ///
-    /// O pacote é obrigatório: sem ele não há onde criar. O nome é obrigatório
-    /// para classe e interface, e opcional para pacote — é o que permite criar o
-    /// pacote e a primeira classe dele num gesto só.
-    fn submit_new_item(&mut self) {
-        let Some(dialog) = self.search.new_item_dialog.as_ref() else {
-            return;
-        };
-        let template_id = dialog.template.id.clone();
-        let source_root = dialog.source_root.clone();
-        let package = self.search.new_item_package.value().trim().to_owned();
-        let name = self.search.new_item_name.value().trim().to_owned();
-        if package.is_empty() {
-            self.set_new_item_message("Informe o pacote.");
-            return;
+    /// A janela não alcança a fila de comandos: ela entrega o pedido montado, e
+    /// é aqui que ele vira trabalho para a aplicação.
+    fn apply_new_item_outcome(&mut self, outcome: NewItemOutcome) {
+        match outcome {
+            NewItemOutcome::Idle => {}
+            NewItemOutcome::Create(request) => {
+                self.commands.push(ApplicationCommand::CreateItem(request));
+            }
         }
-        if name.is_empty() && !dialog.template.allows_empty_name {
-            self.set_new_item_message("Informe o nome.");
-            return;
-        }
-        self.commands
-            .push(ApplicationCommand::CreateItem(NewItemRequest {
-                template_id,
-                package,
-                name,
-                source_root,
-            }));
     }
 
     pub fn pointer_down_with_modifiers(
@@ -2714,7 +2475,7 @@ impl IdeShell {
             self.generate_pointer_down(point, size);
             return;
         }
-        if self.search.modal.is_open() {
+        if self.search.is_open() {
             self.type_search_pointer_down(point, size);
             return;
         }
@@ -2723,15 +2484,15 @@ impl IdeShell {
         if self.completion_pointer_down(point, size) {
             return;
         }
-        if self.debug_panel.inspection.modal.is_open() {
+        if self.inspection.is_open() {
             self.inspection_pointer_down(point, size);
             return;
         }
-        if self.search.new_item_modal.is_open() {
+        if self.new_item.is_open() {
             self.new_item_pointer_down(point, size);
             return;
         }
-        if self.settings.modal.is_open() {
+        if self.settings.is_open() {
             self.settings_dialog_pointer_down(point, size);
             return;
         }
@@ -2790,7 +2551,7 @@ impl IdeShell {
                 return;
             }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "debug.connect" => {
-                self.settings.page = SettingsPage::Debug;
+                self.settings.set_page(SettingsPage::Debug);
                 self.commands.push(ApplicationCommand::OpenSettings);
                 return;
             }
@@ -3003,13 +2764,13 @@ impl IdeShell {
             self.rename_pointer_event(&UiEvent::PointerMove(primary_pointer(point)), size);
             return true;
         }
-        if self.settings.modal.is_open() {
+        if self.settings.is_open() {
             return false;
         }
         // Com a inspeção aberta, o gesto é dela: o resto da janela está atrás do
         // painel, e arrastar sobre o que não se vê seria o gesto indo parar no
         // lugar errado.
-        let inspecting = self.debug_panel.inspection.modal.is_open();
+        let inspecting = self.inspection.is_open();
         if !inspecting && let Some(target) = self.context.scrollbar_drag {
             self.sync_scrollbar(target, size);
             self.scrollbar_mut(target).event(
@@ -3077,7 +2838,7 @@ impl IdeShell {
         }
         // Encerrar o gesto é do painel, que sabe se ele virou seleção.
         self.editor_area.pane.pointer_up();
-        self.debug_panel.inspection.editor.pointer_up();
+        self.inspection.editor_and_source().0.pointer_up();
         let event = UiEvent::PointerUp(primary_pointer(Point::ZERO));
         self.explorer
             .splitter
@@ -3116,11 +2877,11 @@ impl IdeShell {
             self.generate.scroll(&context, point, delta_lines, size);
             return;
         }
-        if self.search.modal.is_open() {
+        if self.search.is_open() {
             self.type_search_scroll(point, delta_lines, size);
             return;
         }
-        if self.settings.modal.is_open() {
+        if self.settings.is_open() {
             return;
         }
         let geo = self.geometry(size);
@@ -3309,7 +3070,7 @@ impl IdeShell {
         if self.new_item_text_input(text) {
             return;
         }
-        if self.settings.modal.is_open() {
+        if self.settings.is_open() {
             let _ = self.settings_text_input(text);
             return;
         }
@@ -3345,32 +3106,9 @@ impl IdeShell {
         if self.new_item_key(key) {
             return;
         }
-        if self.settings.modal.is_open() {
-            if self.settings_key_down(key) {
-                return;
-            }
-            let event = UiEvent::KeyDown(KeyEvent {
-                logical_key: key.to_owned(),
-                repeat: false,
-                modifiers,
-            });
-            let mut context = EventContext::default();
-            let result = self.settings.toolchain_combo.event(&mut context, &event);
-            let atendida = self.handle_settings_action(result);
-            let result = if atendida {
-                EventResult::Handled
-            } else {
-                // Com a segunda lista aberta, as setas e o Enter são dela.
-                self.settings.secondary_combo.event(&mut context, &event)
-            };
-            if !self.handle_settings_action(result) {
-                let _ = self.settings.modal.event(&mut context, &event);
-                // A janela fechada por dentro do componente — Esc no
-                // `ModalHost` — também é cancelamento.
-                if !self.settings.modal.is_open() {
-                    self.cancel_settings();
-                }
-            }
+        if self.settings.is_open() {
+            let outcome = self.settings.key(key, modifiers);
+            self.apply_settings_outcome(outcome);
             return;
         }
         if self.rename_key(key, modifiers) {
@@ -3432,8 +3170,8 @@ impl IdeShell {
             return;
         }
         // O gesto também leva o foco, como no clique simples.
-        if self.debug_panel.inspection.modal.is_open() {
-            self.debug_panel.inspection.focus = InspectionFocus::Source;
+        if self.inspection.is_open() {
+            self.inspection.focus_source();
         } else {
             self.context.focus = ShellFocus::Editor;
         }
@@ -3442,214 +3180,99 @@ impl IdeShell {
         }
     }
 
-    /// Área do campo e da lista dentro do painel da busca.
-    ///
-    /// Um lugar só, para o clique acertar o que foi desenhado.
-    fn type_search_geometry(&mut self, size: Size) -> (Rect, Rect) {
-        self.search.modal.layout(
-            &self.layout_context(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        let panel = self.search.modal.panel_bounds();
-        let input = Rect::new(
-            panel.origin.x + 16.0,
-            panel.origin.y + 56.0,
-            panel.size.width - 32.0,
-            34.0,
-        );
-        let list = Rect::new(
-            panel.origin.x + 16.0,
-            input.origin.y + input.size.height + 12.0,
-            panel.size.width - 32.0,
-            (panel.origin.y + panel.size.height - 16.0)
-                - (input.origin.y + input.size.height + 12.0),
-        );
-        (input, list)
-    }
-
     fn type_search_pointer_down(&mut self, point: Point, size: Size) {
-        let (_, list) = self.type_search_geometry(size);
-        if !list.contains(point) {
-            // Clicar fora da lista não escolhe nada, e clicar fora do painel
-            // dispensa a janela.
-            if !self.search.modal.panel_bounds().contains(point) {
-                self.close_type_search();
-            }
-            return;
-        }
-        let row = self.search.first_visible
-            + ((point.y - list.origin.y) / TYPE_SEARCH_ROW_HEIGHT)
-                .floor()
-                .max(0.0) as usize;
-        if row < self.workspace_search_result_len() {
-            self.search.selected = row;
-            self.open_selected_type();
-        }
+        let context = self.layout_context();
+        let outcome = self.search.pointer_down(&context, point, size);
+        self.apply_type_search_outcome(outcome);
     }
 
     fn type_search_scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
-        let (_, list) = self.type_search_geometry(size);
-        if !list.contains(point) {
-            return;
+        let context = self.layout_context();
+        self.search.scroll(&context, point, delta_lines, size);
+    }
+
+    /// Executa o que a busca decidiu.
+    ///
+    /// A janela não alcança a fila de comandos: ela diz qual consulta refazer e
+    /// o que abrir, e é aqui que isso vira pedido à aplicação.
+    fn apply_type_search_outcome(&mut self, outcome: TypeSearchOutcome) {
+        match outcome {
+            TypeSearchOutcome::Idle => {}
+            TypeSearchOutcome::Query { text, mode } => {
+                let command = match mode {
+                    WorkspaceSearchMode::Types => ApplicationCommand::SearchTypes(text),
+                    WorkspaceSearchMode::Content => ApplicationCommand::SearchContent(text),
+                };
+                self.commands.push(command);
+            }
+            TypeSearchOutcome::Open(location) => {
+                self.commands.push(ApplicationCommand::OpenDocument(
+                    OpenDocumentRequest::new(location.path).at(
+                        location.range.start.line as usize,
+                        location.range.start.column as usize,
+                    ),
+                ));
+            }
         }
-        self.search.first_visible = self
-            .search
-            .first_visible
-            .saturating_add_signed(delta_lines.round() as isize)
-            .min(self.type_search_max_first_visible());
-    }
-
-    fn type_search_max_first_visible(&self) -> usize {
-        self.workspace_search_result_len()
-            .saturating_sub(TYPE_SEARCH_VISIBLE_ROWS)
-    }
-
-    fn workspace_search_result_len(&self) -> usize {
-        self.search.result_len()
-    }
-
-    fn reveal_type_search_selection(&mut self) {
-        if self.search.selected < self.search.first_visible {
-            self.search.first_visible = self.search.selected;
-        } else if self.search.selected >= self.search.first_visible + TYPE_SEARCH_VISIBLE_ROWS {
-            self.search.first_visible = self.search.selected + 1 - TYPE_SEARCH_VISIBLE_ROWS;
-        }
-        self.search.first_visible = self
-            .search
-            .first_visible
-            .min(self.type_search_max_first_visible());
     }
 
     /// Abre a busca de tipo por nome. É o que `Ctrl+L` pede.
     pub fn open_type_search(&mut self) {
-        self.search.reset(WorkspaceSearchMode::Types);
-        self.search.modal.set_title("Ir para o tipo");
-        // A consulta vazia nasce mostrando os tipos existentes.
-        self.commands
-            .push(ApplicationCommand::SearchTypes(String::new()));
-        self.search.modal.open();
+        let outcome = self.search.open_types();
+        self.apply_type_search_outcome(outcome);
     }
 
     /// Abre a mesma janela da busca de tipos no modo de conteúdo.
-    ///
-    /// A consulta vazia não é enviada: ao contrário de uma lista de tipos, cada
-    /// linha vazia de cada arquivo não é um resultado útil.
     pub fn open_content_search(&mut self) {
-        self.search.reset(WorkspaceSearchMode::Content);
         let title = self.catalog.language_names.first().map_or_else(
             || "Buscar conteúdo".to_owned(),
             |language| format!("Buscar conteúdo em {language}"),
         );
-        self.search.modal.set_title(title);
-        self.search.modal.open();
+        self.search.open_content(title);
     }
 
     #[must_use]
-    pub fn type_search_open(&self) -> bool {
-        self.search.modal.is_open()
+    pub const fn type_search_open(&self) -> bool {
+        self.search.is_open()
     }
 
     pub fn close_type_search(&mut self) {
-        self.search.modal.close();
+        self.search.close();
     }
 
     /// Entrega o que a linguagem encontrou.
     pub fn set_type_search_results(&mut self, results: Vec<TypeSearchHit>) {
-        self.search.type_results = results;
-        self.search.content_results.clear();
-        self.search.selected = 0;
-        self.search.first_visible = 0;
+        self.search.set_type_results(results);
     }
 
     /// Entrega as ocorrências encontradas dentro do escopo fornecido pela aplicação.
     pub fn set_content_search_results(&mut self, results: Vec<ContentSearchHit>) {
-        self.search.content_results = results;
-        self.search.type_results.clear();
-        self.search.selected = 0;
-        self.search.first_visible = 0;
+        self.search.set_content_results(results);
     }
 
     #[must_use]
     pub fn type_search_results(&self) -> &[TypeSearchHit] {
-        &self.search.type_results
+        self.search.type_results()
     }
 
     /// Digitação na busca de tipo. Devolve `true` quando consumiu.
     fn type_search_text_input(&mut self, text: &str) -> bool {
-        if !self.search.modal.is_open() {
+        if !self.search.is_open() {
             return false;
         }
-        self.search.query.push_str(text);
-        let command = match self.search.mode {
-            WorkspaceSearchMode::Types => {
-                ApplicationCommand::SearchTypes(self.search.query.clone())
-            }
-            WorkspaceSearchMode::Content => {
-                ApplicationCommand::SearchContent(self.search.query.clone())
-            }
-        };
-        self.commands.push(command);
+        let outcome = self.search.text_input(text);
+        self.apply_type_search_outcome(outcome);
         true
     }
 
     /// Tecla na busca de tipo. Devolve `true` quando consumiu.
     fn type_search_key(&mut self, key: &str) -> bool {
-        if !self.search.modal.is_open() {
+        if !self.search.is_open() {
             return false;
         }
-        match key.to_ascii_lowercase().as_str() {
-            "backspace" => {
-                self.search.query.pop();
-                let command = match self.search.mode {
-                    WorkspaceSearchMode::Types => {
-                        ApplicationCommand::SearchTypes(self.search.query.clone())
-                    }
-                    WorkspaceSearchMode::Content => {
-                        ApplicationCommand::SearchContent(self.search.query.clone())
-                    }
-                };
-                self.commands.push(command);
-            }
-            "arrowdown" => {
-                self.search.selected = (self.search.selected + 1)
-                    .min(self.workspace_search_result_len().saturating_sub(1));
-                self.reveal_type_search_selection();
-            }
-            "arrowup" => {
-                self.search.selected = self.search.selected.saturating_sub(1);
-                self.reveal_type_search_selection();
-            }
-            "enter" => self.open_selected_type(),
-            "escape" => self.close_type_search(),
-            _ => {}
-        }
+        let outcome = self.search.key(key);
+        self.apply_type_search_outcome(outcome);
         true
-    }
-
-    /// Abre o item destacado no editor principal e fecha a janela.
-    fn open_selected_type(&mut self) {
-        let location = match self.search.mode {
-            WorkspaceSearchMode::Types => self
-                .search
-                .type_results
-                .get(self.search.selected)
-                .map(|hit| hit.location.clone()),
-            WorkspaceSearchMode::Content => self
-                .search
-                .content_results
-                .get(self.search.selected)
-                .map(|hit| hit.location.clone()),
-        };
-        let Some(location) = location else {
-            return;
-        };
-        self.close_type_search();
-        self.commands.push(ApplicationCommand::OpenDocument(
-            OpenDocumentRequest::new(location.path).at(
-                location.range.start.line as usize,
-                location.range.start.column as usize,
-            ),
-        ));
     }
 
     /// Recebe uma avaliação vinda do depurador e decide o que ela significa.
@@ -3664,97 +3287,8 @@ impl IdeShell {
         value: DebugVariableView,
         fields: Vec<DebugVariableView>,
     ) {
-        if self
-            .debug_panel
-            .inspection
-            .run
-            .as_ref()
-            .is_some_and(|run| run.current == expression)
-        {
-            self.advance_inspection_run(&expression, &value.value);
-            return;
-        }
-        // A mesma raiz chegando de novo é a releitura pedida depois de uma
-        // execução: os valores mudam, o que estava aberto continua aberto.
-        let same_root = self
-            .debug_panel
-            .inspection
-            .view
-            .as_ref()
-            .is_some_and(|inspection| inspection.expression == expression);
-        if same_root && self.debug_panel.inspection.modal.is_open() {
-            self.refresh_inspection(value, fields);
-            return;
-        }
-        self.show_inspection(expression, value, fields);
-    }
-
-    /// Uma instrução terminou: manda a próxima, ou fecha a execução.
-    fn advance_inspection_run(&mut self, expression: &str, value: &str) {
-        let Some(run) = self.debug_panel.inspection.run.as_mut() else {
-            return;
-        };
-        let total = run.total;
-        if run.remaining.is_empty() {
-            self.debug_panel.inspection.run = None;
-            // Com uma instrução só, o relato é o retorno dela; com várias, o que
-            // interessa é que todas passaram e o que a última respondeu.
-            self.debug_panel.inspection.message = Some(if total > 1 {
-                format!("{total} instruções executadas — {expression} → {value}")
-            } else {
-                format!("{expression} → {value}")
-            });
-            self.reload_inspection();
-            return;
-        }
-        let next = run.remaining.remove(0);
-        run.position += 1;
-        run.current.clone_from(&next);
-        let position = run.position;
-        self.context.status_message = format!("Executando {next} ({position} de {total})");
-        self.commands
-            .push(ApplicationCommand::Debug(DebugRequest::Evaluate(next)));
-    }
-
-    /// Pede ao depurador o valor atual da raiz da árvore.
-    fn reload_inspection(&mut self) {
-        let Some(inspection) = self.debug_panel.inspection.view.as_ref() else {
-            return;
-        };
-        self.commands
-            .push(ApplicationCommand::Debug(DebugRequest::Evaluate(
-                inspection.expression.clone(),
-            )));
-    }
-
-    /// Troca os valores da árvore sem mexer no que está aberto nem no que está
-    /// selecionado.
-    fn refresh_inspection(&mut self, value: DebugVariableView, fields: Vec<DebugVariableView>) {
-        let Some(inspection) = self.debug_panel.inspection.view.as_mut() else {
-            return;
-        };
-        let expression = inspection.expression.clone();
-        inspection.root.variable = value;
-        inspection.root.loaded = true;
-        inspection.root.children = fields
-            .into_iter()
-            .map(|field| InspectionNode::new(format!("{expression}.{}", field.name), field))
-            .collect();
-        // Só a raiz veio com campos; os níveis abertos abaixo dela precisam ser
-        // relidos, ou mostrariam o valor de antes da execução.
-        let deeper: Vec<String> = inspection
-            .expanded
-            .iter()
-            .filter(|path| **path != expression)
-            .cloned()
-            .collect();
-        self.sync_inspection_tree();
-        for path in deeper {
-            self.commands
-                .push(ApplicationCommand::Debug(DebugRequest::ExpandInspection(
-                    path,
-                )));
-        }
+        let requests = self.inspection.result(expression, value, fields);
+        self.apply_inspection_requests(requests);
     }
 
     /// Abre a janela de inspeção com o valor avaliado e seus campos.
@@ -3764,146 +3298,60 @@ impl IdeShell {
         value: DebugVariableView,
         fields: Vec<DebugVariableView>,
     ) {
-        let expression = expression.into();
-        let mut root = InspectionNode::new(expression.clone(), value);
-        root.loaded = true;
-        root.children = fields
-            .into_iter()
-            .map(|field| InspectionNode::new(format!("{expression}.{}", field.name), field))
-            .collect();
-        // A raiz nasce aberta quando tem campos: quem manda inspecionar um objeto
-        // quer ver o que há dentro, não um triângulo para clicar.
-        let mut expanded = HashSet::new();
-        if !root.children.is_empty() {
-            expanded.insert(expression.clone());
-        }
-        self.debug_panel
-            .inspection
-            .modal
-            .set_title(format!("Inspecionar — {expression}"));
-        self.debug_panel.inspection.modal.open();
-        self.debug_panel.inspection.view = Some(InspectionView {
-            selected: expression.clone(),
-            expression,
-            root,
-            expanded,
-        });
-        self.sync_inspection_tree();
+        self.inspection.show(expression, value, fields);
     }
 
     /// Acrescenta os campos que o alvo revelou para um caminho.
     pub fn add_inspection_fields(&mut self, path: &str, fields: Vec<DebugVariableView>) {
-        let Some(inspection) = self.debug_panel.inspection.view.as_mut() else {
-            return;
-        };
-        let Some(node) = inspection.root.find_mut(path) else {
-            return;
-        };
-        node.loaded = true;
-        node.children = fields
-            .into_iter()
-            .map(|field| InspectionNode::new(format!("{path}.{}", field.name), field))
-            .collect();
-        // Sem campos não há o que abrir; manter aberto deixaria um triângulo
-        // apontando para nada.
-        if node.children.is_empty() {
-            inspection.expanded.remove(path);
-        }
-        self.sync_inspection_tree();
-    }
-
-    /// Reconstrói os itens da árvore a partir dos nós carregados.
-    fn sync_inspection_tree(&mut self) {
-        let Some(inspection) = self.debug_panel.inspection.view.as_ref() else {
-            return;
-        };
-        let roots = vec![inspection_items(&inspection.root)];
-        let expanded: Vec<u64> = inspection
-            .expanded
-            .iter()
-            .map(|path| inspection_id(path))
-            .collect();
-        let selected = inspection_id(&inspection.selected);
-        self.debug_panel.inspection.tree.set_roots(roots);
-        self.debug_panel.inspection.tree.set_expanded(expanded);
-        self.debug_panel
-            .inspection
-            .tree
-            .set_selected(Some(selected));
+        self.inspection.add_fields(path, fields);
     }
 
     /// Relata na janela o que a última execução respondeu.
-    ///
-    /// Enquanto a janela está aberta ela cobre a barra de estado, então é aqui
-    /// que a resposta precisa aparecer.
     pub fn set_inspection_message(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        // A avaliação responde com o valor ou com este relato, nunca com os dois:
-        // chegar aqui encerra a execução que estava em curso.
-        let interrupted = self.debug_panel.inspection.run.take();
-        if !self.debug_panel.inspection.modal.is_open() {
-            return;
-        }
-        let Some(run) = interrupted else {
-            self.debug_panel.inspection.message = Some(message);
-            return;
-        };
-        // As instruções seguintes não rodam: cada uma esperava o estado que a
-        // anterior deixaria, e ele não existe.
-        self.debug_panel.inspection.message = Some(if run.total > 1 {
-            format!(
-                "parou na instrução {} de {}: {message}",
-                run.position, run.total
-            )
-        } else {
-            message
-        });
-        // O que rodou antes da falha teve efeito, e a árvore precisa mostrá-lo.
-        // Só aqui: relê a cada relato qualquer e uma releitura que falhasse
-        // pediria outra, sem fim.
-        if run.position > 1 {
-            self.reload_inspection();
+        let requests = self.inspection.set_message(message);
+        self.apply_inspection_requests(requests);
+    }
+
+    /// Executa o que a janela de inspeção pediu.
+    ///
+    /// A janela não alcança o depurador nem a barra de estado: ela diz o que
+    /// precisa ser perguntado, e é aqui que isso vira pedido à aplicação.
+    fn apply_inspection_requests(&mut self, requests: Vec<InspectionRequest>) {
+        for request in requests {
+            match request {
+                InspectionRequest::Status(message) => self.context.status_message = message,
+                InspectionRequest::Evaluate(expression) => {
+                    self.commands
+                        .push(ApplicationCommand::Debug(DebugRequest::Evaluate(
+                            expression,
+                        )));
+                }
+                InspectionRequest::Expand(path) => {
+                    self.commands
+                        .push(ApplicationCommand::Debug(DebugRequest::ExpandInspection(
+                            path,
+                        )));
+                }
+            }
         }
     }
 
+    #[must_use]
     pub const fn inspection_open(&self) -> bool {
-        self.debug_panel.inspection.modal.is_open()
+        self.inspection.is_open()
     }
 
     /// Texto do editor de expressões da inspeção.
     #[must_use]
     pub fn inspection_source(&self) -> &str {
-        self.debug_panel.inspection.source.text()
+        self.inspection.source_text()
     }
 
     /// Executa o que está escrito no editor, no quadro atual.
     pub fn run_inspection_source(&mut self) {
-        if !self.debug_panel.view.attached {
-            self.debug_panel.inspection.message =
-                Some("A sessão de depuração terminou; reconecte para executar".to_owned());
-            return;
-        }
-        let mut statements = inspection_statements(self.debug_panel.inspection.source.text());
-        if statements.is_empty() {
-            self.context.status_message = "Escreva a expressão a executar".to_owned();
-            return;
-        }
-        let total = statements.len();
-        let first = statements.remove(0);
-        self.context.status_message = if total > 1 {
-            format!("Executando {first} (1 de {total})")
-        } else {
-            format!("Executando {first}")
-        };
-        self.debug_panel.inspection.message = None;
-        self.debug_panel.inspection.run = Some(InspectionRun {
-            current: first.clone(),
-            remaining: statements,
-            position: 1,
-            total,
-        });
-        self.commands
-            .push(ApplicationCommand::Debug(DebugRequest::Evaluate(first)));
+        let attached = self.debug_panel.view.attached;
+        let requests = self.inspection.run_source(attached);
+        self.apply_inspection_requests(requests);
     }
 
     /// Painel de edição que está na frente, com o texto que ele edita.
@@ -3913,11 +3361,8 @@ impl IdeShell {
     /// impede cada gesto — arraste, duplo clique, copiar, colar — de escolher por
     /// conta própria e um dia escolher diferente do vizinho.
     fn focused_editor(&mut self) -> Option<(&mut EditorPane, &mut TextBuffer)> {
-        if self.debug_panel.inspection.modal.is_open() {
-            return Some((
-                &mut self.debug_panel.inspection.editor,
-                &mut self.debug_panel.inspection.source,
-            ));
+        if self.inspection.is_open() {
+            return Some(self.inspection.editor_and_source());
         }
         let document = self.editor_area.session.active_mut()?;
         Some((&mut self.editor_area.pane, &mut document.buffer))
@@ -3934,13 +3379,11 @@ impl IdeShell {
     /// quem responde pelos membros é o índice do projeto, não o processo.
     #[must_use]
     pub fn inspection_member_context(&self) -> Option<(String, usize)> {
-        if !self.debug_panel.inspection.modal.is_open() {
+        if !self.inspection.is_open() {
             return None;
         }
-        Some((
-            self.debug_panel.inspection.source.text().to_owned(),
-            self.debug_panel.inspection.editor.cursor(),
-        ))
+        let (editor, source) = self.inspection.editor_and_source_ref();
+        Some((source.text().to_owned(), editor.cursor()))
     }
 
     #[must_use]
@@ -3956,18 +3399,8 @@ impl IdeShell {
     /// A árvore de inspeção vem primeiro porque é o objeto que o usuário mandou
     /// inspecionar; as variáveis do quadro cobrem o resto do que está no escopo.
     fn debug_type_of(&self, name: &str) -> Option<String> {
-        if let Some(inspection) = self.debug_panel.inspection.view.as_ref() {
-            if inspection.expression == name {
-                return inspection.root.variable.type_name.clone();
-            }
-            if let Some(field) = inspection
-                .root
-                .children
-                .iter()
-                .find(|child| child.variable.name == name)
-            {
-                return field.variable.type_name.clone();
-            }
+        if let Some(type_name) = self.inspection.type_of(name) {
+            return Some(type_name);
         }
         self.debug_panel
             .view
@@ -3986,7 +3419,7 @@ impl IdeShell {
         if self.editor_area.completion_items.is_empty() {
             return None;
         }
-        if self.debug_panel.inspection.modal.is_open() {
+        if self.inspection.is_open() {
             return self.inspection_completion_anchor();
         }
         if self.context.focus != ShellFocus::Editor {
@@ -4053,29 +3486,22 @@ impl IdeShell {
         if self.editor_area.completion_items.is_empty() {
             return None;
         }
-        let bounds = self.debug_panel.inspection.editor.bounds();
-        let (line, column) = line_column(
-            self.debug_panel.inspection.source.text(),
-            self.debug_panel.inspection.editor.cursor(),
-        );
+        let (editor, source) = self.inspection.editor_and_source_ref();
+        let bounds = editor.bounds();
+        let (line, column) = line_column(source.text(), editor.cursor());
         Some(Point::new(
             (bounds.origin.x + EDITOR_GUTTER + column as f32 * EDITOR_CHAR_WIDTH)
                 .min(bounds.origin.x + bounds.size.width - COMPLETION_POPUP_WIDTH)
                 .max(bounds.origin.x),
             bounds.origin.y
-                + (line.saturating_sub(self.debug_panel.inspection.editor.scroll_line()) + 1)
-                    as f32
-                    * EDITOR_LINE_HEIGHT,
+                + (line.saturating_sub(editor.scroll_line()) + 1) as f32 * EDITOR_LINE_HEIGHT,
         ))
     }
 
     /// O mesmo, para quem só precisa ler.
     fn focused_editor_ref(&self) -> Option<(&EditorPane, &TextBuffer)> {
-        if self.debug_panel.inspection.modal.is_open() {
-            return Some((
-                &self.debug_panel.inspection.editor,
-                &self.debug_panel.inspection.source,
-            ));
+        if self.inspection.is_open() {
+            return Some(self.inspection.editor_and_source_ref());
         }
         let document = self.editor_area.session.active()?;
         Some((&self.editor_area.pane, &document.buffer))
@@ -4086,8 +3512,9 @@ impl IdeShell {
     /// Converter ponto em posição do texto depende de saber onde o painel está, e
     /// as duas áreas mudam com o tamanho da janela.
     fn place_focused_editor(&mut self, size: Size) {
-        if self.debug_panel.inspection.modal.is_open() {
-            self.layout_inspection_editor(size);
+        if self.inspection.is_open() {
+            let context = self.layout_context();
+            self.inspection.layout_editor(&context, size);
             return;
         }
         let bounds = self.editor_view_rect(size);
@@ -4096,23 +3523,16 @@ impl IdeShell {
 
     /// Digitação dentro da janela de inspeção. Devolve `true` quando consumiu.
     fn inspection_text_input(&mut self, text: &str) -> bool {
-        if !self.debug_panel.inspection.modal.is_open()
-            || self.debug_panel.inspection.focus != InspectionFocus::Source
-        {
+        if !self.inspection.is_open() || !self.inspection.is_source_focused() {
             return false;
         }
-        self.debug_panel
-            .inspection
-            .editor
-            .insert(&mut self.debug_panel.inspection.source, text);
+        self.inspection.text_input(text);
         true
     }
 
     /// Tecla dentro da janela de inspeção. Devolve `true` quando consumiu.
     fn inspection_key(&mut self, key: &str, modifiers: Modifiers) -> bool {
-        if !self.debug_panel.inspection.modal.is_open()
-            || self.debug_panel.inspection.focus != InspectionFocus::Source
-        {
+        if !self.inspection.is_open() || !self.inspection.is_source_focused() {
             return false;
         }
         // Ctrl+Enter executa: a mão já está no teclado, escrevendo a expressão.
@@ -4124,39 +3544,19 @@ impl IdeShell {
         if self.completion_key(key) {
             return true;
         }
-        self.debug_panel.inspection.editor.key(
-            &mut self.debug_panel.inspection.source,
-            key,
-            modifiers.shift,
-            modifiers.control,
-        );
+        self.inspection
+            .editor_key(key, modifiers.shift, modifiers.control);
         true
     }
 
     /// Expressão que está sendo inspecionada.
     #[must_use]
     pub fn inspected_expression(&self) -> Option<&str> {
-        self.debug_panel
-            .inspection
-            .view
-            .as_ref()
-            .map(|inspection| inspection.expression.as_str())
+        self.inspection.expression()
     }
 
     pub fn close_inspection(&mut self) {
-        self.debug_panel.inspection.message = None;
-        self.debug_panel.inspection.run = None;
-        self.debug_panel.inspection.modal.close();
-        self.debug_panel.inspection.view = None;
-    }
-
-    /// Entrada destacada na árvore, que é a detalhada no painel direito.
-    fn inspection_selected(&self) -> Option<&DebugVariableView> {
-        let inspection = self.debug_panel.inspection.view.as_ref()?;
-        inspection
-            .root
-            .find(&inspection.selected)
-            .map(|node| &node.variable)
+        self.inspection.close();
     }
 
     /// Pede a avaliação do trecho marcado no quadro atual da depuração.
@@ -4237,11 +3637,8 @@ impl IdeShell {
     /// Marcar o documento como modificado e fechar o autocomplete são efeitos do
     /// editor de arquivos; o rascunho da inspeção não tem nenhum dos dois.
     fn edit_focused(&mut self, text: &str) {
-        if self.debug_panel.inspection.modal.is_open() {
-            self.debug_panel
-                .inspection
-                .editor
-                .insert(&mut self.debug_panel.inspection.source, text);
+        if self.inspection.is_open() {
+            self.inspection.text_input(text);
             return;
         }
         self.edit_active(text);
@@ -4589,7 +3986,7 @@ impl IdeShell {
                 13.0,
             ));
         }
-        if !self.debug_panel.inspection.modal.is_open()
+        if !self.inspection.is_open()
             && let Some(anchor) = self.completion_anchor(size)
         {
             self.paint_completion(&mut commands, size, anchor);
@@ -4686,113 +4083,14 @@ impl IdeShell {
             button.paint(&mut actions);
         }
         commands.extend(actions.into_commands());
-        if self.settings.modal.is_open() {
-            let mut modal = self.settings.modal.clone();
-            modal.layout(
-                &self.layout_context(),
-                Rect::new(0.0, 0.0, size.width, size.height),
-            );
-            let geometry = settings_dialog_geometry(modal.panel_bounds());
-            let mut modal_paint = self.paint_context();
-            modal.paint(&mut modal_paint);
-            commands.extend(modal_paint.into_commands());
-            commands.push(fill(geometry.sidebar, colors.surface));
-            let mut component_paint = self.paint_context();
-            // A navegação entre páginas é a `ListView` da biblioteca, no estilo
-            // de marcador: a linha ativa ganha a barra de destaque e continua
-            // sendo um rótulo para ler.
-            let pages = self.settings_pages_for(&geometry);
-            pages.paint(&mut component_paint);
-            match self.settings.page {
-                SettingsPage::Contribution(index) => {
-                    let section = self.catalog.settings_sections.get(index);
-                    // Título e legenda são `Label` da biblioteca: tamanho e cor
-                    // vêm do tema, não de números escritos aqui.
-                    self.paint_settings_text(
-                        &mut component_paint,
-                        SETTINGS_TITLE_ID,
-                        section.map_or("Ferramenta", |section| section.title.as_str()),
-                        Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 34.0),
-                        17.0,
-                        IconTint::Text,
-                    );
-                    self.paint_settings_text(
-                        &mut component_paint,
-                        SETTINGS_CAPTION_ID,
-                        section.map_or("Toolchain", |section| section.field_caption.as_str()),
-                        Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 16.0),
-                        13.0,
-                        IconTint::Muted,
-                    );
-                    let mut combo = self.settings.toolchain_combo.clone();
-                    combo.layout(&self.layout_context(), geometry.combo);
-                    combo.paint(&mut component_paint);
-                    let mut browse = self.settings.toolchain_browse_button.clone();
-                    browse.layout(&self.layout_context(), geometry.browse);
-                    browse.paint(&mut component_paint);
-                    // A segunda escolha só existe se a seção declarar uma: a
-                    // tela desenha o que lhe dizem, sem saber o que é.
-                    if let Some(caption) = self
-                        .catalog
-                        .settings_sections
-                        .first()
-                        .and_then(|section| section.secondary_caption.clone())
-                    {
-                        self.paint_settings_text(
-                            &mut component_paint,
-                            SECONDARY_TOOL_CAPTION_ID,
-                            &caption,
-                            Point::new(
-                                geometry.secondary_combo.origin.x,
-                                geometry.secondary_combo.origin.y - 16.0,
-                            ),
-                            13.0,
-                            IconTint::Muted,
-                        );
-                        let mut combo = self.settings.secondary_combo.clone();
-                        combo.layout(&self.layout_context(), geometry.secondary_combo);
-                        combo.paint(&mut component_paint);
-                        let mut browse = self.settings.secondary_browse_button.clone();
-                        browse.layout(&self.layout_context(), geometry.secondary_browse);
-                        browse.paint(&mut component_paint);
-                    }
-                }
-                SettingsPage::Debug => {
-                    commands.extend(self.paint_debug_settings(&geometry, colors));
-                    let mut host = self.settings.debug_host.clone();
-                    host.layout(&self.layout_context(), geometry.debug_host);
-                    host.paint(&mut component_paint);
-                    let mut port = self.settings.debug_port.clone();
-                    port.layout(&self.layout_context(), geometry.debug_port);
-                    port.paint(&mut component_paint);
-                    let mut attach = self.settings.debug_attach_button.clone();
-                    attach.layout(&self.layout_context(), geometry.debug_attach);
-                    attach.paint(&mut component_paint);
-                }
-            }
-            let mut close = self.settings.close_button.clone();
-            close.layout(&self.layout_context(), geometry.close);
-            close.paint(&mut component_paint);
-            let mut save = self.settings.save_button.clone();
-            save.layout(&self.layout_context(), geometry.save);
-            save.paint(&mut component_paint);
-            if let Some(message) = self
-                .settings
-                .dialog
-                .as_ref()
-                .and_then(|dialog| dialog.message.as_ref())
-            {
-                self.paint_settings_text(
-                    &mut component_paint,
-                    SETTINGS_MESSAGE_ID,
-                    message,
-                    Point::new(geometry.combo.origin.x, geometry.combo.origin.y + 54.0),
-                    13.0,
-                    IconTint::Danger,
-                );
-            }
-            commands.extend(component_paint.into_commands());
-        }
+        commands.extend(self.settings.paint(
+            &self.layout_context(),
+            size,
+            &self.catalog.settings_sections,
+            colors,
+            self.paint_context(),
+            self.paint_context(),
+        ));
         // A janela de criação cobre o conteúdo, e o menu de contexto cobre ela.
         self.paint_new_item_dialog(&mut commands, size);
         self.paint_generate(&mut commands, size);
@@ -4800,7 +4098,7 @@ impl IdeShell {
         self.paint_type_search(&mut commands, size);
         self.paint_inspection(&mut commands, size);
         // Depois da janela de inspeção, ou a lista ficaria atrás dela.
-        if self.debug_panel.inspection.modal.is_open()
+        if self.inspection.is_open()
             && let Some(anchor) = self.inspection_completion_anchor()
         {
             self.paint_completion(&mut commands, size, anchor);
@@ -4872,188 +4170,22 @@ impl IdeShell {
     }
 
     fn paint_inspection(&self, commands: &mut Vec<PaintCommand>, size: Size) {
-        let Some(inspection) = self.debug_panel.inspection.view.as_ref() else {
-            return;
-        };
-        let mut modal = self.debug_panel.inspection.modal.clone();
-        modal.layout(
-            &self.layout_context(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        let geometry = inspection_geometry(modal.panel_bounds());
+        let layout = self.layout_context();
         let mut paint = self.paint_context();
-        modal.paint(&mut paint);
-
-        let mut tree = self.debug_panel.inspection.tree.clone();
-        tree.set_selected(Some(inspection_id(&inspection.selected)));
-        tree.layout(&self.layout_context(), geometry.list);
-        tree.paint(&mut paint);
-
-        let detail = geometry.detail;
-        match self.inspection_selected() {
-            Some(entry) => {
-                self.paint_settings_text(
-                    &mut paint,
-                    INSPECTION_NAME_ID,
-                    &entry.name,
-                    Point::new(detail.origin.x, detail.origin.y),
-                    17.0,
-                    IconTint::Text,
-                );
-                self.paint_settings_text(
-                    &mut paint,
-                    INSPECTION_TYPE_ID,
-                    entry.type_name.as_deref().unwrap_or("tipo desconhecido"),
-                    Point::new(detail.origin.x, detail.origin.y + 26.0),
-                    13.0,
-                    IconTint::Muted,
-                );
-                self.paint_settings_text(
-                    &mut paint,
-                    INSPECTION_VALUE_ID,
-                    &entry.value,
-                    Point::new(detail.origin.x, detail.origin.y + 56.0),
-                    14.0,
-                    IconTint::Text,
-                );
-            }
-            None => self.paint_settings_text(
-                &mut paint,
-                INSPECTION_EMPTY_ID,
-                "Sem valor para mostrar",
-                Point::new(detail.origin.x, detail.origin.y),
-                14.0,
-                IconTint::Muted,
-            ),
+        let attached = self.debug_panel.view.attached;
+        if self.inspection.paint(&layout, &mut paint, size, attached) {
+            commands.extend(paint.into_commands());
         }
-
-        // O editor de expressões é o mesmo painel da janela principal, com os
-        // comportamentos de arquivo desligados.
-        self.paint_settings_text(
-            &mut paint,
-            INSPECTION_SOURCE_CAPTION_ID,
-            "Código a executar no quadro atual",
-            Point::new(geometry.source.origin.x, geometry.source.origin.y - 16.0),
-            13.0,
-            IconTint::Muted,
-        );
-        let mut editor = self.debug_panel.inspection.editor.clone();
-        editor.set_bounds(geometry.source);
-        editor.sync(
-            &self.layout_context(),
-            &self.debug_panel.inspection.source,
-            None,
-            Vec::new(),
-            true,
-        );
-        editor.paint(&mut paint);
-
-        if let Some(message) = self.debug_panel.inspection.message.as_ref() {
-            // A mensagem tem a linha inteira, acima dos botões: dividir a linha
-            // com eles a fazia passar por baixo do Executar, ilegível justamente
-            // quando é ela que explica por que o clique não fez nada.
-            self.paint_settings_text(
-                &mut paint,
-                INSPECTION_MESSAGE_ID,
-                &clipped_message(message, geometry.message.size.width),
-                geometry.message.origin,
-                13.0,
-                IconTint::Danger,
-            );
-        }
-        let mut run = self.debug_panel.inspection.run_button.clone();
-        // Sem sessão viva não há quadro onde executar: o botão apagado diz isso
-        // antes do clique, em vez de a mensagem dizer depois.
-        run.set_disabled(!self.debug_panel.view.attached);
-        run.layout(&self.layout_context(), geometry.run);
-        run.paint(&mut paint);
-        let mut close = self.debug_panel.inspection.close_button.clone();
-        close.layout(&self.layout_context(), geometry.close);
-        close.paint(&mut paint);
-        commands.extend(paint.into_commands());
     }
 
     /// Roteia o clique dentro da janela de inspeção.
-    /// Põe o painel de edição da inspeção na área que ele ocupa agora.
-    ///
-    /// O painel só sabe converter ponto em posição do texto depois de saber onde
-    /// está, e a janela é centrada: a área muda com o tamanho da tela.
-    fn layout_inspection_editor(&mut self, size: Size) -> InspectionGeometry {
-        self.debug_panel.inspection.modal.layout(
-            &self.layout_context(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        let geometry = inspection_geometry(self.debug_panel.inspection.modal.panel_bounds());
-        self.debug_panel
-            .inspection
-            .editor
-            .set_bounds(geometry.source);
-        geometry
-    }
-
     fn inspection_pointer_down(&mut self, point: Point, size: Size) {
-        let geometry = self.layout_inspection_editor(size);
-        if geometry.close.contains(point) {
-            self.close_inspection();
-            return;
-        }
-        if geometry.run.contains(point) {
-            self.run_inspection_source();
-            return;
-        }
-        if geometry.source.contains(point) {
-            // O editor cuida do próprio cursor e da própria seleção.
-            self.debug_panel.inspection.editor.pointer_down(
-                &self.debug_panel.inspection.source,
-                point,
-                false,
-                false,
-            );
-            self.debug_panel.inspection.focus = InspectionFocus::Source;
-            return;
-        }
-        self.debug_panel.inspection.focus = InspectionFocus::Tree;
-        if !geometry.list.contains(point) {
-            return;
-        }
-        // Qual nó foi clicado é a árvore quem sabe: recuo, marcador de expansão e
-        // rolagem são dela.
-        let mut tree = self.debug_panel.inspection.tree.clone();
-        tree.layout(&self.layout_context(), geometry.list);
-        tree.event(
-            &mut EventContext::default(),
-            &UiEvent::PointerDown(primary_pointer(point)),
-        );
-        let Some(id) = tree.selected() else {
-            return;
-        };
-        let Some(inspection) = self.debug_panel.inspection.view.as_mut() else {
-            return;
-        };
-        let Some(path) = inspection_path_of(&inspection.root, id) else {
-            return;
-        };
-        inspection.selected = path.clone();
-        let expandable = inspection
-            .root
-            .find(&path)
-            .is_some_and(|node| node.variable.expandable);
-        if expandable {
-            // Clicar em um valor com campos abre e fecha, como no Explorer.
-            if !inspection.expanded.remove(&path) {
-                inspection.expanded.insert(path.clone());
-                let pending = inspection.root.find(&path).is_some_and(|node| !node.loaded);
-                if pending {
-                    // Os campos só são pedidos ao abrir: perguntar por tudo de
-                    // uma vez percorreria o grafo inteiro do objeto.
-                    self.commands
-                        .push(ApplicationCommand::Debug(DebugRequest::ExpandInspection(
-                            path,
-                        )));
-                }
-            }
-        }
-        self.sync_inspection_tree();
+        let context = self.layout_context();
+        let attached = self.debug_panel.view.attached;
+        let requests = self
+            .inspection
+            .pointer_down(&context, point, size, attached);
+        self.apply_inspection_requests(requests);
     }
 
     /// Desenha a janela de criação por cima de tudo.
@@ -5061,451 +4193,94 @@ impl IdeShell {
     /// Moldura, véu e título são do `ModalHost`; os campos, os botões e as
     /// legendas são componentes da biblioteca. A IDE diz onde e o que.
     /// Desenha a busca de tipo: campo em cima, resultados embaixo.
-    ///
-    /// Janela, campo e lista são da biblioteca; a IDE diz o que cada um mostra.
     fn paint_type_search(&self, commands: &mut Vec<PaintCommand>, size: Size) {
-        if !self.search.modal.is_open() {
-            return;
-        }
-        let mut modal = self.search.modal.clone();
-        modal.layout(
-            &self.layout_context(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
+        let layout = self.layout_context();
         let mut paint = self.paint_context();
-        modal.paint(&mut paint);
-        let panel = modal.panel_bounds();
-        let input = Rect::new(
-            panel.origin.x + 16.0,
-            panel.origin.y + 56.0,
-            panel.size.width - 32.0,
-            34.0,
-        );
-        let placeholder = match self.search.mode {
-            WorkspaceSearchMode::Types => "Nome da classe, interface, record ou enum",
-            WorkspaceSearchMode::Content => "Texto nos arquivos do escopo do projeto",
-        };
-        let mut field =
-            TextInput::new(TYPE_SEARCH_INPUT_ID, &self.search.query).with_placeholder(placeholder);
-        field.event(&mut EventContext::default(), &UiEvent::FocusGained);
-        field.layout(&self.layout_context(), input);
-        field.paint(&mut paint);
-
-        let list_rect = Rect::new(
-            panel.origin.x + 16.0,
-            input.origin.y + input.size.height + 12.0,
-            panel.size.width - 32.0,
-            (panel.origin.y + panel.size.height - 16.0)
-                - (input.origin.y + input.size.height + 12.0),
-        );
-        let labels = match self.search.mode {
-            WorkspaceSearchMode::Types => self
-                .search
-                .type_results
-                .iter()
-                .skip(self.search.first_visible)
-                .take(TYPE_SEARCH_VISIBLE_ROWS)
-                .map(|hit| hit.label(&self.catalog.source_root_names))
-                .collect::<Vec<_>>(),
-            WorkspaceSearchMode::Content => self
-                .search
-                .content_results
-                .iter()
-                .skip(self.search.first_visible)
-                .take(TYPE_SEARCH_VISIBLE_ROWS)
-                .map(|hit| hit.label(&self.catalog.source_root_names))
-                .collect::<Vec<_>>(),
-        };
-        let mut list =
-            ListView::new(TYPE_SEARCH_LIST_ID, labels).with_row_height(TYPE_SEARCH_ROW_HEIGHT);
-        list.set_selected(self.search.selected.checked_sub(self.search.first_visible));
-        list.layout(&self.layout_context(), list_rect);
-        list.paint(&mut paint);
-        commands.extend(paint.into_commands());
+        if self
+            .search
+            .paint(&layout, &mut paint, size, &self.catalog.source_root_names)
+        {
+            commands.extend(paint.into_commands());
+        }
     }
 
     fn paint_new_item_dialog(&self, commands: &mut Vec<PaintCommand>, size: Size) {
-        let Some(dialog) = self.search.new_item_dialog.as_ref() else {
-            return;
-        };
-        let mut modal = self.search.new_item_modal.clone();
-        // O painel se centraliza na área que recebe no layout. Sem esse layout a
-        // área é zero, e a janela nasce no canto superior esquerdo.
-        modal.layout(
-            &self.layout_context(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        let panel = modal.panel_bounds();
-        let geometry = new_item_geometry(panel);
+        let layout = self.layout_context();
         let mut paint = self.paint_context();
-        // O título é do `ModalHost`, que já o desenha: escrever outro por cima
-        // era o que aparecia duplicado.
-        modal.paint(&mut paint);
-        self.paint_settings_text(
-            &mut paint,
-            NEW_ITEM_PACKAGE_CAPTION_ID,
-            "Pacote",
-            Point::new(geometry.package.origin.x, geometry.package.origin.y - 18.0),
-            13.0,
-            IconTint::Muted,
-        );
-        self.paint_settings_text(
-            &mut paint,
-            NEW_ITEM_NAME_CAPTION_ID,
-            &dialog.template.name_caption,
-            Point::new(geometry.name.origin.x, geometry.name.origin.y - 18.0),
-            13.0,
-            IconTint::Muted,
-        );
-        for (field, rect) in [
-            (&self.search.new_item_package, geometry.package),
-            (&self.search.new_item_name, geometry.name),
-        ] {
-            // O foco já está no campo de verdade; aqui é só desenhar.
-            let mut field = field.clone();
-            field.layout(&self.layout_context(), rect);
-            field.paint(&mut paint);
+        if self.new_item.paint(&layout, &mut paint, size) {
+            commands.extend(paint.into_commands());
         }
-        for (button, rect) in [
-            (&self.search.new_item_cancel_button, geometry.cancel),
-            (&self.search.new_item_create_button, geometry.create),
-        ] {
-            let mut button = button.clone();
-            button.layout(&self.layout_context(), rect);
-            button.paint(&mut paint);
-        }
-        if let Some(message) = dialog.message.as_ref() {
-            self.paint_settings_text(
-                &mut paint,
-                NEW_ITEM_MESSAGE_ID,
-                message,
-                Point::new(geometry.name.origin.x, geometry.name.origin.y + 44.0),
-                13.0,
-                IconTint::Danger,
-            );
-        }
-        commands.extend(paint.into_commands());
     }
 
     /// Roteia o clique dentro da janela de criação.
     fn new_item_pointer_down(&mut self, point: Point, size: Size) {
-        self.search.new_item_modal.layout(
-            &self.layout_context(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        let geometry = new_item_geometry(self.search.new_item_modal.panel_bounds());
-        // O clique vai ao campo: onde o cursor fica dentro do texto é ele quem
-        // sabe, porque a medição da fonte é dele.
-        for (naming, rect) in [(false, geometry.package), (true, geometry.name)] {
-            if !rect.contains(point) {
-                continue;
-            }
-            let context = self.layout_context();
-            let field = if naming {
-                &mut self.search.new_item_name
-            } else {
-                &mut self.search.new_item_package
-            };
-            field.layout(&context, rect);
-            field.event(
-                &mut EventContext::default(),
-                &UiEvent::PointerDown(primary_pointer(point)),
-            );
-            self.focus_new_item_field(naming);
-            return;
-        }
-        if geometry.create.contains(point) {
-            self.submit_new_item();
-            return;
-        }
-        if geometry.cancel.contains(point) {
-            self.close_new_item_dialog();
-        }
-    }
-
-    /// Move o foco entre os dois campos.
-    ///
-    /// O foco fica nos campos de verdade, e não num clone da pintura: é ele que
-    /// decide onde a digitação entra e onde o cursor aparece.
-    fn focus_new_item_field(&mut self, naming: bool) {
-        if let Some(dialog) = self.search.new_item_dialog.as_mut() {
-            dialog.naming = naming;
-        }
-        let mut context = EventContext::default();
-        let (focused, blurred) = if naming {
-            (
-                &mut self.search.new_item_name,
-                &mut self.search.new_item_package,
-            )
-        } else {
-            (
-                &mut self.search.new_item_package,
-                &mut self.search.new_item_name,
-            )
-        };
-        focused.event(&mut context, &UiEvent::FocusGained);
-        blurred.event(&mut context, &UiEvent::FocusLost);
-    }
-
-    /// O campo que está recebendo o que for digitado.
-    fn new_item_field(&mut self) -> Option<&mut TextInput> {
-        let naming = self.search.new_item_dialog.as_ref()?.naming;
-        Some(if naming {
-            &mut self.search.new_item_name
-        } else {
-            &mut self.search.new_item_package
-        })
+        let context = self.layout_context();
+        let outcome = self.new_item.pointer_down(&context, point, size);
+        self.apply_new_item_outcome(outcome);
     }
 
     /// Tecla dentro da janela de criação. Devolve `true` quando a consumiu.
     fn new_item_key(&mut self, key: &str) -> bool {
-        if !self.search.new_item_modal.is_open() {
+        if !self.new_item.is_open() {
             return false;
         }
-        let Some(naming) = self
-            .search
-            .new_item_dialog
-            .as_ref()
-            .map(|dialog| dialog.naming)
-        else {
-            return false;
-        };
-        match key.to_ascii_lowercase().as_str() {
-            "enter" => self.submit_new_item(),
-            "escape" => self.close_new_item_dialog(),
-            "tab" => self.focus_new_item_field(!naming),
-            // Apagar e mover o cursor são do campo: ele conhece as fronteiras de
-            // caractere e a posição atual.
-            _ => {
-                let event = UiEvent::KeyDown(KeyEvent {
-                    logical_key: key.to_owned(),
-                    repeat: false,
-                    modifiers: Modifiers::default(),
-                });
-                if let Some(field) = self.new_item_field() {
-                    field.event(&mut EventContext::default(), &event);
-                }
-            }
-        }
+        let outcome = self.new_item.key(key);
+        self.apply_new_item_outcome(outcome);
         true
     }
 
     /// Texto digitado na janela de criação. Devolve `true` quando o consumiu.
-    ///
-    /// O texto entra pelo componente, e não por concatenação: é assim que ele
-    /// aparece onde o cursor está, inclusive depois de um clique no meio do
-    /// caminho já digitado.
     fn new_item_text_input(&mut self, text: &str) -> bool {
-        if !self.search.new_item_modal.is_open() {
+        if !self.new_item.is_open() {
             return false;
         }
-        let event = UiEvent::TextInput(TextInputEvent {
-            text: text.to_owned(),
-        });
-        if let Some(field) = self.new_item_field() {
-            field.event(&mut EventContext::default(), &event);
-        }
-        if let Some(dialog) = self.search.new_item_dialog.as_mut() {
-            // Digitar é corrigir: a mensagem do erro anterior sai de cena.
-            dialog.message = None;
-        }
+        self.new_item.text_input(text);
         true
     }
 
-    /// Lista de páginas posicionada, com a página atual selecionada.
-    ///
-    /// A área ocupada é a das duas linhas, não a barra inteira: a lista responde
-    /// pelo que ela desenha, e o resto da barra é fundo do painel.
-    fn settings_pages_for(&self, geometry: &SettingsDialogGeometry) -> ListView {
-        let mut pages = self.settings.pages.clone();
-        pages.set_selected(Some(match self.settings.page {
-            SettingsPage::Contribution(index) => index,
-            SettingsPage::Debug => self.catalog.settings_sections.len(),
-        }));
-        pages.layout(
-            &self.layout_context(),
-            settings_pages_rect(geometry, self.catalog.settings_sections.len() + 1),
-        );
-        pages
-    }
-
-    /// Desenha um texto da janela de configurações com a `Label` da biblioteca.
-    ///
-    /// A IDE escolhe o papel — título, legenda, mensagem de erro — e a posição.
-    /// Cor e desenho vêm do componente, e é assim que o tema alcança este texto.
-    fn paint_settings_text(
-        &self,
-        context: &mut PaintContext,
-        id: WidgetId,
-        text: &str,
-        origin: Point,
-        font_size: f32,
-        tone: IconTint,
-    ) {
-        let mut label = Label::new(id, text)
-            .with_font_size(font_size)
-            .with_tone(tone);
-        label.layout(
-            &self.layout_context(),
-            Rect::new(origin.x, origin.y, 0.0, 0.0),
-        );
-        label.paint(context);
-    }
-
     fn settings_dialog_pointer_down(&mut self, point: Point, size: Size) {
-        if !self.settings.modal.is_open() {
-            return;
-        }
-        self.settings.modal.layout(
-            &self.layout_context(),
-            Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        let geometry = settings_dialog_geometry(self.settings.modal.panel_bounds());
-        // Qual página foi clicada é a lista quem sabe: altura de linha e rolagem
-        // são dela.
-        let mut pages = self.settings_pages_for(&geometry);
-        pages.event(
-            &mut EventContext::default(),
-            &UiEvent::PointerDown(primary_pointer(point)),
-        );
-        if let Some(page) = pages.selected().map(|index| {
-            if index < self.catalog.settings_sections.len() {
-                SettingsPage::Contribution(index)
-            } else {
-                SettingsPage::Debug
-            }
-        }) && settings_pages_rect(&geometry, self.catalog.settings_sections.len() + 1)
-            .contains(point)
-        {
-            self.settings.page = page;
-            self.settings.focus = None;
-            return;
-        }
-        if self.settings.page == SettingsPage::Debug {
-            self.debug_page_pointer_down(point, &geometry);
-            return;
-        }
-        self.settings
-            .toolchain_combo
-            .layout(&self.layout_context(), geometry.combo);
-        self.settings
-            .toolchain_browse_button
-            .layout(&self.layout_context(), geometry.browse);
-        // A segunda escolha da seção recebe o clique pelo mesmo caminho: sem
-        // isso ela é desenhada e nunca respondia.
-        self.settings
-            .secondary_combo
-            .layout(&self.layout_context(), geometry.secondary_combo);
-        self.settings
-            .secondary_browse_button
-            .layout(&self.layout_context(), geometry.secondary_browse);
-        self.settings
-            .close_button
-            .layout(&self.layout_context(), geometry.close);
-        self.settings
-            .save_button
-            .layout(&self.layout_context(), geometry.save);
-        let event = UiEvent::PointerDown(primary_pointer(point));
-        let mut context = EventContext::default();
-        let combo_result = self.settings.toolchain_combo.event(&mut context, &event);
-        let combo_consumed = !matches!(combo_result, EventResult::Ignored);
-        if self.handle_settings_action(combo_result) || combo_consumed {
-            return;
-        }
-        let browse_result = click_widget(&mut self.settings.toolchain_browse_button, point);
-        if self.handle_settings_action(browse_result) {
-            return;
-        }
-        let segunda = self.settings.secondary_combo.event(&mut context, &event);
-        let segunda_consumiu = !matches!(segunda, EventResult::Ignored);
-        if self.handle_settings_action(segunda) || segunda_consumiu {
-            return;
-        }
-        let segunda_browse = click_widget(&mut self.settings.secondary_browse_button, point);
-        if self.handle_settings_action(segunda_browse) {
-            return;
-        }
-        let close_result = click_widget(&mut self.settings.close_button, point);
-        if self.handle_settings_action(close_result) {
-            return;
-        }
-        let save_result = click_widget(&mut self.settings.save_button, point);
-        if self.handle_settings_action(save_result) {
-            return;
-        }
-        let _ = self.settings.modal.event(&mut context, &event);
+        let context = self.layout_context();
+        let sections = self.catalog.settings_sections.clone();
+        let outcome = self.settings.pointer_down(&context, point, size, &sections);
+        self.apply_settings_outcome(outcome);
     }
 
-    fn paint_debug_settings(
-        &self,
-        geometry: &SettingsDialogGeometry,
-        colors: ColorTokens,
-    ) -> Vec<PaintCommand> {
-        let origin = geometry.debug_host.origin;
-        let mut commands = vec![
-            label(
-                "Depuração",
-                Point::new(origin.x, origin.y - 34.0),
-                colors.text,
-                17.0,
-            ),
-            label(
-                "Host e porta de depuração do processo em execução",
-                Point::new(origin.x, origin.y - 16.0),
-                colors.muted_text,
-                13.0,
-            ),
-            label(
-                "Inicie o servidor com -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8000",
-                Point::new(origin.x, geometry.debug_attach.origin.y + 48.0),
-                colors.muted_text,
-                12.0,
-            ),
-            label(
-                "Vale para qualquer processo depurado: servidor, container ou ferramenta.",
-                Point::new(origin.x, geometry.debug_attach.origin.y + 66.0),
-                colors.muted_text,
-                12.0,
-            ),
-        ];
-        for (rect, id) in [
-            (geometry.debug_host, DEBUG_HOST_ID),
-            (geometry.debug_port, DEBUG_PORT_ID),
-        ] {
-            if self.settings.focus == Some(id) {
-                commands.push(stroke(rect, colors.accent));
+    /// Executa o que a janela de configurações decidiu.
+    ///
+    /// A janela não alcança a fila de comandos nem a barra de status: ela diz o
+    /// que mudou, e é aqui que isso vira pedido à aplicação.
+    fn apply_settings_outcome(&mut self, outcome: SettingsOutcome) {
+        match outcome {
+            SettingsOutcome::Idle => {}
+            SettingsOutcome::Browse(ToolSlot::Primary) => {
+                self.commands.push(ApplicationCommand::BrowseToolchain);
+            }
+            SettingsOutcome::Browse(ToolSlot::Secondary) => {
+                self.commands.push(ApplicationCommand::BrowseSecondaryTool);
+            }
+            SettingsOutcome::Save {
+                toolchain,
+                secondary,
+            } => {
+                if let Some(index) = toolchain {
+                    self.commands
+                        .push(ApplicationCommand::SelectToolchain(index));
+                }
+                if let Some(index) = secondary {
+                    self.commands
+                        .push(ApplicationCommand::SelectSecondaryTool(index));
+                }
+            }
+            SettingsOutcome::Attach { host, port } => {
+                self.commands
+                    .push(ApplicationCommand::Debug(DebugRequest::Attach {
+                        host: host.clone(),
+                        port,
+                    }));
+                self.context.status_message =
+                    format!("Conectando ao alvo de depuração {host}:{port}");
             }
         }
-        commands
-    }
-
-    fn debug_page_pointer_down(&mut self, point: Point, geometry: &SettingsDialogGeometry) {
-        if geometry.debug_host.contains(point) {
-            self.settings.focus = Some(DEBUG_HOST_ID);
-            return;
-        }
-        if geometry.debug_port.contains(point) {
-            self.settings.focus = Some(DEBUG_PORT_ID);
-            return;
-        }
-        if geometry.debug_attach.contains(point) {
-            // O foco é preservado para o usuário corrigir um valor recusado.
-            self.attach_debug_target();
-            return;
-        }
-        self.settings.focus = None;
-        self.settings
-            .close_button
-            .layout(&self.layout_context(), geometry.close);
-        let close_result = click_widget(&mut self.settings.close_button, point);
-        if self.handle_settings_action(close_result) {
-            return;
-        }
-        self.settings
-            .save_button
-            .layout(&self.layout_context(), geometry.save);
-        let save_result = click_widget(&mut self.settings.save_button, point);
-        let _ = self.handle_settings_action(save_result);
     }
 
     /// Botões de ação da barra, na ordem em que aparecem.
@@ -5573,7 +4348,7 @@ impl IdeShell {
                     }));
             }
             None => {
-                self.settings.page = SettingsPage::Debug;
+                self.settings.set_page(SettingsPage::Debug);
                 self.commands.push(ApplicationCommand::OpenSettings);
                 self.context.status_message =
                     "Informe um host e uma porta de depuração válidos".to_owned();
@@ -5581,157 +4356,9 @@ impl IdeShell {
         }
     }
 
-    /// Valida host e porta antes de pedir a conexão à aplicação.
-    fn attach_debug_target(&mut self) {
-        let host = self.settings.debug_host.value().trim().to_owned();
-        let port = self.settings.debug_port.value().trim().parse::<u16>().ok();
-        match (host.is_empty(), port) {
-            (false, Some(port)) if port > 0 => {
-                self.commands
-                    .push(ApplicationCommand::Debug(DebugRequest::Attach {
-                        host: host.clone(),
-                        port,
-                    }));
-                self.settings.modal.close();
-                self.settings.dialog = None;
-                self.settings.focus = None;
-                self.context.status_message =
-                    format!("Conectando ao alvo de depuração {host}:{port}");
-            }
-            _ => {
-                self.set_settings_message("Informe um host e uma porta de depuração válidos.");
-            }
-        }
-    }
-
     /// Digitação enquanto a página de depuração está em foco.
     fn settings_text_input(&mut self, text: &str) -> bool {
-        let Some(focus) = self.settings.focus else {
-            return false;
-        };
-        let input = if focus == DEBUG_HOST_ID {
-            &mut self.settings.debug_host
-        } else {
-            &mut self.settings.debug_port
-        };
-        let mut value = input.value().to_owned();
-        value.push_str(text);
-        input.set_value(value);
-        true
-    }
-
-    fn settings_key_down(&mut self, key: &str) -> bool {
-        let Some(focus) = self.settings.focus else {
-            return false;
-        };
-        match key {
-            "Backspace" => {
-                let input = if focus == DEBUG_HOST_ID {
-                    &mut self.settings.debug_host
-                } else {
-                    &mut self.settings.debug_port
-                };
-                let mut value = input.value().to_owned();
-                value.pop();
-                input.set_value(value);
-                true
-            }
-            "Enter" => {
-                self.attach_debug_target();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn handle_settings_action(&mut self, result: EventResult) -> bool {
-        let EventResult::Action(WidgetAction::Command(command)) = result else {
-            return false;
-        };
-        if let Some(index) = command
-            .0
-            .strip_prefix("toolchain.select.")
-            .and_then(|value| value.parse::<usize>().ok())
-        {
-            // A escolha fica pendente: quem aplica é o Salvar.
-            if let Some(dialog) = self.settings.dialog.as_mut() {
-                dialog.pending_toolchain = Some(index);
-            }
-            return true;
-        }
-        if let Some(index) = command
-            .0
-            .strip_prefix("tool.select.")
-            .and_then(|value| value.parse::<usize>().ok())
-        {
-            // Como na primeira escolha: fica pendente, e quem aplica é o Salvar.
-            if let Some(dialog) = self.settings.dialog.as_mut() {
-                dialog.pending_secondary = Some(index);
-            }
-            return true;
-        }
-        match command.0.as_str() {
-            "toolchain.browse" => {
-                self.commands.push(ApplicationCommand::BrowseToolchain);
-                true
-            }
-            "tool.browse" => {
-                self.commands.push(ApplicationCommand::BrowseSecondaryTool);
-                true
-            }
-            "settings.save" => {
-                self.save_settings();
-                true
-            }
-            "settings.cancel" => {
-                self.cancel_settings();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Aplica o que foi mexido e fecha.
-    ///
-    /// Só o que mudou sai daqui: sem escolha pendente, salvar não reaplica a toolchain
-    /// que já estava valendo — reaplicar derrubaria o provider de linguagem e
-    /// reindexaria a biblioteca padrão por nada.
-    fn save_settings(&mut self) {
-        if let Some(dialog) = self.settings.dialog.as_ref()
-            && let Some(index) = dialog.pending_toolchain
-            && dialog.original_toolchain != Some(index)
-        {
-            self.commands
-                .push(ApplicationCommand::SelectToolchain(index));
-        }
-        if let Some(dialog) = self.settings.dialog.as_ref()
-            && let Some(index) = dialog.pending_secondary
-            && dialog.original_secondary != Some(index)
-        {
-            self.commands
-                .push(ApplicationCommand::SelectSecondaryTool(index));
-        }
-        self.settings.modal.close();
-        self.settings.dialog = None;
-    }
-
-    /// Descarta tudo o que foi mexido e fecha.
-    fn cancel_settings(&mut self) {
-        if let Some(dialog) = self.settings.dialog.take() {
-            if let Some(original) = dialog.original_toolchain {
-                self.settings.toolchain_combo.set_selected(original);
-            }
-            if let Some(original) = dialog.original_secondary {
-                self.settings.secondary_combo.set_selected(original);
-            }
-            self.settings
-                .debug_host
-                .set_value(dialog.original_debug_host);
-            self.settings
-                .debug_port
-                .set_value(dialog.original_debug_port);
-        }
-        self.settings.modal.close();
+        self.settings.text_input(text)
     }
 }
 
@@ -5747,98 +4374,6 @@ fn click_widget(widget: &mut dyn Widget, point: Point) -> EventResult {
     let pointer = primary_pointer(point);
     let _ = widget.event(&mut context, &UiEvent::PointerDown(pointer));
     widget.event(&mut context, &UiEvent::PointerUp(pointer))
-}
-
-/// Rótulo de uma entrada na lista da inspeção.
-fn inspection_label(entry: &DebugVariableView) -> String {
-    match entry.type_name.as_deref() {
-        Some(type_name) => format!("{} = ({type_name}) {}", entry.name, entry.value),
-        None => format!("{} = {}", entry.name, entry.value),
-    }
-}
-
-/// Caminho do nó com aquela identidade, procurando em profundidade.
-fn inspection_path_of(node: &InspectionNode, id: u64) -> Option<String> {
-    if inspection_id(&node.path) == id {
-        return Some(node.path.clone());
-    }
-    node.children
-        .iter()
-        .find_map(|child| inspection_path_of(child, id))
-}
-
-/// Identidade de um nó da árvore, derivada do caminho.
-///
-/// O caminho sobrevive à chegada de campos novos; um índice mudaria a cada
-/// expansão, e a árvore perderia o que estava aberto.
-fn inspection_id(path: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Separa o texto do editor nas instruções que o compõem.
-///
-/// O `;` e a quebra de linha terminam uma instrução, mas **não dentro de aspas**:
-/// `setNome("a; b")` é uma instrução só, e partir no ponto e vírgula do meio
-/// entregaria duas metades sem sentido ao alvo.
-fn inspection_statements(source: &str) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut current = String::new();
-    let mut quoted = false;
-    let mut escaped = false;
-    for character in source.chars() {
-        if quoted {
-            current.push(character);
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        match character {
-            '"' => {
-                quoted = true;
-                current.push(character);
-            }
-            ';' | '\n' | '\r' => {
-                if !current.trim().is_empty() {
-                    statements.push(current.trim().to_owned());
-                }
-                current.clear();
-            }
-            _ => current.push(character),
-        }
-    }
-    if !current.trim().is_empty() {
-        statements.push(current.trim().to_owned());
-    }
-    statements
-}
-
-/// Converte um nó carregado em item da biblioteca.
-///
-/// Um valor expansível ainda sem campos recebe um filho de espera: é o que faz a
-/// árvore desenhar o triângulo antes de o alvo ter respondido, e é onde o clique
-/// de expansão acontece.
-fn inspection_items(node: &InspectionNode) -> TreeItem {
-    let children = if node.children.is_empty() && node.variable.expandable && !node.loaded {
-        vec![TreeItem::new(
-            inspection_id(&format!("{}.\u{2026}", node.path)),
-            "carregando…",
-            Vec::new(),
-        )]
-    } else {
-        node.children.iter().map(inspection_items).collect()
-    };
-    TreeItem::new(
-        inspection_id(&node.path),
-        inspection_label(&node.variable),
-        children,
-    )
 }
 
 /// Encurta a mensagem para caber na largura disponível.
@@ -5903,7 +4438,11 @@ fn tab_command(tabs: &mut Tabs, point: Point) -> Option<TabCommand> {
 
 mod generate;
 mod geometry;
+mod inspection;
+mod new_item;
 mod rename;
+mod settings;
+mod type_search;
 
 #[cfg(test)]
 mod tests;

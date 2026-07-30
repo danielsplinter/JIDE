@@ -588,8 +588,10 @@ fn phase_five_keeps_ui_state_split_by_feature() {
         ("explorer.rs", "ExplorerState"),
         ("editor.rs", "EditorAreaState"),
         ("terminal.rs", "TerminalPanelState"),
-        ("search.rs", "SearchState"),
-        ("settings.rs", "SettingsState"),
+        // A busca virou superfície na fase 3: o estado dela mudou de arquivo,
+        // não de dono. Ver `14-ide-shell-decomposition`.
+        ("ide_shell/type_search.rs", "TypeSearchSurface"),
+        ("ide_shell/settings.rs", "SettingsSurface"),
         ("debugging.rs", "DebugPanelState"),
         ("menus.rs", "MenuState"),
     ];
@@ -838,7 +840,7 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // passam a viver numa lista só. Ver `14-ide-shell-decomposition`.
     assert_eq!(
         struct_field_count(&shell, "IdeShell"),
-        12,
+        14,
         "IdeShell divergiu da linha final"
     );
 }
