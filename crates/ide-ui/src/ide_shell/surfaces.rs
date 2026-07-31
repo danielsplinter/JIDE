@@ -398,7 +398,7 @@ impl IdeShell {
     }
 
     pub fn close_new_item_dialog(&mut self) {
-        self.new_item.close();
+        self.new_item.close(&mut self.host);
     }
 
     /// Executa o que a janela de criação decidiu.
@@ -434,7 +434,7 @@ impl IdeShell {
         if !self.new_item.is_open() {
             return false;
         }
-        let outcome = self.new_item.key(key);
+        let outcome = self.new_item.key(&mut self.host, key);
         self.apply_new_item_outcome(outcome);
         true
     }
@@ -444,7 +444,7 @@ impl IdeShell {
         if !self.new_item.is_open() {
             return false;
         }
-        self.new_item.text_input(text);
+        self.new_item.text_input(&mut self.host, text);
         true
     }
 

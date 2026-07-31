@@ -9,16 +9,14 @@
 use std::path::{Path, PathBuf};
 
 use ide_application::{NewItemRequest, NewItemTemplate};
-use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
+use ui_api::{LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
 use ui_components::{Button, FormLayout, IconTint, Label, ModalHost, TextInput};
 use ui_core::{
     KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetAction, WidgetId,
 };
-use ui_focus::{FocusChange, FocusManager};
 use ui_host::UiHost;
 
-use super::primary_pointer;
 use crate::explorer::is_source_root;
 
 const MODAL_ID: WidgetId = WidgetId(10_035);
@@ -49,11 +47,6 @@ struct NewItemDialog {
 pub(super) struct NewItemSurface {
     modal: ModalHost,
     dialog: Option<NewItemDialog>,
-    package: TextInput,
-    name: TextInput,
-    /// Qual dos dois campos recebe o que for digitado. Quem faz a conta é o
-    /// gerenciador da biblioteca: `Tab` percorre, e o clique transfere.
-    focus: FocusManager,
 }
 
 impl Default for NewItemSurface {
@@ -61,18 +54,15 @@ impl Default for NewItemSurface {
         Self {
             modal: ModalHost::new(MODAL_ID, "", PANEL_SIZE),
             dialog: None,
-            package: TextInput::new(PACKAGE_ID, String::new()).with_placeholder("br.com.exemplo"),
-            name: TextInput::new(NAME_ID, String::new()),
-            focus: new_focus(),
         }
     }
 }
 
-/// Entrega os botões desta janela ao anfitrião da tela.
+/// Os componentes desta janela pertencem ao anfitrião da tela.
 ///
-/// Eles são dele — só emitem, nada é lido deles. Os campos ficam com a janela,
-/// que lê o que foi digitado, mas suas áreas são declaradas no mesmo anfitrião:
-/// o acerto é dele mesmo quando a instância não é.
+/// Inclusive os dois campos: quem entrega `FocusGained` e `FocusLost` é quem tem
+/// o mapa de id para componente, e esse é o anfitrião. A janela lê de volta o que
+/// foi digitado por `widget_as`.
 pub(super) fn attach(host: &mut UiHost) {
     host.attach(
         Box::new(Button::new(CREATE_ID, "Criar").with_command("new.create")),
@@ -82,14 +72,23 @@ pub(super) fn attach(host: &mut UiHost) {
         Box::new(Button::new(CANCEL_ID, "Cancelar").with_command("new.cancel")),
         false,
     );
+    host.attach(
+        Box::new(TextInput::new(PACKAGE_ID, String::new()).with_placeholder("br.com.exemplo")),
+        false,
+    );
+    host.attach(Box::new(TextInput::new(NAME_ID, String::new())), false);
 }
 
 /// O percurso do `Tab` desta janela: pacote e depois nome.
-fn new_focus() -> FocusManager {
-    let mut focus = FocusManager::default();
-    focus.register(PACKAGE_ID);
-    focus.register(NAME_ID);
-    focus
+///
+/// Como escopo, e não como ordem global: enquanto a janela está aberta o `Tab`
+/// fica preso nela, e ao fechá-la o foco volta a quem o tinha.
+const FOCUS_SCOPE: [WidgetId; 2] = [PACKAGE_ID, NAME_ID];
+
+/// O texto de um dos campos, lido do anfitrião.
+fn field(host: &UiHost, id: WidgetId) -> &str {
+    host.widget_as::<TextInput>(id)
+        .map_or("", |campo| campo.value())
 }
 
 impl NewItemSurface {
@@ -106,6 +105,7 @@ impl NewItemSurface {
     /// o shell contar na barra de status.
     pub(super) fn open(
         &mut self,
+        host: &mut UiHost,
         template: NewItemTemplate,
         target: &Path,
         source_root_names: &[String],
@@ -127,8 +127,12 @@ impl NewItemSurface {
                     .join(".")
             })
             .unwrap_or_default();
-        self.package.set_value(package);
-        self.name.set_value(String::new());
+        if let Some(campo) = host.widget_as_mut::<TextInput>(PACKAGE_ID) {
+            campo.set_value(package);
+        }
+        if let Some(campo) = host.widget_as_mut::<TextInput>(NAME_ID) {
+            campo.set_value(String::new());
+        }
         self.modal.set_title(template.title.clone());
         self.modal.open();
         let allows_empty_name = template.allows_empty_name;
@@ -139,7 +143,12 @@ impl NewItemSurface {
         });
         // O pacote já vem preenchido, então o que falta digitar é o nome —
         // exceto ao criar pacote, em que o nome é justamente o que se edita.
-        self.focus_field(!allows_empty_name);
+        host.push_focus_scope(FOCUS_SCOPE.to_vec());
+        host.request_focus(if allows_empty_name {
+            PACKAGE_ID
+        } else {
+            NAME_ID
+        });
         None
     }
 
@@ -150,7 +159,10 @@ impl NewItemSurface {
         }
     }
 
-    pub(super) fn close(&mut self) {
+    pub(super) fn close(&mut self, host: &mut UiHost) {
+        if self.modal.is_open() {
+            host.pop_focus_scope();
+        }
         self.modal.close();
         self.dialog = None;
     }
@@ -160,15 +172,15 @@ impl NewItemSurface {
     /// O pacote é obrigatório: sem ele não há onde criar. O nome é obrigatório
     /// para classe e interface, e opcional para pacote — é o que permite criar o
     /// pacote e a primeira classe dele num gesto só.
-    pub(super) fn submit(&mut self) -> NewItemOutcome {
+    pub(super) fn submit(&mut self, host: &mut UiHost) -> NewItemOutcome {
         let Some(dialog) = self.dialog.as_ref() else {
             return NewItemOutcome::Idle;
         };
         let template_id = dialog.template.id.clone();
         let source_root = dialog.source_root.clone();
         let allows_empty_name = dialog.template.allows_empty_name;
-        let package = self.package.value().trim().to_owned();
-        let name = self.name.value().trim().to_owned();
+        let package = field(host, PACKAGE_ID).trim().to_owned();
+        let name = field(host, NAME_ID).trim().to_owned();
         if package.is_empty() {
             self.set_message("Informe o pacote.");
             return NewItemOutcome::Idle;
@@ -195,29 +207,14 @@ impl NewItemSurface {
         for evento in outcome.commands {
             if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
                 match command.0.as_str() {
-                    "new.create" => return self.submit(),
-                    "new.cancel" => self.close(),
+                    "new.create" => return self.submit(host),
+                    "new.cancel" => self.close(host),
                     _ => {}
                 }
             }
         }
-        // O clique vai ao campo: onde o cursor fica dentro do texto é ele quem
-        // sabe, porque a medição da fonte é dele.
-        let naming = match outcome.target {
-            Some(NAME_ID) => true,
-            Some(PACKAGE_ID) => false,
-            _ => return NewItemOutcome::Idle,
-        };
-        let field = if naming {
-            &mut self.name
-        } else {
-            &mut self.package
-        };
-        field.event(
-            &mut EventContext::default(),
-            &UiEvent::PointerDown(primary_pointer(point)),
-        );
-        self.focus_field(naming);
+        // Onde o cursor cai dentro do texto e para onde o foco vai já são do
+        // anfitrião: ele entregou o clique ao campo e moveu o foco para ele.
         NewItemOutcome::Idle
     }
 
@@ -231,37 +228,33 @@ impl NewItemSurface {
     /// decide a sobreposição, e fechá-la é tirá-los de lá.
     pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
         let geometry = self.geometry(context, size);
+        host.place(MODAL_ID, self.modal.panel_bounds());
         host.place(PACKAGE_ID, geometry.package);
         host.place(NAME_ID, geometry.name);
         host.place(CANCEL_ID, geometry.cancel);
         host.place(CREATE_ID, geometry.create);
-        self.package.layout(context, geometry.package);
-        self.name.layout(context, geometry.name);
     }
 
     /// Tecla dentro da janela.
-    pub(super) fn key(&mut self, key: &str) -> NewItemOutcome {
+    pub(super) fn key(&mut self, host: &mut UiHost, key: &str) -> NewItemOutcome {
         if self.dialog.is_none() {
             return NewItemOutcome::Idle;
         }
         match key.to_ascii_lowercase().as_str() {
-            "enter" => return self.submit(),
-            "escape" => self.close(),
-            "tab" => {
-                let change = self.focus.focus_next(false);
-                self.deliver_focus(change);
-            }
+            "enter" => return self.submit(host),
+            "escape" => self.close(host),
+            // O percurso está preso ao escopo desta janela: o `Tab` não escapa
+            // para o que está atrás dela.
+            "tab" => host.focus_next(false),
             // Apagar e mover o cursor são do campo: ele conhece as fronteiras de
-            // caractere e a posição atual.
+            // caractere e a posição atual, e quem o alcança é o anfitrião, pelo
+            // foco.
             _ => {
-                let event = UiEvent::KeyDown(KeyEvent {
+                host.event(&UiEvent::KeyDown(KeyEvent {
                     logical_key: key.to_owned(),
                     repeat: false,
                     modifiers: Modifiers::default(),
-                });
-                if let Some(field) = self.focused_field() {
-                    field.event(&mut EventContext::default(), &event);
-                }
+                }));
             }
         }
         NewItemOutcome::Idle
@@ -272,13 +265,10 @@ impl NewItemSurface {
     /// O texto entra pelo componente, e não por concatenação: é assim que ele
     /// aparece onde o cursor está, inclusive depois de um clique no meio do
     /// caminho já digitado.
-    pub(super) fn text_input(&mut self, text: &str) {
-        let event = UiEvent::TextInput(TextInputEvent {
+    pub(super) fn text_input(&mut self, host: &mut UiHost, text: &str) {
+        host.event(&UiEvent::TextInput(TextInputEvent {
             text: text.to_owned(),
-        });
-        if let Some(field) = self.focused_field() {
-            field.event(&mut EventContext::default(), &event);
-        }
+        }));
         if let Some(dialog) = self.dialog.as_mut() {
             // Digitar é corrigir: a mensagem do erro anterior sai de cena.
             dialog.message = None;
@@ -321,18 +311,10 @@ impl NewItemSurface {
             forma.caption(1),
             IconTint::Muted,
         );
-        for (field, rect) in [
-            (&self.package, geometry.package),
-            (&self.name, geometry.name),
-        ] {
-            // O foco já está no campo de verdade; aqui é só desenhar.
-            let mut field = field.clone();
-            field.layout(layout, rect);
-            field.paint(paint);
-        }
-        // Os botões são desenhados pelo anfitrião da tela, que é quem os possui —
-        // e por isso eles acendem sob o ponteiro e afundam ao ser pressionados.
-        for id in [CANCEL_ID, CREATE_ID] {
+        // Campos e botões são desenhados pelo anfitrião da tela, que é quem os
+        // possui — e por isso eles acendem sob o ponteiro, afundam ao ser
+        // pressionados e mostram o cursor onde o foco está.
+        for id in [PACKAGE_ID, NAME_ID, CANCEL_ID, CREATE_ID] {
             if let Some(button) = host.widget(id) {
                 button.paint(paint);
             }
@@ -357,52 +339,10 @@ impl NewItemSurface {
         geometry(self.modal.panel_bounds())
     }
 
-    /// Move o foco entre os dois campos.
-    ///
-    /// O foco fica nos campos de verdade, e não num clone da pintura: é ele que
-    /// decide onde a digitação entra e onde o cursor aparece. O par ganhar/perder
-    /// é do grupo, que vê os dois campos de uma vez.
-    fn focus_field(&mut self, naming: bool) {
-        let field = if naming { NAME_ID } else { PACKAGE_ID };
-        if let Some(change) = self.focus.request_focus(field) {
-            self.deliver_focus(change);
-        }
-    }
-
-    /// Entrega o par ganhar/perder aos campos.
-    ///
-    /// Temporário: entregar evento é trabalho de quem possui os componentes, e
-    /// esse dono é o anfitrião que a biblioteca ainda não tem. Sai daqui na fase
-    /// 4 de `15-event-runtime-adoption`.
-    fn deliver_focus(&mut self, change: FocusChange) {
-        for (id, event) in [
-            (change.previous, UiEvent::FocusLost),
-            (change.current, UiEvent::FocusGained),
-        ] {
-            let Some(id) = id else {
-                continue;
-            };
-            let field = if id == NAME_ID {
-                &mut self.name
-            } else {
-                &mut self.package
-            };
-            field.event(&mut EventContext::default(), &event);
-        }
-    }
-
-    /// O campo que está recebendo o que for digitado.
-    fn focused_field(&mut self) -> Option<&mut TextInput> {
-        match self.focus.focused()? {
-            NAME_ID => Some(&mut self.name),
-            _ => Some(&mut self.package),
-        }
-    }
-
     /// O que está nos dois campos, para os testes.
     #[cfg(test)]
-    pub(super) fn values(&self) -> (&str, &str) {
-        (self.package.value(), self.name.value())
+    pub(super) fn values(host: &UiHost) -> (&str, &str) {
+        (field(host, PACKAGE_ID), field(host, NAME_ID))
     }
 
     /// O título do modelo aberto, para os testes.

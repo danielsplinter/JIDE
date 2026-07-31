@@ -2069,7 +2069,7 @@ fn the_new_item_dialog_opens_with_the_clicked_package() {
     shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
     shell.run_explorer_command("explorer.new.java.class");
     assert!(shell.new_item_dialog_open());
-    assert_eq!(shell.new_item.values(), ("br.com", ""));
+    assert_eq!(NewItemSurface::values(&shell.host), ("br.com", ""));
 }
 
 /// A mesma janela serve as três ações, mudando só o título e a legenda.
@@ -2084,7 +2084,7 @@ fn the_three_menu_actions_share_one_window() {
     ] {
         shell.run_explorer_command(command);
         assert_eq!(shell.new_item.title(), Some(title));
-        assert_eq!(shell.new_item.values().0, "br.com");
+        assert_eq!(NewItemSurface::values(&shell.host).0, "br.com");
     }
 }
 

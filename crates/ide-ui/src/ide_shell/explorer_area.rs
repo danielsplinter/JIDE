@@ -353,7 +353,10 @@ impl IdeShell {
             return;
         };
         let source_roots = self.catalog.source_root_names.clone();
-        if let Some(refusal) = self.new_item.open(template, &target, &source_roots) {
+        if let Some(refusal) =
+            self.new_item
+                .open(&mut self.host, template, &target, &source_roots)
+        {
             self.context.status_message = refusal;
         }
     }

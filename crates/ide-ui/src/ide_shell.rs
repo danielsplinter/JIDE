@@ -589,6 +589,11 @@ impl IdeShell {
     }
 
     pub fn escape(&mut self) {
+        // O teclado vai a quem tem o foco, e quem sabe disso é o anfitrião. Ele
+        // só alcança um componente que esteja na pilha, então ela é declarada
+        // antes: sem isso, a tecla chegaria numa janela que ainda não existe
+        // para ele.
+        self.place_overlay(self.context.last_size);
         // O menu de contexto é o que está por cima de tudo: é ele que Esc
         // dispensa primeiro.
         if self.context_menu_key("Escape", Modifiers::default()) {
@@ -817,6 +822,11 @@ impl IdeShell {
     }
 
     pub fn text_input(&mut self, text: &str) {
+        // O teclado vai a quem tem o foco, e quem sabe disso é o anfitrião. Ele
+        // só alcança um componente que esteja na pilha, então ela é declarada
+        // antes: sem isso, a tecla chegaria numa janela que ainda não existe
+        // para ele.
+        self.place_overlay(self.context.last_size);
         if let Some(surface) = self.open_surface()
             && self.surface_text_input(surface, text)
         {
@@ -843,6 +853,12 @@ impl IdeShell {
         if self.context_menu_key(key, modifiers) {
             return;
         }
+        // O teclado vai a quem tem o foco, e quem sabe disso é o anfitrião. Ele
+        // só alcança um componente que esteja na pilha, então ela é declarada
+        // antes: sem isso, a tecla chegaria numa janela que ainda não existe
+        // para ele.
+        self.place_overlay(self.context.last_size);
+
         // A janela aberta fica com as teclas — a menos que ela devolva o que não
         // é dela, como a inspeção faz quando o foco está na árvore.
         if let Some(surface) = self.open_surface()
