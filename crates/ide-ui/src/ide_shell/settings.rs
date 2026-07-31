@@ -8,8 +8,7 @@
 use ide_application::SettingsSection;
 use ui_api::{EventContext, EventResult, LayoutContext, PaintContext, Widget};
 use ui_components::{
-    Button, ComboBox, ComboBoxItem, FocusGroup, IconTint, Label, ListSelection, ListView,
-    ModalHost, TextInput,
+    Button, ComboBox, ComboBoxItem, IconTint, Label, ListSelection, ListView, ModalHost, TextInput,
 };
 use ui_core::{
     ColorTokens, KeyEvent, Modifiers, Point, Rect, Size, UiEvent, WidgetAction, WidgetId,
@@ -19,6 +18,7 @@ use ui_render_api::PaintCommand;
 use super::geometry::{SettingsDialogGeometry, settings_dialog_geometry, settings_pages_rect};
 use super::{click_widget, fill, label, primary_pointer, stroke};
 use crate::settings::SettingsPage;
+use ui_focus::FocusManager;
 
 const MODAL_ID: WidgetId = WidgetId(10_002);
 const CLOSE_ID: WidgetId = WidgetId(10_005);
@@ -84,9 +84,9 @@ pub(super) struct SettingsSurface {
     pages: ListView,
     dialog: Option<SettingsDialog>,
     page: SettingsPage,
-    /// Campo em foco na página de depuração. O grupo é da biblioteca: guardar
-    /// quem tem o foco era a conta que cada tela refazia à mão.
-    focus: FocusGroup,
+    /// Campo em foco na página de depuração. O gerenciador é da biblioteca:
+    /// guardar quem tem o foco era a conta que cada tela refazia à mão.
+    focus: FocusManager,
     debug_host: TextInput,
     debug_port: TextInput,
     debug_attach_button: Button,
@@ -109,13 +109,21 @@ impl Default for SettingsSurface {
                 .with_selection(ListSelection::Marker),
             dialog: None,
             page: SettingsPage::default(),
-            focus: FocusGroup::new([DEBUG_HOST_ID, DEBUG_PORT_ID]),
+            focus: debug_focus(),
             debug_host: TextInput::new(DEBUG_HOST_ID, "127.0.0.1").with_placeholder("host"),
             debug_port: TextInput::new(DEBUG_PORT_ID, "8000").with_placeholder("porta"),
             debug_attach_button: Button::new(DEBUG_ATTACH_ID, "Conectar")
                 .with_command("debug.attach"),
         }
     }
+}
+
+/// O percurso do `Tab` da página de depuração: host e depois porta.
+fn debug_focus() -> FocusManager {
+    let mut focus = FocusManager::default();
+    focus.register(DEBUG_HOST_ID);
+    focus.register(DEBUG_PORT_ID);
+    focus
 }
 
 impl SettingsSurface {
@@ -198,7 +206,7 @@ impl SettingsSurface {
 
     pub(super) fn set_page(&mut self, page: SettingsPage) {
         self.page = page;
-        self.focus.clear();
+        self.focus.request_focus(WidgetId(0));
     }
 
     #[must_use]
@@ -262,7 +270,7 @@ impl SettingsSurface {
         }) && settings_pages_rect(&geometry, sections.len() + 1).contains(point)
         {
             self.page = page;
-            self.focus.clear();
+            self.focus.request_focus(WidgetId(0));
             return SettingsOutcome::Idle;
         }
         if self.page == SettingsPage::Debug {
@@ -324,18 +332,18 @@ impl SettingsSurface {
         geometry: &SettingsDialogGeometry,
     ) -> SettingsOutcome {
         if geometry.debug_host.contains(point) {
-            self.focus.focus(DEBUG_HOST_ID);
+            self.focus.request_focus(DEBUG_HOST_ID);
             return SettingsOutcome::Idle;
         }
         if geometry.debug_port.contains(point) {
-            self.focus.focus(DEBUG_PORT_ID);
+            self.focus.request_focus(DEBUG_PORT_ID);
             return SettingsOutcome::Idle;
         }
         if geometry.debug_attach.contains(point) {
             // O foco é preservado para o usuário corrigir um valor recusado.
             return self.attach();
         }
-        self.focus.clear();
+        self.focus.request_focus(WidgetId(0));
         self.close_button.layout(context, geometry.close);
         let close_result = click_widget(&mut self.close_button, point);
         let (outcome, handled) = self.handle_action(close_result);
@@ -420,7 +428,7 @@ impl SettingsSurface {
             (false, Some(port)) if port > 0 => {
                 self.modal.close();
                 self.dialog = None;
-                self.focus.clear();
+                self.focus.request_focus(WidgetId(0));
                 SettingsOutcome::Attach { host, port }
             }
             _ => {
@@ -669,7 +677,7 @@ impl SettingsSurface {
             (geometry.debug_host, DEBUG_HOST_ID),
             (geometry.debug_port, DEBUG_PORT_ID),
         ] {
-            if self.focus.is_focused(id) {
+            if self.focus.focused() == Some(id) {
                 commands.push(stroke(rect, colors.accent));
             }
         }

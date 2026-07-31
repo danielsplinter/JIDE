@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 
 use ide_application::{NewItemRequest, NewItemTemplate};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
-use ui_components::{Button, FocusGroup, FormLayout, IconTint, Label, ModalHost, TextInput};
+use ui_components::{Button, FormLayout, IconTint, Label, ModalHost, TextInput};
 use ui_core::{KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetId};
+use ui_focus::{FocusChange, FocusManager};
 
 use super::primary_pointer;
 use crate::explorer::is_source_root;
@@ -47,8 +48,8 @@ pub(super) struct NewItemSurface {
     package: TextInput,
     name: TextInput,
     /// Qual dos dois campos recebe o que for digitado. Quem faz a conta é o
-    /// grupo da biblioteca: `Tab` percorre, e o clique transfere.
-    focus: FocusGroup,
+    /// gerenciador da biblioteca: `Tab` percorre, e o clique transfere.
+    focus: FocusManager,
     create_button: Button,
     cancel_button: Button,
 }
@@ -60,11 +61,19 @@ impl Default for NewItemSurface {
             dialog: None,
             package: TextInput::new(PACKAGE_ID, String::new()).with_placeholder("br.com.exemplo"),
             name: TextInput::new(NAME_ID, String::new()),
-            focus: FocusGroup::new([PACKAGE_ID, NAME_ID]),
+            focus: new_focus(),
             create_button: Button::new(CREATE_ID, "Criar").with_command("new.create"),
             cancel_button: Button::new(CANCEL_ID, "Cancelar").with_command("new.cancel"),
         }
     }
+}
+
+/// O percurso do `Tab` desta janela: pacote e depois nome.
+fn new_focus() -> FocusManager {
+    let mut focus = FocusManager::default();
+    focus.register(PACKAGE_ID);
+    focus.register(NAME_ID);
+    focus
 }
 
 impl NewItemSurface {
@@ -205,8 +214,8 @@ impl NewItemSurface {
             "enter" => return self.submit(),
             "escape" => self.close(),
             "tab" => {
-                self.focus.advance(true);
-                self.focus.deliver(&mut [&mut self.package, &mut self.name]);
+                let change = self.focus.focus_next(false);
+                self.deliver_focus(change);
             }
             // Apagar e mover o cursor são do campo: ele conhece as fronteiras de
             // caractere e a posição atual.
@@ -320,8 +329,32 @@ impl NewItemSurface {
     /// decide onde a digitação entra e onde o cursor aparece. O par ganhar/perder
     /// é do grupo, que vê os dois campos de uma vez.
     fn focus_field(&mut self, naming: bool) {
-        self.focus.focus_index(usize::from(naming));
-        self.focus.deliver(&mut [&mut self.package, &mut self.name]);
+        let field = if naming { NAME_ID } else { PACKAGE_ID };
+        if let Some(change) = self.focus.request_focus(field) {
+            self.deliver_focus(change);
+        }
+    }
+
+    /// Entrega o par ganhar/perder aos campos.
+    ///
+    /// Temporário: entregar evento é trabalho de quem possui os componentes, e
+    /// esse dono é o anfitrião que a biblioteca ainda não tem. Sai daqui na fase
+    /// 4 de `15-event-runtime-adoption`.
+    fn deliver_focus(&mut self, change: FocusChange) {
+        for (id, event) in [
+            (change.previous, UiEvent::FocusLost),
+            (change.current, UiEvent::FocusGained),
+        ] {
+            let Some(id) = id else {
+                continue;
+            };
+            let field = if id == NAME_ID {
+                &mut self.name
+            } else {
+                &mut self.package
+            };
+            field.event(&mut EventContext::default(), &event);
+        }
     }
 
     /// O campo que está recebendo o que for digitado.

@@ -14,6 +14,7 @@ ui-api.workspace = true
 ui-components.workspace = true
 ui-editor.workspace = true
 ui-core.workspace = true
+ui-focus.workspace = true
 ui-render-api.workspace = true
 ui-window-api.workspace = true
 

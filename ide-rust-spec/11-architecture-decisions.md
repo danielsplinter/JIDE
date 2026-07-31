@@ -321,27 +321,36 @@ correção certa é a primeira, e ela pode ser feita quando o número incomodar 
 quando arquivos maiores entrarem em jogo. Fica registrado com a medição para que
 a próxima investigação não precise começar do zero.
 
-## ADR-018 — O foco dos formulários vem da biblioteca
+## ADR-018 — O foco dos formulários vem do `ui-focus`
 
 **Decisão:** as janelas da IDE param de guardar por conta própria qual campo tem
-o foco e passam a usar o `FocusGroup` da ERLibUi (ADR-016 de lá). A janela de
-criar item o usa por inteiro — `Tab`, clique e entrega dos eventos —, e a página
-de depuração das Configurações o usa para a contabilidade, já que ali os campos
-são pintados e editados pela própria tela.
+o foco e passam a usar o `FocusManager` do crate `ui-focus` da ERLibUi. A janela
+de criar item o usa por inteiro — `Tab`, clique e entrega do par ganhar/perder —,
+e a página de depuração das Configurações o usa para a contabilidade, já que ali
+os campos são pintados e editados pela própria tela.
 
 **Motivo:** era a mesma regra escrita duas vezes, de formas diferentes: um `bool
 naming` numa janela, um `Option<WidgetId>` comparado com `DEBUG_HOST_ID` na
-outra. Nenhuma das duas é errada; ter as duas é. Foi um exemplo do critério que
-esta decomposição usa para decidir o que sobe para a biblioteca: **se a IDE
-escreveu a mesma mecânica de interface mais de uma vez, a lacuna é da
-biblioteca.**
+outra. Nenhuma das duas é errada; ter as duas é.
 
-**Consequência:** uma janela nova com dois campos não reescreve nada — declara o
-grupo e chama `advance` e `deliver`. Fica uma diferença pendente entre as duas
-telas: a página de depuração ainda edita o texto por concatenação e desenha o
-próprio contorno de foco, em vez de deixar isso com o `TextInput`. Unificá-la com
-a janela de criar item é trabalho separado, porque muda o que se vê — o cursor
-passa a ser posicionado pelo clique, e `Tab` passa a andar entre host e porta.
+**Correção de rota.** A primeira versão desta ADR mandava usar um `FocusGroup`
+criado em `ui-components` para este fim. Aquele tipo duplicava o `FocusManager`,
+que já existia em outro crate e fazia mais — tem escopos. O `FocusGroup` foi
+removido; o critério que esta ADR enuncia continua válido, mas ganhou uma
+precondição: **antes de concluir que falta peça na biblioteca, é obrigatório
+inventariar os crates de runtime dela** — `ui-tree`, `ui-events`, `ui-focus`,
+`ui-commands`, `ui-layout-api` —, que a IDE não consome e por isso não aparecem
+em lugar nenhum do código dela.
+
+**Consequência:** uma janela nova com dois campos declara o percurso com
+`register` e chama `focus_next`. A entrega de `FocusGained`/`FocusLost` continua
+na IDE, marcada como temporária: ela é trabalho do anfitrião que falta à
+biblioteca, e sai na fase 4 de `15-event-runtime-adoption`.
+
+Fica ainda uma diferença entre as duas telas: a página de depuração edita o texto
+por concatenação e desenha o próprio contorno de foco, em vez de deixar isso com
+o `TextInput`. Unificá-la muda o que se vê — o cursor passaria a ser posicionado
+pelo clique, e `Tab` a andar entre host e porta —, então é trabalho separado.
 
 ## ADR-019 — A IDE lê ações, e não texto de comando
 

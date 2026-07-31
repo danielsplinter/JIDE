@@ -996,6 +996,7 @@ dependencies = [
  "ui-components",
  "ui-core",
  "ui-editor",
+ "ui-focus",
  "ui-render-api",
  "ui-window-api",
 ]
@@ -2849,6 +2850,13 @@ dependencies = [
  "ui-api",
  "ui-core",
  "ui-render-api",
+]
+
+[[package]]
+name = "ui-focus"
+version = "0.1.0"
+dependencies = [
+ "ui-core",
 ]
 
 [[package]]
