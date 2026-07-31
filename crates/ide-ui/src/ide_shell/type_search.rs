@@ -160,15 +160,13 @@ impl TypeSearchSurface {
         TypeSearchOutcome::Idle
     }
 
-    pub(super) fn scroll(
-        &mut self,
-        context: &LayoutContext,
-        point: Point,
-        delta_lines: f32,
-        size: Size,
-    ) {
-        let (_, list) = self.geometry(context, size);
-        if !list.contains(point) {
+    /// A roda dentro da janela.
+    ///
+    /// Se ela caiu na lista é o anfitrião quem diz, pelo acerto: a área é a
+    /// mesma que foi declarada na pilha, então rolar e clicar concordam sem que
+    /// ninguém repita a conta do retângulo.
+    pub(super) fn scroll(&mut self, host: &UiHost, point: Point, delta_lines: f32) {
+        if host.hit_test(point).next() != Some(LIST_ID) {
             return;
         }
         self.first_visible = self

@@ -548,7 +548,7 @@ impl IdeShell {
                 true
             }
             SurfaceKind::TypeSearch => {
-                self.type_search_scroll(point, delta_lines, size);
+                self.type_search_scroll(point, delta_lines);
                 true
             }
             SurfaceKind::Settings => true,
@@ -781,6 +781,9 @@ impl IdeShell {
     }
 
     pub fn scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
+        // A pilha é declarada antes: é dela que sai a resposta sobre de quem é a
+        // roda, quando ela cai dentro de uma janela.
+        self.place_overlay(size);
         if let Some(surface) = self.open_surface()
             && self.surface_scroll(surface, point, delta_lines, size)
         {

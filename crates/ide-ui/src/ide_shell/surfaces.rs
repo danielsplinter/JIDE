@@ -281,9 +281,8 @@ impl IdeShell {
         self.apply_type_search_outcome(outcome);
     }
 
-    pub(super) fn type_search_scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
-        let context = self.layout_context();
-        self.search.scroll(&context, point, delta_lines, size);
+    pub(super) fn type_search_scroll(&mut self, point: Point, delta_lines: f32) {
+        self.search.scroll(&self.host, point, delta_lines);
     }
 
     /// Executa o que a busca decidiu.
