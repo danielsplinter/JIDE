@@ -77,6 +77,9 @@ use ui_core::{
     PointerEvent, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_editor::{CodeEditor, GutterMark, LineDecoration};
+use ui_host::UiHost;
+use ui_layout_api::{LayoutDirection, LayoutStyle};
+use ui_layout_taffy::TaffyLayoutEngine;
 use ui_render_api::{FillRectCommand, PaintCommand, StrokeRectCommand};
 use ui_window_api::ClipboardService;
 
@@ -164,6 +167,10 @@ const COMPLETION_POPUP_WIDTH: f32 = 260.0;
 const COMPLETION_POPUP_PADDING: f32 = 4.0;
 const SEARCH_BOX_WIDTH: f32 = 380.0;
 const SEARCH_BOX_HEIGHT: f32 = 42.0;
+/// Raiz do anfitrião da tela inteira; não é desenhada.
+const SHELL_ROOT_ID: WidgetId = WidgetId(10_200);
+/// Primeiro id da faixa reservada às áreas das janelas; uma por superfície.
+const SURFACE_LAYER_BASE: WidgetId = WidgetId(10_210);
 
 /// Serviços e estado visual compartilhados apenas pelo coordenador.
 struct ShellContext {
@@ -207,12 +214,40 @@ const SURFACES: [SurfaceKind; 6] = [
     SurfaceKind::Settings,
 ];
 
-/// Onde a lista de completação flutua nessa pilha.
+/// Uma camada da tela, do fundo para a frente.
 ///
-/// Ela não é uma janela: nasce colada ao cursor e convive com o que estiver
-/// aberto. Mas tem profundidade — cobre a inspeção e o editor, e é coberta pelas
-/// janelas que tomam a tela inteira. É esse número que diz até onde ela cobre.
-const COMPLETION_DEPTH: usize = 3;
+/// A lista de completação não é uma janela: nasce colada ao cursor e convive com
+/// o que estiver aberto. Mas tem profundidade — cobre a inspeção e o editor, e é
+/// coberta pelas janelas que tomam a tela inteira. Aqui isso deixa de ser um
+/// número comparado à mão e passa a ser **a posição na pilha**, que é o que o
+/// anfitrião consulta ao testar o acerto.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Layer {
+    Surface(SurfaceKind),
+    Completion,
+}
+
+/// A pilha inteira, do fundo para a frente.
+///
+/// É `SURFACES` lida de trás para frente — a ordem em que as janelas são
+/// desenhadas — com a lista de completação declarada no lugar que ela ocupa.
+const OVERLAY: [Layer; 7] = [
+    Layer::Surface(SurfaceKind::Settings),
+    Layer::Surface(SurfaceKind::NewItem),
+    Layer::Surface(SurfaceKind::Inspection),
+    Layer::Completion,
+    Layer::Surface(SurfaceKind::TypeSearch),
+    Layer::Surface(SurfaceKind::Generate),
+    Layer::Surface(SurfaceKind::Rename),
+];
+
+/// A área que uma janela aberta ocupa na pilha.
+///
+/// Ela cobre a tela inteira — o véu do `ModalHost` é o que está desenhado ali —,
+/// e é essa área que decide se o gesto alcança o que ficou embaixo.
+const fn surface_layer_id(kind: SurfaceKind) -> WidgetId {
+    WidgetId(SURFACE_LAYER_BASE.0 + kind as u64)
+}
 
 /// Coordenador da interface. Cada feature é dona de seus widgets e seleção.
 pub struct IdeShell {
@@ -232,6 +267,27 @@ pub struct IdeShell {
     catalog: UiContributionCatalog,
     context: ShellContext,
     commands: ShellCommandQueue,
+    /// O runtime da tela: a pilha de camadas, o acerto e a entrega.
+    ///
+    /// Um só, e não um por janela: com todas na mesma árvore, a profundidade é a
+    /// posição nela e ninguém precisa perguntar de quem é o gesto. Ver
+    /// `16-single-host`.
+    host: UiHost,
+}
+
+/// O anfitrião da tela, com a raiz em camada.
+///
+/// Em camada porque os filhos se sobrepõem na ordem de declaração: é o que
+/// permite uma janela cobrir o conteúdo em vez de ser empurrada para baixo dele.
+fn new_host() -> UiHost {
+    UiHost::new(
+        SHELL_ROOT_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Overlay,
+            ..LayoutStyle::default()
+        },
+        Box::new(TaffyLayoutEngine),
+    )
 }
 impl IdeShell {
     /// Mensagem atual da barra de estado.
@@ -342,17 +398,33 @@ impl IdeShell {
             .find(|kind| self.surface_is_open(*kind))
     }
 
-    /// Profundidade da janela, para comparar com a da lista de completação.
-    fn surface_depth(kind: SurfaceKind) -> usize {
-        SURFACES
-            .iter()
-            .position(|candidate| *candidate == kind)
-            .unwrap_or(usize::MAX)
+    /// Declara ao anfitrião as áreas da pilha, do fundo para a frente.
+    ///
+    /// A ordem das chamadas **é** a ordem de sobreposição: quem é posicionado por
+    /// último cobre os anteriores, para desenhar e para receber o gesto. É o que
+    /// substitui a comparação de profundidades escrita à mão.
+    pub(super) fn place_overlay(&mut self, size: Size) {
+        self.host.clear_placement();
+        let tela = Rect::new(0.0, 0.0, size.width, size.height);
+        for layer in OVERLAY {
+            match layer {
+                Layer::Completion => self.place_completion(size),
+                // A janela ainda tem anfitrião próprio: o que entra aqui é a
+                // área que ela cobre.
+                Layer::Surface(kind) => {
+                    if self.surface_is_open(kind) {
+                        self.host.place(surface_layer_id(kind), tela);
+                    }
+                }
+            }
+        }
     }
 
-    /// Se a lista de completação está por cima do que quer que esteja aberto.
-    fn completion_is_above(&self) -> bool {
-        self.open_surface().map_or(usize::MAX, Self::surface_depth) >= COMPLETION_DEPTH
+    /// Se um alvo está acima da lista de completação na pilha deste quadro.
+    fn covers_completion(&self, target: Option<WidgetId>) -> bool {
+        let ordem = self.host.snapshot().paint_order();
+        let posicao = |procurado: WidgetId| ordem.iter().position(|id| *id == procurado);
+        target.and_then(posicao) > posicao(COMPLETION_POPUP_ID)
     }
 
     fn surface_is_open(&self, kind: SurfaceKind) -> bool {
@@ -538,8 +610,9 @@ impl IdeShell {
             return;
         }
         // A lista de completação vem antes das janelas que ela cobre: clicar em
-        // outro lugar significa desistir dela.
-        if self.completion_is_above() && self.completion_pointer_down(point, size) {
+        // outro lugar significa desistir dela. Quem decide se ela está por cima
+        // é a pilha, e não uma profundidade escrita à mão.
+        if self.completion_pointer_down(point, size) {
             return;
         }
         if let Some(surface) = self.open_surface() {

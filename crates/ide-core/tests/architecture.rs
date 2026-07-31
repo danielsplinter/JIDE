@@ -872,9 +872,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // Cresce durante a fase 3 da decomposição — cada janela que sai do arquivo
     // vira um campo aqui —, e volta a encolher na fase 4, quando as superfícies
     // passam a viver numa lista só. Ver `14-ide-shell-decomposition`.
+    //
+    // O 15º é o `host`: um anfitrião só para a tela inteira, que é o que tira das
+    // mãos do shell a pergunta de quem recebe o gesto. Ver `16-single-host`.
     assert_eq!(
         struct_field_count(&shell, "IdeShell"),
-        14,
+        15,
         "IdeShell divergiu da linha final"
     );
 }

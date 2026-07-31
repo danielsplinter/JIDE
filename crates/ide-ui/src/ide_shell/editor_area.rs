@@ -579,18 +579,64 @@ impl IdeShell {
         ))
     }
 
+    /// Declara a lista de completação na pilha, no lugar onde ela flutua.
+    ///
+    /// A superfície e a lista dentro dela são dois nós: a moldura responde pelo
+    /// respiro em volta, e a lista pelas linhas. Os dois significam "o gesto é da
+    /// completação", e é por isso que o acerto aceita qualquer um deles.
+    pub(super) fn place_completion(&mut self, size: Size) {
+        let Some(rect) = self.completion_rect(size) else {
+            return;
+        };
+        let visible = self
+            .editor_area
+            .completion_items
+            .len()
+            .min(COMPLETION_VISIBLE_ROWS);
+        let mut list = ListView::new(
+            COMPLETION_LIST_ID,
+            self.editor_area
+                .completion_items
+                .iter()
+                .map(|item| item.label.clone())
+                .collect::<Vec<_>>(),
+        )
+        // Sem cor própria: o texto do tema é o escolhido para se ler sobre a
+        // superfície, e é o mesmo em toda a interface.
+        .with_row_height(COMPLETION_ROW_HEIGHT);
+        list.set_selected(Some(self.editor_area.completion_selected));
+        self.host.replace(Box::new(list));
+        self.host.place(COMPLETION_POPUP_ID, rect);
+        self.host.place(
+            COMPLETION_LIST_ID,
+            Rect::new(
+                rect.origin.x + COMPLETION_POPUP_PADDING,
+                rect.origin.y + COMPLETION_POPUP_PADDING,
+                COMPLETION_POPUP_WIDTH,
+                visible as f32 * COMPLETION_ROW_HEIGHT,
+            ),
+        );
+    }
+
     /// Clique com a lista aberta. Devolve `true` quando ela consumiu o clique.
     ///
     /// Fora dela, o clique a dispensa: o usuário foi olhar outra coisa, e uma
     /// lista que sobrevive a isso fica pairando sobre um cursor que já se moveu.
     /// Dentro dela, escolhe a linha — e precisa consumir o clique de qualquer
     /// forma, ou ele atravessaria a lista e moveria o cursor no editor de baixo.
+    ///
+    /// Coberta por uma janela, ela não recebe nem se dispensa: o gesto nunca
+    /// chegou até ela, e quem responde por ele é quem está na frente.
     pub(super) fn completion_pointer_down(&mut self, point: Point, size: Size) -> bool {
         let Some(rect) = self.completion_rect(size) else {
             return false;
         };
-        if !rect.contains(point) {
-            self.clear_completions();
+        self.place_overlay(size);
+        let target = self.host.hit_test(point).next();
+        if !matches!(target, Some(COMPLETION_POPUP_ID | COMPLETION_LIST_ID)) {
+            if !self.covers_completion(target) {
+                self.clear_completions();
+            }
             return false;
         }
         let row = ((point.y - rect.origin.y - COMPLETION_POPUP_PADDING) / COMPLETION_ROW_HEIGHT)

@@ -55,6 +55,7 @@ impl IdeShell {
     }
 
     pub fn set_text_metrics(&mut self, metrics: Arc<dyn TextMetrics>) {
+        self.host.set_text_metrics(Arc::clone(&metrics));
         self.context.text_metrics = Some(metrics);
     }
 
@@ -244,6 +245,9 @@ impl IdeShell {
     /// cada esquecimento virar um quadro desatualizado.
     pub fn paint(&mut self, size: Size) -> Vec<PaintCommand> {
         self.context.last_size = size;
+        // A pilha é declarada antes do quadro: é dela que sai o que o anfitrião
+        // desenha, e é ela que o gesto seguinte vai consultar.
+        self.place_overlay(size);
         let sidebar = self.sidebar_width(size);
         let editor_x = ACTIVITY_WIDTH + sidebar;
         let geo = self.geometry(size);
@@ -668,20 +672,9 @@ impl IdeShell {
         surface.open_at(anchor);
         let mut popup_paint = self.paint_context();
         surface.paint(&mut popup_paint);
-        if let Some(content) = surface.content_rect() {
-            let mut list = ListView::new(
-                COMPLETION_LIST_ID,
-                self.editor_area
-                    .completion_items
-                    .iter()
-                    .map(|item| item.label.clone())
-                    .collect::<Vec<_>>(),
-            )
-            // Sem cor própria: o texto do tema é o escolhido para se ler sobre a
-            // superfície, e é o mesmo em toda a interface.
-            .with_row_height(COMPLETION_ROW_HEIGHT);
-            list.set_selected(Some(self.editor_area.completion_selected));
-            list.layout(&self.layout_context(), content);
+        // As linhas são do anfitrião, que é quem possui a lista: ela é a mesma
+        // instância que recebeu o clique, e não uma cópia montada para desenhar.
+        if let Some(list) = self.host.widget(COMPLETION_LIST_ID) {
             list.paint(&mut popup_paint);
         }
         commands.extend(popup_paint.into_commands());

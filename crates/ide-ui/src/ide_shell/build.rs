@@ -167,6 +167,7 @@ impl IdeShell {
                 scrollbar_drag: None,
             },
             commands: ShellCommandQueue::default(),
+            host: new_host(),
         };
         shell.sync_explorer_tree();
         shell
