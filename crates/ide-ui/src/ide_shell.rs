@@ -105,8 +105,6 @@ const DEBUG_PANEL_WIDTH: f32 = 320.0;
 pub(super) const DEBUG_ROW_HEIGHT: f32 = 21.0;
 const MENU_BAR_ID: WidgetId = WidgetId(10_001);
 /// Faixa de ids das células da lista, para não colidir com outros componentes.
-/// Largura média de caractere na fonte da mensagem, para saber onde cortar.
-const INSPECTION_MESSAGE_CHAR_WIDTH: f32 = 6.6;
 /// A janela é larga porque o valor de um objeto costuma ser longo.
 /// Fatia da janela ocupada pela lista, à esquerda.
 const INSPECTION_LIST_FRACTION: f32 = 0.42;
@@ -800,19 +798,6 @@ fn click_widget(widget: &mut dyn Widget, point: Point) -> EventResult {
     let pointer = primary_pointer(point);
     let _ = widget.event(&mut context, &UiEvent::PointerDown(pointer));
     widget.event(&mut context, &UiEvent::PointerUp(pointer))
-}
-
-/// Encurta a mensagem para caber na largura disponível.
-///
-/// Sem isso ela sai pela borda da janela e o fim — que costuma ser a causa —
-/// desaparece.
-fn clipped_message(message: &str, width: f32) -> String {
-    let limit = (width / INSPECTION_MESSAGE_CHAR_WIDTH).floor().max(8.0) as usize;
-    if message.chars().count() <= limit {
-        return message.to_owned();
-    }
-    let head: String = message.chars().take(limit.saturating_sub(1)).collect();
-    format!("{head}…")
 }
 
 fn fill(rect: Rect, color: Color) -> PaintCommand {

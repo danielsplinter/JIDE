@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use ide_application::{NewItemRequest, NewItemTemplate};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
-use ui_components::{Button, FocusGroup, IconTint, Label, ModalHost, TextInput};
+use ui_components::{Button, FocusGroup, FormLayout, IconTint, Label, ModalHost, TextInput};
 use ui_core::{KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetId};
 
 use super::primary_pointer;
@@ -260,12 +260,13 @@ impl NewItemSurface {
         // O título é do `ModalHost`, que já o desenha: escrever outro por cima
         // era o que aparecia duplicado.
         modal.paint(paint);
+        let forma = FormLayout::new(modal.panel_bounds());
         caption(
             layout,
             paint,
             PACKAGE_CAPTION_ID,
             "Pacote",
-            Point::new(geometry.package.origin.x, geometry.package.origin.y - 18.0),
+            forma.caption(0),
             IconTint::Muted,
         );
         caption(
@@ -273,7 +274,7 @@ impl NewItemSurface {
             paint,
             NAME_CAPTION_ID,
             &dialog.template.name_caption,
-            Point::new(geometry.name.origin.x, geometry.name.origin.y - 18.0),
+            forma.caption(1),
             IconTint::Muted,
         );
         for (field, rect) in [
@@ -377,25 +378,13 @@ pub(super) struct NewItemGeometry {
 }
 
 fn geometry(panel: Rect) -> NewItemGeometry {
-    let field_width = (panel.size.width - 48.0).max(120.0);
-    let package = Rect::new(
-        panel.origin.x + 24.0,
-        panel.origin.y + 76.0,
-        field_width,
-        34.0,
-    );
-    let name = Rect::new(package.origin.x, package.origin.y + 64.0, field_width, 34.0);
-    // Criar à direita, encostado na borda, como o Salvar das Configurações.
-    let create = Rect::new(
-        panel.origin.x + panel.size.width - 104.0,
-        panel.origin.y + panel.size.height - 48.0,
-        88.0,
-        34.0,
-    );
-    let cancel = Rect::new(create.origin.x - 98.0, create.origin.y, 88.0, 34.0);
+    let forma = FormLayout::new(panel);
+    // Criar à direita, encostado na borda: é o canto que a leitura alcança por
+    // último, e vale para todas as janelas.
+    let [cancel, create] = forma.actions();
     NewItemGeometry {
-        package,
-        name,
+        package: forma.field(0),
+        name: forma.field(1),
         create,
         cancel,
     }

@@ -598,15 +598,13 @@ impl InspectionSurface {
             // A mensagem tem a linha inteira, acima dos botões: dividir a linha
             // com eles a fazia passar por baixo do Executar, ilegível justamente
             // quando é ela que explica por que o clique não fez nada.
-            text(
-                layout,
-                paint,
-                MESSAGE_ID,
-                &super::clipped_message(message, geometry.message.size.width),
-                geometry.message.origin,
-                13.0,
-                IconTint::Danger,
-            );
+            // O corte é do componente, que mede na fonte que vai desenhar.
+            let mut widget = Label::new(MESSAGE_ID, message)
+                .with_font_size(13.0)
+                .with_tone(IconTint::Danger)
+                .with_max_width(geometry.message.size.width);
+            widget.layout(layout, geometry.message);
+            widget.paint(paint);
         }
         let mut run = self.run_button.clone();
         // Sem sessão viva não há quadro onde executar: o botão apagado diz isso

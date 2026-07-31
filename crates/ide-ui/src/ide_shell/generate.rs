@@ -7,7 +7,8 @@
 use ide_domain::{AccessorCandidate, AccessorKind, AccessorPlan, TextPosition};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
-    Button, CellWidth, Checkbox, ComposedCell, ComposedList, ComposedRow, Label, ModalHost,
+    Button, CellWidth, Checkbox, ComposedCell, ComposedList, ComposedRow, FormLayout, Label,
+    ModalHost,
 };
 use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetId};
 
@@ -319,21 +320,10 @@ impl GenerateSurface {
             modal.layout(context, Rect::new(0.0, 0.0, size.width, size.height));
             modal.panel_bounds()
         };
-        let botoes_y = panel.origin.y + panel.size.height - 52.0;
-        let lista = Rect::new(
-            panel.origin.x + 16.0,
-            panel.origin.y + 56.0,
-            panel.size.width - 32.0,
-            botoes_y - (panel.origin.y + 56.0) - 12.0,
-        );
-        let ok = Rect::new(
-            panel.origin.x + panel.size.width - 116.0,
-            botoes_y,
-            100.0,
-            36.0,
-        );
-        let todos = Rect::new(ok.origin.x - 112.0, botoes_y, 100.0, 36.0);
-        (lista, todos, ok)
+        // Botões maiores que o padrão: "Gerar todos" não cabe em 88 pontos.
+        let forma = FormLayout::new(panel).with_action_size(Size::new(100.0, 36.0));
+        let [todos, ok] = forma.actions();
+        (forma.content(), todos, ok)
     }
 }
 

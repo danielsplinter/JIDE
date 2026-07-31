@@ -14,7 +14,7 @@ use ide_domain::{Location, TextRange};
 // A moldura, o campo e a lista são da biblioteca: a IDE não desenha caixa de
 // texto nem trilha de rolagem à mão.
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
-use ui_components::{Button, IconTint, Label, ListView, ModalHost, TextInput};
+use ui_components::{Button, FormLayout, IconTint, Label, ListView, ModalHost, TextInput};
 use ui_core::{KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetId};
 
 use super::primary_pointer;
@@ -394,20 +394,15 @@ struct RenameGeometry {
 }
 
 fn geometry(panel: Rect) -> RenameGeometry {
-    let largura = (panel.size.width - 48.0).max(120.0);
-    let input = Rect::new(panel.origin.x + 24.0, panel.origin.y + 76.0, largura, 34.0);
-    let ok = Rect::new(
-        panel.origin.x + panel.size.width - 104.0,
-        panel.origin.y + panel.size.height - 48.0,
-        88.0,
-        34.0,
-    );
-    let cancel = Rect::new(ok.origin.x - 98.0, ok.origin.y, 88.0, 34.0);
+    let forma = FormLayout::new(panel);
+    let input = forma.field(0);
+    let [cancel, ok] = forma.actions();
+    // A lista ocupa o que sobra entre o campo e a fileira de ações.
     let topo_lista = input.origin.y + input.size.height + 34.0;
     let list = Rect::new(
         input.origin.x,
         topo_lista,
-        largura,
+        input.size.width,
         (ok.origin.y - topo_lista - 16.0).max(40.0),
     );
     RenameGeometry {

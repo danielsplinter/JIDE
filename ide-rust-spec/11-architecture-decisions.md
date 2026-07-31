@@ -361,3 +361,37 @@ mesmo lugar, e nada acusaria.
 que o compilador confere. `tab_action` continua existindo por um motivo diferente
 do anterior: a janela entrega só o pressionar, e o componente espera pressionar e
 soltar — é a soltura sintética que fica ali, não a tradução de texto.
+
+## ADR-020 — As janelas pedem as áreas, e não as calculam
+
+**Decisão:** as cinco janelas da IDE — criar item, renomear, gerar, configurações
+e inspeção — passam a obter campos, legendas e a fileira de ações do `FormLayout`
+da ERLibUi (ADR-018 de lá), em vez de escreverem as coordenadas.
+
+**Motivo:** eram os mesmos números em cinco lugares, e já haviam divergido. A
+janela de geração usava 100×36 com 12 pontos de folga onde as outras usavam 88×34
+com 10; a diferença não vinha de decisão nenhuma, e ninguém a notaria, porque
+telas que funcionam não são comparadas lado a lado.
+
+**Consequência:** a janela de geração mudou 2 pontos — os botões desceram e se
+aproximaram, e a lista dela ficou 2 pontos mais alta. É a única diferença visível
+da mudança, e vale registrá-la: unificar medidas que divergiram significa escolher
+uma, e quem escolhe deve dizer qual. O botão maior dela continua maior, por
+`with_action_size` — o que se unificou foi a fileira, não o tamanho do rótulo.
+
+## ADR-021 — A IDE não estima largura de texto
+
+**Decisão:** a mensagem da janela de inspeção passa a ser um `Label` com
+`with_max_width` (ADR-019 da ERLibUi). Somem a função `clipped_message` e a
+constante `INSPECTION_MESSAGE_CHAR_WIDTH`, que valia 6.6.
+
+**Motivo:** o 6.6 era a largura média de um caractere, medida uma vez e escrita à
+mão. Uma mensagem de letras estreitas ficava com folga sobrando; uma de letras
+largas passava da borda — e a mensagem longa é a que explica por que a execução
+falhou. A IDE nunca teve como medir texto: quem mede é o componente, e a medição
+chega a ele pelo contexto de pintura.
+
+**Consequência:** é a quarta lacuna da biblioteca encontrada pelo mesmo caminho —
+a IDE resolvendo à mão o que a biblioteca deveria oferecer. Nas quatro, o sinal
+foi o mesmo: um número mágico ou uma mecânica repetida. Vale como regra de
+inspeção do que ainda resta.

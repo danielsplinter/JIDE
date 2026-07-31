@@ -4,6 +4,7 @@
 //! fora do shell porque não dependem de estado nenhum — e porque, junto do
 //! resto, escondiam que a mesma conta aparecia na geometria e na pintura.
 
+use ui_components::FormLayout;
 use ui_core::Rect;
 
 use super::settings::PAGE_ROW_HEIGHT as SETTINGS_PAGE_ROW_HEIGHT;
@@ -58,14 +59,9 @@ pub(super) fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
         browse.size.height,
     );
     // Salvar à direita, encostado na borda, e Cancelar à esquerda dele: a ação
-    // que confirma fica no canto que a leitura alcança por último.
-    let save = Rect::new(
-        dialog.origin.x + dialog.size.width - 104.0,
-        dialog.origin.y + dialog.size.height - 48.0,
-        88.0,
-        34.0,
-    );
-    let close = Rect::new(save.origin.x - 98.0, save.origin.y, 88.0, save.size.height);
+    // que confirma fica no canto que a leitura alcança por último. A conta é a
+    // mesma de todas as janelas, e vem da biblioteca.
+    let [close, save] = FormLayout::new(dialog).actions();
     let debug_host = Rect::new(combo.origin.x, combo.origin.y, 220.0, 36.0);
     let debug_port = Rect::new(
         debug_host.origin.x + debug_host.size.width + 12.0,
@@ -130,12 +126,8 @@ pub(super) fn inspection_geometry(panel: Rect) -> InspectionGeometry {
         right_width,
         (height - detail_height - 18.0).max(60.0),
     );
-    let close = Rect::new(
-        panel.origin.x + panel.size.width - 104.0,
-        panel.origin.y + panel.size.height - 48.0,
-        88.0,
-        34.0,
-    );
+    let [close] = FormLayout::new(panel).actions();
+    // Executar é mais largo que o padrão, e por isso não sai da mesma fileira.
     let run = Rect::new(close.origin.x - 108.0, close.origin.y, 98.0, 34.0);
     let message = Rect::new(
         panel.origin.x + 16.0,
