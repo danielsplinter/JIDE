@@ -138,28 +138,50 @@ lateral.
   ela compartilha com o editor principal (a lista de completação, o painel em
   foco) ficou no shell, que é quem arbitra entre os dois.
 
-### Fase 4 — O funil de eventos
+### Fase 4 — O funil de eventos ✅ Concluída
 
-Uma superfície passa a ser um contrato, e não uma convenção:
+As janelas passam a viver numa lista ordenada por profundidade, e cada entrada de
+evento pergunta a ela a quem o gesto pertence:
 
 ```rust
-trait Surface {
-    fn is_open(&self) -> bool;
-    fn pointer(&mut self, event: &PointerEvent, size: Size) -> bool;
-    fn key(&mut self, key: &str, modifiers: Modifiers) -> bool;
-    fn scroll(&mut self, point: Point, delta: f32, size: Size) -> bool;
-}
+enum SurfaceKind { Rename, Generate, TypeSearch, Inspection, NewItem, Settings }
+const SURFACES: [SurfaceKind; 6] = [ /* de cima para baixo */ ];
+
+fn open_surface(&self) -> Option<SurfaceKind>;
 ```
 
-O shell mantém as superfícies numa lista ordenada por profundidade — a de cima
-recebe primeiro — e cada entrada de evento vira uma varredura dessa lista. As
-cadeias de `if` desaparecem.
+Cada entrada virou duas linhas: `open_surface()` e um despacho. As cadeias de
+`if` desapareceram de `escape`, `pointer_down`, `pointer_move`, `pointer_up`,
+`scroll`, `key_down_with_modifiers` e `text_input`.
 
-**Critério:** `pointer_down`, `pointer_move`, `pointer_up`, `scroll`,
-`key_down_with_modifiers` e `escape` não citam nenhuma janela pelo nome.
+**A pintura é a mesma lista, lida ao contrário.** `SURFACES.rev()` desenha da de
+baixo para a de cima. Antes eram cinco chamadas nomeadas mais um bloco solto para
+as configurações, numa ordem que não era a do roteamento — duas listas para
+manter em acordo, e só uma delas visível de cada vez.
 
-**Consequência:** registrar uma janela nova passa a ser **uma** linha, e não
-seis. Esquecer deixa de ser possível — não há onde esquecer.
+**Não virou um `trait Surface`.** O plano previa objetos de traço; o despacho é
+por `enum`. As janelas não têm assinatura comum: a de configurações precisa das
+seções do catálogo, a inspeção precisa saber se a sessão de depuração está viva, e
+cada uma devolve um `Outcome` de forma diferente. Um traço só passaria se todas
+recebessem um contexto genérico — abstração que existiria para satisfazer a
+assinatura, não para dizer algo. O `enum` diz a mesma coisa: a lista é fechada, e
+o compilador exige o braço novo em cada `match` quando ela cresce.
+
+**Critério:** cumprido. Restam duas menções nominais fora do roteamento — o
+`debug.connect` do menu, que escolhe a página das configurações, e o painel de
+edição da inspeção, que o `pointer_up` encerra junto com o do arquivo. Nenhuma
+das duas decide de quem é o gesto.
+
+**A profundidade da lista de completação.** Ela não é uma janela: nasce colada ao
+cursor e convive com o que estiver aberto. Mas tem lugar na pilha — cobre a
+inspeção e o editor, e é coberta pelas janelas que tomam a tela inteira. Isso
+virou uma constante, `COMPLETION_DEPTH`, comparada com a profundidade do que está
+aberto. Sem ela, a ordem única teria mudado comportamento: hoje um clique com a
+lista aberta sobre a inspeção é da lista, e Esc no mesmo estado é da janela.
+
+**Consequência:** registrar uma janela nova é uma linha na lista e um braço em
+cada `match`. Esquecer o roteamento deixou de ser possível — o compilador não
+deixa.
 
 ### Fase 5 — A casca
 
@@ -176,8 +198,21 @@ independentes e cada uma termina com a suíte verde: dá para parar entre
 quaisquer duas.
 
 O ganho não é estético. A classe de defeito que custou quatro rodadas numa única
-sessão deixa de existir na fase 4 — e as fases 1 a 3 existem para que a 4 caiba
-num diff que alguém consiga revisar.
+sessão deixou de existir na fase 4 — e as fases 1 a 3 existiram para que a 4
+coubesse num diff que alguém consiga revisar.
+
+**O que a fase 4 revelou.** Com as ordens lado a lado, três divergências
+apareceram, todas sem efeito hoje porque as janelas são mutuamente exclusivas —
+mas todas prontas para virar defeito no dia em que duas convivessem:
+
+- a ordem entre as janelas era diferente em cada entrada de evento;
+- a inspeção e a criação de item deixavam a roda passar para o editor atrás,
+  enquanto renomear, gerar, buscar e configurar a retinham;
+- o clique secundário só é bloqueado pelas configurações; com qualquer outra
+  janela aberta ele ainda abre o menu do Explorer por trás do painel.
+
+Nenhuma foi corrigida aqui: fase de reorganização que muda comportamento é fase
+para desfazer. Ficam registradas como o próximo trabalho, agora num lugar só.
 
 ## Verificação
 

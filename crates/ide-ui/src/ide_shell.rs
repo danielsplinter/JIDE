@@ -154,6 +154,38 @@ struct ShellContext {
     scrollbar_drag: Option<ScrollTarget>,
 }
 
+/// As janelas que cobrem a tela, da que fica por cima para a que fica embaixo.
+///
+/// A ordem é a profundidade: a primeira aberta é a que recebe o gesto, e as de
+/// baixo nem são consultadas. Registrar uma janela nova é acrescentar uma linha
+/// aqui e um braço em cada `match` do funil — o roteamento não precisa saber que
+/// ela existe. Ver `14-ide-shell-decomposition`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceKind {
+    Rename,
+    Generate,
+    TypeSearch,
+    Inspection,
+    NewItem,
+    Settings,
+}
+
+const SURFACES: [SurfaceKind; 6] = [
+    SurfaceKind::Rename,
+    SurfaceKind::Generate,
+    SurfaceKind::TypeSearch,
+    SurfaceKind::Inspection,
+    SurfaceKind::NewItem,
+    SurfaceKind::Settings,
+];
+
+/// Onde a lista de completação flutua nessa pilha.
+///
+/// Ela não é uma janela: nasce colada ao cursor e convive com o que estiver
+/// aberto. Mas tem profundidade — cobre a inspeção e o editor, e é coberta pelas
+/// janelas que tomam a tela inteira. É esse número que diz até onde ela cobre.
+const COMPLETION_DEPTH: usize = 3;
+
 /// Coordenador da interface. Cada feature é dona de seus widgets e seleção.
 pub struct IdeShell {
     explorer: ExplorerState,
@@ -2175,38 +2207,198 @@ impl IdeShell {
         }
     }
 
+    /// A janela aberta que está por cima, se houver alguma.
+    ///
+    /// É por aqui que cada entrada de evento pergunta a quem o gesto pertence,
+    /// em vez de repetir a cadeia de `if` e um dia repeti-la torta.
+    fn open_surface(&self) -> Option<SurfaceKind> {
+        SURFACES
+            .into_iter()
+            .find(|kind| self.surface_is_open(*kind))
+    }
+
+    /// Profundidade da janela, para comparar com a da lista de completação.
+    fn surface_depth(kind: SurfaceKind) -> usize {
+        SURFACES
+            .iter()
+            .position(|candidate| *candidate == kind)
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Se a lista de completação está por cima do que quer que esteja aberto.
+    fn completion_is_above(&self) -> bool {
+        self.open_surface().map_or(usize::MAX, Self::surface_depth) >= COMPLETION_DEPTH
+    }
+
+    fn surface_is_open(&self, kind: SurfaceKind) -> bool {
+        match kind {
+            SurfaceKind::Rename => self.rename.is_open(),
+            SurfaceKind::Generate => self.generate.is_open(),
+            SurfaceKind::TypeSearch => self.search.is_open(),
+            SurfaceKind::Inspection => self.inspection.is_open(),
+            SurfaceKind::NewItem => self.new_item.is_open(),
+            SurfaceKind::Settings => self.settings.is_open(),
+        }
+    }
+
+    /// Esc na janela: cada uma decide o que desistir significa para ela.
+    fn surface_escape(&mut self, kind: SurfaceKind) {
+        match kind {
+            SurfaceKind::Rename => self.cancel_rename(),
+            SurfaceKind::Generate => self.close_generate(),
+            SurfaceKind::TypeSearch => self.close_type_search(),
+            SurfaceKind::Inspection => self.close_inspection(),
+            SurfaceKind::NewItem => self.close_new_item_dialog(),
+            // Esc nas configurações é cancelar: fechar sem descartar o que foi
+            // mexido salvaria pela porta dos fundos.
+            SurfaceKind::Settings => self.settings.cancel(),
+        }
+    }
+
+    fn surface_pointer_down(&mut self, kind: SurfaceKind, point: Point, size: Size) {
+        match kind {
+            SurfaceKind::Rename => self.rename_pointer_down(point, size),
+            SurfaceKind::Generate => self.generate_pointer_down(point, size),
+            SurfaceKind::TypeSearch => self.type_search_pointer_down(point, size),
+            SurfaceKind::Inspection => self.inspection_pointer_down(point, size),
+            SurfaceKind::NewItem => self.new_item_pointer_down(point, size),
+            SurfaceKind::Settings => self.settings_dialog_pointer_down(point, size),
+        }
+    }
+
+    /// Movimento do ponteiro. `None` é "não é meu, siga adiante".
+    fn surface_pointer_move(
+        &mut self,
+        kind: SurfaceKind,
+        point: Point,
+        size: Size,
+    ) -> Option<bool> {
+        match kind {
+            // Arrastar a barra da lista precisa do movimento: só com o clique
+            // chegando, o indicador é pego e nunca anda.
+            SurfaceKind::Rename => {
+                self.rename_pointer_event(&UiEvent::PointerMove(primary_pointer(point)), size);
+                Some(true)
+            }
+            // A janela cobre o que está atrás: mover ali não arrasta nada.
+            SurfaceKind::Settings => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Soltura do ponteiro, que é o que encerra um arrasto começado na janela.
+    fn surface_pointer_up(&mut self, kind: SurfaceKind) {
+        if kind == SurfaceKind::Rename {
+            let size = self.context.last_size;
+            self.rename_pointer_event(&UiEvent::PointerUp(primary_pointer(Point::ZERO)), size);
+        }
+    }
+
+    /// A roda dentro da janela. `false` deixa passar para o que está atrás.
+    fn surface_scroll(
+        &mut self,
+        kind: SurfaceKind,
+        point: Point,
+        delta_lines: f32,
+        size: Size,
+    ) -> bool {
+        match kind {
+            // A janela cobre tudo: a roda ali é da lista dela, e nunca do editor
+            // atrás — rolar o que está coberto é mexer no que não se vê.
+            SurfaceKind::Rename => {
+                self.rename_pointer_event(
+                    &UiEvent::Scroll(ui_core::ScrollEvent {
+                        position: point,
+                        delta_x: 0.0,
+                        delta_y: delta_lines * generate::ROW_HEIGHT,
+                    }),
+                    size,
+                );
+                true
+            }
+            SurfaceKind::Generate => {
+                let context = self.layout_context();
+                self.generate.scroll(&context, point, delta_lines, size);
+                true
+            }
+            SurfaceKind::TypeSearch => {
+                self.type_search_scroll(point, delta_lines, size);
+                true
+            }
+            SurfaceKind::Settings => true,
+            SurfaceKind::Inspection | SurfaceKind::NewItem => false,
+        }
+    }
+
+    /// Tecla na janela. `false` deixa a tecla seguir para quem estiver atrás.
+    fn surface_key(&mut self, kind: SurfaceKind, key: &str, modifiers: Modifiers) -> bool {
+        match kind {
+            SurfaceKind::Rename => self.rename_key(key, modifiers),
+            SurfaceKind::Generate => false,
+            SurfaceKind::TypeSearch => self.type_search_key(key),
+            SurfaceKind::Inspection => self.inspection_key(key, modifiers),
+            SurfaceKind::NewItem => self.new_item_key(key),
+            SurfaceKind::Settings => {
+                let outcome = self.settings.key(key, modifiers);
+                self.apply_settings_outcome(outcome);
+                true
+            }
+        }
+    }
+
+    /// Se o painel de edição da frente é o de uma janela, e não o do arquivo.
+    ///
+    /// O que está atrás dela está coberto: arrastar a barra de rolagem ou marcar
+    /// no terminal seria o gesto indo parar no que não se vê.
+    fn front_editor_is_modal(&self) -> bool {
+        self.inspection.is_open()
+    }
+
+    /// Desenha a janela, se ela estiver aberta.
+    fn paint_surface(
+        &mut self,
+        kind: SurfaceKind,
+        commands: &mut Vec<PaintCommand>,
+        size: Size,
+        colors: ColorTokens,
+    ) {
+        match kind {
+            SurfaceKind::Rename => self.paint_rename(commands, size),
+            SurfaceKind::Generate => self.paint_generate(commands, size),
+            SurfaceKind::TypeSearch => self.paint_type_search(commands, size),
+            SurfaceKind::Inspection => self.paint_inspection(commands, size),
+            SurfaceKind::NewItem => self.paint_new_item_dialog(commands, size),
+            SurfaceKind::Settings => commands.extend(self.settings.paint(
+                &self.layout_context(),
+                size,
+                &self.catalog.settings_sections,
+                colors,
+                self.paint_context(),
+                self.paint_context(),
+            )),
+        }
+    }
+
+    /// Texto digitado na janela. `false` deixa o texto seguir adiante.
+    fn surface_text_input(&mut self, kind: SurfaceKind, text: &str) -> bool {
+        match kind {
+            SurfaceKind::Rename => self.rename_text_input(text),
+            SurfaceKind::Generate => false,
+            SurfaceKind::TypeSearch => self.type_search_text_input(text),
+            SurfaceKind::Inspection => self.inspection_text_input(text),
+            SurfaceKind::NewItem => self.new_item_text_input(text),
+            SurfaceKind::Settings => self.settings.text_input(text),
+        }
+    }
+
     pub fn escape(&mut self) {
         // O menu de contexto é o que está por cima de tudo: é ele que Esc
         // dispensa primeiro.
         if self.context_menu_key("Escape", Modifiers::default()) {
             return;
         }
-        // A janela de renomear vem antes das outras porque é a que está por
-        // cima quando está aberta.
-        if self.rename.is_open() {
-            self.cancel_rename();
-            return;
-        }
-        if self.generate.is_open() {
-            self.close_generate();
-            return;
-        }
-        if self.search.is_open() {
-            self.close_type_search();
-            return;
-        }
-        if self.inspection.is_open() {
-            self.close_inspection();
-            return;
-        }
-        if self.new_item.is_open() {
-            self.close_new_item_dialog();
-            return;
-        }
-        // Esc na janela de configurações é cancelar: fechar sem descartar o que
-        // foi mexido salvaria pela porta dos fundos.
-        if self.settings.is_open() {
-            self.settings.cancel();
+        if let Some(surface) = self.open_surface() {
+            self.surface_escape(surface);
             return;
         }
         if !self.editor_area.completion_items.is_empty() {
@@ -2467,33 +2659,13 @@ impl IdeShell {
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
             return;
         }
-        if self.rename.is_open() {
-            self.rename_pointer_down(point, size);
+        // A lista de completação vem antes das janelas que ela cobre: clicar em
+        // outro lugar significa desistir dela.
+        if self.completion_is_above() && self.completion_pointer_down(point, size) {
             return;
         }
-        if self.generate.is_open() {
-            self.generate_pointer_down(point, size);
-            return;
-        }
-        if self.search.is_open() {
-            self.type_search_pointer_down(point, size);
-            return;
-        }
-        // A lista de completação vem antes do resto: ela está por cima, e clicar
-        // em outro lugar significa desistir dela.
-        if self.completion_pointer_down(point, size) {
-            return;
-        }
-        if self.inspection.is_open() {
-            self.inspection_pointer_down(point, size);
-            return;
-        }
-        if self.new_item.is_open() {
-            self.new_item_pointer_down(point, size);
-            return;
-        }
-        if self.settings.is_open() {
-            self.settings_dialog_pointer_down(point, size);
+        if let Some(surface) = self.open_surface() {
+            self.surface_pointer_down(surface, point, size);
             return;
         }
         if point.y < TITLE_HEIGHT && self.action_buttons_pointer_down(point, size) {
@@ -2758,19 +2930,15 @@ impl IdeShell {
         if self.explorer.context_menu.is_open() {
             return self.context_menu_event(&UiEvent::PointerMove(primary_pointer(point)), size);
         }
-        // Arrastar a barra da janela de renomear precisa do movimento: só o
-        // clique chegando à lista, o indicador é pego e nunca anda.
-        if self.rename.is_open() {
-            self.rename_pointer_event(&UiEvent::PointerMove(primary_pointer(point)), size);
-            return true;
-        }
-        if self.settings.is_open() {
-            return false;
+        if let Some(surface) = self.open_surface()
+            && let Some(handled) = self.surface_pointer_move(surface, point, size)
+        {
+            return handled;
         }
         // Com a inspeção aberta, o gesto é dela: o resto da janela está atrás do
         // painel, e arrastar sobre o que não se vê seria o gesto indo parar no
         // lugar errado.
-        let inspecting = self.inspection.is_open();
+        let inspecting = self.front_editor_is_modal();
         if !inspecting && let Some(target) = self.context.scrollbar_drag {
             self.sync_scrollbar(target, size);
             self.scrollbar_mut(target).event(
@@ -2830,11 +2998,10 @@ impl IdeShell {
     }
 
     pub fn pointer_up(&mut self) {
-        // A soltura encerra o arrasto da barra: sem ela a lista continuaria
-        // achando que o gesto está em curso e seguiria o ponteiro.
-        if self.rename.is_open() {
-            let size = self.context.last_size;
-            self.rename_pointer_event(&UiEvent::PointerUp(primary_pointer(Point::ZERO)), size);
+        // A soltura encerra o arrasto começado na janela: sem ela a lista
+        // continuaria achando que o gesto está em curso e seguiria o ponteiro.
+        if let Some(surface) = self.open_surface() {
+            self.surface_pointer_up(surface);
         }
         // Encerrar o gesto é do painel, que sabe se ele virou seleção.
         self.editor_area.pane.pointer_up();
@@ -2858,30 +3025,9 @@ impl IdeShell {
     }
 
     pub fn scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
-        // A janela de renomear cobre tudo: a roda ali é da lista dela, e nunca
-        // do editor atrás — rolar o que está coberto é mexer no que não se vê.
-        if self.rename.is_open() {
-            self.rename_pointer_event(
-                &UiEvent::Scroll(ui_core::ScrollEvent {
-                    position: point,
-                    delta_x: 0.0,
-                    delta_y: delta_lines * generate::ROW_HEIGHT,
-                }),
-                size,
-            );
-            return;
-        }
-        // A janela de geração cobre tudo: a roda ali é dela.
-        if self.generate.is_open() {
-            let context = self.layout_context();
-            self.generate.scroll(&context, point, delta_lines, size);
-            return;
-        }
-        if self.search.is_open() {
-            self.type_search_scroll(point, delta_lines, size);
-            return;
-        }
-        if self.settings.is_open() {
+        if let Some(surface) = self.open_surface()
+            && self.surface_scroll(surface, point, delta_lines, size)
+        {
             return;
         }
         let geo = self.geometry(size);
@@ -3058,20 +3204,9 @@ impl IdeShell {
     }
 
     pub fn text_input(&mut self, text: &str) {
-        if self.type_search_text_input(text) {
-            return;
-        }
-        if self.inspection_text_input(text) {
-            return;
-        }
-        if self.rename_text_input(text) {
-            return;
-        }
-        if self.new_item_text_input(text) {
-            return;
-        }
-        if self.settings.is_open() {
-            let _ = self.settings_text_input(text);
+        if let Some(surface) = self.open_surface()
+            && self.surface_text_input(surface, text)
+        {
             return;
         }
         match self.context.focus {
@@ -3095,23 +3230,11 @@ impl IdeShell {
         if self.context_menu_key(key, modifiers) {
             return;
         }
-        // A busca de tipo cobre a janela: enquanto ela está aberta, as teclas são
-        // dela.
-        if self.type_search_key(key) {
-            return;
-        }
-        if self.inspection_key(key, modifiers) {
-            return;
-        }
-        if self.new_item_key(key) {
-            return;
-        }
-        if self.settings.is_open() {
-            let outcome = self.settings.key(key, modifiers);
-            self.apply_settings_outcome(outcome);
-            return;
-        }
-        if self.rename_key(key, modifiers) {
+        // A janela aberta fica com as teclas — a menos que ela devolva o que não
+        // é dela, como a inspeção faz quando o foco está na árvore.
+        if let Some(surface) = self.open_surface()
+            && self.surface_key(surface, key, modifiers)
+        {
             return;
         }
         if self.completion_key(key) {
@@ -4083,20 +4206,13 @@ impl IdeShell {
             button.paint(&mut actions);
         }
         commands.extend(actions.into_commands());
-        commands.extend(self.settings.paint(
-            &self.layout_context(),
-            size,
-            &self.catalog.settings_sections,
-            colors,
-            self.paint_context(),
-            self.paint_context(),
-        ));
-        // A janela de criação cobre o conteúdo, e o menu de contexto cobre ela.
-        self.paint_new_item_dialog(&mut commands, size);
-        self.paint_generate(&mut commands, size);
-        self.paint_rename(&mut commands, size);
-        self.paint_type_search(&mut commands, size);
-        self.paint_inspection(&mut commands, size);
+        // As janelas na ordem inversa do funil: a de baixo é desenhada primeiro,
+        // e a que recebe o gesto é a última a cobrir a tela. É a mesma lista que
+        // roteia o evento, lida de trás para a frente — não há como uma janela
+        // nova receber o clique e esquecer de aparecer.
+        for kind in SURFACES.into_iter().rev() {
+            self.paint_surface(kind, &mut commands, size, colors);
+        }
         // Depois da janela de inspeção, ou a lista ficaria atrás dela.
         if self.inspection.is_open()
             && let Some(anchor) = self.inspection_completion_anchor()
@@ -4354,11 +4470,6 @@ impl IdeShell {
                     "Informe um host e uma porta de depuração válidos".to_owned();
             }
         }
-    }
-
-    /// Digitação enquanto a página de depuração está em foco.
-    fn settings_text_input(&mut self, text: &str) -> bool {
-        self.settings.text_input(text)
     }
 }
 
