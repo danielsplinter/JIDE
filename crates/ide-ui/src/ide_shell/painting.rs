@@ -137,11 +137,8 @@ impl IdeShell {
         decorations
     }
 
-    pub(super) fn paint_debug_panel(&self, size: Size, colors: ColorTokens) -> Vec<PaintCommand> {
-        let geometry = debug_panel_geometry(
-            self.debug_panel_rect(size),
-            self.debug_panel.view.frames.len(),
-        );
+    pub(super) fn paint_debug_panel(&self, colors: ColorTokens) -> Vec<PaintCommand> {
+        let geometry = self.debug_panel_geometry();
         let panel = geometry.panel;
         let mut commands = Vec::new();
         self.paint_surface_band(
@@ -431,7 +428,7 @@ impl IdeShell {
         }
         commands.push(PaintCommand::PopClip);
         if self.debug_panel.view.attached {
-            commands.extend(self.paint_debug_panel(size, colors));
+            commands.extend(self.paint_debug_panel(colors));
         }
         if !self.terminal.minimized {
             let mut terminal_tabs_paint = self.paint_context();
@@ -584,7 +581,7 @@ impl IdeShell {
         commands.extend(menu_paint.into_commands());
         // Os botões de ação são widgets da biblioteca: a IDE define papel e
         // posição, e o desenho do ícone e o tema vêm de lá.
-        let rects = action_button_rects(size);
+        let rects = self.action_button_areas();
         let mut stop = self.debug_panel.stop_button.clone();
         stop.set_tint(if self.application_running() {
             IconTint::Danger

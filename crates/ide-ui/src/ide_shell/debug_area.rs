@@ -122,22 +122,8 @@ impl IdeShell {
         self.debug_panel.attached()
     }
 
-    pub(super) fn debug_panel_rect(&self, size: Size) -> Rect {
-        let geometry = self.geometry();
-        let x = ACTIVITY_WIDTH + self.sidebar_width(size) + geometry.editor_width;
-        Rect::new(
-            x,
-            geometry.content_top,
-            (size.width - x).max(0.0),
-            geometry.editor_height,
-        )
-    }
-
-    pub(super) fn debug_panel_pointer_down(&mut self, point: Point, size: Size) {
-        let geometry = debug_panel_geometry(
-            self.debug_panel_rect(size),
-            self.debug_panel.view.frames.len(),
-        );
+    pub(super) fn debug_panel_pointer_down(&mut self, point: Point) {
+        let geometry = self.debug_panel_geometry();
         // O gesto vai ao botão de verdade: é ele que guarda a pressão em curso.
         let parado = self.debug_panel.view.is_stopped();
         let areas: Vec<_> = geometry.buttons.to_vec();
@@ -215,8 +201,8 @@ impl IdeShell {
     }
 
     /// Roteia o clique para os botões de ação, que são widgets da biblioteca.
-    pub(super) fn action_buttons_pointer_down(&mut self, point: Point, size: Size) -> bool {
-        let rects = action_button_rects(size);
+    pub(super) fn action_buttons_pointer_down(&mut self, point: Point) -> bool {
+        let rects = self.action_button_areas();
         self.debug_panel
             .stop_button
             .layout(&self.layout_context(), rects[0]);
@@ -288,7 +274,7 @@ impl IdeShell {
         {
             return false;
         }
-        self.debug_panel_pointer_down(point, size);
+        self.debug_panel_pointer_down(point);
         true
     }
 }

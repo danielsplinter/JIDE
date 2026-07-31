@@ -437,13 +437,72 @@ em seguida precisa do arranjo já refeito.
 fileira de ações do título e o interior do painel de depuração —, que são fase 4.
 318 testes; o quadro estável em 453 µs, 2,7% do orçamento.
 
-## Fase 4 — Os painéis
+## Fase 4 — Os painéis ✅
 
 Painel de depuração, Explorer e terminal. O **editor de código entra por último**
 e provavelmente como nó opaco: ele tem rolagem própria, virtualização e cache de
 texto moldado, e não deve participar do arranjo interno.
 
 **Critério:** `ide_shell/geometry.rs` não existe mais.
+
+### Passo 1 — Os ícones do título ✅
+
+Parar, executar e depurar eram três retângulos calculados a partir da largura da
+janela menos a soma deles. Agora são uma fileira alinhada à direita e centrada na
+altura do título — `MainAlign::End`, `CrossAlign::Center` —, e `action_button_rects`
+foi apagada.
+
+### Passo 2 — O painel de depuração ganha lugar na árvore ✅
+
+Ele era posicionado por uma conta que somava a barra de atividades, a lateral e a
+largura do editor para achar onde começava. Isso revelou uma **estrutura errada na
+moldura**: o painel não é irmão da coluna do centro — ele fica ao lado do código,
+abaixo das abas e acima do terminal. A árvore passou a dizer isso, com uma linha
+onde editor e painel convivem.
+
+Com a estrutura certa, `editor_width` deixou de precisar de qualquer subtração: é
+a largura do nó do editor. `debug_panel_rect` virou uma leitura.
+
+O quadro estável caiu de 453 µs para **383 µs**. 318 testes.
+
+### O que falta para o critério 🔶
+
+### Passo 3 — O interior do painel de depuração ✅
+
+Fileira de cinco passos e as duas listas, declaradas: o painel é uma coluna com
+respiro de 6 nos lados e 34 no alto — onde ele desenha o estado da sessão —, a
+fileira tem folga de 4 e cada botão divide o que sobra, e a lista de variáveis
+fica com o resto. A altura da lista de quadros vem da contagem, redeclarada a cada
+quadro.
+
+`debug_panel_geometry` virou leitura e a conta foi apagada; com ela foi
+`debug_panel_rect`, que somava barra de atividades, lateral e largura do editor
+para achar onde o painel começava. **`layout.rs` foi de 66 para 35 linhas** — só a
+`Geometry` e a lista dos cinco passos.
+
+**Mudança de pixel declarada:** a conta antiga dava a cada botão
+`(largura - 20) / 5 - 4`, o que deixava 4 px sobrando na direita. A fileira
+declarada distribui a folga por igual, então cada botão fica ~0,8 px mais largo e
+a sobra some. Nenhum teste dependia disso — eles perguntam a área.
+
+### Passo 4 — As páginas das Configurações, e o fim da `geometry.rs` ✅
+
+Cada fileira de escolha é uma linha: o combo fica com o que sobra — com mínimo de
+190, que era o `.max(190.0)` da conta — e o botão de procurar tem largura fixa. As
+duas fileiras vivem numa coluna com folga de 46, que era a soma escondida na
+posição da segunda.
+
+Sem pixel movido: a fileira começa a 28 da borda da página e a 74 do alto dela,
+os mesmos deslocamentos de antes; `554 - 28 - 12 - 112 - 10 = 392`, que é o que
+`(largura - lateral - 178)` dava.
+
+Com isso `settings_dialog_geometry` foi apagada e **a `geometry.rs` deixou de
+existir**. A `SettingsDialogGeometry` sobrevive dentro da `settings`, e agora ela
+é só o **nome** de cada área: todos os campos são leitura do arranjo.
+
+**Fase concluída.** Restam cinco `place` na IDE — abas do editor e do terminal, a
+camada de janela e os dois da completação —, que são a fase 5. O quadro estável
+está em 411 µs, 2,5% do orçamento, com 318 testes.
 
 ## Fase 5 — O que sobra de `place`
 

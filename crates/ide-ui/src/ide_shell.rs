@@ -50,7 +50,7 @@ use std::{
 };
 
 use crate::layout::{
-    DEBUG_BUTTONS, Geometry, action_button_rects, debug_panel_geometry,
+    DEBUG_BUTTONS, DebugPanelGeometry, Geometry,
 };
 use crate::menus::{
     MenuState, debug_request as debug_request_for, editor_entries as editor_menu_entries,
@@ -78,7 +78,7 @@ use ui_core::{
 };
 use ui_editor::{CodeEditor, GutterMark, LineDecoration};
 use ui_host::UiHost;
-use ui_layout_api::{CrossAlign, LayoutDirection, LayoutStyle, MainAlign};
+use ui_layout_api::{CrossAlign, EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 use ui_layout_taffy::TaffyLayoutEngine;
 use ui_render_api::{FillRectCommand, PaintCommand, StrokeRectCommand};
 use ui_window_api::ClipboardService;
@@ -105,6 +105,9 @@ const TERMINAL_MIN_HEIGHT: f32 = 120.0;
 pub(super) const TERMINAL_COLLAPSED_HEIGHT: f32 = 30.0;
 /// O que sobra de editor quando o terminal cresce até onde pode.
 const EDITOR_MIN_HEIGHT: f32 = 100.0;
+/// Os ícones de ação do título: lado e folga entre eles.
+const ACTION_BUTTON_SIDE: f32 = 28.0;
+const ACTION_BUTTON_GAP: f32 = 2.0;
 const DEBUG_PANEL_WIDTH: f32 = 320.0;
 pub(super) const DEBUG_ROW_HEIGHT: f32 = 21.0;
 const MENU_BAR_ID: WidgetId = WidgetId(10_001);
@@ -123,6 +126,14 @@ const FRAME_EDITOR_ID: WidgetId = WidgetId(10_467);
 const FRAME_TERMINAL_ID: WidgetId = WidgetId(10_468);
 const FRAME_DEBUG_ID: WidgetId = WidgetId(10_469);
 const FRAME_STATUS_ID: WidgetId = WidgetId(10_470);
+/// A fileira de ações do título: parar, executar, depurar.
+const FRAME_TITLE_ACTIONS_ID: WidgetId = WidgetId(10_471);
+/// A linha onde o editor e o painel de depuração convivem.
+const FRAME_EDITOR_ROW_ID: WidgetId = WidgetId(10_472);
+/// O interior do painel de depuração: fileira de ações e as duas listas.
+const DEBUG_ACTIONS_ID: WidgetId = WidgetId(10_473);
+const DEBUG_GAP_BEFORE_FRAMES_ID: WidgetId = WidgetId(10_474);
+const DEBUG_GAP_BEFORE_VARS_ID: WidgetId = WidgetId(10_475);
 /// Faixas da moldura: superfícies de fundo, sem conteúdo próprio.
 const CHROME_BACKGROUND_ID: WidgetId = WidgetId(10_080);
 const CHROME_TITLE_ID: WidgetId = WidgetId(10_081);
@@ -286,24 +297,92 @@ fn declare_frame(host: &mut UiHost) {
     };
     let _ = host.declare(SHELL_ROOT_ID, FRAME_ID, coluna);
     let _ = host.declare(FRAME_ID, FRAME_TITLE_ID, fixa(TITLE_HEIGHT));
+    // Os três ícones encostam na direita do título e ficam no meio da altura:
+    // é o alinhamento que os põe ali, e não a largura da janela menos a soma
+    // deles.
+    let _ = host.declare(
+        FRAME_TITLE_ID,
+        FRAME_TITLE_ACTIONS_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            main_align: MainAlign::End,
+            cross_align: CrossAlign::Center,
+            gap: ACTION_BUTTON_GAP,
+            padding: EdgeInsets::only(0.0, 10.0, 0.0, 0.0),
+            flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
+    );
+    for id in [STOP_BUTTON_ID, RUN_BUTTON_ID, DEBUG_BUTTON_ID] {
+        let _ = host.declare(
+            FRAME_TITLE_ACTIONS_ID,
+            id,
+            LayoutStyle {
+                width: Some(ACTION_BUTTON_SIDE),
+                height: Some(ACTION_BUTTON_SIDE),
+                ..LayoutStyle::default()
+            },
+        );
+    }
     let _ = host.declare(FRAME_ID, FRAME_MIDDLE_ID, cresce(linha));
     let _ = host.declare(FRAME_ID, FRAME_STATUS_ID, fixa(StatusBar::HEIGHT));
     let _ = host.declare(FRAME_MIDDLE_ID, FRAME_ACTIVITY_ID, largura(ACTIVITY_WIDTH));
     let _ = host.declare(FRAME_MIDDLE_ID, FRAME_SIDEBAR_ID, largura(SIDEBAR_WIDTH));
     let _ = host.declare(FRAME_MIDDLE_ID, FRAME_CENTER_ID, cresce(coluna));
-    let _ = host.declare(FRAME_MIDDLE_ID, FRAME_DEBUG_ID, largura(DEBUG_PANEL_WIDTH));
     let _ = host.declare(FRAME_CENTER_ID, FRAME_TABS_ID, fixa(TAB_HEIGHT));
-    // O editor não encolhe além do que ainda é editável: é essa restrição que
-    // impede o terminal de engoli-lo, e é ela que o divisor move.
+    // O painel de depuração fica ao lado do código, abaixo das abas e acima do
+    // terminal: é por isso que ele é irmão do editor, e não da coluna inteira.
     let _ = host.declare(
         FRAME_CENTER_ID,
-        FRAME_EDITOR_ID,
+        FRAME_EDITOR_ROW_ID,
         LayoutStyle {
             flex_grow: 1.0,
             min_height: Some(EDITOR_MIN_HEIGHT),
-            ..coluna
+            ..linha
         },
     );
+    // O editor não encolhe além do que ainda é editável: é essa restrição que
+    // impede o terminal de engoli-lo, e é ela que o divisor move.
+    let _ = host.declare(FRAME_EDITOR_ROW_ID, FRAME_EDITOR_ID, cresce(coluna));
+    let _ = host.declare(
+        FRAME_EDITOR_ROW_ID,
+        FRAME_DEBUG_ID,
+        LayoutStyle {
+            width: Some(DEBUG_PANEL_WIDTH),
+            // O alto é do título e do estado da sessão, que o painel desenha; as
+            // listas respiram 6 dos lados.
+            padding: EdgeInsets::only(34.0, 6.0, 0.0, 6.0),
+            ..LayoutStyle::default()
+        },
+    );
+    // Os cinco passos dividem a fileira em partes iguais, com folga entre eles.
+    let _ = host.declare(
+        FRAME_DEBUG_ID,
+        DEBUG_ACTIONS_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            height: Some(26.0),
+            gap: 4.0,
+            padding: EdgeInsets::only(0.0, 4.0, 0.0, 4.0),
+            ..LayoutStyle::default()
+        },
+    );
+    for index in 0..DEBUG_BUTTONS.len() {
+        let _ = host.declare(
+            DEBUG_ACTIONS_ID,
+            WidgetId(DEBUG_STEP_BASE_ID.0 + index as u64),
+            LayoutStyle {
+                flex_grow: 1.0,
+                ..LayoutStyle::default()
+            },
+        );
+    }
+    let _ = host.declare(FRAME_DEBUG_ID, DEBUG_GAP_BEFORE_FRAMES_ID, fixa(26.0));
+    // A altura da lista de quadros vem da contagem, e por isso é redeclarada a
+    // cada quadro em `sync_frame`.
+    let _ = host.declare(FRAME_DEBUG_ID, DEBUG_FRAMES_ID, fixa(DEBUG_ROW_HEIGHT));
+    let _ = host.declare(FRAME_DEBUG_ID, DEBUG_GAP_BEFORE_VARS_ID, fixa(30.0));
+    let _ = host.declare(FRAME_DEBUG_ID, DEBUG_VARIABLES_ID, cresce(coluna));
     let _ = host.declare(
         FRAME_CENTER_ID,
         FRAME_TERMINAL_ID,
@@ -460,7 +539,7 @@ impl IdeShell {
             content_top: tabs.origin.y + tabs.size.height,
             content_bottom: status.origin.y,
             editor_bottom: editor.origin.y + editor.size.height,
-            editor_width: area(FRAME_CENTER_ID).size.width,
+            editor_width: editor.size.width,
             editor_height: editor.size.height,
             terminal_height: area(FRAME_TERMINAL_ID).size.height,
         }
@@ -563,6 +642,25 @@ impl IdeShell {
         let _ = self.host.layout(size);
     }
 
+    /// O interior do painel de depuração, lido do arranjo.
+    fn debug_panel_geometry(&self) -> DebugPanelGeometry {
+        let area = |id| self.host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        DebugPanelGeometry {
+            panel: area(FRAME_DEBUG_ID),
+            buttons: (0..DEBUG_BUTTONS.len())
+                .map(|index| area(WidgetId(DEBUG_STEP_BASE_ID.0 + index as u64)))
+                .collect(),
+            frames: area(DEBUG_FRAMES_ID),
+            variables: area(DEBUG_VARIABLES_ID),
+        }
+    }
+
+    /// As áreas dos três ícones do título, na ordem em que aparecem.
+    fn action_button_areas(&self) -> [Rect; 3] {
+        [STOP_BUTTON_ID, RUN_BUTTON_ID, DEBUG_BUTTON_ID]
+            .map(|id| self.host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)))
+    }
+
     /// Põe na árvore o que muda com o estado da moldura.
     ///
     /// Largura da barra lateral e altura do terminal são o que os divisores
@@ -591,11 +689,20 @@ impl IdeShell {
                 ..LayoutStyle::default()
             },
         );
+        let quadros = self.debug_panel.view.frames.len().clamp(1, 8) as f32;
+        self.host.set_style(
+            DEBUG_FRAMES_ID,
+            LayoutStyle {
+                height: Some(quadros * DEBUG_ROW_HEIGHT),
+                ..LayoutStyle::default()
+            },
+        );
         self.host.set_style(
             FRAME_DEBUG_ID,
             LayoutStyle {
                 hidden: !self.debug_panel.view.attached,
                 width: Some(DEBUG_PANEL_WIDTH),
+                padding: EdgeInsets::only(34.0, 6.0, 0.0, 6.0),
                 ..LayoutStyle::default()
             },
         );
@@ -806,7 +913,7 @@ impl IdeShell {
             self.surface_pointer_down(surface, point, size);
             return;
         }
-        if point.y < TITLE_HEIGHT && self.action_buttons_pointer_down(point, size) {
+        if point.y < TITLE_HEIGHT && self.action_buttons_pointer_down(point) {
             return;
         }
         if self.menu_bar_pointer_down(point, size) {
@@ -1140,7 +1247,6 @@ mod documents;
 mod editor_area;
 mod explorer_area;
 mod generate;
-mod geometry;
 mod inspection;
 mod menu_bar;
 mod new_item;

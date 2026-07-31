@@ -7,7 +7,7 @@ use super::*;
 // Tipos que o shell deixou de importar quando as funções puras saíram; os
 // testes continuam falando deles.
 use crate::debugging::DebugVariableView;
-use crate::ide_shell::geometry::SettingsDialogGeometry;
+use crate::ide_shell::settings::SettingsDialogGeometry;
 use crate::ide_shell::inspection::InspectionGeometry;
 use crate::search::{ContentSearchHit, TypeSearchHit};
 use ide_application::{NewItemRequest, NewItemTemplate};
@@ -674,7 +674,10 @@ fn debug_panel_shows_stack_and_variables_and_selects_a_frame() {
     assert!(texts.iter().any(|text| text == "total = 1"));
     assert!(texts.iter().any(|text| text == "Pilha de chamadas"));
 
-    let panel = debug_panel_geometry(shell.debug_panel_rect(size), 2);
+    let panel = {
+        let _ = shell.paint(size);
+        shell.debug_panel_geometry()
+    };
     shell.pointer_down(
         Point::new(
             panel.panel.origin.x + 40.0,
@@ -736,7 +739,7 @@ fn debug_panel_buttons_and_menu_emit_session_requests() {
     // O painel entra no arranjo com a sessão: sem um quadro, ele ainda não tem
     // lugar, e é do lugar que sai a área dos botões.
     let _ = shell.paint(size);
-    let panel = debug_panel_geometry(shell.debug_panel_rect(size), 0);
+    let panel = shell.debug_panel_geometry();
     let button = panel.buttons[1];
     shell.pointer_down(
         Point::new(button.origin.x + 4.0, button.origin.y + 4.0),
@@ -752,13 +755,11 @@ fn debug_panel_buttons_and_menu_emit_session_requests() {
 
 #[test]
 fn the_action_buttons_are_library_widgets_with_accessible_names() {
-    let shell = test_shell();
+    let mut shell = test_shell();
+    let areas = action_areas(&mut shell, Size::new(1_280.0, 800.0));
     let mut context = PaintContext::with_theme(*shell.theme());
     let mut accessibility = ui_api::AccessibilityContext::default();
-    for (button, rect) in shell
-        .action_buttons()
-        .into_iter()
-        .zip(action_button_rects(Size::new(1_280.0, 800.0)))
+    for (button, rect) in shell.action_buttons().into_iter().zip(areas)
     {
         let mut button = button.clone();
         button.layout(&LayoutContext::default(), rect);
@@ -809,7 +810,7 @@ fn contribution_catalog_generates_templates_settings_and_task_button() {
     shell.escape();
 
     let size = Size::new(1_000.0, 700.0);
-    let run = action_button_rects(size)[1];
+    let run = action_areas(&mut shell, size)[1];
     shell.pointer_down(Point::new(run.origin.x + 2.0, run.origin.y + 2.0), size);
     assert!(
         shell
@@ -824,7 +825,7 @@ fn contribution_catalog_generates_templates_settings_and_task_button() {
 fn the_play_button_requests_a_plain_run() {
     let mut shell = test_shell();
     let size = Size::new(1_280.0, 800.0);
-    let [_, run, debug] = action_button_rects(size);
+    let [_, run, debug] = action_areas(&mut shell, size);
     assert!(
         run.origin.x + run.size.width <= debug.origin.x,
         "o play fica à esquerda do inseto, sem sobrepor"
@@ -854,7 +855,7 @@ fn the_play_button_requests_a_plain_run() {
 fn the_stop_button_sits_left_of_play_and_only_acts_after_a_run() {
     let mut shell = test_shell();
     let size = Size::new(1_280.0, 800.0);
-    let [stop, run, _] = action_button_rects(size);
+    let [stop, run, _] = action_areas(&mut shell, size);
     assert!(
         stop.origin.x + stop.size.width <= run.origin.x,
         "a ordem é parar, executar, depurar"
@@ -903,7 +904,7 @@ fn the_bug_button_runs_and_attaches_with_the_configured_target() {
     let size = Size::new(1_280.0, 800.0);
     shell.set_debug_target("10.0.0.20", 8787);
 
-    let button = action_button_rects(size)[2];
+    let button = action_areas(&mut shell, size)[2];
     assert!(
         button.origin.x + button.size.width < size.width && button.origin.x > size.width - 60.0,
         "o botão fica no canto direito da barra de menus"
@@ -938,7 +939,7 @@ fn the_bug_button_asks_for_a_target_when_it_is_invalid() {
     let size = Size::new(1_280.0, 800.0);
     shell.set_debug_target("", 0);
 
-    let button = action_button_rects(size)[2];
+    let button = action_areas(&mut shell, size)[2];
     shell.pointer_down(
         Point::new(button.origin.x + 6.0, button.origin.y + 6.0),
         size,
@@ -4093,6 +4094,15 @@ fn the_inspection_window_closes() {
         size,
     );
     assert!(!shell.inspection_open());
+}
+
+/// As áreas dos ícones do título, depois de um quadro.
+///
+/// Elas vêm do arranjo, e o arranjo acontece no quadro — pedir antes daria a
+/// moldura do tamanho anterior.
+fn action_areas(shell: &mut IdeShell, size: Size) -> [Rect; 3] {
+    let _ = shell.paint(size);
+    shell.action_button_areas()
 }
 
 fn inspection_layout(shell: &mut IdeShell, size: Size) -> InspectionGeometry {

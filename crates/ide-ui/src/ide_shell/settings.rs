@@ -16,7 +16,35 @@ use ui_core::{
 };
 use ui_render_api::PaintCommand;
 
-use super::geometry::{SettingsDialogGeometry, settings_dialog_geometry};
+/// As áreas da janela, como quem desenha e quem roteia precisam vê-las.
+///
+/// Todas vêm do arranjo: esta forma é só o nome de cada uma.
+pub(super) struct SettingsDialogGeometry {
+    pub(super) sidebar: Rect,
+    /// Primeira linha da navegação; as demais seguem por altura de linha.
+    pub(super) compiler_option: Rect,
+    pub(super) combo: Rect,
+    pub(super) secondary_combo: Rect,
+    pub(super) secondary_browse: Rect,
+    pub(super) browse: Rect,
+    pub(super) close: Rect,
+    pub(super) save: Rect,
+    pub(super) debug_host: Rect,
+    pub(super) debug_port: Rect,
+    pub(super) debug_attach: Rect,
+}
+
+impl SettingsDialogGeometry {
+    /// Área que a lista de páginas ocupa: as linhas, e não a barra inteira.
+    pub(super) fn compiler_option_row(&self, page_count: usize) -> Rect {
+        Rect::new(
+            self.compiler_option.origin.x,
+            self.compiler_option.origin.y,
+            self.compiler_option.size.width,
+            PAGE_ROW_HEIGHT * page_count as f32,
+        )
+    }
+}
 use super::{click_widget, primary_pointer, raw_stroke};
 use crate::settings::SettingsPage;
 use ui_focus::FocusManager;
@@ -50,6 +78,10 @@ const ACTIONS_ID: WidgetId = WidgetId(10_452);
 /// A página de depuração: a coluna com o alvo e o botão de conectar.
 const DEBUG_FORM_ID: WidgetId = WidgetId(10_453);
 const DEBUG_TARGET_ID: WidgetId = WidgetId(10_454);
+/// A página de escolhas: as duas fileiras de combo e botão de procurar.
+const CHOICES_ID: WidgetId = WidgetId(10_455);
+const PRIMARY_ROW_ID: WidgetId = WidgetId(10_456);
+const SECONDARY_ROW_ID: WidgetId = WidgetId(10_457);
 /// O painel: largo o bastante para a barra de páginas e o conteúdo lado a lado.
 const PANEL_SIZE: Size = Size::new(780.0, 460.0);
 
@@ -122,6 +154,50 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             ..LayoutStyle::default()
         },
     );
+    // A página de escolhas: cada fileira tem o combo, que fica com o que sobra,
+    // e o botão de procurar, de largura fixa.
+    let _ = host.declare(
+        PAGE_ID,
+        CHOICES_ID,
+        LayoutStyle {
+            padding: EdgeInsets::only(74.0, 12.0, 0.0, 28.0),
+            gap: 46.0,
+            ..LayoutStyle::default()
+        },
+    );
+    for (row, combo, browse) in [
+        (PRIMARY_ROW_ID, TOOLCHAIN_COMBO_ID, TOOLCHAIN_BROWSE_ID),
+        (SECONDARY_ROW_ID, SECONDARY_COMBO_ID, SECONDARY_BROWSE_ID),
+    ] {
+        let _ = host.declare(
+            CHOICES_ID,
+            row,
+            LayoutStyle {
+                direction: LayoutDirection::Row,
+                height: Some(36.0),
+                gap: 10.0,
+                ..LayoutStyle::default()
+            },
+        );
+        let _ = host.declare(
+            row,
+            combo,
+            LayoutStyle {
+                flex_grow: 1.0,
+                min_width: Some(190.0),
+                ..LayoutStyle::default()
+            },
+        );
+        let _ = host.declare(
+            row,
+            browse,
+            LayoutStyle {
+                width: Some(112.0),
+                ..LayoutStyle::default()
+            },
+        );
+    }
+
     // A página de depuração: host e porta lado a lado, o botão embaixo.
     let _ = host.declare(
         PAGE_ID,
@@ -184,15 +260,6 @@ fn area(host: &UiHost, id: WidgetId) -> Rect {
     host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 
-/// A moldura, como a geometria de cada página precisa vê-la.
-fn frame(host: &UiHost) -> (Rect, Rect, Rect, Rect) {
-    (
-        area(host, MODAL_ID),
-        area(host, SIDEBAR_ID),
-        area(host, CLOSE_ID),
-        area(host, SAVE_ID),
-    )
-}
 const DEBUG_TITLE_ID: WidgetId = WidgetId(10_101);
 const DEBUG_CAPTION_ID: WidgetId = WidgetId(10_102);
 const DEBUG_HINT_ID: WidgetId = WidgetId(10_103);
@@ -416,6 +483,15 @@ impl SettingsSurface {
             PAGES_ID,
             LayoutStyle {
                 height: Some(PAGE_ROW_HEIGHT * (section_count + 1) as f32),
+                ..LayoutStyle::default()
+            },
+        );
+        host.set_style(
+            CHOICES_ID,
+            LayoutStyle {
+                hidden: self.page == SettingsPage::Debug,
+                padding: EdgeInsets::only(74.0, 12.0, 0.0, 28.0),
+                gap: 46.0,
                 ..LayoutStyle::default()
             },
         );
@@ -923,19 +999,23 @@ impl SettingsSurface {
 
     /// As áreas da janela, já centralizada numa tela deste tamanho.
     pub(super) fn geometry(&self, host: &UiHost) -> SettingsDialogGeometry {
-        let (panel, sidebar, close, save) = frame(host);
-        settings_dialog_geometry(
-            panel,
-            sidebar,
-            area(host, PAGES_ID),
-            close,
-            save,
-            (
-                area(host, DEBUG_HOST_ID),
-                area(host, DEBUG_PORT_ID),
-                area(host, DEBUG_ATTACH_ID),
-            ),
-        )
+        let pages = area(host, PAGES_ID);
+        SettingsDialogGeometry {
+            sidebar: area(host, SIDEBAR_ID),
+            // A primeira linha da navegação é o alto da lista, que o arranjo
+            // posiciona: ler daqui é o que impede a lista ser pintada num lugar
+            // e acertada noutro.
+            compiler_option: Rect::new(pages.origin.x, pages.origin.y, 210.0, PAGE_ROW_HEIGHT),
+            combo: area(host, TOOLCHAIN_COMBO_ID),
+            browse: area(host, TOOLCHAIN_BROWSE_ID),
+            secondary_combo: area(host, SECONDARY_COMBO_ID),
+            secondary_browse: area(host, SECONDARY_BROWSE_ID),
+            close: area(host, CLOSE_ID),
+            save: area(host, SAVE_ID),
+            debug_host: area(host, DEBUG_HOST_ID),
+            debug_port: area(host, DEBUG_PORT_ID),
+            debug_attach: area(host, DEBUG_ATTACH_ID),
+        }
     }
 
     /// A toolchain marcada no combo, para os testes.
