@@ -100,6 +100,13 @@ const EDITOR_CHAR_WIDTH: f32 = CodeEditor::default_char_width();
 const TAB_WIDTH: f32 = 140.0;
 const TERMINAL_TAB_WIDTH: f32 = 110.0;
 const TERMINAL_TAB_HEIGHT: f32 = 30.0;
+/// O corpo do console, e a largura de caractere de reserva para o instante em que
+/// ainda não há medição de fonte ligada.
+const TERMINAL_FONT_SIZE: f32 = 14.0;
+/// A faixa da linha de comando, no pé do painel.
+const TERMINAL_INPUT_HEIGHT: f32 = 30.0;
+const TERMINAL_FALLBACK_CHAR_WIDTH: f32 = 8.4;
+const TERMINAL_SCROLLBAR_WIDTH: f32 = 10.0;
 const TERMINAL_DEFAULT_HEIGHT: f32 = 180.0;
 const TERMINAL_MIN_HEIGHT: f32 = 120.0;
 pub(super) const TERMINAL_COLLAPSED_HEIGHT: f32 = 30.0;
@@ -143,6 +150,8 @@ const CHROME_TABS_ID: WidgetId = WidgetId(10_084);
 const CHROME_TERMINAL_ID: WidgetId = WidgetId(10_085);
 const DEBUG_PANEL_SURFACE_ID: WidgetId = WidgetId(10_086);
 const TERMINAL_INPUT_ID: WidgetId = WidgetId(10_087);
+/// A saída, entre as abas e a linha de comando.
+const TERMINAL_OUTPUT_ID: WidgetId = WidgetId(10_476);
 const TERMINAL_CONSOLE_ID: WidgetId = WidgetId(10_088);
 /// Textos da moldura e dos painéis, que são `Label` e não desenho.
 const CHROME_TITLE_TEXT_ID: WidgetId = WidgetId(10_090);
@@ -381,11 +390,19 @@ fn declare_frame(host: &mut UiHost) {
         FRAME_TERMINAL_ID,
         fixa(TERMINAL_COLLAPSED_HEIGHT),
     );
-    // As abas do terminal são a primeira faixa dele.
+    // As três faixas do terminal, na ordem em que se leem: as abas, a saída, e
+    // a linha de comando **no pé** — como em qualquer terminal, o que já foi
+    // executado sobe e o cursor espera embaixo.
     let _ = host.declare(
         FRAME_TERMINAL_ID,
         TERMINAL_TABS_ID,
         fixa(TERMINAL_TAB_HEIGHT),
+    );
+    let _ = host.declare(FRAME_TERMINAL_ID, TERMINAL_OUTPUT_ID, cresce(coluna));
+    let _ = host.declare(
+        FRAME_TERMINAL_ID,
+        TERMINAL_INPUT_ID,
+        fixa(TERMINAL_INPUT_HEIGHT),
     );
 }
 
@@ -636,6 +653,12 @@ impl IdeShell {
         // O motor calcula o que foi declarado; o que veio de `place` entra no
         // lugar que a árvore lhe dá. Ver `17-layout-adoption`.
         let _ = self.host.layout(size);
+    }
+
+    /// As faixas do terminal, lidas do arranjo: a saída e a linha de comando.
+    fn terminal_bands(&self) -> (Rect, Rect) {
+        let area = |id| self.host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        (area(TERMINAL_OUTPUT_ID), area(TERMINAL_INPUT_ID))
     }
 
     /// O interior do painel de depuração, lido do arranjo.
@@ -1076,9 +1099,7 @@ impl IdeShell {
                 (self.editor_area.pane.scroll_offset() + passo).clamp(0.0, maximo.max(0.0));
             self.editor_area.pane.set_scroll_offset(destino);
         } else if point.y >= geo.editor_bottom && point.y < geo.content_bottom {
-            let visible = ((geo.terminal_height - 62.0) / EDITOR_LINE_HEIGHT)
-                .floor()
-                .max(1.0) as usize;
+            let visible = self.terminal_visible_lines();
             let active = self.terminal.active;
             let max = self.terminal.tabs[active]
                 .session

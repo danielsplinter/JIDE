@@ -430,10 +430,11 @@ impl IdeShell {
                 tabs.paint(&mut terminal_tabs_paint);
             }
             commands.extend(terminal_tabs_paint.into_commands());
+            let (saida_area, entrada_area) = self.terminal_bands();
             self.paint_surface_band(
                 &mut commands,
                 TERMINAL_INPUT_ID,
-                Rect::new(editor_x, geo.editor_bottom + 30.0, geo.editor_width, 30.0),
+                entrada_area,
                 SurfaceTone::Background,
                 EdgeInsets::ZERO,
             );
@@ -445,14 +446,12 @@ impl IdeShell {
                 &mut commands,
                 TERMINAL_PROMPT_ID,
                 &linha_de_comando,
-                Point::new(editor_x + 14.0, geo.editor_bottom + 38.0),
+                Point::new(entrada_area.origin.x + 14.0, entrada_area.origin.y + 8.0),
                 14.0,
                 IconTint::Text,
             );
             let active_terminal = &self.terminal.tabs[self.terminal.active];
-            let terminal_visible = ((geo.terminal_height - 62.0) / EDITOR_LINE_HEIGHT)
-                .floor()
-                .max(1.0) as usize;
+            let terminal_visible = self.terminal_visible_lines();
             let terminal_offset = active_terminal.scroll_line.min(
                 active_terminal
                     .session
@@ -476,12 +475,7 @@ impl IdeShell {
                 })
                 .collect();
             let contexto = self.layout_context();
-            let area = Rect::new(
-                editor_x,
-                geo.editor_bottom + 66.0,
-                geo.editor_width,
-                terminal_visible as f32 * EDITOR_LINE_HEIGHT,
-            );
+            let area = saida_area;
             let mut saida = self.paint_context();
             // O console é o mesmo entre quadros: é a medição guardada nele que
             // o clique consulta depois, e as duas precisam concordar.

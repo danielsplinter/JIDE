@@ -977,6 +977,7 @@ dependencies = [
 name = "ide-terminal"
 version = "0.1.0"
 dependencies = [
+ "justerm-core",
  "portable-pty",
  "thiserror 2.0.19",
 ]
@@ -1168,6 +1169,19 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "justerm-core"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc3a5a598f71ebd29641a2c12d2a518b4e6a3095fc3759e64192585c46874203"
+dependencies = [
+ "bitflags 2.13.1",
+ "regex",
+ "unicode-segmentation",
+ "unicode-width",
+ "vte",
 ]
 
 [[package]]
@@ -3033,6 +3047,16 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vte"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
+dependencies = [
+ "arrayvec",
+ "memchr",
+]
 
 [[package]]
 name = "walkdir"

@@ -1,5 +1,6 @@
 #![doc = "Perfis e sessões persistentes do terminal integrado via PTY/ConPTY."]
 
+use justerm_core::{Cell, Cursor, Engine};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::{
     collections::VecDeque,
@@ -117,6 +118,12 @@ pub struct TerminalSession {
     pending: String,
     pty_cols: u16,
     pty_rows: u16,
+    /// A grade do terminal, alimentada com os bytes crus do PTY.
+    ///
+    /// É ela que sabe onde o cursor está, o que cada célula tem de cor e o
+    /// que aconteceu quando um programa reescreveu a linha em que estava —
+    /// coisas que a lista de linhas de texto não tem como representar.
+    engine: Engine,
     /// Instante da interrupção enviada, enquanto ela pode gerar a pergunta do
     /// `cmd` sobre finalizar o arquivo de lote.
     interrupting_since: Option<Instant>,
@@ -214,6 +221,7 @@ impl TerminalSession {
             pending: String::new(),
             pty_cols: 80,
             pty_rows: 24,
+            engine: Engine::with_scrollback(80, 24, 5_000),
             interrupting_since: None,
             queued_command: None,
             queued_at: None,
@@ -314,6 +322,9 @@ impl TerminalSession {
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<bool, TerminalError> {
         let cols = cols.max(1);
         let rows = rows.max(1);
+        // A grade acompanha o PTY: quem quebra a linha usa a mesma largura que
+        // quem a desenha.
+        self.engine.resize(cols as usize, rows as usize);
         if cols == self.pty_cols && rows == self.pty_rows {
             return Ok(false);
         }
@@ -331,10 +342,37 @@ impl TerminalSession {
         Ok(true)
     }
 
+    /// As linhas visíveis da grade, como células.
+    ///
+    /// É o que a interface desenha a partir da `18`: cada célula com o caractere
+    /// e a cor que o programa pediu, e não texto já achatado.
+    #[must_use]
+    pub fn viewport(&self) -> Vec<&[Cell]> {
+        (0..self.pty_rows as usize)
+            .map(|linha| self.engine.viewport_line(linha))
+            .collect()
+    }
+
+    /// Onde o programa deixou o cursor.
+    #[must_use]
+    pub fn cursor(&self) -> &Cursor {
+        self.engine.cursor()
+    }
+
+    /// Quantas linhas o histórico guarda além do que está visível.
+    #[must_use]
+    pub fn scrollback_len(&self) -> usize {
+        self.engine.scrollback_len()
+    }
+
     pub fn drain_output(&mut self) -> usize {
         let mut received = 0;
         while let Ok(bytes) = self.output.try_recv() {
             received += bytes.len();
+            // A grade recebe os bytes **crus**: as sequências de escape são o
+            // que ela interpreta, e filtrá-las antes seria jogar fora a cor, o
+            // cursor e a reescrita de linha.
+            self.engine.feed(&bytes);
             let clean = strip_terminal_controls(&String::from_utf8_lossy(&bytes));
             self.pending.push_str(&clean.replace("\r\n", "\n"));
             self.commit_complete_lines();
@@ -796,5 +834,59 @@ mod tests {
         );
         assert!(wait_for(&mut terminal, "LOCATION="));
         assert!(terminal.lines().any(|line| line.text.contains("crates")));
+    }
+
+    /// Uma grade solta, alimentada à mão: sem PTY, sem processo, sem tela.
+    fn grade(bytes: &[u8]) -> Engine {
+        let mut engine = Engine::with_scrollback(80, 24, 500);
+        engine.feed(bytes);
+        engine
+    }
+
+    fn texto(engine: &Engine, linha: usize) -> String {
+        engine
+            .viewport_line(linha)
+            .iter()
+            .map(justerm_core::Cell::c)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// A cor que o programa pediu chega à grade.
+    ///
+    /// Antes o `strip_terminal_controls` a descartava antes de guardar, e erro e
+    /// sucesso ficavam do mesmo tom.
+    #[test]
+    fn colour_survives_all_the_way_to_the_grid() {
+        let engine = grade(b"\x1b[31mfalhou\x1b[0m ok");
+        assert_eq!(texto(&engine, 0), "falhou ok");
+        let pintado = engine.grid().cell(0, 0).fg();
+        let normal = engine.grid().cell(0, 7).fg();
+        assert_ne!(
+            pintado, normal,
+            "o trecho vermelho tem que diferir do texto sem cor"
+        );
+    }
+
+    /// Reescrever a linha ocupa uma linha.
+    ///
+    /// É o caso da barra de progresso do Maven e do npm: um `\r` volta ao começo
+    /// e o texto seguinte cobre o anterior. A lista de linhas empilhava cada
+    /// passo como se fosse uma linha nova.
+    #[test]
+    fn a_carriage_return_overwrites_instead_of_stacking() {
+        let engine = grade(b"Progresso: 10%\rProgresso: 50%\rProgresso: 100%");
+        assert_eq!(texto(&engine, 0), "Progresso: 100%");
+        assert_eq!(texto(&engine, 1), "", "não pode ter sobrado linha nenhuma");
+    }
+
+    /// O cursor é posição, e o programa o move.
+    #[test]
+    fn the_program_moves_the_cursor_where_it_wants() {
+        let mut engine = grade(b"primeira\r\nsegunda\r\nterceira");
+        engine.feed(b"\x1b[2;1HREESCRITA");
+        assert_eq!(texto(&engine, 1), "REESCRITA");
+        assert_eq!(texto(&engine, 0), "primeira", "as outras ficam onde estavam");
     }
 }

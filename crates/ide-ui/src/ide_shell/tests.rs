@@ -1574,7 +1574,7 @@ fn terminal_tabs_keep_input_and_content_isolated() {
 
 #[cfg(windows)]
 #[test]
-fn terminal_input_is_above_command_and_output() {
+fn the_command_line_waits_below_what_already_ran() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
@@ -1599,10 +1599,14 @@ fn terminal_input_is_above_command_and_output() {
             .any(|line| line.contains("RESULT_BELOW"))
     );
 
-    let geo = shell.geometry();
-    let input_y = geo.editor_bottom + 38.0;
-    let first_output_y = geo.editor_bottom + 68.0;
-    assert!(first_output_y > input_y);
+    // O que já rodou fica em cima; o cursor espera embaixo, como em qualquer
+    // terminal. Antes era o contrário, e a linha de comando ficava no topo com o
+    // histórico crescendo abaixo dela.
+    let (saida, entrada) = shell.terminal_bands();
+    assert!(
+        entrada.origin.y >= saida.origin.y + saida.size.height,
+        "a linha de comando tem que começar depois do fim da saída:          saída {saida:?}, entrada {entrada:?}"
+    );
 }
 
 /// Clicar no fim da trilha do editor leva ao fim do documento, e arrastar

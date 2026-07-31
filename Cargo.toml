@@ -42,6 +42,7 @@ tree-sitter-java = "0.23.5"
 zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 pollster = "0.4"
 portable-pty = "=0.8.1"
+justerm-core = "0.12"
 rfd = "0.17.2"
 winit = "0.30.13"
 ui-api = { version = "0.1.0", path = "../ERLibUi/crates/ui-api" }

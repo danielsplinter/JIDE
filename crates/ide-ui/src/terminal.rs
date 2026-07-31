@@ -51,6 +51,12 @@ pub(super) struct TerminalPanelState {
     pub(super) selection: Option<TerminalSelection>,
     pub(super) selecting: bool,
     pub(super) running_terminal: Option<usize>,
+    /// Colunas que os terminais já receberam.
+    ///
+    /// Guardadas para o tamanho só ser reenviado quando muda de verdade: cada
+    /// reenvio faz o programa do outro lado redesenhar, e arrastar o divisor na
+    /// vertical não deveria produzir saída nenhuma.
+    pub(super) pty_cols: u16,
 }
 
 impl TerminalPanelState {

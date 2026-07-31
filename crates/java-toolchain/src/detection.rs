@@ -32,10 +32,13 @@ impl JavaToolchainProvider {
         let mut installations = candidates
             .into_iter()
             .filter_map(|home| {
-                let normalized = fs::canonicalize(&home).unwrap_or(home);
-                if !seen.insert(normalized.clone()) || !is_jdk_home(&normalized) {
+                let canonical = fs::canonicalize(&home).unwrap_or(home);
+                // A forma canônica serve para reconhecer o mesmo JDK chegando por
+                // dois caminhos; o que se guarda e se mostra é a forma legível.
+                if !seen.insert(canonical.clone()) || !is_jdk_home(&canonical) {
                     return None;
                 }
+                let normalized = readable_path(&canonical);
                 Some(ToolchainInstallation {
                     id: ToolchainId(format!("java:{}", normalized.to_string_lossy())),
                     version: java_version(&normalized),
@@ -115,6 +118,30 @@ pub fn jdk_executable(home: &Path, executable: &str) -> PathBuf {
         executable.to_owned()
     };
     home.join("bin").join(name)
+}
+
+/// Tira o prefixo de caminho estendido que o Windows devolve ao canonizar.
+///
+/// `fs::canonicalize` responde `\\?\C:\java\jdk-17` — forma que o sistema
+/// entende e que ninguém quer ler numa lista de JDKs. O prefixo sai só quando o
+/// que sobra continua sendo um caminho válido: um compartilhamento de rede
+/// volta à forma `\\servidor\pasta`, e o que não for nem unidade nem rede fica
+/// como está, porque ali o prefixo faz parte do endereço.
+fn readable_path(path: &Path) -> PathBuf {
+    let texto = path.to_string_lossy();
+    if let Some(resto) = texto.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{resto}"));
+    }
+    let Some(resto) = texto.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    let mut caracteres = resto.chars();
+    match (caracteres.next(), caracteres.next(), caracteres.next()) {
+        (Some(unidade), Some(':'), Some('\\')) if unidade.is_ascii_alphabetic() => {
+            PathBuf::from(resto)
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 fn is_jdk_home(home: &Path) -> bool {
@@ -232,5 +259,31 @@ mod tests {
         assert!(JavaToolchainProvider::installation_from_home(&second).is_ok());
         let _ = fs::remove_dir_all(first);
         let _ = fs::remove_dir_all(second);
+    }
+
+    #[test]
+    fn the_extended_length_prefix_never_reaches_the_screen() {
+        // O que o `canonicalize` devolve no Windows, e o que se quer ler.
+        assert_eq!(
+            readable_path(Path::new(r"\\?\C:\java\jdk-17")),
+            PathBuf::from(r"C:\java\jdk-17")
+        );
+    }
+
+    #[test]
+    fn a_network_share_goes_back_to_its_usual_form() {
+        assert_eq!(
+            readable_path(Path::new(r"\\?\UNC\servidor\java\jdk-21")),
+            PathBuf::from(r"\\servidor\java\jdk-21")
+        );
+    }
+
+    #[test]
+    fn what_is_not_a_drive_keeps_the_prefix() {
+        // Ali o prefixo faz parte do endereço, e tirá-lo quebraria o caminho.
+        let volume = Path::new(r"\\?\Volume{cafe}\jdk");
+        assert_eq!(readable_path(volume), volume.to_path_buf());
+        let comum = Path::new("/usr/lib/jvm/jdk-17");
+        assert_eq!(readable_path(comum), comum.to_path_buf());
     }
 }

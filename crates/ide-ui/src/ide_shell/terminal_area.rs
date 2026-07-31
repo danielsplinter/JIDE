@@ -1,6 +1,7 @@
 //! O painel de terminais: abas, rolagem, seleção e o que é enviado.
 
 use super::*;
+use ui_core::FontId;
 
 impl IdeShell {
     /// Executa um comando na aba de terminal ativa, como se o usuário digitasse.
@@ -78,9 +79,22 @@ impl IdeShell {
 
     pub fn update_terminals(&mut self) -> bool {
         let geo = self.geometry();
-        let rows = ((geo.terminal_height - 62.0) / EDITOR_LINE_HEIGHT).max(1.0) as u16;
+        let rows = self.terminal_visible_lines().max(1) as u16;
+        // Quem quebra a linha é o programa do outro lado, na largura que o
+        // terminal declarou ter: sem contar isto, ele fica nas 80 colunas com que
+        // nasceu e dobra o texto no meio de um caminho. Só a **coluna** é
+        // reenviada, porque é ela que causa a quebra — mudar a altura faria o
+        // programa redesenhar à toa a cada arrasto do divisor.
+        let cols = self.terminal_columns(geo.editor_width);
+        let mudou_largura = cols != self.terminal.pty_cols;
+        if mudou_largura {
+            self.terminal.pty_cols = cols;
+        }
         let mut changed = false;
         for terminal in &mut self.terminal.tabs {
+            if mudou_largura {
+                let _ = terminal.session.resize(cols, rows);
+            }
             let received = terminal.session.drain_output();
             changed |= received > 0;
             if received > 0 && terminal.follow_output {
@@ -88,6 +102,22 @@ impl IdeShell {
             }
         }
         changed
+    }
+
+    /// Quantas colunas cabem na largura do painel.
+    ///
+    /// A largura do caractere é **medida** na mesma fonte que o console desenha —
+    /// estimá-la deixaria o programa quebrando numa coluna e a tela mostrando
+    /// noutra. Ver a ADR-021.
+    fn terminal_columns(&self, width: f32) -> u16 {
+        let caractere = self
+            .layout_context()
+            .text_width("0", FontId::MONOSPACE, TERMINAL_FONT_SIZE)
+            .unwrap_or(TERMINAL_FALLBACK_CHAR_WIDTH)
+            .max(1.0);
+        // A trilha da barra de rolagem não é área de texto.
+        let util = (width - TERMINAL_SCROLLBAR_WIDTH).max(caractere);
+        ((util / caractere).floor() as u16).max(1)
     }
 
     /// Abas do painel de terminal, uma por perfil aberto. Terminais não fecham
@@ -139,20 +169,20 @@ impl IdeShell {
         splitter
     }
 
+    /// Quantas linhas da saída cabem — a altura da faixa, e não uma subtração.
     pub(super) fn terminal_visible_lines(&self) -> usize {
-        ((self.geometry().terminal_height - 62.0) / EDITOR_LINE_HEIGHT)
-            .floor()
-            .max(1.0) as usize
+        let (saida, _) = self.terminal_bands();
+        ((saida.size.height / EDITOR_LINE_HEIGHT).floor()).max(1.0) as usize
     }
 
-    pub(super) fn terminal_scrollbar_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry();
-        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+    pub(super) fn terminal_scrollbar_rect(&self, _size: Size) -> Rect {
+        // A trilha acompanha a saída: é o que ela rola.
+        let (saida, _) = self.terminal_bands();
         Rect::new(
-            editor_x + geo.editor_width - 10.0,
-            geo.editor_bottom + 60.0,
-            10.0,
-            (geo.terminal_height - 60.0).max(0.0),
+            saida.origin.x + saida.size.width - TERMINAL_SCROLLBAR_WIDTH,
+            saida.origin.y,
+            TERMINAL_SCROLLBAR_WIDTH,
+            saida.size.height,
         )
     }
 
@@ -246,7 +276,7 @@ impl IdeShell {
                     self.active_terminal().selected_profile().kind.label()
                 );
             }
-        } else if point.y >= geometry.editor_bottom + 60.0 {
+        } else if point.y >= self.terminal_bands().0.origin.y {
             let position = self.terminal_position_at(point, size);
             self.terminal.selection = Some(TerminalSelection {
                 anchor: position,

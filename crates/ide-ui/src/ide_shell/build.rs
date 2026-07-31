@@ -86,6 +86,8 @@ impl IdeShell {
                 selection: None,
                 selecting: false,
                 running_terminal: None,
+                // 80 é a largura com que o PTY nasce; o primeiro quadro corrige.
+                pty_cols: 80,
             },
             search: TypeSearchSurface::default(),
             inspection: InspectionSurface::default(),

@@ -67,6 +67,7 @@ Este é um requisito arquitetural obrigatório.
 - [15 — Adoção do runtime de eventos da ERLibUi](15-event-runtime-adoption.md)
 - [16 — Um anfitrião só](16-single-host.md)
 - [17 — Adoção do arranjo](17-layout-adoption.md)
+- [18 — Um terminal de verdade](18-real-terminal.md)
 
 ## Escopo inicial, e o que dele já existe
 
