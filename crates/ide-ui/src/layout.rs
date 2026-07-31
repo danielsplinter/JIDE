@@ -1,12 +1,12 @@
-//! Geometria centralizada dos painéis do shell.
+//! Áreas dos painéis que ainda não são arranjados pelo motor.
+//!
+//! A moldura saiu daqui: ela é declarada ao anfitrião e lida do arranjo. O que
+//! resta é o interior do painel de depuração e a fileira de ações do título.
 
 use ide_application::DebugRequest;
-use ui_components::StatusBar;
 use ui_core::{Rect, Size};
 
-use crate::ide_shell::{
-    ACTIVITY_WIDTH, DEBUG_ROW_HEIGHT, TAB_HEIGHT, TERMINAL_COLLAPSED_HEIGHT, TITLE_HEIGHT,
-};
+use crate::ide_shell::{DEBUG_ROW_HEIGHT, TITLE_HEIGHT};
 
 pub(super) struct Geometry {
     pub(super) content_top: f32,
@@ -17,25 +17,6 @@ pub(super) struct Geometry {
     pub(super) terminal_height: f32,
 }
 
-pub(super) fn shell_geometry(
-    size: Size,
-    requested_terminal_height: f32,
-    sidebar_width: f32,
-) -> Geometry {
-    let content_top = TITLE_HEIGHT + TAB_HEIGHT;
-    let content_bottom = size.height - StatusBar::HEIGHT;
-    let terminal_height = requested_terminal_height
-        .min((content_bottom - content_top - 100.0).max(TERMINAL_COLLAPSED_HEIGHT));
-    let editor_height = (content_bottom - content_top - terminal_height).max(0.0);
-    Geometry {
-        content_top,
-        content_bottom,
-        editor_bottom: content_top + editor_height,
-        editor_width: (size.width - ACTIVITY_WIDTH - sidebar_width).max(0.0),
-        editor_height,
-        terminal_height,
-    }
-}
 
 pub(super) fn action_button_rects(size: Size) -> [Rect; 3] {
     const SIDE: f32 = 28.0;

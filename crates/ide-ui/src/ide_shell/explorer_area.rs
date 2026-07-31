@@ -26,7 +26,7 @@ impl IdeShell {
 
     /// Área da árvore de arquivos.
     pub(super) fn explorer_tree_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         Rect::new(
             ACTIVITY_WIDTH,
             EXPLORER_TOP,
@@ -141,7 +141,7 @@ impl IdeShell {
     /// terminal, pela altura mínima dele e pelo espaço que o editor precisa
     /// manter. São limites em pontos, não proporções.
     pub(super) fn sidebar_splitter_for(&self, size: Size) -> Splitter {
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let mut splitter = self.explorer.splitter.clone();
         splitter.layout(
             &self.layout_context(),
@@ -180,7 +180,7 @@ impl IdeShell {
         if self.settings.is_open() {
             return;
         }
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         // No editor o menu fala do texto: copiar e colar.
         if point.x >= editor_x
@@ -361,15 +361,15 @@ impl IdeShell {
         }
     }
 
-    pub(super) fn explorer_visible_lines(&self, size: Size) -> usize {
-        let geo = self.geometry(size);
+    pub(super) fn explorer_visible_lines(&self) -> usize {
+        let geo = self.geometry();
         ((geo.content_bottom - 12.0 - EXPLORER_TOP) / EXPLORER_ROW_HEIGHT)
             .floor()
             .max(1.0) as usize
     }
 
     pub(super) fn explorer_horizontal_scrollbar_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         Rect::new(
             ACTIVITY_WIDTH,
             geo.content_bottom - 12.0,
@@ -379,7 +379,7 @@ impl IdeShell {
     }
 
     pub(super) fn explorer_vertical_scrollbar_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         Rect::new(
             ACTIVITY_WIDTH + self.sidebar_width(size) - 16.0,
             EXPLORER_TOP - EXPLORER_ROW_HEIGHT,

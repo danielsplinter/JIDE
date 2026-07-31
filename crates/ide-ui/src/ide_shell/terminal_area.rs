@@ -76,8 +76,8 @@ impl IdeShell {
         self.terminal.active_session_mut()
     }
 
-    pub fn update_terminals(&mut self, size: Size) -> bool {
-        let geo = self.geometry(size);
+    pub fn update_terminals(&mut self) -> bool {
+        let geo = self.geometry();
         let rows = ((geo.terminal_height - 62.0) / EDITOR_LINE_HEIGHT).max(1.0) as u16;
         let mut changed = false;
         for terminal in &mut self.terminal.tabs {
@@ -119,7 +119,7 @@ impl IdeShell {
     }
 
     pub(super) fn terminal_tabs_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         Rect::new(
             ACTIVITY_WIDTH + self.sidebar_width(size),
             geo.editor_bottom,
@@ -129,7 +129,7 @@ impl IdeShell {
     }
 
     pub(super) fn terminal_splitter_for(&self, size: Size) -> Splitter {
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         let maximum =
             (geometry.content_bottom - geometry.content_top - 100.0).max(TERMINAL_MIN_HEIGHT);
@@ -151,14 +151,14 @@ impl IdeShell {
         splitter
     }
 
-    pub(super) fn terminal_visible_lines(&self, size: Size) -> usize {
-        ((self.geometry(size).terminal_height - 62.0) / EDITOR_LINE_HEIGHT)
+    pub(super) fn terminal_visible_lines(&self) -> usize {
+        ((self.geometry().terminal_height - 62.0) / EDITOR_LINE_HEIGHT)
             .floor()
             .max(1.0) as usize
     }
 
     pub(super) fn terminal_scrollbar_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         Rect::new(
             editor_x + geo.editor_width - 10.0,
@@ -226,7 +226,7 @@ impl IdeShell {
 
     /// O botão que recolhe e restaura o painel de terminais.
     pub(super) fn terminal_toggle_pointer_down(&mut self, point: Point, size: Size) -> bool {
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let toggle = Rect::new(size.width - 30.0, geometry.editor_bottom + 4.0, 22.0, 22.0);
         if !toggle.contains(point) {
             return false;
@@ -243,7 +243,7 @@ impl IdeShell {
 
     /// Clique no painel de terminais: a aba escolhida, ou o começo de uma marca.
     pub(super) fn terminal_area_pointer_down(&mut self, point: Point, size: Size) {
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         if point.x < editor_x || point.y < geometry.editor_bottom {
             return;

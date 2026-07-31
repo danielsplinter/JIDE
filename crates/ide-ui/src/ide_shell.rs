@@ -50,7 +50,7 @@ use std::{
 };
 
 use crate::layout::{
-    DEBUG_BUTTONS, Geometry, action_button_rects, debug_panel_geometry, shell_geometry as geometry,
+    DEBUG_BUTTONS, Geometry, action_button_rects, debug_panel_geometry,
 };
 use crate::menus::{
     MenuState, debug_request as debug_request_for, editor_entries as editor_menu_entries,
@@ -103,9 +103,26 @@ const TERMINAL_TAB_HEIGHT: f32 = 30.0;
 const TERMINAL_DEFAULT_HEIGHT: f32 = 180.0;
 const TERMINAL_MIN_HEIGHT: f32 = 120.0;
 pub(super) const TERMINAL_COLLAPSED_HEIGHT: f32 = 30.0;
+/// O que sobra de editor quando o terminal cresce até onde pode.
+const EDITOR_MIN_HEIGHT: f32 = 100.0;
 const DEBUG_PANEL_WIDTH: f32 = 320.0;
 pub(super) const DEBUG_ROW_HEIGHT: f32 = 21.0;
 const MENU_BAR_ID: WidgetId = WidgetId(10_001);
+/// A árvore da moldura, declarada ao anfitrião.
+///
+/// São as faixas que a `shell_geometry` calcula hoje. Elas entram na árvore
+/// **antes** das camadas de sobreposição, porque é o que as janelas cobrem.
+const FRAME_ID: WidgetId = WidgetId(10_460);
+const FRAME_TITLE_ID: WidgetId = WidgetId(10_461);
+const FRAME_MIDDLE_ID: WidgetId = WidgetId(10_462);
+const FRAME_ACTIVITY_ID: WidgetId = WidgetId(10_463);
+const FRAME_SIDEBAR_ID: WidgetId = WidgetId(10_464);
+const FRAME_CENTER_ID: WidgetId = WidgetId(10_465);
+const FRAME_TABS_ID: WidgetId = WidgetId(10_466);
+const FRAME_EDITOR_ID: WidgetId = WidgetId(10_467);
+const FRAME_TERMINAL_ID: WidgetId = WidgetId(10_468);
+const FRAME_DEBUG_ID: WidgetId = WidgetId(10_469);
+const FRAME_STATUS_ID: WidgetId = WidgetId(10_470);
 /// Faixas da moldura: superfícies de fundo, sem conteúdo próprio.
 const CHROME_BACKGROUND_ID: WidgetId = WidgetId(10_080);
 const CHROME_TITLE_ID: WidgetId = WidgetId(10_081);
@@ -244,6 +261,56 @@ const OVERLAY: [Layer; 7] = [
 ///
 /// Ela cobre a tela inteira — o véu do `ModalHost` é o que está desenhado ali —,
 /// e é essa área que decide se o gesto alcança o que ficou embaixo.
+/// Declara as faixas da moldura, na ordem em que se empilham.
+///
+/// As medidas que mudam com o estado — largura da barra lateral, altura do
+/// terminal, presença do painel de depuração — são ajustadas a cada quadro por
+/// `sync_frame`, antes do arranjo.
+fn declare_frame(host: &mut UiHost) {
+    let coluna = LayoutStyle::default();
+    let linha = LayoutStyle {
+        direction: LayoutDirection::Row,
+        ..LayoutStyle::default()
+    };
+    let fixa = |height: f32| LayoutStyle {
+        height: Some(height),
+        ..LayoutStyle::default()
+    };
+    let largura = |width: f32| LayoutStyle {
+        width: Some(width),
+        ..LayoutStyle::default()
+    };
+    let cresce = |style: LayoutStyle| LayoutStyle {
+        flex_grow: 1.0,
+        ..style
+    };
+    let _ = host.declare(SHELL_ROOT_ID, FRAME_ID, coluna);
+    let _ = host.declare(FRAME_ID, FRAME_TITLE_ID, fixa(TITLE_HEIGHT));
+    let _ = host.declare(FRAME_ID, FRAME_MIDDLE_ID, cresce(linha));
+    let _ = host.declare(FRAME_ID, FRAME_STATUS_ID, fixa(StatusBar::HEIGHT));
+    let _ = host.declare(FRAME_MIDDLE_ID, FRAME_ACTIVITY_ID, largura(ACTIVITY_WIDTH));
+    let _ = host.declare(FRAME_MIDDLE_ID, FRAME_SIDEBAR_ID, largura(SIDEBAR_WIDTH));
+    let _ = host.declare(FRAME_MIDDLE_ID, FRAME_CENTER_ID, cresce(coluna));
+    let _ = host.declare(FRAME_MIDDLE_ID, FRAME_DEBUG_ID, largura(DEBUG_PANEL_WIDTH));
+    let _ = host.declare(FRAME_CENTER_ID, FRAME_TABS_ID, fixa(TAB_HEIGHT));
+    // O editor não encolhe além do que ainda é editável: é essa restrição que
+    // impede o terminal de engoli-lo, e é ela que o divisor move.
+    let _ = host.declare(
+        FRAME_CENTER_ID,
+        FRAME_EDITOR_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            min_height: Some(EDITOR_MIN_HEIGHT),
+            ..coluna
+        },
+    );
+    let _ = host.declare(
+        FRAME_CENTER_ID,
+        FRAME_TERMINAL_ID,
+        fixa(TERMINAL_COLLAPSED_HEIGHT),
+    );
+}
+
 /// O estilo de uma camada, aberta ou fechada.
 ///
 /// Aberta, ela cobre a tela: é essa área que decide se o gesto alcança o que
@@ -307,6 +374,7 @@ fn new_host() -> UiHost {
     // arranjo vier do consumidor, a ordem de sobreposição é a das chamadas de
     // `place`; quando vier do motor, passa a ser esta. Declará-las aqui é o que
     // torna as duas ordens a mesma.
+    declare_frame(&mut host);
     // O conteúdo da moldura vem **antes** das camadas: é o que elas cobrem. A
     // ordem dos irmãos é a de sobreposição, e um nó criado só quando é
     // posicionado pela primeira vez entraria no fim, acima das janelas.
@@ -378,23 +446,24 @@ impl IdeShell {
         &self.explorer.workspace.path
     }
 
-    fn geometry(&self, size: Size) -> Geometry {
-        let mut geometry = geometry(
-            size,
-            if self.terminal.minimized {
-                TERMINAL_COLLAPSED_HEIGHT
-            } else {
-                self.terminal.height
-            },
-            self.sidebar_width(size),
-        );
-        // O painel de depuração ocupa a direita do editor enquanto há sessão,
-        // em vez de cobrir o código.
-        if self.debug_panel.view.attached {
-            geometry.editor_width =
-                (geometry.editor_width - DEBUG_PANEL_WIDTH).max(EDITOR_GUTTER * 2.0);
+    /// As faixas da moldura, lidas do arranjo.
+    ///
+    /// Nada é calculado aqui: cada número é a área que o motor deu a uma faixa.
+    /// O painel de depuração não precisa mais ser subtraído do editor — ele é
+    /// irmão do centro na mesma linha, e ocupar lugar já é o que o encolhe.
+    fn geometry(&self) -> Geometry {
+        let area = |id| self.host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        let tabs = area(FRAME_TABS_ID);
+        let editor = area(FRAME_EDITOR_ID);
+        let status = area(FRAME_STATUS_ID);
+        Geometry {
+            content_top: tabs.origin.y + tabs.size.height,
+            content_bottom: status.origin.y,
+            editor_bottom: editor.origin.y + editor.size.height,
+            editor_width: area(FRAME_CENTER_ID).size.width,
+            editor_height: editor.size.height,
+            terminal_height: area(FRAME_TERMINAL_ID).size.height,
         }
-        geometry
     }
 
     fn sync_splitters(&mut self, size: Size) {
@@ -403,8 +472,8 @@ impl IdeShell {
     }
 
     /// Traz de volta o tamanho que cada divisor definiu.
-    fn apply_splitters(&mut self, size: Size) {
-        let content_bottom = self.geometry(size).content_bottom;
+    fn apply_splitters(&mut self) {
+        let content_bottom = self.geometry().content_bottom;
         if self.explorer.splitter.is_dragging() {
             self.explorer.sidebar_width = self.explorer.splitter.position() - ACTIVITY_WIDTH;
         }
@@ -454,6 +523,7 @@ impl IdeShell {
         // a IDE ainda calcula. A ordem importa: quem posiciona à mão lê a
         // moldura do arranjo — a área do painel, a da barra lateral —, e lê-la
         // antes de calculá-la daria o quadro anterior.
+        self.sync_frame(size);
         for layer in OVERLAY {
             if let Layer::Surface(kind) = layer {
                 let open = self.surface_is_open(kind);
@@ -491,6 +561,44 @@ impl IdeShell {
         // O motor calcula o que foi declarado; o que veio de `place` entra no
         // lugar que a árvore lhe dá. Ver `17-layout-adoption`.
         let _ = self.host.layout(size);
+    }
+
+    /// Põe na árvore o que muda com o estado da moldura.
+    ///
+    /// Largura da barra lateral e altura do terminal são o que os divisores
+    /// movem; o painel de depuração entra e sai do arranjo com a sessão. Tudo
+    /// **antes** do arranjo, ou valeria só no quadro seguinte.
+    fn sync_frame(&mut self, size: Size) {
+        let sidebar = self.sidebar_width(size);
+        let terminal = if self.terminal.minimized {
+            TERMINAL_COLLAPSED_HEIGHT
+        } else {
+            self.terminal.height
+        };
+        self.host.set_style(
+            FRAME_SIDEBAR_ID,
+            LayoutStyle {
+                width: Some(sidebar),
+                min_width: Some(SIDEBAR_MIN_WIDTH),
+                ..LayoutStyle::default()
+            },
+        );
+        self.host.set_style(
+            FRAME_TERMINAL_ID,
+            LayoutStyle {
+                height: Some(terminal),
+                min_height: Some(TERMINAL_COLLAPSED_HEIGHT),
+                ..LayoutStyle::default()
+            },
+        );
+        self.host.set_style(
+            FRAME_DEBUG_ID,
+            LayoutStyle {
+                hidden: !self.debug_panel.view.attached,
+                width: Some(DEBUG_PANEL_WIDTH),
+                ..LayoutStyle::default()
+            },
+        );
     }
 
     /// Se um alvo está acima da lista de completação na pilha deste quadro.
@@ -675,6 +783,14 @@ impl IdeShell {
         control: bool,
         shift: bool,
     ) {
+        self.route_pointer_down(point, size, control, shift);
+        // O gesto pode ter mudado a moldura — minimizar o terminal, ligar o
+        // painel de depuração. A geometria é leitura do arranjo, e quem
+        // perguntar em seguida precisa do arranjo já refeito.
+        self.place_overlay(size);
+    }
+
+    fn route_pointer_down(&mut self, point: Point, size: Size, control: bool, shift: bool) {
         // O menu aberto tem a primeira palavra: escolher uma ação ou dispensá-lo
         // é o que este clique significa, e não o que está embaixo dele.
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
@@ -782,7 +898,7 @@ impl IdeShell {
             .splitter
             .event(&mut EventContext::default(), &event);
         if dragging {
-            self.apply_splitters(size);
+            self.apply_splitters();
             return true;
         }
         // Parado, o retorno diz se o ponteiro está sobre o divisor do terminal,
@@ -815,6 +931,9 @@ impl IdeShell {
             );
         }
         self.terminal.selecting = false;
+        // Soltar um divisor muda a moldura, e quem pergunta a geometria logo
+        // depois precisa da nova — não da do quadro anterior.
+        self.place_overlay(self.context.last_size);
     }
 
     pub fn scroll(&mut self, point: Point, delta_lines: f32, size: Size) {
@@ -826,7 +945,7 @@ impl IdeShell {
         {
             return;
         }
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         if point.x >= ACTIVITY_WIDTH
             && point.x < ACTIVITY_WIDTH + self.sidebar_width(size)
             && point.y >= EXPLORER_TOP - EXPLORER_ROW_HEIGHT
@@ -835,7 +954,7 @@ impl IdeShell {
             let max = self
                 .visible_entries()
                 .len()
-                .saturating_sub(self.explorer_visible_lines(size));
+                .saturating_sub(self.explorer_visible_lines());
             // Explorer e terminal são listas de linhas inteiras: aqui a
             // fração não tem onde aparecer, e o passo volta a ser em linhas.
             self.explorer.scroll_line = self

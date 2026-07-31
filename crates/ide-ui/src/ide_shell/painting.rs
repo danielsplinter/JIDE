@@ -250,7 +250,7 @@ impl IdeShell {
         self.place_overlay(size);
         let sidebar = self.sidebar_width(size);
         let editor_x = ACTIVITY_WIDTH + sidebar;
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         let colors = self.context.theme.colors;
         let mut commands = Vec::new();
         // As faixas da moldura, de trás para a frente. Cada uma é uma superfície

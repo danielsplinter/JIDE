@@ -123,7 +123,7 @@ impl IdeShell {
     }
 
     pub(super) fn debug_panel_rect(&self, size: Size) -> Rect {
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let x = ACTIVITY_WIDTH + self.sidebar_width(size) + geometry.editor_width;
         Rect::new(
             x,
@@ -279,7 +279,7 @@ impl IdeShell {
 
     /// Clique na faixa do painel de depuração, quando há sessão conectada.
     pub(super) fn debug_panel_area_pointer_down(&mut self, point: Point, size: Size) -> bool {
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         if !self.debug_panel.view.attached
             || point.x < editor_x + geometry.editor_width

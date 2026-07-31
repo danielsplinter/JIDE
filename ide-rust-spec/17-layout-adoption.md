@@ -356,7 +356,7 @@ novidade de mecanismo — é o mesmo recorte. A `settings` é a maior, porque te
 lista de páginas própria; `new_item` e `generate` usam `FormLayout` e devem mover
 os mesmos pixels que a `rename` moveu.
 
-## Fase 3 — A moldura
+## Fase 3 — A moldura ✅
 
 `shell_geometry` vira árvore: linha com barra de atividades, barra lateral e
 conteúdo; coluna com título, editor e terminal. É aqui que a resposta a restrição
@@ -364,6 +364,78 @@ aparece — largura mínima da barra lateral, altura mínima do terminal — e o
 divisores deixam de mover números para mover **restrições**.
 
 **Critério:** `layout.rs` sem `shell_geometry`.
+
+### Passo 1 — A árvore declarada, e conferida contra a conta ✅
+
+A moldura entra na árvore antes das camadas: título, faixa do meio — atividades,
+barra lateral, centro, painel de depuração —, e barra de estado; dentro do centro,
+abas, editor e terminal. O que muda com o estado é ajustado por `sync_frame`
+**antes** do arranjo: largura da barra lateral e altura do terminal, que são o que
+os divisores movem, e o painel de depuração, que entra e sai com a sessão.
+
+**Nada lê essa árvore ainda.** O passo existe para produzir o teste que autoriza o
+próximo: `the_declared_frame_agrees_with_the_computed_one` compara, faixa a faixa,
+o que o motor calculou com o que a `shell_geometry` calcula — começo e fim do
+conteúdo, altura e base do editor, altura do terminal, largura do centro e das
+barras. Enquanto as duas não concordarem, trocar a fonte da geometria seria mover
+a tela inteira sem querer.
+
+318 testes. O quadro estável foi de 311 µs para **517 µs** — 3,1% do orçamento: são
+onze nós a mais, calculados duas vezes por quadro. A segunda passagem some no
+passo seguinte, quando não sobrar quem declare área à mão.
+
+**O que este passo não cobre:** o teste roda sem sessão de depuração, então a
+subtração `editor_width - DEBUG_PANEL_WIDTH` não é conferida por ele.
+
+### Passo 2 — A geometria passa a ser lida, não calculada ✅
+
+`IdeShell::geometry` devolve as faixas do arranjo: o conteúdo começa onde as abas
+terminam, termina onde a barra de estado começa, e o editor tem a altura que
+sobrou. Os 47 leitores não mudaram — mudou de onde vem o número.
+
+**A subtração do painel de depuração sumiu.** Ele era descontado da largura do
+editor à mão; agora é irmão do centro na mesma linha, e ocupar lugar já é o que o
+encolhe. Uma conta a menos, e uma a menos para divergir.
+
+**Duas coisas que a suíte ensinou:**
+
+- **a geometria virou leitura, e leitura tem instante.** Onze testes caíram porque
+  chamavam `geometry` antes de qualquer arranjo. A conta original ficou como
+  reserva para esse instante — ela é exata —, e por isso o critério da fase
+  (`layout.rs` sem `shell_geometry`) **ainda não está cumprido**;
+- **soltar um divisor mudava o estado sem rearranjar.** O teste do redimensionamento
+  leu a largura nova e recebeu a do quadro anterior. O `pointer_up` passou a
+  refazer a pilha, que é o que os outros gestos já faziam.
+
+O quadro estável caiu de 517 µs para **434 µs**: o segundo arranjo por quadro tem
+menos o que reaplicar. 318 testes.
+
+### Passo 3 — A conta apagada, e os limites virando restrição ✅
+
+A moldura passou a ser arranjada **na construção do shell**: geometria é leitura,
+e leitura precisa de algo escrito antes. Com isso a `shell_geometry` foi apagada —
+o critério da fase — e junto dela foi embora o parâmetro `size` de cinco funções
+que já não o usavam, porque a área não depende mais do tamanho passado, e sim do
+último arranjo.
+
+**Os limites deixaram de ser conta.** A antiga `shell_geometry` grampeava a altura
+do terminal para o editor nunca ficar com menos de 100. Agora quem diz isso é o
+editor, no estilo: `min_height`. O terminal encolhe ao encostar nesse limite, e
+ninguém subtrai nada — é o ganho que só esta fase entrega, e o mesmo vale para a
+largura mínima da barra lateral.
+
+**Três testes tiveram que aprender que geometria tem instante:** ler a área do
+painel de depuração logo depois de ligar a sessão, ou a da barra de estado num
+tamanho diferente do arranjado, passou a exigir um quadro no meio. É mais fiel ao
+que a aplicação faz do que era antes.
+
+E um lugar só passou a garantir isso para todos: **todo clique termina refazendo a
+pilha**. O gesto pode ter minimizado o terminal ou ligado o painel; quem perguntar
+em seguida precisa do arranjo já refeito.
+
+**Fase concluída.** `layout.rs` foi de geometria da moldura a duas funções — a
+fileira de ações do título e o interior do painel de depuração —, que são fase 4.
+318 testes; o quadro estável em 453 µs, 2,7% do orçamento.
 
 ## Fase 4 — Os painéis
 

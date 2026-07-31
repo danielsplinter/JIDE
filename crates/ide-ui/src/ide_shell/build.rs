@@ -181,6 +181,12 @@ impl IdeShell {
             },
         };
         shell.sync_explorer_tree();
+        // A moldura é arranjada já na construção: a geometria passa a ser
+        // leitura, e leitura precisa de algo escrito antes. Sem isto, quem
+        // perguntasse antes do primeiro quadro receberia faixas vazias.
+        let inicial = shell.context.last_size;
+        shell.sync_frame(inicial);
+        let _ = shell.host.layout(inicial);
         shell
     }
 

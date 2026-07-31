@@ -108,6 +108,46 @@ fn test_shell() -> IdeShell {
     })
 }
 
+/// A moldura declarada dá os mesmos números que a moldura calculada.
+///
+/// É o que autoriza a próxima etapa a trocar a fonte da geometria: enquanto as
+/// duas não concordarem, trocar seria mover a tela inteira sem querer.
+#[test]
+fn the_declared_frame_agrees_with_the_computed_one() {
+    let mut shell = test_shell();
+    let size = Size::new(1_280.0, 800.0);
+    let _ = shell.paint(size);
+    let calculada = shell.geometry();
+    let area = |id| {
+        shell
+            .host
+            .bounds(id)
+            .unwrap_or_else(|| panic!("a faixa {id:?} precisa estar no arranjo"))
+    };
+
+    let tabs = area(FRAME_TABS_ID);
+    assert_eq!(
+        tabs.origin.y + tabs.size.height,
+        calculada.content_top,
+        "o conteúdo começa onde as abas terminam"
+    );
+    assert_eq!(
+        area(FRAME_STATUS_ID).origin.y,
+        calculada.content_bottom,
+        "o conteúdo termina onde a barra de estado começa"
+    );
+    let editor = area(FRAME_EDITOR_ID);
+    assert_eq!(editor.size.height, calculada.editor_height);
+    assert_eq!(
+        editor.origin.y + editor.size.height,
+        calculada.editor_bottom
+    );
+    assert_eq!(area(FRAME_TERMINAL_ID).size.height, calculada.terminal_height);
+    assert_eq!(area(FRAME_CENTER_ID).size.width, calculada.editor_width);
+    assert_eq!(area(FRAME_ACTIVITY_ID).size.width, ACTIVITY_WIDTH);
+    assert_eq!(area(FRAME_SIDEBAR_ID).size.width, shell.sidebar_width(size));
+}
+
 /// As camadas nascem com o shell, na ordem em que se sobrepõem.
 ///
 /// Enquanto o arranjo vem do consumidor, a ordem de sobreposição é a das
@@ -548,7 +588,7 @@ fn the_gutter_shows_pending_and_confirmed_breakpoints_and_the_stopped_line() {
 fn clicking_the_gutter_toggles_a_breakpoint_and_marks_the_file() {
     let (mut shell, path) = shell_with_java_file();
     let size = Size::new(1280.0, 800.0);
-    let geometry = shell.geometry(size);
+    let geometry = shell.geometry();
     let editor_x = ACTIVITY_WIDTH + shell.sidebar_width(size);
     // Terceira linha visível, dentro da calha.
     let point = Point::new(
@@ -693,6 +733,9 @@ fn debug_panel_buttons_and_menu_emit_session_requests() {
         ..DebugView::default()
     });
 
+    // O painel entra no arranjo com a sessão: sem um quadro, ele ainda não tem
+    // lugar, e é do lugar que sai a área dos botões.
+    let _ = shell.paint(size);
     let panel = debug_panel_geometry(shell.debug_panel_rect(size), 0);
     let button = panel.buttons[1];
     shell.pointer_down(
@@ -1138,7 +1181,7 @@ fn the_navigation_cursor_agrees_with_what_the_click_resolves() {
     let sobre = |coluna: f32| {
         Point::new(
             editor_x + EDITOR_GUTTER + coluna * EDITOR_CHAR_WIDTH,
-            shell.geometry(size).content_top + 15.0,
+            shell.geometry().content_top + 15.0,
         )
     };
     assert!(shell.navigation_hover(sobre(7.0), size, true), "método");
@@ -1178,7 +1221,7 @@ fn control_hover_over_java_type_uses_navigation_cursor_state() {
     let editor_x = ACTIVITY_WIDTH + shell.sidebar_width(size);
     let point = Point::new(
         editor_x + EDITOR_GUTTER + 8.0 * EDITOR_CHAR_WIDTH,
-        shell.geometry(size).content_top + 15.0,
+        shell.geometry().content_top + 15.0,
     );
     assert!(!shell.navigation_hover(point, size, false));
     assert!(shell.navigation_hover(point, size, true));
@@ -1429,14 +1472,14 @@ fn the_sidebar_divider_is_painted_in_place_and_highlights_under_the_pointer() {
 fn sidebar_border_resizes_explorer_editor_and_terminal_widths_together() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
-    let before = shell.geometry(size).editor_width;
+    let before = shell.geometry().editor_width;
     let border = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
     shell.pointer_down(Point::new(border, 300.0), size);
     assert!(shell.sidebar_resizing());
     shell.pointer_move(Point::new(border + 80.0, 300.0), size);
     shell.pointer_up();
     assert_eq!(shell.sidebar_width(size), SIDEBAR_WIDTH + 80.0);
-    assert_eq!(shell.geometry(size).editor_width, before - 80.0);
+    assert_eq!(shell.geometry().editor_width, before - 80.0);
     assert!(!shell.sidebar_resizing());
 }
 
@@ -1486,7 +1529,7 @@ fn editor_wheel_scrolls_and_terminal_profile_is_selectable() {
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
     shell.scroll(Point::new(editor_x + 100.0, 200.0), 8.0, size);
     assert_eq!(shell.editor_scroll_line(), 8);
-    let terminal_y = shell.geometry(size).editor_bottom + 10.0;
+    let terminal_y = shell.geometry().editor_bottom + 10.0;
     shell.pointer_down(Point::new(editor_x + 115.0, terminal_y), size);
     assert_eq!(shell.selected_shell(), ShellKind::Cmd);
 }
@@ -1496,7 +1539,7 @@ fn terminal_tabs_keep_input_and_content_isolated() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
-    let terminal_y = shell.geometry(size).editor_bottom + 10.0;
+    let terminal_y = shell.geometry().editor_bottom + 10.0;
 
     shell.pointer_down(Point::new(editor_x + 10.0, terminal_y), size);
     shell.text_input("Get-Location");
@@ -1529,13 +1572,13 @@ fn terminal_input_is_above_command_and_output() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
-    let terminal_y = shell.geometry(size).editor_bottom + 10.0;
+    let terminal_y = shell.geometry().editor_bottom + 10.0;
     shell.pointer_down(Point::new(editor_x + 10.0, terminal_y), size);
     shell.text_input("Write-Output RESULT_BELOW");
     shell.key_down("Enter");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
-        shell.update_terminals(size);
+        shell.update_terminals();
         if shell
             .active_terminal_lines()
             .any(|line| line.contains("RESULT_BELOW"))
@@ -1550,7 +1593,7 @@ fn terminal_input_is_above_command_and_output() {
             .any(|line| line.contains("RESULT_BELOW"))
     );
 
-    let geo = shell.geometry(size);
+    let geo = shell.geometry();
     let input_y = geo.editor_bottom + 38.0;
     let first_output_y = geo.editor_bottom + 68.0;
     assert!(first_output_y > input_y);
@@ -1571,7 +1614,7 @@ fn the_editor_scrollbar_maps_click_and_drag_to_content_offsets() {
     shell.editor_area.session.open_memory("longo.rs", &text);
     let size = Size::new(1280.0, 800.0);
     let track = shell.editor_scrollbar_rect(size);
-    let visible = shell.editor_visible_lines(size);
+    let visible = shell.editor_visible_lines();
 
     shell.pointer_down(
         Point::new(track.origin.x + 5.0, track.origin.y + track.size.height),
@@ -1610,13 +1653,13 @@ fn terminal_wheel_and_scrollbar_change_the_visible_offset() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
-    let terminal_y = shell.geometry(size).editor_bottom + 10.0;
+    let terminal_y = shell.geometry().editor_bottom + 10.0;
     shell.pointer_down(Point::new(editor_x + 10.0, terminal_y), size);
     shell.text_input("1..80 | ForEach-Object { Write-Output \"scroll-$_\" }");
     shell.key_down("Enter");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
-        shell.update_terminals(size);
+        shell.update_terminals();
         if shell.active_terminal().line_count() >= 80 {
             break;
         }
@@ -1626,7 +1669,7 @@ fn terminal_wheel_and_scrollbar_change_the_visible_offset() {
     let bottom = shell.terminal.tabs[active].scroll_line;
     assert!(bottom > 0);
 
-    let content_point = Point::new(editor_x + 100.0, shell.geometry(size).editor_bottom + 90.0);
+    let content_point = Point::new(editor_x + 100.0, shell.geometry().editor_bottom + 90.0);
     shell.scroll(content_point, -5.0, size);
     assert!(shell.terminal.tabs[active].scroll_line < bottom);
 
@@ -1647,13 +1690,13 @@ fn vertically_resizing_terminal_never_changes_its_content() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
-    let terminal_header = shell.geometry(size).editor_bottom + 10.0;
+    let terminal_header = shell.geometry().editor_bottom + 10.0;
     shell.pointer_down(Point::new(editor_x + 10.0, terminal_header), size);
     shell.text_input("Write-Output RESIZE_STABLE");
     shell.key_down("Enter");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
-        shell.update_terminals(size);
+        shell.update_terminals();
         if shell
             .active_terminal_lines()
             .any(|line| line.trim() == "RESIZE_STABLE")
@@ -1663,21 +1706,21 @@ fn vertically_resizing_terminal_never_changes_its_content() {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     std::thread::sleep(std::time::Duration::from_millis(150));
-    shell.update_terminals(size);
+    shell.update_terminals();
     let before = shell
         .active_terminal_lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
 
-    let border = shell.geometry(size).editor_bottom;
+    let border = shell.geometry().editor_bottom;
     shell.pointer_down(Point::new(editor_x + 200.0, border), size);
     for y in [border - 20.0, border - 60.0, border - 100.0, border - 40.0] {
         shell.pointer_move(Point::new(editor_x + 200.0, y), size);
-        shell.update_terminals(size);
+        shell.update_terminals();
     }
     shell.pointer_up();
     std::thread::sleep(std::time::Duration::from_millis(150));
-    shell.update_terminals(size);
+    shell.update_terminals();
 
     let after = shell
         .active_terminal_lines()
@@ -1691,15 +1734,15 @@ fn terminal_button_minimizes_and_restores_previous_height() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let original = shell.terminal_height();
-    let toggle = Point::new(size.width - 20.0, shell.geometry(size).editor_bottom + 12.0);
+    let toggle = Point::new(size.width - 20.0, shell.geometry().editor_bottom + 12.0);
     shell.pointer_down(toggle, size);
     assert!(shell.terminal_minimized());
     assert_eq!(
-        shell.geometry(size).terminal_height,
+        shell.geometry().terminal_height,
         TERMINAL_COLLAPSED_HEIGHT
     );
 
-    let restore = Point::new(size.width - 20.0, shell.geometry(size).editor_bottom + 12.0);
+    let restore = Point::new(size.width - 20.0, shell.geometry().editor_bottom + 12.0);
     shell.pointer_down(restore, size);
     assert!(!shell.terminal_minimized());
     assert_eq!(shell.terminal_height(), original);
@@ -1710,7 +1753,7 @@ fn dragging_terminal_top_border_changes_height_with_limits() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
-    let border_y = shell.geometry(size).editor_bottom;
+    let border_y = shell.geometry().editor_bottom;
     shell.pointer_down(Point::new(editor_x + 100.0, border_y), size);
     assert!(shell.terminal_resizing());
     assert!(shell.pointer_move(Point::new(editor_x + 100.0, border_y - 70.0), size));
@@ -1763,7 +1806,7 @@ fn going_to_a_definition_scrolls_the_target_line_into_view() {
         );
     shell.editor_area.session.open_memory("Longo.java", &texto);
     let size = Size::new(1280.0, 800.0);
-    let visiveis = shell.editor_visible_lines(size);
+    let visiveis = shell.editor_visible_lines();
     assert!(120 > visiveis, "o destino precisa estar fora da tela");
     assert_eq!(shell.editor_scroll_line(), 0);
 
@@ -1921,8 +1964,9 @@ fn status_bar_uses_palette_colors_with_readable_contrast() {
     shell.set_status_message("Pronto");
     let size = Size::new(1_000.0, 700.0);
     let colors = Theme::default().colors;
-    let geometry = shell.geometry(size);
+    // O quadro primeiro: a geometria é a do arranjo, e o arranjo é deste tamanho.
     let commands = shell.paint(size);
+    let geometry = shell.geometry();
 
     let background = commands.iter().find_map(|command| match command {
         PaintCommand::FillRect(rect)
@@ -2979,7 +3023,7 @@ fn the_editor_gets_a_horizontal_scrollbar_only_when_a_line_overflows() {
 
 /// Coluna do editor em coordenadas de tela.
 fn editor_column(shell: &IdeShell, size: Size, index: usize) -> Point {
-    let geometry = shell.geometry(size);
+    let geometry = shell.geometry();
     let editor_x = ACTIVITY_WIDTH + shell.sidebar_width(size);
     Point::new(
         editor_x + EDITOR_GUTTER + index as f32 * EDITOR_CHAR_WIDTH,

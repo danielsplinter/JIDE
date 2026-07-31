@@ -64,7 +64,7 @@ impl IdeShell {
         if !control {
             return false;
         }
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         if point.x < editor_x + EDITOR_GUTTER
             || point.y < geometry.content_top
@@ -150,7 +150,7 @@ impl IdeShell {
     }
 
     pub(super) fn editor_tabs_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         Rect::new(
             ACTIVITY_WIDTH + self.sidebar_width(size),
             TITLE_HEIGHT,
@@ -173,7 +173,7 @@ impl IdeShell {
             ScrollTarget::Editor => (
                 self.editor_scrollbar_rect(size),
                 self.active_text().map_or(0, |text| text.lines().count()) as f32,
-                self.editor_visible_lines(size) as f32,
+                self.editor_visible_lines() as f32,
                 self.editor_area.pane.scroll_offset() / EDITOR_LINE_HEIGHT,
             ),
             ScrollTarget::Terminal => {
@@ -181,14 +181,14 @@ impl IdeShell {
                 (
                     self.terminal_scrollbar_rect(size),
                     active.session.line_count() as f32,
-                    self.terminal_visible_lines(size) as f32,
+                    self.terminal_visible_lines() as f32,
                     active.scroll_line as f32,
                 )
             }
             ScrollTarget::ExplorerVertical => (
                 self.explorer_vertical_scrollbar_rect(size),
                 self.visible_entries().len() as f32,
-                self.explorer_visible_lines(size) as f32,
+                self.explorer_visible_lines() as f32,
                 self.explorer.scroll_line as f32,
             ),
             ScrollTarget::EditorHorizontal => {
@@ -272,7 +272,7 @@ impl IdeShell {
     /// Ela para antes da barra vertical: duas trilhas cruzadas no canto
     /// disputariam o mesmo clique.
     pub(super) fn editor_horizontal_scrollbar_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         Rect::new(
             editor_x,
@@ -367,7 +367,7 @@ impl IdeShell {
     }
 
     pub(super) fn editor_view_rect(&self, size: Size) -> Rect {
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         Rect::new(
             ACTIVITY_WIDTH + self.sidebar_width(size),
             geometry.content_top,
@@ -494,14 +494,14 @@ impl IdeShell {
             .is_some_and(|(pane, buffer)| pane.drag_autoscroll(buffer))
     }
 
-    pub(super) fn editor_visible_lines(&self, size: Size) -> usize {
-        (self.geometry(size).editor_height / EDITOR_LINE_HEIGHT)
+    pub(super) fn editor_visible_lines(&self) -> usize {
+        (self.geometry().editor_height / EDITOR_LINE_HEIGHT)
             .floor()
             .max(1.0) as usize
     }
 
     pub(super) fn editor_scrollbar_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         Rect::new(
             editor_x + geo.editor_width - 10.0,
@@ -561,7 +561,7 @@ impl IdeShell {
             return None;
         }
         let text = self.active_text()?;
-        let geo = self.geometry(size);
+        let geo = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         let (line, column) = line_column(text, self.editor_area.pane.cursor());
         Some(Point::new(
@@ -908,7 +908,7 @@ impl IdeShell {
         control: bool,
         shift: bool,
     ) -> bool {
-        let geometry = self.geometry(size);
+        let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         if point.x < editor_x
             || point.x >= editor_x + geometry.editor_width

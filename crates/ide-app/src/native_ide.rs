@@ -1845,7 +1845,7 @@ impl ApplicationHandler for NativeIde {
         self.dispatch_application_commands(Vec::new());
         self.drain_application_events();
         if let (Some(window), Some(shell)) = (self.window.window.as_ref(), self.ui.shell.as_mut()) {
-            changed |= shell.update_terminals(window.logical_size());
+            changed |= shell.update_terminals();
             // Um arrasto que saiu da janela não manda mais movimento nenhum, e
             // é justamente aí que a vista precisa continuar andando. O relógio
             // já bate por causa das ferramentas; o passo pega carona nele.
