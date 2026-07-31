@@ -66,6 +66,7 @@ Este é um requisito arquitetural obrigatório.
 - [14 — Decomposição do `ide_shell`](14-ide-shell-decomposition.md)
 - [15 — Adoção do runtime de eventos da ERLibUi](15-event-runtime-adoption.md)
 - [16 — Um anfitrião só](16-single-host.md)
+- [17 — Adoção do arranjo](17-layout-adoption.md)
 
 ## Escopo inicial, e o que dele já existe
 

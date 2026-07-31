@@ -15,11 +15,12 @@ use ide_domain::{Location, TextRange};
 // texto nem trilha de rolagem à mão.
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
-use ui_components::{Button, FormLayout, IconTint, Label, ListView, ModalHost, TextInput};
+use ui_components::{Button, IconTint, Label, ListView, ModalHost, TextInput};
 use ui_core::{
     KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetAction, WidgetId,
 };
-use ui_host::UiHost;
+use ui_host::{Node, UiHost};
+use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 
 use super::primary_pointer;
 
@@ -30,6 +31,8 @@ const OK_ID: WidgetId = WidgetId(10_403);
 const CANCEL_ID: WidgetId = WidgetId(10_404);
 const NAME_CAPTION_ID: WidgetId = WidgetId(10_405);
 const LIST_CAPTION_ID: WidgetId = WidgetId(10_406);
+/// A fileira de ações, que é quem alinha os botões à direita.
+const ACTIONS_ID: WidgetId = WidgetId(10_407);
 /// A janela é larga porque a lista mostra caminho e contagem em cada linha, e
 /// estreitá-la só empurraria o trabalho para a barra lateral.
 const PANEL_SIZE: Size = Size::new(720.0, 460.0);
@@ -82,16 +85,34 @@ impl Default for RenameSurface {
     }
 }
 
-/// Entrega os dois botões desta janela ao anfitrião da tela.
-pub(super) fn attach(host: &mut UiHost) {
-    host.attach(
-        Box::new(Button::new(CANCEL_ID, "Cancelar").with_command("rename.cancel")),
-        false,
+/// Declara a janela inteira ao anfitrião da tela: o que ela tem e como se arruma.
+///
+/// Nenhuma conta de retângulo aqui — o painel é uma coluna, a fileira de ações é
+/// uma linha alinhada à direita, e a lista fica com o que sobra. Quem calcula é o
+/// motor da biblioteca.
+pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
+    let _ = host.declare(layer, MODAL_ID, panel_style());
+    let _ = host.declare(MODAL_ID, INPUT_ID, field_style());
+    // A lista fica com a folga entre o campo e as ações.
+    let _ = host.declare(
+        MODAL_ID,
+        LIST_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
     );
-    host.attach(
-        Box::new(Button::new(OK_ID, "OK").with_command("rename.confirm")),
-        false,
-    );
+    let _ = host.declare(MODAL_ID, ACTIONS_ID, actions_style());
+    for (id, label, command) in [
+        (CANCEL_ID, "Cancelar", "rename.cancel"),
+        (OK_ID, "OK", "rename.confirm"),
+    ] {
+        let _ = host.insert(
+            ACTIONS_ID,
+            Node::new(Box::new(Button::new(id, label).with_command(command)))
+                .with_style(action_style()),
+        );
+    }
 }
 
 impl RenameSurface {
@@ -214,9 +235,7 @@ impl RenameSurface {
         host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
-        size: Size,
     ) -> RenameOutcome {
-        let geometry = self.geometry(context, size);
         let outcome = host.click(point);
         for evento in outcome.commands {
             if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
@@ -238,14 +257,14 @@ impl RenameSurface {
         match outcome.target {
             // O campo sabe onde o cursor cai dentro do texto: a medição é dele.
             Some(INPUT_ID) => {
-                state.input.layout(context, geometry.input);
+                state.input.layout(context, area(host, INPUT_ID));
                 state.input.event(
                     &mut EventContext::default(),
                     &UiEvent::PointerDown(primary_pointer(point)),
                 );
             }
             Some(LIST_ID) => {
-                state.list.layout(context, geometry.list);
+                state.list.layout(context, area(host, LIST_ID));
                 state.list.event(
                     &mut EventContext::default(),
                     &UiEvent::PointerDown(primary_pointer(point)),
@@ -256,24 +275,13 @@ impl RenameSurface {
         RenameOutcome::Idle
     }
 
-    /// Declara ao anfitrião da tela a área de cada peça da janela.
-    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
-        let geometry = self.geometry(context, size);
-        host.place(MODAL_ID, self.modal.panel_bounds());
-        host.place(INPUT_ID, geometry.input);
-        host.place(LIST_ID, geometry.list);
-        host.place(CANCEL_ID, geometry.cancel);
-        host.place(OK_ID, geometry.ok);
-    }
-
     /// Movimento e soltura do ponteiro: são da lista, que tem as barras.
     ///
     /// Sem eles o indicador é agarrado e nunca anda — foi assim que o arrasto
     /// deixou de funcionar quando a janela nasceu.
-    pub(super) fn pointer_event(&mut self, context: &LayoutContext, event: &UiEvent, size: Size) {
-        let geometry = self.geometry(context, size);
+    pub(super) fn pointer_event(&mut self, host: &UiHost, context: &LayoutContext, event: &UiEvent) {
         if let Some(state) = self.state.as_mut() {
-            state.list.layout(context, geometry.list);
+            state.list.layout(context, area(host, LIST_ID));
             state.list.event(&mut EventContext::default(), event);
         }
     }
@@ -323,7 +331,7 @@ impl RenameSurface {
         if !self.modal.is_open() || self.state.is_none() {
             return false;
         }
-        let geometry = self.geometry(layout, size);
+        let (input_area, list_area) = (area(host, INPUT_ID), area(host, LIST_ID));
         let mut modal = self.modal.clone();
         modal.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
         modal.paint(paint);
@@ -341,19 +349,19 @@ impl RenameSurface {
             paint,
             NAME_CAPTION_ID,
             "Novo nome",
-            Point::new(geometry.input.origin.x, geometry.input.origin.y - 18.0),
+            Point::new(input_area.origin.x, input_area.origin.y - CAPTION_OFFSET),
         );
         caption(
             layout,
             paint,
             LIST_CAPTION_ID,
             &legenda,
-            Point::new(geometry.list.origin.x, geometry.list.origin.y - 18.0),
+            Point::new(list_area.origin.x, list_area.origin.y - CAPTION_OFFSET),
         );
         if let Some(state) = self.state.as_mut() {
-            state.input.layout(layout, geometry.input);
+            state.input.layout(layout, input_area);
             state.input.paint(paint);
-            state.list.layout(layout, geometry.list);
+            state.list.layout(layout, list_area);
             state.list.paint(paint);
         }
         // Os botões são do anfitrião da tela, e por isso respondem ao ponteiro.
@@ -367,8 +375,8 @@ impl RenameSurface {
 
     /// Área da lista, para quem precisa apontar um gesto dentro dela.
     #[cfg(test)]
-    pub(super) fn list_area(&mut self, context: &LayoutContext, size: Size) -> Rect {
-        self.geometry(context, size).list
+    pub(super) fn list_area(&self, host: &UiHost) -> Rect {
+        area(host, LIST_ID)
     }
 
     /// Quanto a lista já rolou, para verificar o arrasto.
@@ -380,12 +388,11 @@ impl RenameSurface {
             .unwrap_or_default()
     }
 
-    /// Áreas da janela, com o painel já posicionado.
-    fn geometry(&mut self, context: &LayoutContext, size: Size) -> RenameGeometry {
-        self.modal
-            .layout(context, Rect::new(0.0, 0.0, size.width, size.height));
-        geometry(self.modal.panel_bounds())
-    }
+}
+
+/// A área que o arranjo deu a uma peça da janela.
+fn area(host: &UiHost, id: WidgetId) -> Rect {
+    host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 
 /// Rótulo comum das legendas da janela.
@@ -423,30 +430,48 @@ fn reference_label(path: &Path, ocorrencias: usize) -> String {
     }
 }
 
-/// Áreas da janela de renomear: campo, lista e os dois botões.
-struct RenameGeometry {
-    input: Rect,
-    list: Rect,
-    cancel: Rect,
-    ok: Rect,
+/// Onde a legenda fica em relação ao campo que ela nomeia.
+const CAPTION_OFFSET: f32 = 18.0;
+
+/// O painel: uma coluna, com o título do `ModalHost` reservado no alto.
+///
+/// Os números são os que o `FormLayout` usava — margem de 24, primeiro campo em
+/// 76, ações a 14 do pé. A diferença é que agora eles são declarados uma vez, e
+/// não somados a cada peça.
+fn panel_style() -> LayoutStyle {
+    LayoutStyle {
+        width: Some(PANEL_SIZE.width),
+        height: Some(PANEL_SIZE.height),
+        padding: EdgeInsets::only(76.0, 24.0, 14.0, 24.0),
+        // A folga entre as peças é a mesma em toda a janela: é ela que abriga a
+        // legenda de cada uma.
+        gap: 34.0,
+        ..LayoutStyle::default()
+    }
 }
 
-fn geometry(panel: Rect) -> RenameGeometry {
-    let forma = FormLayout::new(panel);
-    let input = forma.field(0);
-    let [cancel, ok] = forma.actions();
-    // A lista ocupa o que sobra entre o campo e a fileira de ações.
-    let topo_lista = input.origin.y + input.size.height + 34.0;
-    let list = Rect::new(
-        input.origin.x,
-        topo_lista,
-        input.size.width,
-        (ok.origin.y - topo_lista - 16.0).max(40.0),
-    );
-    RenameGeometry {
-        input,
-        list,
-        cancel,
-        ok,
+fn field_style() -> LayoutStyle {
+    LayoutStyle {
+        height: Some(34.0),
+        ..LayoutStyle::default()
+    }
+}
+
+/// A fileira de ações encosta à direita, e é o alinhamento que faz isso.
+fn actions_style() -> LayoutStyle {
+    LayoutStyle {
+        direction: LayoutDirection::Row,
+        main_align: MainAlign::End,
+        height: Some(34.0),
+        gap: 10.0,
+        ..LayoutStyle::default()
+    }
+}
+
+fn action_style() -> LayoutStyle {
+    LayoutStyle {
+        width: Some(88.0),
+        height: Some(34.0),
+        ..LayoutStyle::default()
     }
 }

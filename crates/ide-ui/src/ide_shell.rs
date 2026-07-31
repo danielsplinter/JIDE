@@ -78,7 +78,7 @@ use ui_core::{
 };
 use ui_editor::{CodeEditor, GutterMark, LineDecoration};
 use ui_host::UiHost;
-use ui_layout_api::{LayoutDirection, LayoutStyle};
+use ui_layout_api::{CrossAlign, LayoutDirection, LayoutStyle, MainAlign};
 use ui_layout_taffy::TaffyLayoutEngine;
 use ui_render_api::{FillRectCommand, PaintCommand, StrokeRectCommand};
 use ui_window_api::ClipboardService;
@@ -244,6 +244,21 @@ const OVERLAY: [Layer; 7] = [
 ///
 /// Ela cobre a tela inteira — o véu do `ModalHost` é o que está desenhado ali —,
 /// e é essa área que decide se o gesto alcança o que ficou embaixo.
+/// O estilo de uma camada, aberta ou fechada.
+///
+/// Aberta, ela cobre a tela: é essa área que decide se o gesto alcança o que
+/// ficou embaixo, e é ela que vai centralizar o painel quando a janela passar a
+/// ser arranjada pelo motor. Fechada, sai do arranjo — sem sair da árvore, para
+/// a ordem não depender do uso.
+fn layer_style(open: bool) -> LayoutStyle {
+    LayoutStyle {
+        hidden: !open,
+        main_align: MainAlign::Center,
+        cross_align: CrossAlign::Center,
+        ..LayoutStyle::default()
+    }
+}
+
 const fn surface_layer_id(kind: SurfaceKind) -> WidgetId {
     WidgetId(SURFACE_LAYER_BASE.0 + kind as u64)
 }
@@ -279,14 +294,44 @@ pub struct IdeShell {
 /// Em camada porque os filhos se sobrepõem na ordem de declaração: é o que
 /// permite uma janela cobrir o conteúdo em vez de ser empurrada para baixo dele.
 fn new_host() -> UiHost {
-    UiHost::new(
+    let mut host = UiHost::new(
         SHELL_ROOT_ID,
         LayoutStyle {
             direction: LayoutDirection::Overlay,
             ..LayoutStyle::default()
         },
         Box::new(TaffyLayoutEngine),
-    )
+    );
+    // As camadas nascem com o shell, na ordem de `OVERLAY`, e não na ordem em
+    // que cada janela é aberta pela primeira vez — que é acidental. Enquanto o
+    // arranjo vier do consumidor, a ordem de sobreposição é a das chamadas de
+    // `place`; quando vier do motor, passa a ser esta. Declará-las aqui é o que
+    // torna as duas ordens a mesma.
+    // O conteúdo da moldura vem **antes** das camadas: é o que elas cobrem. A
+    // ordem dos irmãos é a de sobreposição, e um nó criado só quando é
+    // posicionado pela primeira vez entraria no fim, acima das janelas.
+    let arranjado_pelo_consumidor = LayoutStyle {
+        hidden: true,
+        ..LayoutStyle::default()
+    };
+    for id in [EDITOR_TABS_ID, TERMINAL_TABS_ID] {
+        let _ = host.declare(SHELL_ROOT_ID, id, arranjado_pelo_consumidor);
+    }
+    for layer in OVERLAY {
+        let id = match layer {
+            Layer::Surface(kind) => surface_layer_id(kind),
+            Layer::Completion => COMPLETION_POPUP_ID,
+        };
+        // A camada ocupa a tela inteira: é a área que decide se o gesto alcança
+        // o que ficou embaixo dela.
+        let _ = host.declare(SHELL_ROOT_ID, id, layer_style(false));
+        // A lista da completação é o conteúdo da camada dela, e entra logo
+        // depois: acima do fundo da lista, abaixo das janelas que vêm a seguir.
+        if matches!(layer, Layer::Completion) {
+            let _ = host.declare(SHELL_ROOT_ID, COMPLETION_LIST_ID, arranjado_pelo_consumidor);
+        }
+    }
+    host
 }
 impl IdeShell {
     /// Mensagem atual da barra de estado.
@@ -417,13 +462,21 @@ impl IdeShell {
                 // engole o gesto do que ficou atrás —, depois o que há dentro
                 // dela.
                 Layer::Surface(kind) => {
-                    if self.surface_is_open(kind) {
+                    // A camada fechada sai do arranjo em vez de sair da árvore:
+                    // é o que mantém a ordem de sobreposição independente da
+                    // ordem em que as janelas foram abertas.
+                    let open = self.surface_is_open(kind);
+                    self.host.set_style(surface_layer_id(kind), layer_style(open));
+                    if open {
                         self.host.place(surface_layer_id(kind), tela);
                         self.place_surface(kind, size);
                     }
                 }
             }
         }
+        // O motor calcula o que foi declarado; o que veio de `place` entra no
+        // lugar que a árvore lhe dá. Ver `17-layout-adoption`.
+        let _ = self.host.layout(size);
     }
 
     /// Declara os nós de dentro da janela aberta.
@@ -434,13 +487,18 @@ impl IdeShell {
     fn place_surface(&mut self, kind: SurfaceKind, size: Size) {
         let context = self.layout_context();
         match kind {
-            SurfaceKind::NewItem => self.new_item.place_widgets(&mut self.host, &context, size),
-            SurfaceKind::TypeSearch => self.search.place_widgets(&mut self.host, &context, size),
-            SurfaceKind::Generate => self.generate.place_widgets(&mut self.host, &context, size),
-            SurfaceKind::Rename => self.rename.place_widgets(&mut self.host, &context, size),
+            // A janela de criação declara estilo: o arranjo é do motor.
+            SurfaceKind::NewItem => {}
+            // A busca declara estilo: o arranjo dela é do motor.
+            SurfaceKind::TypeSearch => {}
+            // A janela de gerar declara estilo: o arranjo é do motor.
+            SurfaceKind::Generate => {}
             SurfaceKind::Inspection => {
                 self.inspection.place_widgets(&mut self.host, &context, size);
             }
+            // A janela de renomear não aparece aqui: ela declara estilo, e quem
+            // calcula a área de cada peça é o motor.
+            SurfaceKind::Rename => {}
             SurfaceKind::Settings => {
                 let sections = self.catalog.settings_sections.len();
                 self.settings
@@ -493,17 +551,12 @@ impl IdeShell {
     }
 
     /// Movimento do ponteiro. `None` é "não é meu, siga adiante".
-    fn surface_pointer_move(
-        &mut self,
-        kind: SurfaceKind,
-        point: Point,
-        size: Size,
-    ) -> Option<bool> {
+    fn surface_pointer_move(&mut self, kind: SurfaceKind, point: Point) -> Option<bool> {
         match kind {
             // Arrastar a barra da lista precisa do movimento: só com o clique
             // chegando, o indicador é pego e nunca anda.
             SurfaceKind::Rename => {
-                self.rename_pointer_event(&UiEvent::PointerMove(primary_pointer(point)), size);
+                self.rename_pointer_event(&UiEvent::PointerMove(primary_pointer(point)));
                 Some(true)
             }
             // A janela cobre o que está atrás: mover ali não arrasta nada.
@@ -515,8 +568,7 @@ impl IdeShell {
     /// Soltura do ponteiro, que é o que encerra um arrasto começado na janela.
     fn surface_pointer_up(&mut self, kind: SurfaceKind) {
         if kind == SurfaceKind::Rename {
-            let size = self.context.last_size;
-            self.rename_pointer_event(&UiEvent::PointerUp(primary_pointer(Point::ZERO)), size);
+            self.rename_pointer_event(&UiEvent::PointerUp(primary_pointer(Point::ZERO)));
         }
     }
 
@@ -526,7 +578,6 @@ impl IdeShell {
         kind: SurfaceKind,
         point: Point,
         delta_lines: f32,
-        size: Size,
     ) -> bool {
         match kind {
             // A janela cobre tudo: a roda ali é da lista dela, e nunca do editor
@@ -538,13 +589,13 @@ impl IdeShell {
                         delta_x: 0.0,
                         delta_y: delta_lines * generate::ROW_HEIGHT,
                     }),
-                    size,
                 );
                 true
             }
             SurfaceKind::Generate => {
                 let context = self.layout_context();
-                self.generate.scroll(&context, point, delta_lines, size);
+                self.generate
+                    .scroll(&self.host, &context, point, delta_lines);
                 true
             }
             SurfaceKind::TypeSearch => {
@@ -699,7 +750,7 @@ impl IdeShell {
             return self.context_menu_event(&UiEvent::PointerMove(primary_pointer(point)), size);
         }
         if let Some(surface) = self.open_surface()
-            && let Some(handled) = self.surface_pointer_move(surface, point, size)
+            && let Some(handled) = self.surface_pointer_move(surface, point)
         {
             return handled;
         }
@@ -785,7 +836,7 @@ impl IdeShell {
         // roda, quando ela cai dentro de uma janela.
         self.place_overlay(size);
         if let Some(surface) = self.open_surface()
-            && self.surface_scroll(surface, point, delta_lines, size)
+            && self.surface_scroll(surface, point, delta_lines)
         {
             return;
         }

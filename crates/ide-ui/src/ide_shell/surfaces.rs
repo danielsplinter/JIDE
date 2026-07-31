@@ -115,14 +115,14 @@ impl IdeShell {
         let context = self.layout_context();
         let outcome = self
             .rename
-            .pointer_down(&mut self.host, &context, point, size);
+            .pointer_down(&mut self.host, &context, point);
         self.apply_rename_outcome(outcome);
     }
 
     /// Movimento e soltura vão à janela: são o arrasto das barras da lista.
-    pub(super) fn rename_pointer_event(&mut self, event: &UiEvent, size: Size) {
+    pub(super) fn rename_pointer_event(&mut self, event: &UiEvent) {
         let context = self.layout_context();
-        self.rename.pointer_event(&context, event, size);
+        self.rename.pointer_event(&self.host, &context, event);
     }
 
     /// Teclas da janela de renomear: `Enter` confirma, `Esc` desiste.
@@ -259,7 +259,7 @@ impl IdeShell {
         let context = self.layout_context();
         let outcome = self
             .generate
-            .pointer_down(&mut self.host, &context, point, size);
+            .pointer_down(&mut self.host, &context, point);
         self.apply_generate_outcome(outcome);
     }
 
@@ -274,10 +274,7 @@ impl IdeShell {
     // ---- Buscar ----
     pub(super) fn type_search_pointer_down(&mut self, point: Point, size: Size) {
         self.place_overlay(size);
-        let context = self.layout_context();
-        let outcome = self
-            .search
-            .pointer_down(&mut self.host, &context, point, size);
+        let outcome = self.search.pointer_down(&mut self.host, point);
         self.apply_type_search_outcome(outcome);
     }
 
@@ -379,7 +376,7 @@ impl IdeShell {
         let mut paint = self.paint_context();
         if self
             .search
-            .paint(&layout, &mut paint, size, &self.catalog.source_root_names)
+            .paint(&self.host, &layout, &mut paint, size, &self.catalog.source_root_names)
         {
             commands.extend(paint.into_commands());
         }

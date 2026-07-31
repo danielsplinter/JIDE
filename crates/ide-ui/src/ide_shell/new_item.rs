@@ -11,11 +11,12 @@ use std::path::{Path, PathBuf};
 use ide_application::{NewItemRequest, NewItemTemplate};
 use ui_api::{LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
-use ui_components::{Button, FormLayout, IconTint, Label, ModalHost, TextInput};
+use ui_components::{Button, IconTint, Label, ModalHost, TextInput};
 use ui_core::{
     KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetAction, WidgetId,
 };
-use ui_host::UiHost;
+use ui_host::{Node, UiHost};
+use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 
 use crate::explorer::is_source_root;
 
@@ -27,6 +28,12 @@ const CANCEL_ID: WidgetId = WidgetId(10_039);
 const PACKAGE_CAPTION_ID: WidgetId = WidgetId(10_041);
 const NAME_CAPTION_ID: WidgetId = WidgetId(10_042);
 const MESSAGE_ID: WidgetId = WidgetId(10_043);
+/// A fileira de ações, e as duas folgas que separam as peças da coluna.
+const ACTIONS_ID: WidgetId = WidgetId(10_430);
+const FIELD_GAP_ID: WidgetId = WidgetId(10_431);
+const FILL_ID: WidgetId = WidgetId(10_432);
+/// Onde a legenda fica em relação ao campo que ela nomeia.
+const CAPTION_OFFSET: f32 = 18.0;
 pub(super) const PANEL_SIZE: Size = Size::new(460.0, 230.0);
 
 /// O que a janela concluiu, para o shell executar.
@@ -63,20 +70,82 @@ impl Default for NewItemSurface {
 /// Inclusive os dois campos: quem entrega `FocusGained` e `FocusLost` é quem tem
 /// o mapa de id para componente, e esse é o anfitrião. A janela lê de volta o que
 /// foi digitado por `widget_as`.
-pub(super) fn attach(host: &mut UiHost) {
-    host.attach(
-        Box::new(Button::new(CREATE_ID, "Criar").with_command("new.create")),
-        false,
+pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
+    let campo = || LayoutStyle {
+        height: Some(34.0),
+        ..LayoutStyle::default()
+    };
+    let _ = host.declare(
+        layer,
+        MODAL_ID,
+        LayoutStyle {
+            width: Some(PANEL_SIZE.width),
+            height: Some(PANEL_SIZE.height),
+            padding: EdgeInsets::only(76.0, 24.0, 14.0, 24.0),
+            ..LayoutStyle::default()
+        },
     );
-    host.attach(
-        Box::new(Button::new(CANCEL_ID, "Cancelar").with_command("new.cancel")),
-        false,
+    let _ = host.insert(
+        MODAL_ID,
+        Node::new(Box::new(
+            TextInput::new(PACKAGE_ID, String::new()).with_placeholder("br.com.exemplo"),
+        ))
+        .with_style(campo()),
     );
-    host.attach(
-        Box::new(TextInput::new(PACKAGE_ID, String::new()).with_placeholder("br.com.exemplo")),
-        false,
+    // A folga entre os dois campos é uma peça vazia, e não uma soma escondida na
+    // posição do seguinte: é ela que abriga a legenda do campo de baixo.
+    let _ = host.declare(
+        MODAL_ID,
+        FIELD_GAP_ID,
+        LayoutStyle {
+            height: Some(30.0),
+            ..LayoutStyle::default()
+        },
     );
-    host.attach(Box::new(TextInput::new(NAME_ID, String::new())), false);
+    let _ = host.insert(
+        MODAL_ID,
+        Node::new(Box::new(TextInput::new(NAME_ID, String::new()))).with_style(campo()),
+    );
+    // O que sobra empurra a fileira de ações para o pé do painel.
+    let _ = host.declare(
+        MODAL_ID,
+        FILL_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        MODAL_ID,
+        ACTIONS_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            main_align: MainAlign::End,
+            height: Some(34.0),
+            gap: 10.0,
+            ..LayoutStyle::default()
+        },
+    );
+    for (id, label, command) in [
+        (CANCEL_ID, "Cancelar", "new.cancel"),
+        (CREATE_ID, "Criar", "new.create"),
+    ] {
+        let _ = host.insert(
+            ACTIONS_ID,
+            Node::new(Box::new(Button::new(id, label).with_command(command))).with_style(
+                LayoutStyle {
+                    width: Some(88.0),
+                    height: Some(34.0),
+                    ..LayoutStyle::default()
+                },
+            ),
+        );
+    }
+}
+
+/// A área que o arranjo deu a uma peça da janela.
+fn area(host: &UiHost, id: WidgetId) -> Rect {
+    host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 
 /// O percurso do `Tab` desta janela: pacote e depois nome.
@@ -218,23 +287,6 @@ impl NewItemSurface {
         NewItemOutcome::Idle
     }
 
-    /// Declara ao anfitrião da tela a área de cada peça da janela.
-    ///
-    /// O arranjo continua sendo desta tela — o `FormLayout` sabe onde cada campo
-    /// e cada botão ficam. O que o anfitrião recebe é o resultado, e com ele o
-    /// acerto e a entrega deixam de ser escritos à mão.
-    ///
-    /// Só enquanto a janela está aberta: é a presença destes nós na pilha que
-    /// decide a sobreposição, e fechá-la é tirá-los de lá.
-    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
-        let geometry = self.geometry(context, size);
-        host.place(MODAL_ID, self.modal.panel_bounds());
-        host.place(PACKAGE_ID, geometry.package);
-        host.place(NAME_ID, geometry.name);
-        host.place(CANCEL_ID, geometry.cancel);
-        host.place(CREATE_ID, geometry.create);
-    }
-
     /// Tecla dentro da janela.
     pub(super) fn key(&mut self, host: &mut UiHost, key: &str) -> NewItemOutcome {
         if self.dialog.is_none() {
@@ -290,17 +342,16 @@ impl NewItemSurface {
         // O painel se centraliza na área que recebe no layout. Sem esse layout a
         // área é zero, e a janela nasce no canto superior esquerdo.
         modal.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
-        let geometry = geometry(modal.panel_bounds());
+        let (package, name) = (area(host, PACKAGE_ID), area(host, NAME_ID));
         // O título é do `ModalHost`, que já o desenha: escrever outro por cima
         // era o que aparecia duplicado.
         modal.paint(paint);
-        let forma = FormLayout::new(modal.panel_bounds());
         caption(
             layout,
             paint,
             PACKAGE_CAPTION_ID,
             "Pacote",
-            forma.caption(0),
+            Point::new(package.origin.x, package.origin.y - CAPTION_OFFSET),
             IconTint::Muted,
         );
         caption(
@@ -308,7 +359,7 @@ impl NewItemSurface {
             paint,
             NAME_CAPTION_ID,
             &dialog.template.name_caption,
-            forma.caption(1),
+            Point::new(name.origin.x, name.origin.y - CAPTION_OFFSET),
             IconTint::Muted,
         );
         // Campos e botões são desenhados pelo anfitrião da tela, que é quem os
@@ -325,18 +376,17 @@ impl NewItemSurface {
                 paint,
                 MESSAGE_ID,
                 message,
-                Point::new(geometry.name.origin.x, geometry.name.origin.y + 44.0),
+                Point::new(name.origin.x, name.origin.y + 44.0),
                 IconTint::Danger,
             );
         }
         true
     }
 
-    /// Áreas da janela, já centralizada numa tela deste tamanho.
-    pub(super) fn geometry(&mut self, context: &LayoutContext, size: Size) -> NewItemGeometry {
-        self.modal
-            .layout(context, Rect::new(0.0, 0.0, size.width, size.height));
-        geometry(self.modal.panel_bounds())
+    /// Área de um campo, para quem precisa apontar um gesto dentro dele.
+    #[cfg(test)]
+    pub(super) fn field_area(host: &UiHost, package: bool) -> Rect {
+        area(host, if package { PACKAGE_ID } else { NAME_ID })
     }
 
     /// O que está nos dois campos, para os testes.
@@ -376,23 +426,3 @@ fn caption(
     label.paint(paint);
 }
 
-/// Onde cada peça da janela de criação fica dentro do painel.
-pub(super) struct NewItemGeometry {
-    pub(super) package: Rect,
-    pub(super) name: Rect,
-    pub(super) create: Rect,
-    pub(super) cancel: Rect,
-}
-
-fn geometry(panel: Rect) -> NewItemGeometry {
-    let forma = FormLayout::new(panel);
-    // Criar à direita, encostado na borda: é o canto que a leitura alcança por
-    // último, e vale para todas as janelas.
-    let [cancel, create] = forma.actions();
-    NewItemGeometry {
-        package: forma.field(0),
-        name: forma.field(1),
-        create,
-        cancel,
-    }
-}

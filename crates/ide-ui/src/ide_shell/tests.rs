@@ -107,6 +107,38 @@ fn test_shell() -> IdeShell {
     })
 }
 
+/// As camadas nascem com o shell, na ordem em que se sobrepõem.
+///
+/// Enquanto o arranjo vem do consumidor, a ordem de sobreposição é a das
+/// chamadas de `place`; quando vier do motor, será a da árvore. Este teste
+/// prende as duas à mesma ordem — sem ele, a primeira janela a adotar o motor
+/// herdaria a ordem em que as janelas foram abertas, que é acidental.
+#[test]
+fn the_layers_are_declared_in_the_order_they_stack() {
+    let shell = test_shell();
+    let filhos = shell.host.children(SHELL_ROOT_ID);
+    let esperada: Vec<_> = OVERLAY
+        .into_iter()
+        .map(|layer| match layer {
+            Layer::Surface(kind) => surface_layer_id(kind),
+            Layer::Completion => COMPLETION_POPUP_ID,
+        })
+        .collect();
+    let camadas: Vec<_> = filhos
+        .iter()
+        .copied()
+        .filter(|id| esperada.contains(id))
+        .collect();
+    assert_eq!(camadas, esperada, "as camadas fora da ordem em que se cobrem");
+
+    // E a moldura vem antes de todas elas, porque é o que elas cobrem.
+    let posicao = |procurado: WidgetId| filhos.iter().position(|id| *id == procurado);
+    assert!(
+        posicao(EDITOR_TABS_ID) < posicao(esperada[0]),
+        "a moldura tem que ser declarada antes da primeira camada"
+    );
+}
+
 /// O Explorer desenha pela árvore da biblioteca, e a rolagem horizontal
 /// desloca as linhas em vez de cortá-las.
 #[test]
@@ -2161,8 +2193,9 @@ fn the_generate_window_lists_what_is_missing_and_writes_what_was_checked() {
 
     // Marcar a segunda linha e confirmar gera só ela.
     let (lista, _, ok) = {
-        let context = shell.layout_context();
-        shell.generate.areas(&context, size)
+        // As áreas vêm do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        GenerateSurface::areas(&shell.host)
     };
     shell.pointer_down(
         Point::new(
@@ -2185,8 +2218,9 @@ fn the_all_button_ignores_the_checkboxes() {
     let size = Size::new(1280.0, 800.0);
     shell.show_accessor_plan(AccessorKind::Getter, accessor_plan_para_teste());
     let (_, todos, _) = {
-        let context = shell.layout_context();
-        shell.generate.areas(&context, size)
+        // As áreas vêm do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        GenerateSurface::areas(&shell.host)
     };
     shell.pointer_down(
         Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
@@ -2228,8 +2262,9 @@ fn the_generate_list_keeps_its_scroll_between_frames() {
 
     // A roda rola a lista da janela.
     let (lista, ..) = {
-        let context = shell.layout_context();
-        shell.generate.areas(&context, size)
+        // As áreas vêm do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        GenerateSurface::areas(&shell.host)
     };
     shell.scroll(
         Point::new(lista.origin.x + 40.0, lista.origin.y + 40.0),
@@ -2324,8 +2359,9 @@ fn generating_changes_the_revision_so_the_highlight_is_asked_again() {
         },
     );
     let (_, todos, _) = {
-        let context = shell.layout_context();
-        shell.generate.areas(&context, size)
+        // As áreas vêm do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        GenerateSurface::areas(&shell.host)
     };
     shell.pointer_down(
         Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
@@ -2374,8 +2410,8 @@ fn the_three_generate_options_share_one_window() {
         assert_eq!(shell.generate_fields(), vec!["id"]);
 
         let (_, todos, _) = {
-            let context = shell.layout_context();
-            shell.generate.areas(&context, size)
+            let _ = shell.paint(size);
+            GenerateSurface::areas(&shell.host)
         };
         shell.pointer_down(
             Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
@@ -2431,8 +2467,7 @@ fn dragging_the_rename_scrollbar_scrolls_the_list() {
     // A área da lista é da janela: o teste aponta o gesto por ela, e não por
     // dentro do estado do shell.
     let lista = {
-        let context = shell.layout_context();
-        shell.rename.list_area(&context, size)
+        shell.rename.list_area(&shell.host)
     };
     let trilha_x = lista.origin.x + lista.size.width - 5.0;
     let topo = lista.origin.y + 4.0;
@@ -2728,8 +2763,9 @@ fn the_constructor_uses_the_same_window_and_asks_the_language() {
         "o construtor lista todos os campos, e não só os que faltam"
     );
     let (_, _, ok) = {
-        let context = shell.layout_context();
-        shell.generate.areas(&context, size)
+        // As áreas vêm do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        GenerateSurface::areas(&shell.host)
     };
     shell.pointer_down(Point::new(ok.origin.x + 10.0, ok.origin.y + 10.0), size);
     let Some((campos, onde)) = shell.take_constructor_request() else {
@@ -2745,8 +2781,9 @@ fn the_constructor_uses_the_same_window_and_asks_the_language() {
     let mut shell = shell_editing("class Pedido {\n}\n");
     shell.show_accessor_plan(AccessorKind::Constructor, plano());
     let (lista, _, ok) = {
-        let context = shell.layout_context();
-        shell.generate.areas(&context, size)
+        // As áreas vêm do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        GenerateSurface::areas(&shell.host)
     };
     shell.pointer_down(
         Point::new(lista.origin.x + 20.0, lista.origin.y + 12.0),
@@ -2762,8 +2799,9 @@ fn the_constructor_uses_the_same_window_and_asks_the_language() {
     let mut shell = shell_editing("class Pedido {\n}\n");
     shell.show_accessor_plan(AccessorKind::Constructor, plano());
     let (_, todos, _) = {
-        let context = shell.layout_context();
-        shell.generate.areas(&context, size)
+        // As áreas vêm do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        GenerateSurface::areas(&shell.host)
     };
     shell.pointer_down(
         Point::new(todos.origin.x + 10.0, todos.origin.y + 10.0),
@@ -3614,7 +3652,7 @@ fn type_search_scroll_stays_inside_the_modal_and_reveals_keyboard_selection() {
     );
 
     let editor_before = shell.editor_area.pane.scroll_line();
-    let (_, list) = shell.search.geometry(&LayoutContext::default(), size);
+    let list = TypeSearchSurface::list_area(&shell.host);
     shell.scroll(
         Point::new(list.origin.x + 20.0, list.origin.y + 20.0),
         3.0,
@@ -4391,12 +4429,15 @@ fn clicking_a_field_moves_the_cursor_before_typing() {
     let size = Size::new(1_000.0, 700.0);
     shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
     shell.run_explorer_command("explorer.new.java.package");
-    let geometry = shell.new_item.geometry(&LayoutContext::default(), size);
+    // A área vem do arranjo, e o arranjo acontece no quadro: sem desenhar um,
+    // a janela recém-aberta ainda não tem onde cada campo fica.
+    let _ = shell.paint(size);
+    let package = NewItemSurface::field_area(&shell.host, true);
     // Clique antes do primeiro caractere leva o cursor para o começo.
     shell.pointer_down(
         Point::new(
-            geometry.package.origin.x + 1.0,
-            geometry.package.origin.y + 8.0,
+            package.origin.x + 1.0,
+            package.origin.y + 8.0,
         ),
         size,
     );

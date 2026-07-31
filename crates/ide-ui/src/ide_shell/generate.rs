@@ -8,11 +8,12 @@ use ide_domain::{AccessorCandidate, AccessorKind, AccessorPlan, TextPosition};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
 use ui_components::{
-    Button, CellWidth, Checkbox, ComposedCell, ComposedList, ComposedRow, FormLayout, Label,
+    Button, CellWidth, Checkbox, ComposedCell, ComposedList, ComposedRow, Label,
     ModalHost,
 };
 use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetAction, WidgetId};
-use ui_host::UiHost;
+use ui_host::{Node, UiHost};
+use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 
 use super::primary_pointer;
 
@@ -21,6 +22,8 @@ const LIST_ID: WidgetId = WidgetId(10_301);
 const ALL_ID: WidgetId = WidgetId(10_302);
 const OK_ID: WidgetId = WidgetId(10_303);
 const ROW_ID: WidgetId = WidgetId(10_320);
+/// A fileira de ações, que é quem encosta os botões à direita.
+const ACTIONS_ID: WidgetId = WidgetId(10_433);
 /// Altura de uma linha da lista, também usada pelo passo da roda.
 pub(super) const ROW_HEIGHT: f32 = 30.0;
 const PANEL_SIZE: Size = Size::new(520.0, 420.0);
@@ -61,16 +64,60 @@ pub(super) struct GenerateSurface {
     pending_constructor: Option<(Vec<String>, TextPosition)>,
 }
 
-/// Entrega os dois botões desta janela ao anfitrião da tela.
-pub(super) fn attach(host: &mut UiHost) {
-    host.attach(
-        Box::new(Button::new(ALL_ID, "All").with_command("generate.all")),
-        false,
+/// Declara a janela ao anfitrião: painel, lista e a fileira de ações.
+///
+/// Os números são os que o `FormLayout` produzia — conteúdo a 56 do alto, 16 de
+/// margem, 12 de folga até as ações, botões de 100 por 36 porque "Gerar todos"
+/// não cabe no tamanho padrão. A diferença é que a lista fica com o que sobra em
+/// vez de ter a altura subtraída.
+pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
+    let _ = host.declare(
+        layer,
+        MODAL_ID,
+        LayoutStyle {
+            width: Some(PANEL_SIZE.width),
+            height: Some(PANEL_SIZE.height),
+            padding: EdgeInsets::only(56.0, 16.0, 14.0, 16.0),
+            gap: 12.0,
+            ..LayoutStyle::default()
+        },
     );
-    host.attach(
-        Box::new(Button::new(OK_ID, "OK").with_command("generate.ok")),
-        false,
+    let _ = host.declare(
+        MODAL_ID,
+        LIST_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
     );
+    let _ = host.declare(
+        MODAL_ID,
+        ACTIONS_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            main_align: MainAlign::End,
+            height: Some(36.0),
+            gap: 10.0,
+            ..LayoutStyle::default()
+        },
+    );
+    for (id, label, command) in [(ALL_ID, "All", "generate.all"), (OK_ID, "OK", "generate.ok")] {
+        let _ = host.insert(
+            ACTIONS_ID,
+            Node::new(Box::new(Button::new(id, label).with_command(command))).with_style(
+                LayoutStyle {
+                    width: Some(100.0),
+                    height: Some(36.0),
+                    ..LayoutStyle::default()
+                },
+            ),
+        );
+    }
+}
+
+/// A área que o arranjo deu a uma peça da janela.
+fn area(host: &UiHost, id: WidgetId) -> Rect {
+    host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
 }
 impl GenerateSurface {
     fn modal(&mut self) -> &mut ModalHost {
@@ -205,23 +252,13 @@ impl GenerateSurface {
         }
     }
 
-    /// Declara ao anfitrião da tela a área de cada peça da janela.
-    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
-        let (lista, todos, ok) = self.geometry(context, size);
-        host.place(MODAL_ID, self.panel_bounds());
-        host.place(LIST_ID, lista);
-        host.place(ALL_ID, todos);
-        host.place(OK_ID, ok);
-    }
-
     pub(super) fn pointer_down(
         &mut self,
         host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
-        size: Size,
     ) -> GenerateOutcome {
-        let (lista, ..) = self.geometry(context, size);
+        let lista = area(host, LIST_ID);
         let outcome = host.click(point);
         for evento in outcome.commands {
             if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
@@ -263,28 +300,24 @@ impl GenerateSurface {
         GenerateOutcome::Idle
     }
 
-    fn panel_bounds(&mut self) -> Rect {
-        self.modal().panel_bounds()
-    }
-
     /// Roda e arrasto: são da lista, que tem a barra.
-    pub(super) fn pointer_event(&mut self, context: &LayoutContext, event: &UiEvent, size: Size) {
-        let (lista, ..) = self.geometry(context, size);
+    pub(super) fn pointer_event(&mut self, host: &UiHost, context: &LayoutContext, event: &UiEvent) {
+        let lista = area(host, LIST_ID);
         if let Some(state) = self.state.as_mut() {
             state.list.layout(context, lista);
             state.list.event(&mut EventContext::default(), event);
         }
     }
 
-    pub(super) fn scroll(&mut self, context: &LayoutContext, point: Point, lines: f32, size: Size) {
+    pub(super) fn scroll(&mut self, host: &UiHost, context: &LayoutContext, point: Point, lines: f32) {
         self.pointer_event(
+            host,
             context,
             &UiEvent::Scroll(ScrollEvent {
                 position: point,
                 delta_x: 0.0,
                 delta_y: lines * ROW_HEIGHT,
             }),
-            size,
         );
     }
 
@@ -298,7 +331,7 @@ impl GenerateSurface {
         if !self.is_open() || self.state.is_none() {
             return false;
         }
-        let (lista, ..) = self.geometry(layout, size);
+        let lista = area(host, LIST_ID);
         if let Some(modal) = self.modal.as_ref() {
             let mut copia = modal.clone();
             copia.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
@@ -338,21 +371,8 @@ impl GenerateSurface {
 
     /// Áreas da janela, para os testes apontarem um gesto dentro dela.
     #[cfg(test)]
-    pub(super) fn areas(&mut self, context: &LayoutContext, size: Size) -> (Rect, Rect, Rect) {
-        self.geometry(context, size)
-    }
-
-    /// Áreas da janela: a lista e os dois botões.
-    fn geometry(&mut self, context: &LayoutContext, size: Size) -> (Rect, Rect, Rect) {
-        let panel = {
-            let modal = self.modal();
-            modal.layout(context, Rect::new(0.0, 0.0, size.width, size.height));
-            modal.panel_bounds()
-        };
-        // Botões maiores que o padrão: "Gerar todos" não cabe em 88 pontos.
-        let forma = FormLayout::new(panel).with_action_size(Size::new(100.0, 36.0));
-        let [todos, ok] = forma.actions();
-        (forma.content(), todos, ok)
+    pub(super) fn areas(host: &UiHost) -> (Rect, Rect, Rect) {
+        (area(host, LIST_ID), area(host, ALL_ID), area(host, OK_ID))
     }
 }
 

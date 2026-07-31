@@ -9,6 +9,7 @@ use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{ListView, ModalHost, TextInput};
 use ui_core::{Point, Rect, Size, UiEvent, WidgetId};
 use ui_host::UiHost;
+use ui_layout_api::{EdgeInsets, LayoutStyle};
 
 use crate::search::{ContentSearchHit, TypeSearchHit};
 
@@ -20,6 +21,46 @@ const PANEL_SIZE: Size = Size::new(760.0, 420.0);
 const ROW_HEIGHT: f32 = 26.0;
 /// Quantas linhas cabem: é o que decide a rolagem e o que a seta revela.
 pub(super) const VISIBLE_ROWS: usize = 12;
+
+/// Declara a janela ao anfitrião: painel, campo e lista, e como se arrumam.
+///
+/// A coluna reproduz o que a conta à mão fazia — 16 de margem, o campo a 56 do
+/// alto, 12 de folga até a lista —, com a diferença de que agora está dito uma
+/// vez, e a lista fica com o que sobra em vez de ter a altura subtraída.
+pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
+    let _ = host.declare(
+        layer,
+        MODAL_ID,
+        LayoutStyle {
+            width: Some(PANEL_SIZE.width),
+            height: Some(PANEL_SIZE.height),
+            padding: EdgeInsets::only(56.0, 16.0, 16.0, 16.0),
+            gap: 12.0,
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        MODAL_ID,
+        INPUT_ID,
+        LayoutStyle {
+            height: Some(34.0),
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        MODAL_ID,
+        LIST_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
+    );
+}
+
+/// A área que o arranjo deu a uma peça da janela.
+fn area(host: &UiHost, id: WidgetId) -> Rect {
+    host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+}
 
 /// Em que a janela está buscando.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,24 +163,8 @@ impl TypeSearchSurface {
         &self.type_results
     }
 
-    /// Declara ao anfitrião da tela a área de cada peça da janela.
-    ///
-    /// O painel entra como área para o anfitrião distinguir "dentro da janela" de
-    /// "fora dela", que é o que decide se ela se dispensa.
-    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
-        let (_, list) = self.geometry(context, size);
-        host.place(MODAL_ID, self.modal.panel_bounds());
-        host.place(LIST_ID, list);
-    }
-
-    pub(super) fn pointer_down(
-        &mut self,
-        host: &mut UiHost,
-        context: &LayoutContext,
-        point: Point,
-        size: Size,
-    ) -> TypeSearchOutcome {
-        let (_, list) = self.geometry(context, size);
+    pub(super) fn pointer_down(&mut self, host: &mut UiHost, point: Point) -> TypeSearchOutcome {
+        let list = area(host, LIST_ID);
         match host.click(point).target {
             Some(LIST_ID) => {}
             // Dentro do painel e fora da lista, o clique não escolhe nada.
@@ -214,6 +239,7 @@ impl TypeSearchSurface {
     /// Janela, campo e lista são da biblioteca; a IDE diz o que cada um mostra.
     pub(super) fn paint(
         &self,
+        host: &UiHost,
         layout: &LayoutContext,
         paint: &mut PaintContext,
         size: Size,
@@ -225,7 +251,7 @@ impl TypeSearchSurface {
         let mut modal = self.modal.clone();
         modal.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
         modal.paint(paint);
-        let (input, list_rect) = panel_geometry(modal.panel_bounds());
+        let (input, list_rect) = (area(host, INPUT_ID), area(host, LIST_ID));
         let placeholder = match self.mode {
             WorkspaceSearchMode::Types => "Nome da classe, interface, record ou enum",
             WorkspaceSearchMode::Content => "Texto nos arquivos do escopo do projeto",
@@ -312,11 +338,10 @@ impl TypeSearchSurface {
         self.first_visible = 0;
     }
 
-    /// O campo e a lista, num lugar só, para o clique acertar o que foi desenhado.
-    pub(super) fn geometry(&mut self, context: &LayoutContext, size: Size) -> (Rect, Rect) {
-        self.modal
-            .layout(context, Rect::new(0.0, 0.0, size.width, size.height));
-        panel_geometry(self.modal.panel_bounds())
+    /// Área da lista, para quem precisa apontar um gesto dentro dela.
+    #[cfg(test)]
+    pub(super) fn list_area(host: &UiHost) -> Rect {
+        area(host, LIST_ID)
     }
 
     /// Linha destacada e primeira visível, para os testes.
@@ -324,20 +349,4 @@ impl TypeSearchSurface {
     pub(super) const fn scroll_state(&self) -> (usize, usize) {
         (self.selected, self.first_visible)
     }
-}
-
-fn panel_geometry(panel: Rect) -> (Rect, Rect) {
-    let input = Rect::new(
-        panel.origin.x + 16.0,
-        panel.origin.y + 56.0,
-        panel.size.width - 32.0,
-        34.0,
-    );
-    let list = Rect::new(
-        panel.origin.x + 16.0,
-        input.origin.y + input.size.height + 12.0,
-        panel.size.width - 32.0,
-        (panel.origin.y + panel.size.height - 16.0) - (input.origin.y + input.size.height + 12.0),
-    );
-    (input, list)
 }

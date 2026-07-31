@@ -171,10 +171,11 @@ impl IdeShell {
                 // construção; o que muda com a abertura é a presença deles na
                 // pilha. Ver `16-single-host`.
                 let mut host = new_host();
-                generate::attach(&mut host);
+                generate::attach(&mut host, surface_layer_id(SurfaceKind::Generate));
                 inspection::attach(&mut host);
-                new_item::attach(&mut host);
-                rename::attach(&mut host);
+                new_item::attach(&mut host, surface_layer_id(SurfaceKind::NewItem));
+                rename::attach(&mut host, surface_layer_id(SurfaceKind::Rename));
+                type_search::attach(&mut host, surface_layer_id(SurfaceKind::TypeSearch));
                 host
             },
         };

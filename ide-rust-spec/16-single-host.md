@@ -1,5 +1,10 @@
 # 16 — Um anfitrião só
 
+> **Concluída.** Os cinco passos foram executados. A IDE tem um `UiHost` só, as
+> seis janelas entram nele como camadas, as abas atravessam o quadro por
+> identidade e o `with_pointer` deixou de ser necessário. 316 testes, os mesmos do
+> começo.
+
 ## Situação
 
 A adoção do runtime da ERLibUi (especificação `15`) parou num meio-termo
@@ -43,7 +48,7 @@ Migrar em cinco passos, do menor risco ao maior, **cada um terminando com a suí
 verde**. O critério de parada de cada passo é objetivo, e nenhum deles muda
 comportamento.
 
-### Passo 1 — O campo, e a lista de completação nele
+### Passo 1 — O campo, e a lista de completação nele ✅
 
 O `IdeShell` ganha um `host: UiHost` com raiz em camada. O primeiro e único nó é
 a **lista de completação** — um nó, que exercita o caminho inteiro: declarar,
@@ -55,7 +60,7 @@ tela cheia. Declarada no lugar certo da camada, a constante deixa de ter funçã
 
 **Critério:** `COMPLETION_DEPTH` não existe mais; 316 testes.
 
-### Passo 2 — A primeira janela
+### Passo 2 — A primeira janela ✅
 
 `new_item` sai do anfitrião próprio para o do shell. É a mais migrada das seis: já
 usa `FocusManager`, `FormLayout` e `place`, e o que muda é de quem é o anfitrião.
@@ -66,14 +71,14 @@ decide a sobreposição.
 
 **Critério:** `new_item` sem `UiHost` próprio; 316 testes.
 
-### Passo 3 — As outras cinco
+### Passo 3 — As outras cinco ✅
 
 `rename`, `generate`, `type_search`, `settings` e `inspection`, uma por vez, na
 ordem de tamanho. Cada uma é um commit.
 
 **Critério:** nenhuma superfície tem `UiHost` próprio.
 
-### Passo 4 — O funil sai
+### Passo 4 — O funil sai ✅
 
 Com todas as janelas na mesma árvore, `SurfaceKind`, `SURFACES` e os seis
 `surface_*` perdem a razão de existir. As sete entradas de evento passam a
@@ -84,10 +89,24 @@ passam a ser resolvidos por acerto — e a entrega manual de foco, que vira
 `push_focus_scope` ao abrir e `pop_focus_scope` ao fechar. Isso prende o `Tab`
 dentro da janela aberta, o que hoje não acontece.
 
-**Critério:** `ide_shell.rs` sem `SurfaceKind`; `grep contains(point)` vazio nos
-módulos de janela.
+**Critério:** nenhuma entrada de evento decide o alvo por nome de janela — quem
+decide é a ordem da árvore; `grep contains(point)` vazio nos módulos de janela.
 
-### Passo 5 — As abas
+**Correção de rota.** A primeira versão deste critério dizia "`ide_shell.rs` sem
+`SurfaceKind`". Estava formulado pelo **símbolo**, e não pela propriedade — e o
+símbolo sobreviveu por um bom motivo: ele deixou de ser tabela de profundidade e
+virou o **nome da camada** na árvore do anfitrião, com `surface_layer_id`
+traduzindo cada janela no id do nó que ela ocupa. O `open_surface` continua para
+dizer a quem entregar o `Outcome`, que é assunto da IDE porque cada janela devolve
+um tipo diferente.
+
+O que a fase precisava eliminar era a **decisão de quem recebe o gesto** escrita à
+mão, e essa saiu. Manter um enum para nomear camadas é melhor do que espalhar ids
+soltos, e um critério que proíbe o nome do tipo teria empurrado o código para pior.
+Vale como lição: **critério de fase se escreve pela propriedade que se quer, não
+pelo símbolo que se espera ver sumir.**
+
+### Passo 5 — As abas ✅
 
 `editor_tabs()` e `terminal_tabs()` deixam de construir e passam a **substituir**
 por identidade, com `UiHost::replace`. O estado de interação atravessa, e o
@@ -104,6 +123,9 @@ verdade, em vez de depender de a posição do ponteiro ter sido informada à mã
   tela de IDE — árvore de arquivos virtualizada, editor, terminal e painel de
   depuração juntos. Medir **antes** do passo 3; se o custo aparecer, a invalidação
   do `WidgetTree` existe e ainda não é usada para pular trabalho;
+  **medido depois, na fase 0 da `17`**: o custo cabe (624 µs, 3,7% do orçamento),
+  e a causa não era a suposta — é a reconstrução da árvore do Taffy a cada
+  chamada, que a invalidação do `WidgetTree` não resolveria;
 - **o editor de código não é widget comum.** Tem rolagem própria, gesto contínuo e
   cache de texto moldado. Entra por último, e pode precisar ser um nó opaco que
   recebe o gesto bruto em vez de participar da propagação;

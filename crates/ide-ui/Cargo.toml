@@ -22,5 +22,9 @@ ui-layout-taffy.workspace = true
 ui-render-api.workspace = true
 ui-window-api.workspace = true
 
+[[bench]]
+name = "frame"
+harness = false
+
 [lints]
 workspace = true
