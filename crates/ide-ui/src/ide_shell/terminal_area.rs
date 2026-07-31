@@ -92,7 +92,7 @@ impl IdeShell {
 
     /// Abas do painel de terminal, uma por perfil aberto. Terminais não fecham
     /// pela aba: eles pertencem à janela enquanto ela existir.
-    pub(super) fn terminal_tabs(&self) -> Tabs {
+    fn terminal_tabs(&self) -> Tabs {
         let items = self
             .terminal
             .tabs
@@ -108,6 +108,14 @@ impl IdeShell {
         let mut tabs = Tabs::new(TERMINAL_TABS_ID, items).with_tab_width(TERMINAL_TAB_WIDTH);
         tabs.set_active(self.terminal.active);
         tabs
+    }
+
+    /// Repõe no anfitrião a apresentação das abas do terminal e a área delas.
+    pub(super) fn sync_terminal_tabs(&mut self, size: Size) {
+        let tabs = self.terminal_tabs();
+        let rect = self.terminal_tabs_rect(size);
+        self.host.replace(Box::new(tabs));
+        self.host.place(TERMINAL_TABS_ID, rect);
     }
 
     pub(super) fn terminal_tabs_rect(&self, size: Size) -> Rect {
@@ -242,9 +250,8 @@ impl IdeShell {
         }
         self.context.focus = ShellFocus::Terminal;
         if point.y < geometry.editor_bottom + TERMINAL_TAB_HEIGHT {
-            let mut tabs = self.terminal_tabs();
-            tabs.layout(&self.layout_context(), self.terminal_tabs_rect(size));
-            if let Some(WidgetAction::TabSelected { tab, .. }) = tab_action(&mut tabs, point) {
+            self.place_overlay(size);
+            if let Some(WidgetAction::TabSelected { tab, .. }) = tab_action(&mut self.host, point) {
                 self.terminal.active = tab as usize;
                 self.context.status_message = format!(
                     "Terminal: {}",

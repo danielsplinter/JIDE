@@ -180,7 +180,6 @@ struct ShellContext {
     theme: Theme,
     status_message: String,
     project_summary: Option<String>,
-    pointer: Point,
     /// Tamanho da janela no último quadro.
     ///
     /// A soltura do ponteiro não recebe tamanho, e as janelas precisam dele
@@ -406,6 +405,11 @@ impl IdeShell {
     pub(super) fn place_overlay(&mut self, size: Size) {
         self.host.clear_placement();
         let tela = Rect::new(0.0, 0.0, size.width, size.height);
+        // A moldura é o fundo da pilha: as janelas a cobrem.
+        self.sync_editor_tabs(size);
+        if !self.terminal.minimized {
+            self.sync_terminal_tabs(size);
+        }
         for layer in OVERLAY {
             match layer {
                 Layer::Completion => self.place_completion(size),
@@ -683,7 +687,13 @@ impl IdeShell {
     }
 
     pub fn pointer_move(&mut self, point: Point, size: Size) -> bool {
-        self.context.pointer = point;
+        // O movimento vai ao anfitrião antes de tudo: é dele o destaque do que
+        // está sob o ponteiro, e sem o evento nenhum componente tem como saber
+        // que ele passou por cima. Não é consumo: quem se destaca não decide
+        // nada, e o gesto continua o caminho abaixo.
+        self.place_overlay(size);
+        self.host
+            .event(&UiEvent::PointerMove(primary_pointer(point)));
         // Com o menu aberto, o destaque acompanha o ponteiro dentro dele.
         if self.explorer.context_menu.is_open() {
             return self.context_menu_event(&UiEvent::PointerMove(primary_pointer(point)), size);
@@ -950,19 +960,19 @@ fn raw_stroke(rect: Rect, color: Color) -> PaintCommand {
     })
 }
 
-/// Entrega o clique ao componente de abas e devolve o que ele decidiu.
+/// Entrega o clique ao anfitrião e devolve o que a fileira de abas decidiu.
 ///
 /// Um clique é pressionar e soltar; a interface da IDE só encaminha o
 /// pressionar, então os dois eventos vão juntos. O que volta é a ação do
 /// componente — a identidade da aba, e não um texto para desmontar.
-fn tab_action(tabs: &mut Tabs, point: Point) -> Option<WidgetAction> {
-    let mut context = EventContext::default();
-    let event = UiEvent::PointerDown(primary_pointer(point));
-    tabs.event(&mut context, &event);
-    match tabs.event(&mut context, &UiEvent::PointerUp(primary_pointer(point))) {
-        EventResult::Action(action) => Some(action),
-        _ => None,
-    }
+fn tab_action(host: &mut UiHost, point: Point) -> Option<WidgetAction> {
+    host.click(point)
+        .commands
+        .into_iter()
+        .find_map(|evento| match evento {
+            ui_commands::CommandEvent::Action(action) => Some(action),
+            _ => None,
+        })
 }
 
 mod build;

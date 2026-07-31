@@ -162,7 +162,6 @@ impl IdeShell {
                 theme: Theme::default(),
                 status_message: "Ready".to_owned(),
                 project_summary: None,
-                pointer: Point::new(-1.0, -1.0),
                 last_size: Size::new(1280.0, 800.0),
                 scrollbar_drag: None,
             },

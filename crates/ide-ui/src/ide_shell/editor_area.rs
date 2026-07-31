@@ -108,10 +108,13 @@ impl IdeShell {
 
     /// Abas do editor montadas a partir dos documentos abertos.
     ///
-    /// O widget é reconstruído a cada uso porque a verdade são os documentos, e
-    /// não uma cópia deles: assim nenhuma abertura, gravação ou fechamento
-    /// precisa lembrar de sincronizar a barra de abas.
-    pub(super) fn editor_tabs(&self) -> Tabs {
+    /// A apresentação é reconstruída a cada quadro porque a verdade são os
+    /// documentos, e não uma cópia deles: assim nenhuma abertura, gravação ou
+    /// fechamento precisa lembrar de sincronizar a barra de abas. Quem recebe a
+    /// reconstrução é [`UiHost::replace`], que carrega o estado de interação de
+    /// uma instância para a outra — é por isso que a aba sob o ponteiro continua
+    /// destacada entre um quadro e o seguinte.
+    fn editor_tabs(&self) -> Tabs {
         let items = self
             .editor_area
             .session
@@ -127,13 +130,23 @@ impl IdeShell {
                     .modified(document.buffer.is_dirty())
             })
             .collect();
-        let mut tabs = Tabs::new(EDITOR_TABS_ID, items)
-            .with_tab_width(TAB_WIDTH)
-            .with_pointer(self.context.pointer);
+        let mut tabs = Tabs::new(EDITOR_TABS_ID, items).with_tab_width(TAB_WIDTH);
         if let Some(active) = self.editor_area.session.active_id() {
             tabs.set_active_id(active.0);
         }
         tabs
+    }
+
+    /// Repõe no anfitrião a apresentação das abas e a área delas.
+    ///
+    /// Substituir, e não construir: o destaque sob o ponteiro e a pressão em
+    /// curso atravessam a troca, e a IDE deixa de precisar informar à mão onde o
+    /// ponteiro está.
+    pub(super) fn sync_editor_tabs(&mut self, size: Size) {
+        let tabs = self.editor_tabs();
+        let rect = self.editor_tabs_rect(size);
+        self.host.replace(Box::new(tabs));
+        self.host.place(EDITOR_TABS_ID, rect);
     }
 
     pub(super) fn editor_tabs_rect(&self, size: Size) -> Rect {
@@ -862,10 +875,8 @@ impl IdeShell {
         if point.y < TITLE_HEIGHT || point.y >= TITLE_HEIGHT + TAB_HEIGHT || point.x < editor_x {
             return false;
         }
-        self.context.pointer = point;
-        let mut tabs = self.editor_tabs();
-        tabs.layout(&self.layout_context(), self.editor_tabs_rect(size));
-        match tab_action(&mut tabs, point) {
+        self.place_overlay(size);
+        match tab_action(&mut self.host, point) {
             Some(WidgetAction::TabSelected { tab, .. }) => {
                 let _ = self.editor_area.session.activate(DocumentId(tab));
                 self.editor_area.pane.set_cursor(0);

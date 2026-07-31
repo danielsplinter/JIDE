@@ -391,11 +391,13 @@ impl IdeShell {
         }
         commands.extend(splitters.into_commands());
         // As abas são um componente: largura, faixa da aba ativa, corte do
-        // título, ponto de alterado e botão de fechar pertencem a ele.
-        let mut editor_tabs = self.editor_tabs();
-        editor_tabs.layout(&self.layout_context(), self.editor_tabs_rect(size));
+        // título, ponto de alterado e botão de fechar pertencem a ele. A
+        // instância é a do anfitrião — a mesma que recebeu o gesto —, e por isso
+        // a aba sob o ponteiro se destaca.
         let mut tabs_paint = self.paint_context();
-        editor_tabs.paint(&mut tabs_paint);
+        if let Some(tabs) = self.host.widget(EDITOR_TABS_ID) {
+            tabs.paint(&mut tabs_paint);
+        }
         commands.extend(tabs_paint.into_commands());
         commands.push(PaintCommand::PushClip(Rect::new(
             editor_x,
@@ -432,10 +434,10 @@ impl IdeShell {
             commands.extend(self.paint_debug_panel(size, colors));
         }
         if !self.terminal.minimized {
-            let mut terminal_tabs = self.terminal_tabs();
-            terminal_tabs.layout(&self.layout_context(), self.terminal_tabs_rect(size));
             let mut terminal_tabs_paint = self.paint_context();
-            terminal_tabs.paint(&mut terminal_tabs_paint);
+            if let Some(tabs) = self.host.widget(TERMINAL_TABS_ID) {
+                tabs.paint(&mut terminal_tabs_paint);
+            }
             commands.extend(terminal_tabs_paint.into_commands());
             self.paint_surface_band(
                 &mut commands,
