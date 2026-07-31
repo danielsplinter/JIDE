@@ -320,3 +320,44 @@ A 7 ms por tecla isso não aparece para quem digita, e por isso não foi mexido:
 correção certa é a primeira, e ela pode ser feita quando o número incomodar ou
 quando arquivos maiores entrarem em jogo. Fica registrado com a medição para que
 a próxima investigação não precise começar do zero.
+
+## ADR-018 — O foco dos formulários vem da biblioteca
+
+**Decisão:** as janelas da IDE param de guardar por conta própria qual campo tem
+o foco e passam a usar o `FocusGroup` da ERLibUi (ADR-016 de lá). A janela de
+criar item o usa por inteiro — `Tab`, clique e entrega dos eventos —, e a página
+de depuração das Configurações o usa para a contabilidade, já que ali os campos
+são pintados e editados pela própria tela.
+
+**Motivo:** era a mesma regra escrita duas vezes, de formas diferentes: um `bool
+naming` numa janela, um `Option<WidgetId>` comparado com `DEBUG_HOST_ID` na
+outra. Nenhuma das duas é errada; ter as duas é. Foi um exemplo do critério que
+esta decomposição usa para decidir o que sobe para a biblioteca: **se a IDE
+escreveu a mesma mecânica de interface mais de uma vez, a lacuna é da
+biblioteca.**
+
+**Consequência:** uma janela nova com dois campos não reescreve nada — declara o
+grupo e chama `advance` e `deliver`. Fica uma diferença pendente entre as duas
+telas: a página de depuração ainda edita o texto por concatenação e desenha o
+próprio contorno de foco, em vez de deixar isso com o `TextInput`. Unificá-la com
+a janela de criar item é trabalho separado, porque muda o que se vê — o cursor
+passa a ser posicionado pelo clique, e `Tab` passa a andar entre host e porta.
+
+## ADR-019 — A IDE lê ações, e não texto de comando
+
+**Decisão:** a IDE deixa de traduzir comandos em texto emitidos por componentes.
+As abas passam a ser lidas por `WidgetAction::TabSelected`/`TabClosed`, e as
+listas de escolha das Configurações por `ItemSelected`, distinguidas pelo
+`widget_id` (ADR-017 da ERLibUi).
+
+**Motivo:** a IDE montava um prefixo (`"toolchain.select."`, `"tool.select."`) e
+o desmontava do outro lado da mesma tela, e a função `tab_command` existia só
+para reverter o `format!` que o componente acabara de fazer. Duas listas na mesma
+janela só se distinguiam porque alguém combinou dois rótulos distintos — quem
+copiasse a linha de montagem sem trocar o prefixo teria duas escolhas gravando no
+mesmo lugar, e nada acusaria.
+
+**Consequência:** saem `TabCommand` e a tradução; a leitura passa a ser um `match`
+que o compilador confere. `tab_action` continua existindo por um motivo diferente
+do anterior: a janela entrega só o pressionar, e o componente espera pressionar e
+soltar — é a soltura sintética que fica ali, não a tradução de texto.

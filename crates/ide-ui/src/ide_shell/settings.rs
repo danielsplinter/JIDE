@@ -8,7 +8,8 @@
 use ide_application::SettingsSection;
 use ui_api::{EventContext, EventResult, LayoutContext, PaintContext, Widget};
 use ui_components::{
-    Button, ComboBox, ComboBoxItem, IconTint, Label, ListSelection, ListView, ModalHost, TextInput,
+    Button, ComboBox, ComboBoxItem, FocusGroup, IconTint, Label, ListSelection, ListView,
+    ModalHost, TextInput,
 };
 use ui_core::{
     ColorTokens, KeyEvent, Modifiers, Point, Rect, Size, UiEvent, WidgetAction, WidgetId,
@@ -83,8 +84,9 @@ pub(super) struct SettingsSurface {
     pages: ListView,
     dialog: Option<SettingsDialog>,
     page: SettingsPage,
-    /// Campo em foco na página de depuração, que não usa `TextInput` focado.
-    focus: Option<WidgetId>,
+    /// Campo em foco na página de depuração. O grupo é da biblioteca: guardar
+    /// quem tem o foco era a conta que cada tela refazia à mão.
+    focus: FocusGroup,
     debug_host: TextInput,
     debug_port: TextInput,
     debug_attach_button: Button,
@@ -94,10 +96,8 @@ impl Default for SettingsSurface {
     fn default() -> Self {
         Self {
             modal: ModalHost::new(MODAL_ID, "Configurações", Size::new(780.0, 460.0)),
-            toolchain_combo: ComboBox::new(TOOLCHAIN_COMBO_ID, Vec::new())
-                .with_command_prefix("toolchain.select."),
-            secondary_combo: ComboBox::new(SECONDARY_COMBO_ID, Vec::new())
-                .with_command_prefix("tool.select."),
+            toolchain_combo: ComboBox::new(TOOLCHAIN_COMBO_ID, Vec::new()),
+            secondary_combo: ComboBox::new(SECONDARY_COMBO_ID, Vec::new()),
             secondary_browse_button: Button::new(SECONDARY_BROWSE_ID, "Procurar...")
                 .with_command("tool.browse"),
             toolchain_browse_button: Button::new(TOOLCHAIN_BROWSE_ID, "Procurar...")
@@ -109,7 +109,7 @@ impl Default for SettingsSurface {
                 .with_selection(ListSelection::Marker),
             dialog: None,
             page: SettingsPage::default(),
-            focus: None,
+            focus: FocusGroup::new([DEBUG_HOST_ID, DEBUG_PORT_ID]),
             debug_host: TextInput::new(DEBUG_HOST_ID, "127.0.0.1").with_placeholder("host"),
             debug_port: TextInput::new(DEBUG_PORT_ID, "8000").with_placeholder("porta"),
             debug_attach_button: Button::new(DEBUG_ATTACH_ID, "Conectar")
@@ -198,7 +198,7 @@ impl SettingsSurface {
 
     pub(super) fn set_page(&mut self, page: SettingsPage) {
         self.page = page;
-        self.focus = None;
+        self.focus.clear();
     }
 
     #[must_use]
@@ -262,7 +262,7 @@ impl SettingsSurface {
         }) && settings_pages_rect(&geometry, sections.len() + 1).contains(point)
         {
             self.page = page;
-            self.focus = None;
+            self.focus.clear();
             return SettingsOutcome::Idle;
         }
         if self.page == SettingsPage::Debug {
@@ -324,18 +324,18 @@ impl SettingsSurface {
         geometry: &SettingsDialogGeometry,
     ) -> SettingsOutcome {
         if geometry.debug_host.contains(point) {
-            self.focus = Some(DEBUG_HOST_ID);
+            self.focus.focus(DEBUG_HOST_ID);
             return SettingsOutcome::Idle;
         }
         if geometry.debug_port.contains(point) {
-            self.focus = Some(DEBUG_PORT_ID);
+            self.focus.focus(DEBUG_PORT_ID);
             return SettingsOutcome::Idle;
         }
         if geometry.debug_attach.contains(point) {
             // O foco é preservado para o usuário corrigir um valor recusado.
             return self.attach();
         }
-        self.focus = None;
+        self.focus.clear();
         self.close_button.layout(context, geometry.close);
         let close_result = click_widget(&mut self.close_button, point);
         let (outcome, handled) = self.handle_action(close_result);
@@ -352,7 +352,7 @@ impl SettingsSurface {
     /// Com uma das listas aberta, as setas e o Enter são dela; o que sobra vai
     /// ao `ModalHost`, e a janela fechada por dentro dele também é cancelamento.
     pub(super) fn key(&mut self, key: &str, modifiers: Modifiers) -> SettingsOutcome {
-        if let Some(focus) = self.focus {
+        if let Some(focus) = self.focus.focused() {
             match key {
                 "Backspace" => {
                     let input = if focus == DEBUG_HOST_ID {
@@ -398,7 +398,7 @@ impl SettingsSurface {
 
     /// Digitação enquanto a página de depuração está em foco.
     pub(super) fn text_input(&mut self, text: &str) -> bool {
-        let Some(focus) = self.focus else {
+        let Some(focus) = self.focus.focused() else {
             return false;
         };
         let input = if focus == DEBUG_HOST_ID {
@@ -420,7 +420,7 @@ impl SettingsSurface {
             (false, Some(port)) if port > 0 => {
                 self.modal.close();
                 self.dialog = None;
-                self.focus = None;
+                self.focus.clear();
                 SettingsOutcome::Attach { host, port }
             }
             _ => {
@@ -430,33 +430,34 @@ impl SettingsSurface {
         }
     }
 
-    /// Traduz o comando de um componente. O `bool` diz se ele foi atendido aqui.
+    /// Traduz o que um componente decidiu. O `bool` diz se foi atendido aqui.
     fn handle_action(&mut self, result: EventResult) -> (SettingsOutcome, bool) {
-        let EventResult::Action(WidgetAction::Command(command)) = result else {
+        let EventResult::Action(action) = result else {
             return (SettingsOutcome::Idle, false);
         };
-        if let Some(index) = command
-            .0
-            .strip_prefix("toolchain.select.")
-            .and_then(|value| value.parse::<usize>().ok())
-        {
+        // Qual das duas listas falou é o id que diz — antes eram dois prefixos
+        // combinados entre a montagem e a leitura, um de cada lado da tela.
+        if let WidgetAction::ItemSelected { widget_id, index } = action {
             // A escolha fica pendente: quem aplica é o Salvar.
-            if let Some(dialog) = self.dialog.as_mut() {
-                dialog.pending_toolchain = Some(index);
+            let pendente = match widget_id {
+                TOOLCHAIN_COMBO_ID => self
+                    .dialog
+                    .as_mut()
+                    .map(|dialog| &mut dialog.pending_toolchain),
+                SECONDARY_COMBO_ID => self
+                    .dialog
+                    .as_mut()
+                    .map(|dialog| &mut dialog.pending_secondary),
+                _ => return (SettingsOutcome::Idle, false),
+            };
+            if let Some(pendente) = pendente {
+                *pendente = Some(index);
             }
             return (SettingsOutcome::Idle, true);
         }
-        if let Some(index) = command
-            .0
-            .strip_prefix("tool.select.")
-            .and_then(|value| value.parse::<usize>().ok())
-        {
-            // Como na primeira escolha: fica pendente, e quem aplica é o Salvar.
-            if let Some(dialog) = self.dialog.as_mut() {
-                dialog.pending_secondary = Some(index);
-            }
-            return (SettingsOutcome::Idle, true);
-        }
+        let WidgetAction::Command(command) = action else {
+            return (SettingsOutcome::Idle, false);
+        };
         match command.0.as_str() {
             "toolchain.browse" => (SettingsOutcome::Browse(ToolSlot::Primary), true),
             "tool.browse" => (SettingsOutcome::Browse(ToolSlot::Secondary), true),
@@ -668,7 +669,7 @@ impl SettingsSurface {
             (geometry.debug_host, DEBUG_HOST_ID),
             (geometry.debug_port, DEBUG_PORT_ID),
         ] {
-            if self.focus == Some(id) {
+            if self.focus.is_focused(id) {
                 commands.push(stroke(rect, colors.accent));
             }
         }

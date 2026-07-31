@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use ide_application::{NewItemRequest, NewItemTemplate};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
-use ui_components::{Button, IconTint, Label, ModalHost, TextInput};
+use ui_components::{Button, FocusGroup, IconTint, Label, ModalHost, TextInput};
 use ui_core::{KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetId};
 
 use super::primary_pointer;
@@ -39,8 +39,6 @@ struct NewItemDialog {
     template: NewItemTemplate,
     source_root: PathBuf,
     message: Option<String>,
-    /// O foco está no nome; do contrário, está no pacote.
-    naming: bool,
 }
 
 pub(super) struct NewItemSurface {
@@ -48,6 +46,9 @@ pub(super) struct NewItemSurface {
     dialog: Option<NewItemDialog>,
     package: TextInput,
     name: TextInput,
+    /// Qual dos dois campos recebe o que for digitado. Quem faz a conta é o
+    /// grupo da biblioteca: `Tab` percorre, e o clique transfere.
+    focus: FocusGroup,
     create_button: Button,
     cancel_button: Button,
 }
@@ -59,6 +60,7 @@ impl Default for NewItemSurface {
             dialog: None,
             package: TextInput::new(PACKAGE_ID, String::new()).with_placeholder("br.com.exemplo"),
             name: TextInput::new(NAME_ID, String::new()),
+            focus: FocusGroup::new([PACKAGE_ID, NAME_ID]),
             create_button: Button::new(CREATE_ID, "Criar").with_command("new.create"),
             cancel_button: Button::new(CANCEL_ID, "Cancelar").with_command("new.cancel"),
         }
@@ -109,7 +111,6 @@ impl NewItemSurface {
             template,
             source_root,
             message: None,
-            naming: false,
         });
         // O pacote já vem preenchido, então o que falta digitar é o nome —
         // exceto ao criar pacote, em que o nome é justamente o que se edita.
@@ -197,13 +198,16 @@ impl NewItemSurface {
 
     /// Tecla dentro da janela.
     pub(super) fn key(&mut self, key: &str) -> NewItemOutcome {
-        let Some(naming) = self.dialog.as_ref().map(|dialog| dialog.naming) else {
+        if self.dialog.is_none() {
             return NewItemOutcome::Idle;
-        };
+        }
         match key.to_ascii_lowercase().as_str() {
             "enter" => return self.submit(),
             "escape" => self.close(),
-            "tab" => self.focus_field(!naming),
+            "tab" => {
+                self.focus.advance(true);
+                self.focus.deliver(&mut [&mut self.package, &mut self.name]);
+            }
             // Apagar e mover o cursor são do campo: ele conhece as fronteiras de
             // caractere e a posição atual.
             _ => {
@@ -312,29 +316,19 @@ impl NewItemSurface {
     /// Move o foco entre os dois campos.
     ///
     /// O foco fica nos campos de verdade, e não num clone da pintura: é ele que
-    /// decide onde a digitação entra e onde o cursor aparece.
+    /// decide onde a digitação entra e onde o cursor aparece. O par ganhar/perder
+    /// é do grupo, que vê os dois campos de uma vez.
     fn focus_field(&mut self, naming: bool) {
-        if let Some(dialog) = self.dialog.as_mut() {
-            dialog.naming = naming;
-        }
-        let mut context = EventContext::default();
-        let (focused, blurred) = if naming {
-            (&mut self.name, &mut self.package)
-        } else {
-            (&mut self.package, &mut self.name)
-        };
-        focused.event(&mut context, &UiEvent::FocusGained);
-        blurred.event(&mut context, &UiEvent::FocusLost);
+        self.focus.focus_index(usize::from(naming));
+        self.focus.deliver(&mut [&mut self.package, &mut self.name]);
     }
 
     /// O campo que está recebendo o que for digitado.
     fn focused_field(&mut self) -> Option<&mut TextInput> {
-        let naming = self.dialog.as_ref()?.naming;
-        Some(if naming {
-            &mut self.name
-        } else {
-            &mut self.package
-        })
+        match self.focus.focused()? {
+            NAME_ID => Some(&mut self.name),
+            _ => Some(&mut self.package),
+        }
     }
 
     /// O que está nos dois campos, para os testes.

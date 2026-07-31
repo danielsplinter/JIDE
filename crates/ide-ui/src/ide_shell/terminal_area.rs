@@ -247,8 +247,8 @@ impl IdeShell {
         if point.y < geometry.editor_bottom + TERMINAL_TAB_HEIGHT {
             let mut tabs = self.terminal_tabs();
             tabs.layout(&self.layout_context(), self.terminal_tabs_rect(size));
-            if let Some(TabCommand::Select(index)) = tab_command(&mut tabs, point) {
-                self.terminal.active = index as usize;
+            if let Some(WidgetAction::TabSelected { tab, .. }) = tab_action(&mut tabs, point) {
+                self.terminal.active = tab as usize;
                 self.context.status_message = format!(
                     "Terminal: {}",
                     self.active_terminal().selected_profile().kind.label()

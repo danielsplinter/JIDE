@@ -819,15 +819,15 @@ impl IdeShell {
         self.context.pointer = point;
         let mut tabs = self.editor_tabs();
         tabs.layout(&self.layout_context(), self.editor_tabs_rect(size));
-        match tab_command(&mut tabs, point) {
-            Some(TabCommand::Select(id)) => {
-                let _ = self.editor_area.session.activate(DocumentId(id));
+        match tab_action(&mut tabs, point) {
+            Some(WidgetAction::TabSelected { tab, .. }) => {
+                let _ = self.editor_area.session.activate(DocumentId(tab));
                 self.editor_area.pane.set_cursor(0);
                 self.context.focus = ShellFocus::Editor;
                 self.sync_explorer_to_active();
             }
-            Some(TabCommand::Close(id)) => {
-                let id = DocumentId(id);
+            Some(WidgetAction::TabClosed { tab, .. }) => {
+                let id = DocumentId(tab);
                 if self.editor_area.session.close(id).is_ok() {
                     self.editor_area.syntax_snapshots.remove(&id);
                     self.editor_area.syntax_spans.remove(&id);
@@ -838,7 +838,7 @@ impl IdeShell {
                     self.sync_explorer_to_active();
                 }
             }
-            None => {}
+            _ => {}
         }
         true
     }

@@ -835,31 +835,19 @@ fn label(text: &str, origin: Point, color: Color, size: f32) -> PaintCommand {
     })
 }
 
-/// O que uma barra de abas pediu para um clique.
-enum TabCommand {
-    Select(u64),
-    Close(u64),
-}
-
-/// Entrega o clique ao componente de abas e traduz o comando emitido.
+/// Entrega o clique ao componente de abas e devolve o que ele decidiu.
 ///
 /// Um clique é pressionar e soltar; a interface da IDE só encaminha o
-/// pressionar, então os dois eventos vão juntos.
-fn tab_command(tabs: &mut Tabs, point: Point) -> Option<TabCommand> {
+/// pressionar, então os dois eventos vão juntos. O que volta é a ação do
+/// componente — a identidade da aba, e não um texto para desmontar.
+fn tab_action(tabs: &mut Tabs, point: Point) -> Option<WidgetAction> {
     let mut context = EventContext::default();
     let event = UiEvent::PointerDown(primary_pointer(point));
     tabs.event(&mut context, &event);
-    let result = tabs.event(&mut context, &UiEvent::PointerUp(primary_pointer(point)));
-    let EventResult::Action(WidgetAction::Command(CommandId(command))) = result else {
-        return None;
-    };
-    if let Some(id) = command.strip_prefix("tabs.close.") {
-        return id.parse().ok().map(TabCommand::Close);
+    match tabs.event(&mut context, &UiEvent::PointerUp(primary_pointer(point))) {
+        EventResult::Action(action) => Some(action),
+        _ => None,
     }
-    command
-        .strip_prefix("tabs.select.")
-        .and_then(|id| id.parse().ok())
-        .map(TabCommand::Select)
 }
 
 mod build;
