@@ -73,14 +73,14 @@ use ui_components::{
     TextInput, TreeView,
 };
 use ui_core::{
-    Color, ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton,
+    ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton,
     PointerEvent, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_editor::{CodeEditor, GutterMark, LineDecoration};
 use ui_host::UiHost;
 use ui_layout_api::{CrossAlign, EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 use ui_layout_taffy::TaffyLayoutEngine;
-use ui_render_api::{FillRectCommand, PaintCommand, StrokeRectCommand};
+use ui_render_api::PaintCommand;
 use ui_window_api::ClipboardService;
 
 pub(super) const ACTIVITY_WIDTH: f32 = 48.0;
@@ -1211,16 +1211,6 @@ fn click_widget(widget: &mut dyn Widget, point: Point) -> EventResult {
     widget.event(&mut context, &UiEvent::PointerUp(pointer))
 }
 
-fn raw_fill(rect: Rect, color: Color) -> PaintCommand {
-    PaintCommand::FillRect(FillRectCommand { rect, color })
-}
-fn raw_stroke(rect: Rect, color: Color) -> PaintCommand {
-    PaintCommand::StrokeRect(StrokeRectCommand {
-        rect,
-        color,
-        width: 1.0,
-    })
-}
 
 /// Entrega o clique ao anfitrião e devolve o que a fileira de abas decidiu.
 ///

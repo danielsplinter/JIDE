@@ -882,30 +882,28 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     );
 }
 
-/// A IDE não pode desenhar mais primitivas do que já desenha.
+/// A IDE não desenha. Ponto.
 ///
 /// Retângulo, contorno e texto crus não passam pelo tema, pela medição de fonte
-/// nem pela árvore de acessibilidade — quem faz isso é o componente. O que a IDE
-/// desenha à mão hoje é dívida conhecida, com endereço: a moldura da janela em
-/// `painting.rs` e a página de depuração em `settings.rs`.
+/// nem pela árvore de acessibilidade. Quem desenha é o componente da ERLibUi; o
+/// que falta nela é pedido a ela, e não contornado aqui.
 ///
-/// O teto existe para a dívida **só encolher**. Cada peça que a ERLibUi ganhar —
-/// um painel, mais ícones, um console — derruba um punhado destas, e o número
-/// desce junto. Ver a fase 6 de `15-event-runtime-adoption`.
+/// Este teste já foi um **teto** que só podia encolher — 48 primitivas quando a
+/// dívida foi medida, depois 2. Agora é zero, e zero é diferente de um número
+/// pequeno: não há mais o que negociar quadro a quadro. As duas últimas caíram
+/// quando a `Panel` ganhou borda por lado e a página de depuração passou a
+/// entregar o foco ao próprio campo.
+///
+/// Os atalhos `raw_fill` e `raw_stroke` foram apagados junto: enquanto
+/// existirem, desenhar à mão fica a uma linha de distância.
 #[test]
-fn the_ide_never_draws_more_raw_primitives_than_it_already_does() {
-    const TETO: usize = 2;
-
+fn the_ide_does_not_draw() {
     let fontes = neutral_ui_sources(&workspace_root());
     let cruas = fontes.match_indices("raw_fill(").count()
         + fontes.match_indices("raw_stroke(").count()
         + fontes.match_indices("raw_label(").count();
-    // As três definições não são desenho: são a própria ferramenta.
-    let definicoes = fontes.matches("fn raw_").count();
-    let chamadas = cruas.saturating_sub(definicoes);
-    assert!(
-        chamadas <= TETO,
-        "a IDE passou a desenhar {chamadas} primitivas cruas, acima do teto de {TETO}: \
-         desenhar é da biblioteca, e o que falta nela deve ser pedido a ela"
+    assert_eq!(
+        cruas, 0,
+        "a IDE voltou a desenhar primitiva crua: desenhar é da biblioteca, e o          que falta nela deve ser pedido a ela"
     );
 }

@@ -388,6 +388,31 @@ da mudança, e vale registrá-la: unificar medidas que divergiram significa esco
 uma, e quem escolhe deve dizer qual. O botão maior dela continua maior, por
 `with_action_size` — o que se unificou foi a fileira, não o tamanho do rótulo.
 
+## ADR-022 — A IDE não desenha
+
+**Contexto.** Quando a dívida foi medida pela primeira vez, a IDE emitia **48**
+primitivas cruas — retângulos e contornos desenhados à mão, ao lado de componentes
+da biblioteca. Cada uma era uma cor fora do tema, uma medida que discordava do
+texto real e um elemento invisível para o leitor de tela.
+
+O número foi caindo à medida que a ERLibUi ganhava o que faltava: painel, ícones,
+console, corte de texto medido. Chegou a 2, e ali empacou — uma divisória de 1 px
+e um contorno de foco. Nenhuma das duas era teimosia: faltava borda **por lado** na
+`Panel`, e faltava a página de depuração entregar o foco ao próprio campo em vez
+de contorná-lo por fora.
+
+**Decisão.** A IDE não emite primitiva. O teto virou **zero**, e o teste mudou de
+nome: `the_ide_does_not_draw`. Os atalhos `raw_fill` e `raw_stroke` foram apagados
+— enquanto existirem, desenhar à mão fica a uma linha de distância.
+
+**Consequência.** O que falta na biblioteca é pedido a ela. Foi assim que saíram as
+duas últimas: a `Panel` ganhou `with_borders(EdgeInsets)` e a divisória virou a
+borda esquerda da superfície; o campo de depuração passou a receber `FocusGained`
+e a desenhar o próprio foco — de quebra, com o cursor que antes não aparecia.
+
+Zero é diferente de um número pequeno: não há mais o que negociar quadro a quadro.
+A regra está escrita também do lado da biblioteca, em `01-product-vision`.
+
 ## ADR-021 — A IDE não estima largura de texto
 
 **Decisão:** a mensagem da janela de inspeção passa a ser um `Label` com

@@ -4,6 +4,7 @@
 //! espaço, qualquer movimentação aparecia misturada ao que não se moveu.
 
 use super::*;
+use ui_core::Color;
 // Tipos que o shell deixou de importar quando as funções puras saíram; os
 // testes continuam falando deles.
 use crate::debugging::DebugVariableView;

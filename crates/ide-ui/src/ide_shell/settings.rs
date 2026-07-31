@@ -45,7 +45,7 @@ impl SettingsDialogGeometry {
         )
     }
 }
-use super::{click_widget, primary_pointer, raw_stroke};
+use super::{click_widget, primary_pointer};
 use crate::settings::SettingsPage;
 use ui_focus::FocusManager;
 use ui_host::UiHost;
@@ -811,11 +811,17 @@ impl SettingsSurface {
             }
             SettingsPage::Debug => {
                 commands.extend(self.paint_debug_page(&geometry, colors));
-                for (widget, rect) in [
-                    (&self.debug_host, geometry.debug_host),
-                    (&self.debug_port, geometry.debug_port),
+                for (widget, id, rect) in [
+                    (&self.debug_host, DEBUG_HOST_ID, geometry.debug_host),
+                    (&self.debug_port, DEBUG_PORT_ID, geometry.debug_port),
                 ] {
                     let mut widget = widget.clone();
+                    // Quem desenha o foco é o campo: a cópia que vai à tela
+                    // precisa saber que o tem. Antes a janela contornava o
+                    // retângulo por fora, e por isso o cursor não aparecia.
+                    if self.focus.focused() == Some(id) {
+                        widget.event(&mut EventContext::default(), &UiEvent::FocusGained);
+                    }
                     widget.layout(layout, rect);
                     widget.paint(&mut component_paint);
                 }
@@ -964,16 +970,7 @@ impl SettingsSurface {
                 tom,
             );
         }
-        let mut commands = paint.into_commands();
-        for (rect, id) in [
-            (geometry.debug_host, DEBUG_HOST_ID),
-            (geometry.debug_port, DEBUG_PORT_ID),
-        ] {
-            if self.focus.focused() == Some(id) {
-                commands.push(raw_stroke(rect, colors.accent));
-            }
-        }
-        commands
+        paint.into_commands()
     }
 
     /// Lista de páginas posicionada, com a página atual selecionada.

@@ -15,6 +15,11 @@ Gradle e a depuração remota de processos em execução.
 
 ## Dependência da interface
 
+**Tudo o que aparece na tela é desenhado por um componente da ERLibUi.** A IDE
+compõe e dá significado; o traço é sempre da biblioteca, e o que falta nela é
+pedido a ela. Um teste de arquitetura falha se a IDE desenhar uma primitiva
+sequer — ver `01-product-vision` e a ADR-022.
+
 A IDE usa a ERLibUi `0.1.0` como repositório irmão, sem caminhos absolutos:
 
 ```text

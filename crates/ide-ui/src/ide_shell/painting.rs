@@ -42,12 +42,10 @@ impl IdeShell {
         id: WidgetId,
         area: Rect,
         tone: SurfaceTone,
-        border: bool,
+        borders: EdgeInsets,
     ) {
-        let mut panel = Panel::new(id, tone);
-        if border {
-            panel = panel.with_border();
-        }
+        let panel = Panel::new(id, tone).with_borders(borders);
+        let mut panel = panel;
         panel.layout(&self.layout_context(), area);
         let mut paint = self.paint_context();
         panel.paint(&mut paint);
@@ -137,24 +135,20 @@ impl IdeShell {
         decorations
     }
 
-    pub(super) fn paint_debug_panel(&self, colors: ColorTokens) -> Vec<PaintCommand> {
+    pub(super) fn paint_debug_panel(&self) -> Vec<PaintCommand> {
         let geometry = self.debug_panel_geometry();
         let panel = geometry.panel;
         let mut commands = Vec::new();
+        // A divisória que separa o painel do código é a borda esquerda da
+        // superfície — do componente, e não um retângulo desenhado por cima.
         self.paint_surface_band(
             &mut commands,
             DEBUG_PANEL_SURFACE_ID,
             panel,
             SurfaceTone::Surface,
-            false,
+            EdgeInsets::only(0.0, 0.0, 0.0, 1.0),
         );
-        commands.extend([
-            raw_fill(
-                Rect::new(panel.origin.x, panel.origin.y, 1.0, panel.size.height),
-                colors.border,
-            ),
-            PaintCommand::PushClip(panel),
-        ]);
+        commands.push(PaintCommand::PushClip(panel));
         self.paint_label(
             &mut commands,
             DEBUG_STATUS_ID,
@@ -252,18 +246,18 @@ impl IdeShell {
         let mut commands = Vec::new();
         // As faixas da moldura, de trás para a frente. Cada uma é uma superfície
         // da biblioteca: o tom nomeia o nível, e o tema resolve a cor.
-        for (id, area, tone, border) in [
+        for (id, area, tone, borders) in [
             (
                 CHROME_BACKGROUND_ID,
                 Rect::new(0.0, 0.0, size.width, size.height),
                 SurfaceTone::Background,
-                false,
+                EdgeInsets::ZERO,
             ),
             (
                 CHROME_TITLE_ID,
                 Rect::new(0.0, 0.0, size.width, TITLE_HEIGHT),
                 SurfaceTone::Elevated,
-                false,
+                EdgeInsets::ZERO,
             ),
             (
                 CHROME_ACTIVITY_ID,
@@ -274,7 +268,7 @@ impl IdeShell {
                     geo.content_bottom - TITLE_HEIGHT,
                 ),
                 SurfaceTone::Elevated,
-                false,
+                EdgeInsets::ZERO,
             ),
             (
                 CHROME_SIDEBAR_ID,
@@ -285,13 +279,13 @@ impl IdeShell {
                     geo.content_bottom - TITLE_HEIGHT,
                 ),
                 SurfaceTone::Surface,
-                false,
+                EdgeInsets::ZERO,
             ),
             (
                 CHROME_TABS_ID,
                 Rect::new(editor_x, TITLE_HEIGHT, geo.editor_width, TAB_HEIGHT),
                 SurfaceTone::Elevated,
-                false,
+                EdgeInsets::ZERO,
             ),
             (
                 CHROME_TERMINAL_ID,
@@ -302,10 +296,10 @@ impl IdeShell {
                     geo.terminal_height,
                 ),
                 SurfaceTone::Surface,
-                true,
+                EdgeInsets::all(1.0),
             ),
         ] {
-            self.paint_surface_band(&mut commands, id, area, tone, border);
+            self.paint_surface_band(&mut commands, id, area, tone, borders);
         }
         for (id, texto, origem, tamanho, tom) in [
             (
@@ -428,7 +422,7 @@ impl IdeShell {
         }
         commands.push(PaintCommand::PopClip);
         if self.debug_panel.view.attached {
-            commands.extend(self.paint_debug_panel(colors));
+            commands.extend(self.paint_debug_panel());
         }
         if !self.terminal.minimized {
             let mut terminal_tabs_paint = self.paint_context();
@@ -441,7 +435,7 @@ impl IdeShell {
                 TERMINAL_INPUT_ID,
                 Rect::new(editor_x, geo.editor_bottom + 30.0, geo.editor_width, 30.0),
                 SurfaceTone::Background,
-                false,
+                EdgeInsets::ZERO,
             );
             let linha_de_comando = {
                 let terminal = &self.terminal.tabs[self.terminal.active];

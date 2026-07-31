@@ -4,6 +4,25 @@
 
 A IDE será uma plataforma nativa em Rust para desenvolvimento em diversas linguagens.
 
+## A regra da interface
+
+**Tudo o que a IDE mostra na tela é desenhado por um componente da ERLibUi.**
+
+Toda superfície, todo texto, toda borda, todo ícone. A IDE escolhe *quais*
+componentes existem, *onde* eles ficam — declarando estrutura, não somando
+retângulos — e *o que* cada gesto significa no domínio. O traço na tela é sempre
+da biblioteca.
+
+Quando falta um componente, o pedido é à ERLibUi. Nunca se contorna desenhando à
+mão: já foi assim, e o resultado eram 48 primitivas cruas espalhadas pela IDE —
+cada uma com uma cor que não acompanhava o tema, uma medida que discordava do
+texto real e um elemento que o leitor de tela não enxergava. Hoje são zero.
+
+A regra não depende de disciplina. O teste de arquitetura `the_ide_does_not_draw`
+falha se **uma** primitiva crua aparecer, e os atalhos que facilitavam isso foram
+apagados. Ver a ADR-022 em `11-architecture-decisions`, e o outro lado da regra em
+`01-product-vision` e `14-ide-integration` da ERLibUi.
+
 ## Navegação principal
 
 A janela principal deve possuir uma barra de menu. O fluxo mínimo para carregar
