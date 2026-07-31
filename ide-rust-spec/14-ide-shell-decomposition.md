@@ -1,5 +1,10 @@
 # 14 — Decomposição do `ide_shell`
 
+> **Concluída.** As cinco fases foram executadas. `ide_shell.rs` saiu de 11.220
+> para **883 linhas**, distribuídas em dezoito módulos irmãos, com os mesmos 315
+> testes do começo ao fim. O histórico abaixo fica como registro do que motivou
+> cada passo e do que a execução ensinou.
+
 ## Situação
 
 `crates/ide-ui/src/ide_shell.rs` tem **11.220 linhas**: 6.749 de código e 4.470
@@ -183,12 +188,46 @@ lista aberta sobre a inspeção é da lista, e Esc no mesmo estado é da janela.
 cada `match`. Esquecer o roteamento deixou de ser possível — o compilador não
 deixa.
 
-### Fase 5 — A casca
+### Fase 5 — A casca ✅ Concluída
 
-O que sobra em `ide_shell.rs` é a composição: estado do editor, Explorer e
-terminal, a fachada pública que a aplicação usa, e a lista de superfícies.
+O que sobrou em `ide_shell.rs` é a composição: a estrutura `IdeShell` com um
+campo por área, a geometria da janela, o funil, as entradas de evento e a fachada
+mínima. **883 linhas** — a meta era 1.500.
 
-**Critério:** menos de 1.500 linhas.
+O resto foi para módulos por área, todos `impl IdeShell` em arquivos irmãos:
+
+| módulo | o que leva | linhas |
+|---|---|---|
+| `painting` | o quadro inteiro, da moldura ao conteúdo | 598 |
+| `editor_area` | painel, abas, barras, completação, área de transferência | 877 |
+| `explorer_area` | árvore, menu dela, barra lateral | 434 |
+| `terminal_area` | abas, rolagem, seleção, envio | 266 |
+| `debug_area` | pontos de parada, quadros, botões de ação | 282 |
+| `documents` | a fachada de abrir, salvar e ler documentos | 216 |
+| `build` | construção do shell e o catálogo contribuído | 247 |
+| `menu_bar` | o que cada comando da barra significa | 80 |
+| `surfaces` | o lado do shell de cada janela | 687 |
+
+**`surfaces.rs` existe por causa do guarda.** As delegações de cada janela — o
+`apply_*_outcome` e os roteadores — são código do shell, e o guarda de
+arquitetura proíbe um módulo de feature de mencionar o `IdeShell`. Pôr esse
+`impl` dentro de `rename.rs` teria passado no compilador e quebrado a regra que
+mantém a janela sem acesso ao shell inteiro. Ficam todas num arquivo só, marcadas
+por janela.
+
+**Os testes-acessório foram para junto dos testes.** Os trinta e poucos
+`#[cfg(test)] fn take_*` que liam a fila de comandos moraram no arquivo de
+produção desde sempre; agora vivem em `tests.rs`, onde são usados.
+
+**O guarda mudou de escopo, não de regra.** Ele lia `ide_shell.rs` para provar
+que tarefas chegam à UI pelo catálogo; a prova mudou de arquivo. Em vez de
+apontar para o novo nome, passou a ler **todo** o código de produção de
+`ide-ui/src`. É mais forte: nenhum fluxo concreto de Java pode aparecer em
+arquivo nenhum do crate neutro, e a evidência do catálogo vale onde estiver.
+Segunda vez na mesma decomposição que um guarda preso a um nome de arquivo
+precisou ser reancorado — vale escrevê-los por propriedade, não por endereço.
+
+**Critério:** cumprido.
 
 ## Consequência
 

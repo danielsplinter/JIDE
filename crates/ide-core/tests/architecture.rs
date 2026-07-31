@@ -456,18 +456,52 @@ fn tasks_and_toolchains_are_dispatched_without_java_branches_in_native_ide() {
     );
 }
 
+/// Todo o código de produção do crate de interface, num texto só.
+///
+/// Os testes ficam de fora — eles falam de Java de propósito, porque é a
+/// linguagem que os cenários usam.
+fn neutral_ui_sources(root: &Path) -> String {
+    fn coletar(diretorio: &Path, destino: &mut String) {
+        let Ok(entradas) = fs::read_dir(diretorio) else {
+            return;
+        };
+        for entrada in entradas.flatten() {
+            let caminho = entrada.path();
+            if caminho.is_dir() {
+                coletar(&caminho, destino);
+                continue;
+            }
+            if caminho.extension().is_none_or(|extensao| extensao != "rs")
+                || caminho.file_name().is_some_and(|nome| nome == "tests.rs")
+            {
+                continue;
+            }
+            let Ok(fonte) = fs::read_to_string(&caminho) else {
+                continue;
+            };
+            destino.push_str(
+                fonte
+                    .split("#[cfg(test)]\nmod tests")
+                    .next()
+                    .unwrap_or(&fonte),
+            );
+            destino.push('\n');
+        }
+    }
+
+    let mut fontes = String::new();
+    coletar(&root.join("crates/ide-ui/src"), &mut fontes);
+    fontes
+}
+
 #[test]
 fn phase_four_keeps_ui_and_workspace_driven_by_neutral_models() {
     let root = workspace_root();
-    let ui = fs::read_to_string(root.join("crates/ide-ui/src/lib.rs"))
-        .unwrap_or_else(|error| panic!("não foi possível ler ide-ui/src/lib.rs: {error}"));
-    let shell = fs::read_to_string(root.join("crates/ide-ui/src/ide_shell.rs"))
-        .unwrap_or_else(|error| panic!("não foi possível ler ide_shell.rs: {error}"));
-    let production_shell = shell
-        .split("#[cfg(test)]\nmod tests")
-        .next()
-        .unwrap_or(&shell);
-    let production_ui = format!("{ui}\n{production_shell}");
+    // A UI neutra é o crate inteiro, e não um arquivo dele: depois da fase 5 o
+    // shell é uma casca com as áreas em módulos, e amarrar o guarda a um nome de
+    // arquivo faria a regra mudar de endereço junto com o código.
+    // Ver `14-ide-shell-decomposition`.
+    let production_ui = neutral_ui_sources(&root);
     for forbidden in [
         "java.package",
         "java.class",

@@ -6,9 +6,11 @@
 use super::*;
 // Tipos que o shell deixou de importar quando as funções puras saíram; os
 // testes continuam falando deles.
+use crate::debugging::DebugVariableView;
 use crate::ide_shell::geometry::{InspectionGeometry, SettingsDialogGeometry};
+use crate::search::{ContentSearchHit, TypeSearchHit};
 use ide_application::{NewItemRequest, NewItemTemplate};
-use ide_domain::{AccessorCandidate, SyntaxHighlightKind};
+use ide_domain::{AccessorCandidate, AccessorPlan, Location, SyntaxHighlightKind};
 use ui_components::TreeItem;
 use ui_editor::TokenKind;
 
@@ -4498,4 +4500,199 @@ fn choose_second_jdk(shell: &mut IdeShell, geometry: &SettingsDialogGeometry, si
         ),
         size,
     );
+}
+
+/// Acessos que só os testes usam para entrar pela porta do shell.
+impl IdeShell {
+    #[cfg(test)]
+    fn open(root: &Path) -> Result<Self, ide_workspace::WorkspaceError> {
+        ide_workspace::WorkspaceService::native()
+            .scan(root)
+            .map(Self::from_tree)
+    }
+
+    #[cfg(test)]
+    fn open_file(&mut self, path: &Path) -> Result<DocumentId, String> {
+        if self
+            .editor_area
+            .session
+            .tabs()
+            .any(|document| document.path == path)
+        {
+            return Ok(self.show_document(path, String::new()));
+        }
+        let text = ide_workspace::WorkspaceService::native()
+            .read_document(path)
+            .map_err(|error| error.to_string())?;
+        Ok(self.show_document(path, text))
+    }
+
+    #[cfg(test)]
+    fn open_location(
+        &mut self,
+        path: &Path,
+        line: usize,
+        column: usize,
+    ) -> Result<DocumentId, String> {
+        if self
+            .editor_area
+            .session
+            .tabs()
+            .any(|document| document.path == path)
+        {
+            return Ok(self.show_location(path, String::new(), line, column));
+        }
+        let text = ide_workspace::WorkspaceService::native()
+            .read_document(path)
+            .map_err(|error| error.to_string())?;
+        Ok(self.show_location(path, text, line, column))
+    }
+
+    #[cfg(test)]
+    fn save_active_document(&mut self) -> bool {
+        let Some(document) = self.editor_area.session.active() else {
+            return false;
+        };
+        let id = document.id;
+        let path = document.path.clone();
+        let text = document.buffer.text().to_owned();
+        let revision = document.buffer.revision();
+        if ide_workspace::WorkspaceService::native()
+            .save_document(&path, &text)
+            .is_err()
+        {
+            return false;
+        }
+        self.document_saved(id, revision, &path);
+        true
+    }
+
+    #[cfg(test)]
+    fn reload_workspace(&mut self) -> Result<(), ide_workspace::WorkspaceError> {
+        let tree = ide_workspace::WorkspaceService::native().scan(&self.explorer.workspace.path)?;
+        self.replace_workspace_tree(tree);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn take_test_command(
+        &mut self,
+        predicate: impl Fn(&ApplicationCommand) -> bool,
+    ) -> Option<ApplicationCommand> {
+        let index = self.commands.iter().position(predicate)?;
+        Some(self.commands.remove(index))
+    }
+
+    #[cfg(test)]
+    fn take_settings_jdk_result(&mut self) -> Option<usize> {
+        match self
+            .take_test_command(|command| matches!(command, ApplicationCommand::SelectToolchain(_)))
+        {
+            Some(ApplicationCommand::SelectToolchain(index)) => Some(index),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_browse_jdk_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::BrowseToolchain))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_navigation_request(&mut self) -> Option<NavigationRequest> {
+        match self.take_test_command(|command| matches!(command, ApplicationCommand::Navigate(_))) {
+            Some(ApplicationCommand::Navigate(request)) => Some(request),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_open_project_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::OpenProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_breakpoints_dirty(&mut self) -> Option<PathBuf> {
+        match self.take_test_command(|command| {
+            matches!(command, ApplicationCommand::BreakpointsChanged(_))
+        }) {
+            Some(ApplicationCommand::BreakpointsChanged(path)) => Some(path),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_debug_requests(&mut self) -> Vec<DebugRequest> {
+        let mut requests = Vec::new();
+        self.commands.retain(|command| {
+            if let ApplicationCommand::Debug(request) = command {
+                requests.push(request.clone());
+                false
+            } else {
+                true
+            }
+        });
+        requests
+    }
+
+    #[cfg(test)]
+    fn take_build_project_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::BuildProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_reimport_project_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::ReimportProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_run_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::RunProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_stop_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::StopProject))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_open_settings_request(&mut self) -> bool {
+        self.take_test_command(|command| matches!(command, ApplicationCommand::OpenSettings))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn take_new_item_request(&mut self) -> Option<ide_application::NewItemRequest> {
+        match self.take_test_command(|command| matches!(command, ApplicationCommand::CreateItem(_)))
+        {
+            Some(ApplicationCommand::CreateItem(request)) => Some(request),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_type_search_request(&mut self) -> Option<String> {
+        match self
+            .take_test_command(|command| matches!(command, ApplicationCommand::SearchTypes(_)))
+        {
+            Some(ApplicationCommand::SearchTypes(query)) => Some(query),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn take_content_search_request(&mut self) -> Option<String> {
+        match self
+            .take_test_command(|command| matches!(command, ApplicationCommand::SearchContent(_)))
+        {
+            Some(ApplicationCommand::SearchContent(query)) => Some(query),
+            _ => None,
+        }
+    }
 }
