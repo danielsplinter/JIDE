@@ -17,8 +17,6 @@ use ui_core::{
 };
 use ui_focus::{FocusChange, FocusManager};
 use ui_host::UiHost;
-use ui_layout_api::LayoutStyle;
-use ui_layout_taffy::TaffyLayoutEngine;
 
 use super::primary_pointer;
 use crate::explorer::is_source_root;
@@ -32,8 +30,6 @@ const PACKAGE_CAPTION_ID: WidgetId = WidgetId(10_041);
 const NAME_CAPTION_ID: WidgetId = WidgetId(10_042);
 const MESSAGE_ID: WidgetId = WidgetId(10_043);
 pub(super) const PANEL_SIZE: Size = Size::new(460.0, 230.0);
-/// Raiz do anfitrião desta janela; não é desenhada.
-const HOST_ROOT_ID: WidgetId = WidgetId(10_044);
 
 /// O que a janela concluiu, para o shell executar.
 pub(super) enum NewItemOutcome {
@@ -58,12 +54,6 @@ pub(super) struct NewItemSurface {
     /// Qual dos dois campos recebe o que for digitado. Quem faz a conta é o
     /// gerenciador da biblioteca: `Tab` percorre, e o clique transfere.
     focus: FocusManager,
-    /// O runtime da janela: as áreas, o acerto e a entrega aos botões.
-    ///
-    /// Os botões são dele — só emitem, nada é lido deles. Os campos ficam com a
-    /// janela, que lê o que foi digitado, mas suas áreas são declaradas aqui: o
-    /// acerto é do anfitrião mesmo quando a instância não é.
-    host: UiHost,
 }
 
 impl Default for NewItemSurface {
@@ -74,18 +64,16 @@ impl Default for NewItemSurface {
             package: TextInput::new(PACKAGE_ID, String::new()).with_placeholder("br.com.exemplo"),
             name: TextInput::new(NAME_ID, String::new()),
             focus: new_focus(),
-            host: new_host(),
         }
     }
 }
 
-/// O anfitrião da janela, com os dois botões dentro dele.
-fn new_host() -> UiHost {
-    let mut host = UiHost::new(
-        HOST_ROOT_ID,
-        LayoutStyle::default(),
-        Box::new(TaffyLayoutEngine),
-    );
+/// Entrega os botões desta janela ao anfitrião da tela.
+///
+/// Eles são dele — só emitem, nada é lido deles. Os campos ficam com a janela,
+/// que lê o que foi digitado, mas suas áreas são declaradas no mesmo anfitrião:
+/// o acerto é dele mesmo quando a instância não é.
+pub(super) fn attach(host: &mut UiHost) {
     host.attach(
         Box::new(Button::new(CREATE_ID, "Criar").with_command("new.create")),
         false,
@@ -94,7 +82,6 @@ fn new_host() -> UiHost {
         Box::new(Button::new(CANCEL_ID, "Cancelar").with_command("new.cancel")),
         false,
     );
-    host
 }
 
 /// O percurso do `Tab` desta janela: pacote e depois nome.
@@ -203,14 +190,8 @@ impl NewItemSurface {
     /// Quem descobre o alvo é o anfitrião, pelas áreas que ele recebeu. Os
     /// botões ele mesmo aciona, e devolve o comando; os campos são entregues
     /// aqui, porque é esta janela que lê o que foi digitado.
-    pub(super) fn pointer_down(
-        &mut self,
-        context: &LayoutContext,
-        point: Point,
-        size: Size,
-    ) -> NewItemOutcome {
-        self.place_widgets(context, size);
-        let outcome = self.host.click(point);
+    pub(super) fn pointer_down(&mut self, host: &mut UiHost, point: Point) -> NewItemOutcome {
+        let outcome = host.click(point);
         for evento in outcome.commands {
             if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
                 match command.0.as_str() {
@@ -240,18 +221,20 @@ impl NewItemSurface {
         NewItemOutcome::Idle
     }
 
-    /// Declara ao anfitrião a área de cada peça da janela.
+    /// Declara ao anfitrião da tela a área de cada peça da janela.
     ///
     /// O arranjo continua sendo desta tela — o `FormLayout` sabe onde cada campo
     /// e cada botão ficam. O que o anfitrião recebe é o resultado, e com ele o
     /// acerto e a entrega deixam de ser escritos à mão.
-    fn place_widgets(&mut self, context: &LayoutContext, size: Size) {
+    ///
+    /// Só enquanto a janela está aberta: é a presença destes nós na pilha que
+    /// decide a sobreposição, e fechá-la é tirá-los de lá.
+    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
         let geometry = self.geometry(context, size);
-        self.host.clear_placement();
-        self.host.place(PACKAGE_ID, geometry.package);
-        self.host.place(NAME_ID, geometry.name);
-        self.host.place(CANCEL_ID, geometry.cancel);
-        self.host.place(CREATE_ID, geometry.create);
+        host.place(PACKAGE_ID, geometry.package);
+        host.place(NAME_ID, geometry.name);
+        host.place(CANCEL_ID, geometry.cancel);
+        host.place(CREATE_ID, geometry.create);
         self.package.layout(context, geometry.package);
         self.name.layout(context, geometry.name);
     }
@@ -305,6 +288,7 @@ impl NewItemSurface {
     /// Desenha a janela. Devolve `false` quando não há nada aberto.
     pub(super) fn paint(
         &self,
+        host: &UiHost,
         layout: &LayoutContext,
         paint: &mut PaintContext,
         size: Size,
@@ -346,10 +330,12 @@ impl NewItemSurface {
             field.layout(layout, rect);
             field.paint(paint);
         }
-        // Os botões são desenhados pelo anfitrião, que é quem os possui — e por
-        // isso eles acendem sob o ponteiro e afundam ao ser pressionados.
-        for command in self.host.paint() {
-            paint.push(command);
+        // Os botões são desenhados pelo anfitrião da tela, que é quem os possui —
+        // e por isso eles acendem sob o ponteiro e afundam ao ser pressionados.
+        for id in [CANCEL_ID, CREATE_ID] {
+            if let Some(button) = host.widget(id) {
+                button.paint(paint);
+            }
         }
         if let Some(message) = dialog.message.as_ref() {
             caption(

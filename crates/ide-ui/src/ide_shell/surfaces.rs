@@ -408,15 +408,15 @@ impl IdeShell {
     pub(super) fn paint_new_item_dialog(&self, commands: &mut Vec<PaintCommand>, size: Size) {
         let layout = self.layout_context();
         let mut paint = self.paint_context();
-        if self.new_item.paint(&layout, &mut paint, size) {
+        if self.new_item.paint(&self.host, &layout, &mut paint, size) {
             commands.extend(paint.into_commands());
         }
     }
 
     /// Roteia o clique dentro da janela de criação.
     pub(super) fn new_item_pointer_down(&mut self, point: Point, size: Size) {
-        let context = self.layout_context();
-        let outcome = self.new_item.pointer_down(&context, point, size);
+        self.place_overlay(size);
+        let outcome = self.new_item.pointer_down(&mut self.host, point);
         self.apply_new_item_outcome(outcome);
     }
 

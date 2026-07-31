@@ -167,7 +167,14 @@ impl IdeShell {
                 scrollbar_drag: None,
             },
             commands: ShellCommandQueue::default(),
-            host: new_host(),
+            host: {
+                // Os componentes de cada janela são do anfitrião da tela desde a
+                // construção; o que muda com a abertura é a presença deles na
+                // pilha. Ver `16-single-host`.
+                let mut host = new_host();
+                new_item::attach(&mut host);
+                host
+            },
         };
         shell.sync_explorer_tree();
         shell

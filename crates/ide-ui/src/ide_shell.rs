@@ -409,14 +409,28 @@ impl IdeShell {
         for layer in OVERLAY {
             match layer {
                 Layer::Completion => self.place_completion(size),
-                // A janela ainda tem anfitrião próprio: o que entra aqui é a
-                // área que ela cobre.
+                // Primeiro a área que a janela cobre — o véu, que é o que
+                // engole o gesto do que ficou atrás —, depois o que há dentro
+                // dela.
                 Layer::Surface(kind) => {
                     if self.surface_is_open(kind) {
                         self.host.place(surface_layer_id(kind), tela);
+                        self.place_surface(kind, size);
                     }
                 }
             }
+        }
+    }
+
+    /// Declara os nós de dentro da janela aberta.
+    ///
+    /// Eles entram na pilha ao abrir e saem ao fechar, porque é a presença deles
+    /// que decide a sobreposição. As janelas que ainda têm anfitrião próprio não
+    /// declaram nada aqui.
+    fn place_surface(&mut self, kind: SurfaceKind, size: Size) {
+        let context = self.layout_context();
+        if kind == SurfaceKind::NewItem {
+            self.new_item.place_widgets(&mut self.host, &context, size);
         }
     }
 
