@@ -63,30 +63,46 @@ Este é um requisito arquitetural obrigatório.
 - [11 — Decisões arquiteturais](11-architecture-decisions.md)
 - [12 — Consolidação de crates e módulos](12-crate-consolidation.md)
 - [13 — Desacoplamento da aplicação e da apresentação](13-application-ui-decoupling.md)
+- [14 — Decomposição do `ide_shell`](14-ide-shell-decomposition.md)
+- [15 — Adoção do runtime de eventos da ERLibUi](15-event-runtime-adoption.md)
+- [16 — Um anfitrião só](16-single-host.md)
 
-## Escopo inicial
+## Escopo inicial, e o que dele já existe
 
-A primeira versão deve oferecer:
+A lista abaixo era a da primeira versão. Está mantida como escrita, com o estado
+de cada item — um sumário que descreve só a intenção envelhece em silêncio, e
+quem chega ao projeto não tem como saber o que está de pé.
 
-- editor de texto nativo;
-- gerenciamento de workspace;
-- árvore de arquivos;
-- comandos e atalhos;
-- terminal integrado;
-- registro de linguagens;
-- ativação e desativação de suporte linguístico;
-- parser Java;
-- análise sintática Java;
-- indexação de símbolos;
-- navegação para definição;
-- busca por referências;
-- autocomplete inicial;
-- execução de `javac`, Maven e Gradle como processos externos;
-- configuração de um JDK externo;
-- depuração remota de qualquer processo Java com depuração habilitada,
-  independentemente do servidor ou container;
-- logs e diagnósticos;
-- arquitetura de plugins.
+| item | estado | onde |
+|---|---|---|
+| editor de texto nativo | ✅ | `ui-editor` na ERLibUi, `EditorPane` na IDE |
+| gerenciamento de workspace | ✅ | `ide-workspace` |
+| árvore de arquivos | ✅ | `explorer`, sobre a `TreeView` da biblioteca |
+| comandos e atalhos | ✅ | `menus`, `ApplicationCommand`; o `ShortcutMap` da biblioteca ainda não é consumido |
+| terminal integrado | ✅ | `ide-terminal`, com abas, seleção e o `Console` da biblioteca |
+| registro de linguagens | ✅ | `ide-language-api`, `ide-language-host` |
+| ativação e desativação de suporte linguístico | 🔶 | o host ativa por contribuição; desativar em tempo de execução não existe |
+| parser Java | ✅ | `language-java`, sobre tree-sitter |
+| análise sintática Java | ✅ | destaque, diagnósticos e estrutura numa passada |
+| indexação de símbolos | ✅ | busca por tipo e por conteúdo |
+| navegação para definição | ✅ | `definition` na API de linguagem |
+| busca por referências | ✅ | `references_to_name`, usada também pela renomeação |
+| autocomplete inicial | ✅ | lista de completação, inclusive por membro após o ponto |
+| execução de `javac`, Maven e Gradle | ✅ | `java-maven-adapter`, `java-gradle-adapter`, `java-toolchain` |
+| configuração de um JDK externo | ✅ | Configurações, com JDK e Maven persistidos juntos |
+| depuração remota de qualquer processo Java | ✅ | `java-debug-adapter`: pontos de parada, quadros, variáveis, inspeção e passo |
+| logs e diagnósticos | 🔶 | diagnósticos no editor e saída no terminal; não há registro estruturado |
+| arquitetura de plugins | ⬜ | não existe; a extensibilidade hoje é por contribuição de linguagem |
+
+Além do previsto, foram construídos: renomeação de arquivo e de tipo com reescrita
+de referências, geração de acessores e construtor, criação de pacote, classe e
+interface, e inspeção de objetos durante a depuração.
+
+**O que a lista não capturava e virou trabalho próprio:** a interface da IDE
+crescera reimplementando à mão o que a ERLibUi oferece. As especificações `14`,
+`15` e `16` tratam disso — decompor o shell, adotar o runtime de eventos da
+biblioteca, e reduzir a IDE ao que é dela: compor a tela e dizer o que cada gesto
+significa no domínio.
 
 ## Fora do escopo inicial
 
