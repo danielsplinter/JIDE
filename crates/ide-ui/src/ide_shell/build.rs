@@ -172,7 +172,8 @@ impl IdeShell {
                 // pilha. Ver `16-single-host`.
                 let mut host = new_host();
                 generate::attach(&mut host, surface_layer_id(SurfaceKind::Generate));
-                inspection::attach(&mut host);
+                inspection::attach(&mut host, surface_layer_id(SurfaceKind::Inspection));
+                settings::attach(&mut host, surface_layer_id(SurfaceKind::Settings));
                 new_item::attach(&mut host, surface_layer_id(SurfaceKind::NewItem));
                 rename::attach(&mut host, surface_layer_id(SurfaceKind::Rename));
                 type_search::attach(&mut host, surface_layer_id(SurfaceKind::TypeSearch));

@@ -4,11 +4,9 @@
 //! fora do shell porque não dependem de estado nenhum — e porque, junto do
 //! resto, escondiam que a mesma conta aparecia na geometria e na pintura.
 
-use ui_components::FormLayout;
 use ui_core::Rect;
 
 use super::settings::PAGE_ROW_HEIGHT as SETTINGS_PAGE_ROW_HEIGHT;
-use super::{INSPECTION_DETAIL_FRACTION, INSPECTION_LIST_FRACTION};
 
 pub(super) struct SettingsDialogGeometry {
     pub(super) sidebar: Rect,
@@ -24,14 +22,23 @@ pub(super) struct SettingsDialogGeometry {
     pub(super) debug_port: Rect,
     pub(super) debug_attach: Rect,
 }
-pub(super) fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
-    let sidebar = Rect::new(
-        dialog.origin.x,
-        dialog.origin.y + 52.0,
-        210.0,
-        dialog.size.height - 52.0,
-    );
-    let compiler_option = Rect::new(sidebar.origin.x, sidebar.origin.y + 12.0, 210.0, 42.0);
+/// As áreas de dentro de uma página das Configurações.
+///
+/// A moldura — painel, barra lateral e fileira de ações — vem do arranjo, e por
+/// isso entra aqui pronta. O que sobra é o interior de cada página, que ainda é
+/// conta, e é o que a próxima etapa da `17` converte.
+pub(super) fn settings_dialog_geometry(
+    dialog: Rect,
+    sidebar: Rect,
+    pages: Rect,
+    close: Rect,
+    save: Rect,
+    debug: (Rect, Rect, Rect),
+) -> SettingsDialogGeometry {
+    let (debug_host, debug_port, debug_attach) = debug;
+    // A primeira linha da navegação é o alto da lista, que o arranjo posiciona:
+    // ler daqui é o que impede a lista ser pintada num lugar e acertada noutro.
+    let compiler_option = Rect::new(pages.origin.x, pages.origin.y, 210.0, 42.0);
     let combo = Rect::new(
         sidebar.origin.x + sidebar.size.width + 28.0,
         dialog.origin.y + 126.0,
@@ -58,23 +65,6 @@ pub(super) fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
         browse.size.width,
         browse.size.height,
     );
-    // Salvar à direita, encostado na borda, e Cancelar à esquerda dele: a ação
-    // que confirma fica no canto que a leitura alcança por último. A conta é a
-    // mesma de todas as janelas, e vem da biblioteca.
-    let [close, save] = FormLayout::new(dialog).actions();
-    let debug_host = Rect::new(combo.origin.x, combo.origin.y, 220.0, 36.0);
-    let debug_port = Rect::new(
-        debug_host.origin.x + debug_host.size.width + 12.0,
-        debug_host.origin.y,
-        96.0,
-        36.0,
-    );
-    let debug_attach = Rect::new(
-        debug_host.origin.x,
-        debug_host.origin.y + debug_host.size.height + 20.0,
-        120.0,
-        34.0,
-    );
     SettingsDialogGeometry {
         sidebar,
         compiler_option,
@@ -89,58 +79,14 @@ pub(super) fn settings_dialog_geometry(dialog: Rect) -> SettingsDialogGeometry {
         debug_attach,
     }
 }
-/// Área que a lista de páginas ocupa: as linhas, e não a barra inteira.
-pub(super) fn settings_pages_rect(geometry: &SettingsDialogGeometry, page_count: usize) -> Rect {
-    Rect::new(
-        geometry.compiler_option.origin.x,
-        geometry.compiler_option.origin.y,
-        geometry.compiler_option.size.width,
-        SETTINGS_PAGE_ROW_HEIGHT * page_count as f32,
-    )
-}
-/// Os dois painéis da janela de inspeção e os botões.
-pub(super) struct InspectionGeometry {
-    pub(super) list: Rect,
-    pub(super) detail: Rect,
-    /// Editor de expressões, na parte de baixo do painel direito.
-    pub(super) source: Rect,
-    /// Linha da resposta da última execução, acima dos botões.
-    pub(super) message: Rect,
-    pub(super) run: Rect,
-    pub(super) close: Rect,
-}
-pub(super) fn inspection_geometry(panel: Rect) -> InspectionGeometry {
-    let top = panel.origin.y + 56.0;
-    let height = (panel.size.height - 112.0).max(80.0);
-    let list_width = (panel.size.width - 32.0) * INSPECTION_LIST_FRACTION;
-    let list = Rect::new(panel.origin.x + 16.0, top, list_width, height);
-    let right_x = list.origin.x + list.size.width + 16.0;
-    let right_width = (panel.size.width - list_width - 48.0).max(80.0);
-    // O detalhe fica em cima e o editor embaixo: o valor é o que se lê, o código
-    // é o que se escreve.
-    let detail_height = (height * INSPECTION_DETAIL_FRACTION).max(60.0);
-    let detail = Rect::new(right_x, top, right_width, detail_height);
-    let source = Rect::new(
-        right_x,
-        top + detail_height + 18.0,
-        right_width,
-        (height - detail_height - 18.0).max(60.0),
-    );
-    let [close] = FormLayout::new(panel).actions();
-    // Executar é mais largo que o padrão, e por isso não sai da mesma fileira.
-    let run = Rect::new(close.origin.x - 108.0, close.origin.y, 98.0, 34.0);
-    let message = Rect::new(
-        panel.origin.x + 16.0,
-        close.origin.y - 22.0,
-        (panel.size.width - 32.0).max(80.0),
-        18.0,
-    );
-    InspectionGeometry {
-        list,
-        detail,
-        source,
-        message,
-        run,
-        close,
+impl SettingsDialogGeometry {
+    /// Área que a lista de páginas ocupa: as linhas, e não a barra inteira.
+    pub(super) fn compiler_option_row(&self, page_count: usize) -> Rect {
+        Rect::new(
+            self.compiler_option.origin.x,
+            self.compiler_option.origin.y,
+            self.compiler_option.size.width,
+            SETTINGS_PAGE_ROW_HEIGHT * page_count as f32,
+        )
     }
 }

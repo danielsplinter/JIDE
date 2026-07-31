@@ -13,9 +13,10 @@ use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
 use ui_components::{Button, IconTint, Label, ModalHost, TreeItem, TreeView};
 use ui_core::{Point, Rect, Size, UiEvent, WidgetAction, WidgetId};
-use ui_host::UiHost;
+use ui_host::{Node, UiHost};
+use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 
-use super::geometry::{InspectionGeometry, inspection_geometry};
+use super::{INSPECTION_DETAIL_FRACTION, INSPECTION_LIST_FRACTION};
 use super::primary_pointer;
 use crate::debugging::DebugVariableView;
 use crate::editor::{EditorCapabilities, EditorPane};
@@ -34,6 +35,12 @@ const PANEL_SIZE: Size = Size::new(720.0, 420.0);
 pub(super) const ROW_HEIGHT: f32 = 26.0;
 /// Área do editor de expressões, para o anfitrião distinguir o alvo.
 const SOURCE_ID: WidgetId = WidgetId(10_068);
+/// As peças de estrutura: a linha de conteúdo, a coluna da direita, o detalhe e
+/// a fileira de ações.
+const CONTENT_ID: WidgetId = WidgetId(10_440);
+const RIGHT_ID: WidgetId = WidgetId(10_441);
+const DETAIL_ID: WidgetId = WidgetId(10_442);
+const ACTIONS_ID: WidgetId = WidgetId(10_443);
 
 /// O que a janela precisa perguntar ao alvo, ou contar na barra.
 pub(super) enum InspectionRequest {
@@ -140,16 +147,138 @@ impl Default for InspectionSurface {
     }
 }
 
-/// Entrega os dois botões desta janela ao anfitrião da tela.
-pub(super) fn attach(host: &mut UiHost) {
-    host.attach(
-        Box::new(Button::new(CLOSE_ID, "Fechar").with_command("inspect.close")),
-        false,
+/// Declara a janela ao anfitrião: duas colunas, e a fileira de ações no pé.
+///
+/// A árvore de objetos fica à esquerda; à direita, o detalhe em cima e o editor
+/// embaixo — o valor é o que se lê, o código é o que se escreve. As frações são
+/// as mesmas de antes, e agora dividem a largura uma vez só, em vez de aparecer
+/// no cálculo de cada peça.
+pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
+    let content_height = (PANEL_SIZE.height - 112.0).max(80.0);
+    let list_width = (PANEL_SIZE.width - 32.0) * INSPECTION_LIST_FRACTION;
+    let detail_height = (content_height * INSPECTION_DETAIL_FRACTION).max(60.0);
+    let _ = host.declare(
+        layer,
+        MODAL_ID,
+        LayoutStyle {
+            width: Some(PANEL_SIZE.width),
+            height: Some(PANEL_SIZE.height),
+            padding: EdgeInsets::only(56.0, 16.0, 14.0, 16.0),
+            gap: 8.0,
+            ..LayoutStyle::default()
+        },
     );
-    host.attach(
-        Box::new(Button::new(RUN_ID, "Executar").with_command("inspect.run")),
-        false,
+    let _ = host.declare(
+        MODAL_ID,
+        CONTENT_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            height: Some(content_height),
+            gap: 16.0,
+            ..LayoutStyle::default()
+        },
     );
+    let _ = host.declare(
+        CONTENT_ID,
+        TREE_ID,
+        LayoutStyle {
+            width: Some(list_width),
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        CONTENT_ID,
+        RIGHT_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            gap: 18.0,
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        RIGHT_ID,
+        DETAIL_ID,
+        LayoutStyle {
+            height: Some(detail_height),
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        RIGHT_ID,
+        SOURCE_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        MODAL_ID,
+        ACTIONS_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            main_align: MainAlign::End,
+            height: Some(34.0),
+            gap: 10.0,
+            ..LayoutStyle::default()
+        },
+    );
+    // Executar é mais largo que o padrão, e por isso a fileira não usa um
+    // tamanho só para as duas.
+    for (id, label, command, width) in [
+        (RUN_ID, "Executar", "inspect.run", 98.0),
+        (CLOSE_ID, "Fechar", "inspect.close", 88.0),
+    ] {
+        let _ = host.insert(
+            ACTIONS_ID,
+            Node::new(Box::new(Button::new(id, label).with_command(command))).with_style(
+                LayoutStyle {
+                    width: Some(width),
+                    height: Some(34.0),
+                    ..LayoutStyle::default()
+                },
+            ),
+        );
+    }
+}
+
+/// A área que o arranjo deu a uma peça da janela.
+fn area(host: &UiHost, id: WidgetId) -> Rect {
+    host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+}
+
+/// As áreas da janela, como os testes precisam vê-las.
+#[cfg(test)]
+pub(super) struct InspectionGeometry {
+    pub(super) list: Rect,
+    pub(super) source: Rect,
+    pub(super) run: Rect,
+    pub(super) close: Rect,
+}
+
+/// As áreas da janela, para os testes apontarem um gesto dentro dela.
+#[cfg(test)]
+pub(super) fn areas(host: &UiHost) -> InspectionGeometry {
+    InspectionGeometry {
+        list: area(host, TREE_ID),
+        source: area(host, SOURCE_ID),
+        run: area(host, RUN_ID),
+        close: area(host, CLOSE_ID),
+    }
+}
+
+/// A linha da mensagem: largura toda, logo acima dos botões.
+///
+/// Dividir a linha com eles a fazia passar por baixo do Executar, ilegível
+/// justamente quando é ela que explica por que o clique não fez nada.
+fn message_area(host: &UiHost) -> Rect {
+    let panel = area(host, MODAL_ID);
+    let actions = area(host, ACTIONS_ID);
+    Rect::new(
+        panel.origin.x + 16.0,
+        actions.origin.y - 22.0,
+        (panel.size.width - 32.0).max(80.0),
+        18.0,
+    )
 }
 
 impl InspectionSurface {
@@ -450,26 +579,16 @@ impl InspectionSurface {
         self.editor.key(&mut self.source, key, shift, control);
     }
 
-    /// Declara ao anfitrião da tela a área de cada peça da janela.
-    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
-        let geometry = self.layout_editor(context, size);
-        host.place(MODAL_ID, self.modal.panel_bounds());
-        host.place(TREE_ID, geometry.list);
-        host.place(SOURCE_ID, geometry.source);
-        host.place(RUN_ID, geometry.run);
-        host.place(CLOSE_ID, geometry.close);
-    }
-
     /// Roteia o clique dentro da janela.
     pub(super) fn pointer_down(
         &mut self,
         host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
-        size: Size,
         attached: bool,
     ) -> Vec<InspectionRequest> {
-        let geometry = self.layout_editor(context, size);
+        // O editor guarda a área para converter ponto em posição no texto.
+        self.editor.set_bounds(area(host, SOURCE_ID));
         let outcome = host.click(point);
         for evento in outcome.commands {
             if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
@@ -496,7 +615,7 @@ impl InspectionSurface {
         // Qual nó foi clicado é a árvore quem sabe: recuo, marcador de expansão e
         // rolagem são dela. O gesto vai à árvore de verdade: entregue a um clone,
         // o destaque da linha morreria no fim desta chamada.
-        self.tree.layout(context, geometry.list);
+        self.tree.layout(context, area(host, TREE_ID));
         self.tree.event(
             &mut EventContext::default(),
             &UiEvent::PointerDown(primary_pointer(point)),
@@ -536,16 +655,8 @@ impl InspectionSurface {
     ///
     /// O painel só sabe converter ponto em posição do texto depois de saber onde
     /// está, e a janela é centrada: a área muda com o tamanho da tela.
-    pub(super) fn layout_editor(
-        &mut self,
-        context: &LayoutContext,
-        size: Size,
-    ) -> InspectionGeometry {
-        self.modal
-            .layout(context, Rect::new(0.0, 0.0, size.width, size.height));
-        let geometry = inspection_geometry(self.modal.panel_bounds());
-        self.editor.set_bounds(geometry.source);
-        geometry
+    pub(super) fn layout_editor(&mut self, host: &UiHost) {
+        self.editor.set_bounds(area(host, SOURCE_ID));
     }
 
     /// Desenha a janela. Devolve `false` quando não há nada aberto.
@@ -562,15 +673,14 @@ impl InspectionSurface {
         };
         let mut modal = self.modal.clone();
         modal.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
-        let geometry = inspection_geometry(modal.panel_bounds());
         modal.paint(paint);
 
         let mut tree = self.tree.clone();
         tree.set_selected(Some(id(&view.selected)));
-        tree.layout(layout, geometry.list);
+        tree.layout(layout, area(host, TREE_ID));
         tree.paint(paint);
 
-        let detail = geometry.detail;
+        let (detail, source) = (area(host, DETAIL_ID), area(host, SOURCE_ID));
         match self.selected_variable() {
             Some(entry) => {
                 text(
@@ -617,12 +727,12 @@ impl InspectionSurface {
             paint,
             SOURCE_CAPTION_ID,
             "Código a executar no quadro atual",
-            Point::new(geometry.source.origin.x, geometry.source.origin.y - 16.0),
+            Point::new(source.origin.x, source.origin.y - 16.0),
             13.0,
             IconTint::Muted,
         );
         let mut editor = self.editor.clone();
-        editor.set_bounds(geometry.source);
+        editor.set_bounds(source);
         editor.sync(layout, &self.source, None, Vec::new(), true);
         editor.paint(paint);
 
@@ -634,8 +744,8 @@ impl InspectionSurface {
             let mut widget = Label::new(MESSAGE_ID, message)
                 .with_font_size(13.0)
                 .with_tone(IconTint::Danger)
-                .with_max_width(geometry.message.size.width);
-            widget.layout(layout, geometry.message);
+                .with_max_width(message_area(host).size.width);
+            widget.layout(layout, message_area(host));
             widget.paint(paint);
         }
         // Sem sessão viva não há quadro onde executar: o botão apagado diz isso
@@ -648,7 +758,7 @@ impl InspectionSurface {
         } else {
             let mut run = self.run_button.clone();
             run.set_disabled(true);
-            run.layout(layout, geometry.run);
+            run.layout(layout, area(host, RUN_ID));
             run.paint(paint);
         }
         if let Some(button) = host.widget(CLOSE_ID) {

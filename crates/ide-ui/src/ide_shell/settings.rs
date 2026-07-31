@@ -16,11 +16,12 @@ use ui_core::{
 };
 use ui_render_api::PaintCommand;
 
-use super::geometry::{SettingsDialogGeometry, settings_dialog_geometry, settings_pages_rect};
+use super::geometry::{SettingsDialogGeometry, settings_dialog_geometry};
 use super::{click_widget, primary_pointer, raw_stroke};
 use crate::settings::SettingsPage;
 use ui_focus::FocusManager;
 use ui_host::UiHost;
+use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 
 const MODAL_ID: WidgetId = WidgetId(10_002);
 const CLOSE_ID: WidgetId = WidgetId(10_005);
@@ -41,6 +42,157 @@ const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
 pub(super) const DEBUG_PAGE_TITLE: &str = "Depuração";
 pub(super) const PAGE_ROW_HEIGHT: f32 = 42.0;
 const SIDEBAR_ID: WidgetId = WidgetId(10_100);
+/// As peças de estrutura da moldura: a coluna da direita, a área da página e a
+/// fileira de ações.
+const RIGHT_ID: WidgetId = WidgetId(10_450);
+const PAGE_ID: WidgetId = WidgetId(10_451);
+const ACTIONS_ID: WidgetId = WidgetId(10_452);
+/// A página de depuração: a coluna com o alvo e o botão de conectar.
+const DEBUG_FORM_ID: WidgetId = WidgetId(10_453);
+const DEBUG_TARGET_ID: WidgetId = WidgetId(10_454);
+/// O painel: largo o bastante para a barra de páginas e o conteúdo lado a lado.
+const PANEL_SIZE: Size = Size::new(780.0, 460.0);
+
+/// Declara a moldura da janela: barra de páginas à esquerda, conteúdo à direita,
+/// ações no pé.
+///
+/// Só a moldura. O interior de cada página continua sendo conta, porque cada
+/// página tem o seu arranjo — e transformá-las é a etapa seguinte, uma por vez.
+/// A barra desce até o pé do painel, por baixo das ações: por isso ela é irmã da
+/// coluna da direita, e não parte dela.
+pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
+    let _ = host.declare(
+        layer,
+        MODAL_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            width: Some(PANEL_SIZE.width),
+            height: Some(PANEL_SIZE.height),
+            // O alto é do título, que o `ModalHost` desenha.
+            padding: EdgeInsets::only(52.0, 0.0, 0.0, 0.0),
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        MODAL_ID,
+        SIDEBAR_ID,
+        LayoutStyle {
+            width: Some(210.0),
+            // A lista não encosta no título: os 12 do alto são o respiro que a
+            // barra sempre teve.
+            padding: EdgeInsets::only(12.0, 0.0, 0.0, 0.0),
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        MODAL_ID,
+        RIGHT_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            padding: EdgeInsets::only(0.0, 16.0, 14.0, 0.0),
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        RIGHT_ID,
+        PAGE_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        RIGHT_ID,
+        ACTIONS_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            main_align: MainAlign::End,
+            height: Some(34.0),
+            gap: 10.0,
+            ..LayoutStyle::default()
+        },
+    );
+    // A lista de páginas mora na barra. A altura dela depende de quantas páginas
+    // existem, e por isso é declarada de novo a cada quadro, em `place_widgets`.
+    let _ = host.declare(
+        SIDEBAR_ID,
+        PAGES_ID,
+        LayoutStyle {
+            height: Some(PAGE_ROW_HEIGHT),
+            ..LayoutStyle::default()
+        },
+    );
+    // A página de depuração: host e porta lado a lado, o botão embaixo.
+    let _ = host.declare(
+        PAGE_ID,
+        DEBUG_FORM_ID,
+        LayoutStyle {
+            hidden: true,
+            padding: EdgeInsets::only(74.0, 0.0, 0.0, 28.0),
+            gap: 20.0,
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        DEBUG_FORM_ID,
+        DEBUG_TARGET_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            height: Some(36.0),
+            gap: 12.0,
+            ..LayoutStyle::default()
+        },
+    );
+    for (id, width) in [(DEBUG_HOST_ID, 220.0), (DEBUG_PORT_ID, 96.0)] {
+        let _ = host.declare(
+            DEBUG_TARGET_ID,
+            id,
+            LayoutStyle {
+                width: Some(width),
+                height: Some(36.0),
+                ..LayoutStyle::default()
+            },
+        );
+    }
+    let _ = host.declare(
+        DEBUG_FORM_ID,
+        DEBUG_ATTACH_ID,
+        LayoutStyle {
+            width: Some(120.0),
+            height: Some(34.0),
+            ..LayoutStyle::default()
+        },
+    );
+
+    // Cancelar e Salvar ainda são instâncias da janela, e por isso entram como
+    // nós de estrutura: o arranjo diz onde eles ficam, e a janela os desenha.
+    for id in [CLOSE_ID, SAVE_ID] {
+        let _ = host.declare(
+            ACTIONS_ID,
+            id,
+            LayoutStyle {
+                width: Some(88.0),
+                height: Some(34.0),
+                ..LayoutStyle::default()
+            },
+        );
+    }
+}
+
+/// A área que o arranjo deu a uma peça da moldura.
+fn area(host: &UiHost, id: WidgetId) -> Rect {
+    host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+}
+
+/// A moldura, como a geometria de cada página precisa vê-la.
+fn frame(host: &UiHost) -> (Rect, Rect, Rect, Rect) {
+    (
+        area(host, MODAL_ID),
+        area(host, SIDEBAR_ID),
+        area(host, CLOSE_ID),
+        area(host, SAVE_ID),
+    )
+}
 const DEBUG_TITLE_ID: WidgetId = WidgetId(10_101);
 const DEBUG_CAPTION_ID: WidgetId = WidgetId(10_102);
 const DEBUG_HINT_ID: WidgetId = WidgetId(10_103);
@@ -102,7 +254,7 @@ pub(super) struct SettingsSurface {
 impl Default for SettingsSurface {
     fn default() -> Self {
         Self {
-            modal: ModalHost::new(MODAL_ID, "Configurações", Size::new(780.0, 460.0)),
+            modal: ModalHost::new(MODAL_ID, "Configurações", PANEL_SIZE),
             toolchain_combo: ComboBox::new(TOOLCHAIN_COMBO_ID, Vec::new()),
             secondary_combo: ComboBox::new(SECONDARY_COMBO_ID, Vec::new()),
             secondary_browse_button: Button::new(SECONDARY_BROWSE_ID, "Procurar...")
@@ -254,21 +406,28 @@ impl SettingsSurface {
     ///
     /// A lista de páginas e as três peças da página de depuração: são elas que o
     /// acerto precisa distinguir. O resto da janela responde pelo painel.
-    pub(super) fn place_widgets(
-        &mut self,
-        host: &mut UiHost,
-        context: &LayoutContext,
-        size: Size,
-        section_count: usize,
-    ) {
-        let geometry = self.geometry(context, size);
-        host.place(MODAL_ID, self.modal.panel_bounds());
-        host.place(PAGES_ID, settings_pages_rect(&geometry, section_count + 1));
-        if self.page == SettingsPage::Debug {
-            host.place(DEBUG_HOST_ID, geometry.debug_host);
-            host.place(DEBUG_PORT_ID, geometry.debug_port);
-            host.place(DEBUG_ATTACH_ID, geometry.debug_attach);
-        }
+    /// Ajusta o que muda com o estado: quantas páginas há, e qual está aberta.
+    ///
+    /// Não é posicionar — é declarar de novo. A altura da lista vem da contagem
+    /// de páginas, e a página de depuração entra e sai do arranjo conforme a
+    /// escolha.
+    pub(super) fn sync_declaration(&mut self, host: &mut UiHost, section_count: usize) {
+        host.set_style(
+            PAGES_ID,
+            LayoutStyle {
+                height: Some(PAGE_ROW_HEIGHT * (section_count + 1) as f32),
+                ..LayoutStyle::default()
+            },
+        );
+        host.set_style(
+            DEBUG_FORM_ID,
+            LayoutStyle {
+                hidden: self.page != SettingsPage::Debug,
+                padding: EdgeInsets::only(74.0, 0.0, 0.0, 28.0),
+                gap: 20.0,
+                ..LayoutStyle::default()
+            },
+        );
     }
 
     pub(super) fn pointer_down(
@@ -276,13 +435,12 @@ impl SettingsSurface {
         host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
-        size: Size,
         sections: &[SettingsSection],
     ) -> SettingsOutcome {
         if !self.modal.is_open() {
             return SettingsOutcome::Idle;
         }
-        let geometry = self.geometry(context, size);
+        let geometry = self.geometry(host);
         // Qual página foi clicada é a lista quem sabe: altura de linha e rolagem
         // são dela.
         let mut pages = self.pages_for(context, &geometry, sections.len());
@@ -539,19 +697,21 @@ impl SettingsSurface {
     /// se decide o que cada componente mostra e onde ele fica.
     pub(super) fn paint(
         &self,
+        host: &UiHost,
         layout: &LayoutContext,
         size: Size,
         sections: &[SettingsSection],
         colors: ColorTokens,
-        mut modal_paint: PaintContext,
-        mut component_paint: PaintContext,
+        // Dois contextos: o véu e o painel vão num, o conteúdo no outro, para a
+        // janela ficar por cima do que a moldura desenhou.
+        (mut modal_paint, mut component_paint): (PaintContext, PaintContext),
     ) -> Vec<PaintCommand> {
         if !self.modal.is_open() {
             return Vec::new();
         }
         let mut modal = self.modal.clone();
         modal.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
-        let geometry = settings_dialog_geometry(modal.panel_bounds());
+        let geometry = self.geometry(host);
         modal.paint(&mut modal_paint);
         let mut commands = modal_paint.into_commands();
         // A barra lateral da janela é uma superfície da biblioteca.
@@ -755,19 +915,27 @@ impl SettingsSurface {
             SettingsPage::Contribution(index) => index,
             SettingsPage::Debug => section_count,
         }));
-        pages.layout(layout, settings_pages_rect(geometry, section_count + 1));
+        // A área é a que o arranjo deu à lista: pintar noutra faria a linha
+        // acertada não ser a linha vista.
+        pages.layout(layout, geometry.compiler_option_row(section_count + 1));
         pages
     }
 
     /// As áreas da janela, já centralizada numa tela deste tamanho.
-    pub(super) fn geometry(
-        &mut self,
-        context: &LayoutContext,
-        size: Size,
-    ) -> SettingsDialogGeometry {
-        self.modal
-            .layout(context, Rect::new(0.0, 0.0, size.width, size.height));
-        settings_dialog_geometry(self.modal.panel_bounds())
+    pub(super) fn geometry(&self, host: &UiHost) -> SettingsDialogGeometry {
+        let (panel, sidebar, close, save) = frame(host);
+        settings_dialog_geometry(
+            panel,
+            sidebar,
+            area(host, PAGES_ID),
+            close,
+            save,
+            (
+                area(host, DEBUG_HOST_ID),
+                area(host, DEBUG_PORT_ID),
+                area(host, DEBUG_ATTACH_ID),
+            ),
+        )
     }
 
     /// A toolchain marcada no combo, para os testes.

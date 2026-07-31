@@ -497,7 +497,7 @@ impl IdeShell {
         let sections = self.catalog.settings_sections.clone();
         let outcome = self
             .settings
-            .pointer_down(&mut self.host, &context, point, size, &sections);
+            .pointer_down(&mut self.host, &context, point, &sections);
         self.apply_settings_outcome(outcome);
     }
 
@@ -690,7 +690,7 @@ impl IdeShell {
         let attached = self.debug_panel.view.attached;
         let requests =
             self.inspection
-                .pointer_down(&mut self.host, &context, point, size, attached);
+                .pointer_down(&mut self.host, &context, point, attached);
         self.apply_inspection_requests(requests);
     }
 }

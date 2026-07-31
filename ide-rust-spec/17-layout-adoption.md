@@ -298,7 +298,60 @@ Os sete pontos dos testes que pediam as áreas passaram a desenhar um quadro ant
 de perguntar — o mesmo ajuste da `new_item`, e pela mesma razão: área agora vem do
 arranjo, e arranjo acontece no quadro.
 
-**Faltam duas:** `inspection` e `settings`. Nenhuma
+**Inspecionar, feita — e é a que mais mostra o ganho.** Ela não é uma coluna de
+campos: é uma linha de duas colunas, com a árvore de objetos à esquerda e, à
+direita, o detalhe em cima e o editor embaixo. As frações de largura e de altura
+agora dividem o espaço **uma vez**, na declaração, em vez de aparecer no cálculo
+de cada peça. A fileira de ações tem larguras diferentes — Executar tem 98,
+Fechar tem 88 — e o alinhamento à direita resolve as duas sem conta nenhuma.
+
+Sem mover um pixel: `56 + 308 + 8 + 34 + 14 = 420`, e a fileira reproduz `508` e
+`616` exatamente. `inspection_geometry` e a `InspectionGeometry` saíram da
+`geometry.rs`; a struct sobrevive só dentro da `inspection`, sob `cfg(test)`, como
+a forma que os testes usam para apontar um gesto.
+
+**Falta uma:** `settings`.
+
+A `settings` é diferente das cinco em espécie, e não em tamanho: ela tem uma barra
+lateral de páginas e um conteúdo cujo arranjo **muda com a página escolhida** —
+combos e botões em deslocamentos próprios (126, +46), campos de depuração. Não é
+uma árvore só; é uma por página.
+
+**A moldura, feita.** Painel, barra de páginas e fileira de ações são declarados;
+o interior de cada página continua sendo conta, e é a etapa seguinte. A barra
+desce até o pé do painel, por baixo das ações — por isso ela é **irmã** da coluna
+da direita, e não parte dela, e é essa estrutura que preserva os pixels:
+`780 - 210 - 16 = 554` de conteúdo, Salvar em `676`, Cancelar em `578`, os mesmos
+do `FormLayout`.
+
+Com isso o **`FormLayout` deixa de ser usado pela IDE**. O alinhamento à direita
+faz o que ele fazia, e a `geometry.rs` sobrevive só com o interior das páginas.
+
+**Duas mudanças que precisam ser declaradas:**
+
+- **a ordem do quadro mudou.** Quem posiciona à mão passou a ler a moldura do
+  arranjo, e ler antes de calcular daria o quadro anterior — a página de
+  depuração abria vazia na primeira vez. O `place_overlay` agora faz: estilos das
+  camadas, **arranjo**, e só então as áreas que a IDE ainda calcula;
+- **o quadro estável foi de 132 µs para 301 µs** — 1,8% do orçamento. São dois
+  arranjos por quadro, um antes e um depois das áreas declaradas à mão. O segundo
+  desaparece quando não sobrar quem as declare: é dívida da transição.
+
+**As páginas, feitas.** A lista de páginas mora na barra e tem a altura da
+contagem; a página de depuração é uma coluna que **entra e sai do arranjo** com a
+escolha, em vez de ser posicionada quando aparece. O que muda com o estado é
+declarado **antes** do arranjo, por `sync_declaration` — declarar depois valeria
+só no quadro seguinte, e foi assim que a página de depuração abriu vazia uma vez.
+
+Com isso o `place_surface` deixou de existir: **nenhuma janela chama `place`**. Os
+cinco `place` que restam são a moldura — abas do editor e do terminal — e a
+completação, que é a fase 5.
+
+**Uma mudança de comportamento que precisa ser dita:** a geometria das
+Configurações agora é a **do que está na tela**. Antes era uma conta sobre o
+painel, e respondia por peças invisíveis — dava a área dos campos de depuração com
+a página de Java aberta. Um teste dependia disso: capturava as áreas uma vez e as
+usava depois de trocar de página. Agora ele relê, que é o que a aplicação faz. Nenhuma
 novidade de mecanismo — é o mesmo recorte. A `settings` é a maior, porque tem
 lista de páginas própria; `new_item` e `generate` usam `FormLayout` e devem mover
 os mesmos pixels que a `rename` moveu.

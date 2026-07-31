@@ -450,6 +450,26 @@ impl IdeShell {
     pub(super) fn place_overlay(&mut self, size: Size) {
         self.host.clear_placement();
         let tela = Rect::new(0.0, 0.0, size.width, size.height);
+        // Primeiro quem está na tela, depois o arranjo, e só então as áreas que
+        // a IDE ainda calcula. A ordem importa: quem posiciona à mão lê a
+        // moldura do arranjo — a área do painel, a da barra lateral —, e lê-la
+        // antes de calculá-la daria o quadro anterior.
+        for layer in OVERLAY {
+            if let Layer::Surface(kind) = layer {
+                let open = self.surface_is_open(kind);
+                self.host
+                    .set_style(surface_layer_id(kind), layer_style(open));
+                // O que a janela declara e muda com o estado dela — quantas
+                // páginas há, qual está aberta — entra **antes** do arranjo, ou
+                // valeria só no quadro seguinte.
+                if open && kind == SurfaceKind::Settings {
+                    let sections = self.catalog.settings_sections.len();
+                    self.settings.sync_declaration(&mut self.host, sections);
+                }
+            }
+        }
+        let _ = self.host.layout(size);
+
         // A moldura é o fundo da pilha: as janelas a cobrem.
         self.sync_editor_tabs(size);
         if !self.terminal.minimized {
@@ -462,14 +482,8 @@ impl IdeShell {
                 // engole o gesto do que ficou atrás —, depois o que há dentro
                 // dela.
                 Layer::Surface(kind) => {
-                    // A camada fechada sai do arranjo em vez de sair da árvore:
-                    // é o que mantém a ordem de sobreposição independente da
-                    // ordem em que as janelas foram abertas.
-                    let open = self.surface_is_open(kind);
-                    self.host.set_style(surface_layer_id(kind), layer_style(open));
-                    if open {
+                    if self.surface_is_open(kind) {
                         self.host.place(surface_layer_id(kind), tela);
-                        self.place_surface(kind, size);
                     }
                 }
             }
@@ -477,34 +491,6 @@ impl IdeShell {
         // O motor calcula o que foi declarado; o que veio de `place` entra no
         // lugar que a árvore lhe dá. Ver `17-layout-adoption`.
         let _ = self.host.layout(size);
-    }
-
-    /// Declara os nós de dentro da janela aberta.
-    ///
-    /// Eles entram na pilha ao abrir e saem ao fechar, porque é a presença deles
-    /// que decide a sobreposição. As janelas que ainda têm anfitrião próprio não
-    /// declaram nada aqui.
-    fn place_surface(&mut self, kind: SurfaceKind, size: Size) {
-        let context = self.layout_context();
-        match kind {
-            // A janela de criação declara estilo: o arranjo é do motor.
-            SurfaceKind::NewItem => {}
-            // A busca declara estilo: o arranjo dela é do motor.
-            SurfaceKind::TypeSearch => {}
-            // A janela de gerar declara estilo: o arranjo é do motor.
-            SurfaceKind::Generate => {}
-            SurfaceKind::Inspection => {
-                self.inspection.place_widgets(&mut self.host, &context, size);
-            }
-            // A janela de renomear não aparece aqui: ela declara estilo, e quem
-            // calcula a área de cada peça é o motor.
-            SurfaceKind::Rename => {}
-            SurfaceKind::Settings => {
-                let sections = self.catalog.settings_sections.len();
-                self.settings
-                    .place_widgets(&mut self.host, &context, size, sections);
-            }
-        }
     }
 
     /// Se um alvo está acima da lista de completação na pilha deste quadro.

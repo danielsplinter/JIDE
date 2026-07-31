@@ -7,7 +7,8 @@ use super::*;
 // Tipos que o shell deixou de importar quando as funções puras saíram; os
 // testes continuam falando deles.
 use crate::debugging::DebugVariableView;
-use crate::ide_shell::geometry::{InspectionGeometry, SettingsDialogGeometry};
+use crate::ide_shell::geometry::SettingsDialogGeometry;
+use crate::ide_shell::inspection::InspectionGeometry;
 use crate::search::{ContentSearchHit, TypeSearchHit};
 use ide_application::{NewItemRequest, NewItemTemplate};
 use ide_domain::{AccessorCandidate, AccessorPlan, Location, SyntaxHighlightKind};
@@ -950,7 +951,11 @@ fn debug_settings_page_validates_the_target_before_connecting() {
     let mut shell = test_shell();
     let size = Size::new(1_000.0, 700.0);
     open_java_settings(&mut shell, vec!["JDK 8".to_owned()], 0);
-    let geometry = shell.settings.geometry(&LayoutContext::default(), size);
+    let geometry = {
+        // A moldura vem do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        shell.settings.geometry(&shell.host)
+    };
 
     // Segunda linha da navegação é a página de Depuração.
     shell.pointer_down(
@@ -970,6 +975,11 @@ fn debug_settings_page_validates_the_target_before_connecting() {
         .collect();
     assert!(texts.iter().any(|text| text == "Depuração"));
     assert!(texts.iter().any(|text| text.contains("agentlib:jdwp")));
+
+    // As áreas são relidas: os campos de depuração só existem com a página
+    // aberta, porque agora a geometria é a do que está na tela — e não uma conta
+    // sobre o painel, que respondia por peças invisíveis.
+    let geometry = shell.settings.geometry(&shell.host);
 
     shell.pointer_down(
         Point::new(
@@ -2011,7 +2021,11 @@ fn settings_jdk_combo_and_browse_button_emit_requests() {
     let mut shell = test_shell();
     let size = Size::new(1_000.0, 700.0);
     open_java_settings(&mut shell, vec!["JDK 8".to_owned(), "JDK 17".to_owned()], 0);
-    let geometry = shell.settings.geometry(&LayoutContext::default(), size);
+    let geometry = {
+        // A moldura vem do arranjo, e o arranjo acontece no quadro.
+        let _ = shell.paint(size);
+        shell.settings.geometry(&shell.host)
+    };
     shell.pointer_down(
         Point::new(
             geometry.combo.origin.x + 10.0,
@@ -2556,10 +2570,7 @@ fn the_secondary_tool_answers_the_pointer() {
     shell.open_settings_dialog(vec!["JDK 21".to_owned()], 0);
     let _ = shell.paint(size);
 
-    let geometry = {
-        let context = shell.layout_context();
-        shell.settings.geometry(&context, size)
-    };
+    let geometry = shell.settings.geometry(&shell.host);
 
     // Abrir a lista e escolher a segunda opção.
     let combo = geometry.secondary_combo;
@@ -4041,9 +4052,9 @@ fn the_inspection_window_closes() {
 }
 
 fn inspection_layout(shell: &mut IdeShell, size: Size) -> InspectionGeometry {
-    shell
-        .inspection
-        .layout_editor(&LayoutContext::default(), size)
+    // As áreas vêm do arranjo, e o arranjo acontece no quadro.
+    let _ = shell.paint(size);
+    inspection::areas(&shell.host)
 }
 
 /// O que está marcado no editor da inspeção.
@@ -4529,7 +4540,9 @@ fn escape_in_the_settings_discards_every_change() {
 }
 
 fn open_settings_geometry(shell: &mut IdeShell, size: Size) -> SettingsDialogGeometry {
-    shell.settings.geometry(&LayoutContext::default(), size)
+    // A moldura vem do arranjo, e o arranjo acontece no quadro.
+    let _ = shell.paint(size);
+    shell.settings.geometry(&shell.host)
 }
 
 /// Abre o combo e clica na segunda linha.

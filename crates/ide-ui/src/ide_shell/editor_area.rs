@@ -694,8 +694,7 @@ impl IdeShell {
     /// as duas áreas mudam com o tamanho da janela.
     pub(super) fn place_focused_editor(&mut self, size: Size) {
         if self.inspection.is_open() {
-            let context = self.layout_context();
-            self.inspection.layout_editor(&context, size);
+            self.inspection.layout_editor(&self.host);
             return;
         }
         let bounds = self.editor_view_rect(size);

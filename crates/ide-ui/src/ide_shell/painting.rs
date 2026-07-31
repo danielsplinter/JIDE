@@ -227,12 +227,12 @@ impl IdeShell {
             SurfaceKind::Inspection => self.paint_inspection(commands, size),
             SurfaceKind::NewItem => self.paint_new_item_dialog(commands, size),
             SurfaceKind::Settings => commands.extend(self.settings.paint(
+                &self.host,
                 &self.layout_context(),
                 size,
                 &self.catalog.settings_sections,
                 colors,
-                self.paint_context(),
-                self.paint_context(),
+                (self.paint_context(), self.paint_context()),
             )),
         }
     }
