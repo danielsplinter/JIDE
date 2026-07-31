@@ -129,7 +129,7 @@ A IDE não mudou uma linha e segue com 316 testes: o `Default` preserva o
 comportamento anterior, que era a condição para esta fase não mexer em tela
 nenhuma. Documentado em `05-layout.md` e na ADR-021 da biblioteca.
 
-## Fase 2 — Os diálogos 🔶
+## Fase 2 — Os diálogos ✅
 
 As seis janelas modais primeiro: são fechadas, de tamanho fixo, e o `FormLayout`
 já descreve o que elas têm. Cada uma vira uma árvore — coluna de campos, fileira
@@ -504,13 +504,69 @@ existir**. A `SettingsDialogGeometry` sobrevive dentro da `settings`, e agora el
 camada de janela e os dois da completação —, que são a fase 5. O quadro estável
 está em 411 µs, 2,5% do orçamento, com 318 testes.
 
-## Fase 5 — O que sobra de `place`
+## Fase 5 — O que sobra de `place` ✅
 
 O `place` continua legítimo para o que é área derivada de conteúdo virtualizado —
 a saída do terminal, que sabe quantas linhas cabe, e o editor. O que não pode
 sobrar é área de **estrutura** calculada à mão.
 
 **Critério:** nenhuma chamada a `place` fora de console e editor.
+
+### Passo 1 — A camada de janela sai do `place` ✅
+
+Ela era posicionada com a tela inteira a cada quadro. Não precisa: é filha da raiz
+em camada, e filho de camada já ocupa a área toda. Uma chamada a menos, e a área
+passa a vir de onde o nó está na árvore.
+
+### O que a conversão das abas revelou 🔶
+
+As abas do editor e as do terminal usam `editor_width` — a largura **sem** o painel
+de depuração. Na árvore que a fase 3 declarou, elas são irmãs da linha do editor
+dentro da coluna do centro, e portanto tão largas quanto o centro inteiro, **com**
+o painel.
+
+Ninguém lê a largura desses nós, então nada quebrou e nenhum teste acusou. Mas é
+divergência entre o que está declarado e o que está desenhado — a mesma classe de
+defeito que a lista de páginas das Configurações teve, e que só apareceu ao
+conferir a aritmética.
+
+A causa é estrutural: **o painel de depuração não cobre a altura toda do centro.**
+Ele começa abaixo das abas e termina acima do terminal, então "editor mais painel"
+não é uma faixa da coluna — é uma faixa entre duas outras. Declarar isso pede uma
+coluna espelho à direita, com folgas da altura das abas e do terminal, e não uma
+linha só.
+
+**Antes de converter as abas era preciso decidir essa forma.** Convertê-las sobre a
+árvore de então propagaria a divergência do declarado para o desenhado, que é
+exatamente o que esta especificação existe para acabar.
+
+Havia três saídas. A **coluna espelho** manteria o desenho intacto ao custo de nós
+vazios cuja altura tem que acompanhar a do terminal — espelhar, e não declarar, que
+é a duplicação que esta especificação passou o tempo todo removendo. As abas
+atravessarem **sob** o painel simplificaria a árvore e estaria errado: aba é do
+editor. A escolhida foi a terceira.
+
+### Passo 2 — O painel vira lateral de altura inteira ✅
+
+O centro passou a ser uma linha: a **coluna de trabalho** — abas, editor, terminal
+— e, à direita dela, o painel. Com isso as abas são naturalmente da largura do
+editor, que é o que o desenho sempre disse, e nenhum nó precisa acompanhar a altura
+de outro.
+
+**Mudança visível, e é a única da fase:** o painel de depuração ia do fim das abas
+ao começo do terminal; agora ocupa a altura toda à direita, como painéis laterais
+costumam ocupar.
+
+### Passo 3 — As abas saem do `place` ✅
+
+Declaradas dentro das faixas que já lhes cabiam: as do editor na faixa de abas, as
+do terminal no alto dele. `editor_tabs_rect` e `terminal_tabs_rect` sumiram — eram
+somas de barra de atividades, lateral e largura do editor para chegar a uma faixa
+que a árvore já sabia.
+
+**Fase concluída.** Restam **dois** `place`, os dois da lista de completação — que
+é o caso legítimo previsto desde o começo: área derivada de conteúdo, ancorada no
+cursor. 318 testes, quadro estável em 425 µs.
 
 ## O risco que separa esta especificação das anteriores
 

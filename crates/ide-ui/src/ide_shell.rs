@@ -128,8 +128,8 @@ const FRAME_DEBUG_ID: WidgetId = WidgetId(10_469);
 const FRAME_STATUS_ID: WidgetId = WidgetId(10_470);
 /// A fileira de ações do título: parar, executar, depurar.
 const FRAME_TITLE_ACTIONS_ID: WidgetId = WidgetId(10_471);
-/// A linha onde o editor e o painel de depuração convivem.
-const FRAME_EDITOR_ROW_ID: WidgetId = WidgetId(10_472);
+/// A coluna de trabalho: abas, editor e terminal, à esquerda do painel.
+const FRAME_WORK_ID: WidgetId = WidgetId(10_472);
 /// O interior do painel de depuração: fileira de ações e as duas listas.
 const DEBUG_ACTIONS_ID: WidgetId = WidgetId(10_473);
 const DEBUG_GAP_BEFORE_FRAMES_ID: WidgetId = WidgetId(10_474);
@@ -328,31 +328,24 @@ fn declare_frame(host: &mut UiHost) {
     let _ = host.declare(FRAME_ID, FRAME_STATUS_ID, fixa(StatusBar::HEIGHT));
     let _ = host.declare(FRAME_MIDDLE_ID, FRAME_ACTIVITY_ID, largura(ACTIVITY_WIDTH));
     let _ = host.declare(FRAME_MIDDLE_ID, FRAME_SIDEBAR_ID, largura(SIDEBAR_WIDTH));
-    let _ = host.declare(FRAME_MIDDLE_ID, FRAME_CENTER_ID, cresce(coluna));
-    let _ = host.declare(FRAME_CENTER_ID, FRAME_TABS_ID, fixa(TAB_HEIGHT));
-    // O painel de depuração fica ao lado do código, abaixo das abas e acima do
-    // terminal: é por isso que ele é irmão do editor, e não da coluna inteira.
+    // O centro é uma linha: a coluna de trabalho e, à direita dela, o painel de
+    // depuração — uma lateral de altura inteira, como painéis laterais são.
+    let _ = host.declare(FRAME_MIDDLE_ID, FRAME_CENTER_ID, cresce(linha));
+    let _ = host.declare(FRAME_CENTER_ID, FRAME_WORK_ID, cresce(coluna));
+    let _ = host.declare(FRAME_CENTER_ID, FRAME_DEBUG_ID, largura(DEBUG_PANEL_WIDTH));
+    let _ = host.declare(FRAME_WORK_ID, FRAME_TABS_ID, fixa(TAB_HEIGHT));
+    // As abas ocupam a faixa inteira que lhes cabe: declarar o nó dentro dela é
+    // o que tira a área da mão de quem as sincroniza.
+    let _ = host.declare(FRAME_TABS_ID, EDITOR_TABS_ID, cresce(coluna));
+    // O editor não encolhe além do que ainda é editável: é essa restrição que
+    // impede o terminal de engoli-lo, e é ela que o divisor move.
     let _ = host.declare(
-        FRAME_CENTER_ID,
-        FRAME_EDITOR_ROW_ID,
+        FRAME_WORK_ID,
+        FRAME_EDITOR_ID,
         LayoutStyle {
             flex_grow: 1.0,
             min_height: Some(EDITOR_MIN_HEIGHT),
-            ..linha
-        },
-    );
-    // O editor não encolhe além do que ainda é editável: é essa restrição que
-    // impede o terminal de engoli-lo, e é ela que o divisor move.
-    let _ = host.declare(FRAME_EDITOR_ROW_ID, FRAME_EDITOR_ID, cresce(coluna));
-    let _ = host.declare(
-        FRAME_EDITOR_ROW_ID,
-        FRAME_DEBUG_ID,
-        LayoutStyle {
-            width: Some(DEBUG_PANEL_WIDTH),
-            // O alto é do título e do estado da sessão, que o painel desenha; as
-            // listas respiram 6 dos lados.
-            padding: EdgeInsets::only(34.0, 6.0, 0.0, 6.0),
-            ..LayoutStyle::default()
+            ..coluna
         },
     );
     // Os cinco passos dividem a fileira em partes iguais, com folga entre eles.
@@ -384,9 +377,15 @@ fn declare_frame(host: &mut UiHost) {
     let _ = host.declare(FRAME_DEBUG_ID, DEBUG_GAP_BEFORE_VARS_ID, fixa(30.0));
     let _ = host.declare(FRAME_DEBUG_ID, DEBUG_VARIABLES_ID, cresce(coluna));
     let _ = host.declare(
-        FRAME_CENTER_ID,
+        FRAME_WORK_ID,
         FRAME_TERMINAL_ID,
         fixa(TERMINAL_COLLAPSED_HEIGHT),
+    );
+    // As abas do terminal são a primeira faixa dele.
+    let _ = host.declare(
+        FRAME_TERMINAL_ID,
+        TERMINAL_TABS_ID,
+        fixa(TERMINAL_TAB_HEIGHT),
     );
 }
 
@@ -597,7 +596,6 @@ impl IdeShell {
     /// substitui a comparação de profundidades escrita à mão.
     pub(super) fn place_overlay(&mut self, size: Size) {
         self.host.clear_placement();
-        let tela = Rect::new(0.0, 0.0, size.width, size.height);
         // Primeiro quem está na tela, depois o arranjo, e só então as áreas que
         // a IDE ainda calcula. A ordem importa: quem posiciona à mão lê a
         // moldura do arranjo — a área do painel, a da barra lateral —, e lê-la
@@ -620,9 +618,9 @@ impl IdeShell {
         let _ = self.host.layout(size);
 
         // A moldura é o fundo da pilha: as janelas a cobrem.
-        self.sync_editor_tabs(size);
+        self.sync_editor_tabs();
         if !self.terminal.minimized {
-            self.sync_terminal_tabs(size);
+            self.sync_terminal_tabs();
         }
         for layer in OVERLAY {
             match layer {
@@ -630,11 +628,9 @@ impl IdeShell {
                 // Primeiro a área que a janela cobre — o véu, que é o que
                 // engole o gesto do que ficou atrás —, depois o que há dentro
                 // dela.
-                Layer::Surface(kind) => {
-                    if self.surface_is_open(kind) {
-                        self.host.place(surface_layer_id(kind), tela);
-                    }
-                }
+                // A camada aberta cobre a tela por declaração: ela é filha da
+                // raiz em camada, e filho de camada ocupa a área inteira.
+                Layer::Surface(_) => {}
             }
         }
         // O motor calcula o que foi declarado; o que veio de `place` entra no

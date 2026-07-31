@@ -1437,7 +1437,11 @@ fn long_tab_titles_are_clipped_and_ellipsized_before_close_button() {
             .any(|text| text.starts_with("Explosion") && text.ends_with('…')),
         "esperava um título encurtado, veio {texts:?}"
     );
-    let tabs = shell.editor_tabs_rect(Size::new(1280.0, 800.0));
+    // A faixa das abas vem do arranjo, como tudo mais na moldura.
+    let tabs = shell
+        .host
+        .bounds(EDITOR_TABS_ID)
+        .unwrap_or_else(|| panic!("as abas precisam ter área"));
     assert!(
         rendered
             .iter()

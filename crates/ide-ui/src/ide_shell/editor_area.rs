@@ -142,21 +142,9 @@ impl IdeShell {
     /// Substituir, e não construir: o destaque sob o ponteiro e a pressão em
     /// curso atravessam a troca, e a IDE deixa de precisar informar à mão onde o
     /// ponteiro está.
-    pub(super) fn sync_editor_tabs(&mut self, size: Size) {
+    pub(super) fn sync_editor_tabs(&mut self) {
         let tabs = self.editor_tabs();
-        let rect = self.editor_tabs_rect(size);
         self.host.replace(Box::new(tabs));
-        self.host.place(EDITOR_TABS_ID, rect);
-    }
-
-    pub(super) fn editor_tabs_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry();
-        Rect::new(
-            ACTIVITY_WIDTH + self.sidebar_width(size),
-            TITLE_HEIGHT,
-            geo.editor_width,
-            TAB_HEIGHT,
-        )
     }
 
     /// Trilha, faixa e deslocamento de uma barra, na unidade do seu conteúdo.

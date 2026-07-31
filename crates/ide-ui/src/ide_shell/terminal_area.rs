@@ -111,21 +111,9 @@ impl IdeShell {
     }
 
     /// Repõe no anfitrião a apresentação das abas do terminal e a área delas.
-    pub(super) fn sync_terminal_tabs(&mut self, size: Size) {
+    pub(super) fn sync_terminal_tabs(&mut self) {
         let tabs = self.terminal_tabs();
-        let rect = self.terminal_tabs_rect(size);
         self.host.replace(Box::new(tabs));
-        self.host.place(TERMINAL_TABS_ID, rect);
-    }
-
-    pub(super) fn terminal_tabs_rect(&self, size: Size) -> Rect {
-        let geo = self.geometry();
-        Rect::new(
-            ACTIVITY_WIDTH + self.sidebar_width(size),
-            geo.editor_bottom,
-            geo.editor_width,
-            TERMINAL_TAB_HEIGHT,
-        )
     }
 
     pub(super) fn terminal_splitter_for(&self, size: Size) -> Splitter {
