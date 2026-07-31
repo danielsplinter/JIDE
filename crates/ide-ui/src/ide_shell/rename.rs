@@ -14,8 +14,14 @@ use ide_domain::{Location, TextRange};
 // A moldura, o campo e a lista são da biblioteca: a IDE não desenha caixa de
 // texto nem trilha de rolagem à mão.
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
+use ui_commands::CommandEvent;
 use ui_components::{Button, FormLayout, IconTint, Label, ListView, ModalHost, TextInput};
-use ui_core::{KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetId};
+use ui_core::{
+    KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetAction, WidgetId,
+};
+use ui_host::UiHost;
+use ui_layout_api::LayoutStyle;
+use ui_layout_taffy::TaffyLayoutEngine;
 
 use super::primary_pointer;
 
@@ -29,6 +35,8 @@ const LIST_CAPTION_ID: WidgetId = WidgetId(10_066);
 /// A janela é larga porque a lista mostra caminho e contagem em cada linha, e
 /// estreitá-la só empurraria o trabalho para a barra lateral.
 const PANEL_SIZE: Size = Size::new(720.0, 460.0);
+/// Raiz do anfitrião desta janela; não é desenhada.
+const HOST_ROOT_ID: WidgetId = WidgetId(10_065);
 
 /// O que a janela conclui, para o shell executar.
 ///
@@ -66,6 +74,8 @@ pub(super) struct RenameSurface {
     state: Option<RenameState>,
     /// Arquivo cuja renomeação foi pedida e ainda não foi respondida.
     pending: Option<PathBuf>,
+    /// O runtime da janela: as áreas, o acerto e a entrega aos botões.
+    host: UiHost,
 }
 
 impl Default for RenameSurface {
@@ -74,8 +84,27 @@ impl Default for RenameSurface {
             modal: ModalHost::new(MODAL_ID, "Renomear", PANEL_SIZE),
             state: None,
             pending: None,
+            host: new_host(),
         }
     }
+}
+
+/// O anfitrião da janela, com os dois botões dentro dele.
+fn new_host() -> UiHost {
+    let mut host = UiHost::new(
+        HOST_ROOT_ID,
+        LayoutStyle::default(),
+        Box::new(TaffyLayoutEngine),
+    );
+    host.attach(
+        Box::new(Button::new(CANCEL_ID, "Cancelar").with_command("rename.cancel")),
+        false,
+    );
+    host.attach(
+        Box::new(Button::new(OK_ID, "OK").with_command("rename.confirm")),
+        false,
+    );
+    host
 }
 
 impl RenameSurface {
@@ -200,33 +229,54 @@ impl RenameSurface {
         size: Size,
     ) -> RenameOutcome {
         let geometry = self.geometry(context, size);
-        if geometry.ok.contains(point) {
-            return self.confirm();
-        }
-        if geometry.cancel.contains(point) {
-            self.cancel();
-            return RenameOutcome::Idle;
+        self.place_widgets(context, size);
+        let outcome = self.host.click(point);
+        for evento in outcome.commands {
+            if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
+                match command.0.as_str() {
+                    "rename.confirm" => return self.confirm(),
+                    "rename.cancel" => {
+                        self.cancel();
+                        return RenameOutcome::Idle;
+                    }
+                    _ => {}
+                }
+            }
         }
         let Some(state) = self.state.as_mut() else {
             return RenameOutcome::Idle;
         };
-        // O campo sabe onde o cursor cai dentro do texto: a medição é dele.
-        if geometry.input.contains(point) {
-            state.input.layout(context, geometry.input);
-            state.input.event(
-                &mut EventContext::default(),
-                &UiEvent::PointerDown(primary_pointer(point)),
-            );
-            return RenameOutcome::Idle;
-        }
-        if geometry.list.contains(point) {
-            state.list.layout(context, geometry.list);
-            state.list.event(
-                &mut EventContext::default(),
-                &UiEvent::PointerDown(primary_pointer(point)),
-            );
+        // Campo e lista guardam o que a janela lê — cursor e rolagem —, então a
+        // entrega fica aqui; o acerto é do anfitrião.
+        match outcome.target {
+            // O campo sabe onde o cursor cai dentro do texto: a medição é dele.
+            Some(INPUT_ID) => {
+                state.input.layout(context, geometry.input);
+                state.input.event(
+                    &mut EventContext::default(),
+                    &UiEvent::PointerDown(primary_pointer(point)),
+                );
+            }
+            Some(LIST_ID) => {
+                state.list.layout(context, geometry.list);
+                state.list.event(
+                    &mut EventContext::default(),
+                    &UiEvent::PointerDown(primary_pointer(point)),
+                );
+            }
+            _ => {}
         }
         RenameOutcome::Idle
+    }
+
+    /// Declara ao anfitrião a área de cada peça da janela.
+    fn place_widgets(&mut self, context: &LayoutContext, size: Size) {
+        let geometry = self.geometry(context, size);
+        self.host.clear_placement();
+        self.host.place(INPUT_ID, geometry.input);
+        self.host.place(LIST_ID, geometry.list);
+        self.host.place(CANCEL_ID, geometry.cancel);
+        self.host.place(OK_ID, geometry.ok);
     }
 
     /// Movimento e soltura do ponteiro: são da lista, que tem as barras.
@@ -318,12 +368,10 @@ impl RenameSurface {
             state.list.layout(layout, geometry.list);
             state.list.paint(paint);
         }
-        let mut cancelar = Button::new(CANCEL_ID, "Cancelar");
-        cancelar.layout(layout, geometry.cancel);
-        cancelar.paint(paint);
-        let mut ok = Button::new(OK_ID, "OK");
-        ok.layout(layout, geometry.ok);
-        ok.paint(paint);
+        // Os botões são do anfitrião, e por isso respondem ao ponteiro.
+        for command in self.host.paint() {
+            paint.push(command);
+        }
         true
     }
 

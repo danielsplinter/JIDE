@@ -878,3 +878,31 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         "IdeShell divergiu da linha final"
     );
 }
+
+/// A IDE não pode desenhar mais primitivas do que já desenha.
+///
+/// Retângulo, contorno e texto crus não passam pelo tema, pela medição de fonte
+/// nem pela árvore de acessibilidade — quem faz isso é o componente. O que a IDE
+/// desenha à mão hoje é dívida conhecida, com endereço: a moldura da janela em
+/// `painting.rs` e a página de depuração em `settings.rs`.
+///
+/// O teto existe para a dívida **só encolher**. Cada peça que a ERLibUi ganhar —
+/// um painel, mais ícones, um console — derruba um punhado destas, e o número
+/// desce junto. Ver a fase 6 de `15-event-runtime-adoption`.
+#[test]
+fn the_ide_never_draws_more_raw_primitives_than_it_already_does() {
+    const TETO: usize = 2;
+
+    let fontes = neutral_ui_sources(&workspace_root());
+    let cruas = fontes.match_indices("raw_fill(").count()
+        + fontes.match_indices("raw_stroke(").count()
+        + fontes.match_indices("raw_label(").count();
+    // As três definições não são desenho: são a própria ferramenta.
+    let definicoes = fontes.matches("fn raw_").count();
+    let chamadas = cruas.saturating_sub(definicoes);
+    assert!(
+        chamadas <= TETO,
+        "a IDE passou a desenhar {chamadas} primitivas cruas, acima do teto de {TETO}: \
+         desenhar é da biblioteca, e o que falta nela deve ser pedido a ela"
+    );
+}

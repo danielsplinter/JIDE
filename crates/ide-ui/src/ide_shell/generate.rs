@@ -6,11 +6,15 @@
 
 use ide_domain::{AccessorCandidate, AccessorKind, AccessorPlan, TextPosition};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
+use ui_commands::CommandEvent;
 use ui_components::{
     Button, CellWidth, Checkbox, ComposedCell, ComposedList, ComposedRow, FormLayout, Label,
     ModalHost,
 };
-use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetId};
+use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetAction, WidgetId};
+use ui_host::UiHost;
+use ui_layout_api::LayoutStyle;
+use ui_layout_taffy::TaffyLayoutEngine;
 
 use super::primary_pointer;
 
@@ -20,6 +24,8 @@ const ALL_ID: WidgetId = WidgetId(10_053);
 const OK_ID: WidgetId = WidgetId(10_054);
 const ROW_ID: WidgetId = WidgetId(10_055);
 /// Altura de uma linha da lista, também usada pelo passo da roda.
+/// Raiz do anfitrião desta janela; não é desenhada.
+const HOST_ROOT_ID: WidgetId = WidgetId(10_066);
 pub(super) const ROW_HEIGHT: f32 = 30.0;
 const PANEL_SIZE: Size = Size::new(520.0, 420.0);
 
@@ -49,7 +55,6 @@ struct GenerateState {
     list: ComposedList,
 }
 
-#[derive(Default)]
 pub(super) struct GenerateSurface {
     modal: Option<ModalHost>,
     state: Option<GenerateState>,
@@ -57,8 +62,39 @@ pub(super) struct GenerateSurface {
     pending_kind: Option<AccessorKind>,
     /// Construtor escolhido cuja fonte a linguagem ainda não devolveu.
     pending_constructor: Option<(Vec<String>, TextPosition)>,
+    /// O runtime da janela: as áreas, o acerto e a entrega aos botões.
+    host: UiHost,
 }
 
+impl Default for GenerateSurface {
+    fn default() -> Self {
+        Self {
+            modal: Default::default(),
+            state: Default::default(),
+            pending_kind: Default::default(),
+            pending_constructor: Default::default(),
+            host: new_host(),
+        }
+    }
+}
+
+/// O anfitrião da janela, com os dois botões dentro dele.
+fn new_host() -> UiHost {
+    let mut host = UiHost::new(
+        HOST_ROOT_ID,
+        LayoutStyle::default(),
+        Box::new(TaffyLayoutEngine),
+    );
+    host.attach(
+        Box::new(Button::new(ALL_ID, "All").with_command("generate.all")),
+        false,
+    );
+    host.attach(
+        Box::new(Button::new(OK_ID, "OK").with_command("generate.ok")),
+        false,
+    );
+    host
+}
 impl GenerateSurface {
     fn modal(&mut self) -> &mut ModalHost {
         self.modal
@@ -199,13 +235,21 @@ impl GenerateSurface {
         size: Size,
     ) -> GenerateOutcome {
         let (lista, todos, ok) = self.geometry(context, size);
-        if todos.contains(point) {
-            return self.confirm(true);
+        self.host.clear_placement();
+        self.host.place(LIST_ID, lista);
+        self.host.place(ALL_ID, todos);
+        self.host.place(OK_ID, ok);
+        let outcome = self.host.click(point);
+        for evento in outcome.commands {
+            if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
+                match command.0.as_str() {
+                    "generate.all" => return self.confirm(true),
+                    "generate.ok" => return self.confirm(false),
+                    _ => {}
+                }
+            }
         }
-        if ok.contains(point) {
-            return self.confirm(false);
-        }
-        if lista.contains(point) {
+        if outcome.target == Some(LIST_ID) {
             // A lista trata a trilha e diz qual linha foi clicada; a marcação
             // é da tela, que é quem sabe o que está marcado.
             let Some(state) = self.state.as_mut() else {
@@ -280,10 +324,10 @@ impl GenerateSurface {
             state.list.layout(layout, lista);
             state.list.paint(paint);
         }
-        let mut todos = Button::new(ALL_ID, "All");
+        let mut todos = Button::new(ALL_ID, "All").with_command("generate.all");
         todos.layout(layout, todos_rect);
         todos.paint(paint);
-        let mut ok = Button::new(OK_ID, "OK");
+        let mut ok = Button::new(OK_ID, "OK").with_command("generate.ok");
         ok.layout(layout, ok_rect);
         ok.paint(paint);
         true

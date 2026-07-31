@@ -10,9 +10,15 @@ use std::path::{Path, PathBuf};
 
 use ide_application::{NewItemRequest, NewItemTemplate};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
+use ui_commands::CommandEvent;
 use ui_components::{Button, FormLayout, IconTint, Label, ModalHost, TextInput};
-use ui_core::{KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetId};
+use ui_core::{
+    KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetAction, WidgetId,
+};
 use ui_focus::{FocusChange, FocusManager};
+use ui_host::UiHost;
+use ui_layout_api::LayoutStyle;
+use ui_layout_taffy::TaffyLayoutEngine;
 
 use super::primary_pointer;
 use crate::explorer::is_source_root;
@@ -26,6 +32,8 @@ const PACKAGE_CAPTION_ID: WidgetId = WidgetId(10_041);
 const NAME_CAPTION_ID: WidgetId = WidgetId(10_042);
 const MESSAGE_ID: WidgetId = WidgetId(10_043);
 pub(super) const PANEL_SIZE: Size = Size::new(460.0, 230.0);
+/// Raiz do anfitrião desta janela; não é desenhada.
+const HOST_ROOT_ID: WidgetId = WidgetId(10_044);
 
 /// O que a janela concluiu, para o shell executar.
 pub(super) enum NewItemOutcome {
@@ -50,8 +58,12 @@ pub(super) struct NewItemSurface {
     /// Qual dos dois campos recebe o que for digitado. Quem faz a conta é o
     /// gerenciador da biblioteca: `Tab` percorre, e o clique transfere.
     focus: FocusManager,
-    create_button: Button,
-    cancel_button: Button,
+    /// O runtime da janela: as áreas, o acerto e a entrega aos botões.
+    ///
+    /// Os botões são dele — só emitem, nada é lido deles. Os campos ficam com a
+    /// janela, que lê o que foi digitado, mas suas áreas são declaradas aqui: o
+    /// acerto é do anfitrião mesmo quando a instância não é.
+    host: UiHost,
 }
 
 impl Default for NewItemSurface {
@@ -62,10 +74,27 @@ impl Default for NewItemSurface {
             package: TextInput::new(PACKAGE_ID, String::new()).with_placeholder("br.com.exemplo"),
             name: TextInput::new(NAME_ID, String::new()),
             focus: new_focus(),
-            create_button: Button::new(CREATE_ID, "Criar").with_command("new.create"),
-            cancel_button: Button::new(CANCEL_ID, "Cancelar").with_command("new.cancel"),
+            host: new_host(),
         }
     }
+}
+
+/// O anfitrião da janela, com os dois botões dentro dele.
+fn new_host() -> UiHost {
+    let mut host = UiHost::new(
+        HOST_ROOT_ID,
+        LayoutStyle::default(),
+        Box::new(TaffyLayoutEngine),
+    );
+    host.attach(
+        Box::new(Button::new(CREATE_ID, "Criar").with_command("new.create")),
+        false,
+    );
+    host.attach(
+        Box::new(Button::new(CANCEL_ID, "Cancelar").with_command("new.cancel")),
+        false,
+    );
+    host
 }
 
 /// O percurso do `Tab` desta janela: pacote e depois nome.
@@ -170,39 +199,61 @@ impl NewItemSurface {
     }
 
     /// Roteia o clique dentro da janela.
+    ///
+    /// Quem descobre o alvo é o anfitrião, pelas áreas que ele recebeu. Os
+    /// botões ele mesmo aciona, e devolve o comando; os campos são entregues
+    /// aqui, porque é esta janela que lê o que foi digitado.
     pub(super) fn pointer_down(
         &mut self,
         context: &LayoutContext,
         point: Point,
         size: Size,
     ) -> NewItemOutcome {
-        let geometry = self.geometry(context, size);
+        self.place_widgets(context, size);
+        let outcome = self.host.click(point);
+        for evento in outcome.commands {
+            if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
+                match command.0.as_str() {
+                    "new.create" => return self.submit(),
+                    "new.cancel" => self.close(),
+                    _ => {}
+                }
+            }
+        }
         // O clique vai ao campo: onde o cursor fica dentro do texto é ele quem
         // sabe, porque a medição da fonte é dele.
-        for (naming, rect) in [(false, geometry.package), (true, geometry.name)] {
-            if !rect.contains(point) {
-                continue;
-            }
-            let field = if naming {
-                &mut self.name
-            } else {
-                &mut self.package
-            };
-            field.layout(context, rect);
-            field.event(
-                &mut EventContext::default(),
-                &UiEvent::PointerDown(primary_pointer(point)),
-            );
-            self.focus_field(naming);
-            return NewItemOutcome::Idle;
-        }
-        if geometry.create.contains(point) {
-            return self.submit();
-        }
-        if geometry.cancel.contains(point) {
-            self.close();
-        }
+        let naming = match outcome.target {
+            Some(NAME_ID) => true,
+            Some(PACKAGE_ID) => false,
+            _ => return NewItemOutcome::Idle,
+        };
+        let field = if naming {
+            &mut self.name
+        } else {
+            &mut self.package
+        };
+        field.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        self.focus_field(naming);
         NewItemOutcome::Idle
+    }
+
+    /// Declara ao anfitrião a área de cada peça da janela.
+    ///
+    /// O arranjo continua sendo desta tela — o `FormLayout` sabe onde cada campo
+    /// e cada botão ficam. O que o anfitrião recebe é o resultado, e com ele o
+    /// acerto e a entrega deixam de ser escritos à mão.
+    fn place_widgets(&mut self, context: &LayoutContext, size: Size) {
+        let geometry = self.geometry(context, size);
+        self.host.clear_placement();
+        self.host.place(PACKAGE_ID, geometry.package);
+        self.host.place(NAME_ID, geometry.name);
+        self.host.place(CANCEL_ID, geometry.cancel);
+        self.host.place(CREATE_ID, geometry.create);
+        self.package.layout(context, geometry.package);
+        self.name.layout(context, geometry.name);
     }
 
     /// Tecla dentro da janela.
@@ -295,13 +346,10 @@ impl NewItemSurface {
             field.layout(layout, rect);
             field.paint(paint);
         }
-        for (button, rect) in [
-            (&self.cancel_button, geometry.cancel),
-            (&self.create_button, geometry.create),
-        ] {
-            let mut button = button.clone();
-            button.layout(layout, rect);
-            button.paint(paint);
+        // Os botões são desenhados pelo anfitrião, que é quem os possui — e por
+        // isso eles acendem sob o ponteiro e afundam ao ser pressionados.
+        for command in self.host.paint() {
+            paint.push(command);
         }
         if let Some(message) = dialog.message.as_ref() {
             caption(

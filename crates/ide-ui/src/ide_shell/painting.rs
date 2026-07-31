@@ -4,8 +4,56 @@
 //! cima, na ordem inversa do funil de eventos.
 
 use super::*;
+use ui_components::{ConsoleLine, Label, Panel, SurfaceTone, paint_icon};
 
 impl IdeShell {
+    /// Desenha um texto solto com a `Label` da biblioteca.
+    ///
+    /// A IDE escolhe o papel — título, legenda, aviso — e a posição; cor e
+    /// desenho vêm do componente, e é por aí que o tema alcança este texto.
+    fn paint_label(
+        &self,
+        commands: &mut Vec<PaintCommand>,
+        id: WidgetId,
+        text: &str,
+        origin: Point,
+        font_size: f32,
+        tone: IconTint,
+    ) {
+        let mut label = Label::new(id, text)
+            .with_font_size(font_size)
+            .with_tone(tone);
+        label.layout(
+            &self.layout_context(),
+            Rect::new(origin.x, origin.y, 0.0, 0.0),
+        );
+        let mut paint = self.paint_context();
+        label.paint(&mut paint);
+        commands.extend(paint.into_commands());
+    }
+
+    /// Desenha uma faixa da moldura com a superfície da biblioteca.
+    ///
+    /// A cor vem do tom, e o tom vem do tema: escrita à mão, cada faixa fixava a
+    /// cor no lugar, e a tela deixava de trocar de tema mesmo tendo tema.
+    fn paint_surface_band(
+        &self,
+        commands: &mut Vec<PaintCommand>,
+        id: WidgetId,
+        area: Rect,
+        tone: SurfaceTone,
+        border: bool,
+    ) {
+        let mut panel = Panel::new(id, tone);
+        if border {
+            panel = panel.with_border();
+        }
+        panel.layout(&self.layout_context(), area);
+        let mut paint = self.paint_context();
+        panel.paint(&mut paint);
+        commands.extend(paint.into_commands());
+    }
+
     pub fn set_text_metrics(&mut self, metrics: Arc<dyn TextMetrics>) {
         self.context.text_metrics = Some(metrics);
     }
@@ -94,46 +142,54 @@ impl IdeShell {
             self.debug_panel.view.frames.len(),
         );
         let panel = geometry.panel;
-        let mut commands = vec![
-            fill(panel, colors.surface),
-            fill(
+        let mut commands = Vec::new();
+        self.paint_surface_band(
+            &mut commands,
+            DEBUG_PANEL_SURFACE_ID,
+            panel,
+            SurfaceTone::Surface,
+            false,
+        );
+        commands.extend([
+            raw_fill(
                 Rect::new(panel.origin.x, panel.origin.y, 1.0, panel.size.height),
                 colors.border,
             ),
             PaintCommand::PushClip(panel),
-            label(
-                &self.debug_panel.view.status,
-                Point::new(panel.origin.x + 12.0, panel.origin.y + 10.0),
-                if self.debug_panel.view.is_stopped() {
-                    colors.accent
-                } else {
-                    colors.text
-                },
-                13.0,
-            ),
-        ];
+        ]);
+        self.paint_label(
+            &mut commands,
+            DEBUG_STATUS_ID,
+            &self.debug_panel.view.status,
+            Point::new(panel.origin.x + 12.0, panel.origin.y + 10.0),
+            13.0,
+            if self.debug_panel.view.is_stopped() {
+                IconTint::Accent
+            } else {
+                IconTint::Text
+            },
+        );
 
-        for (rect, (title, _)) in geometry.buttons.iter().zip(DEBUG_BUTTONS) {
-            commands.push(fill(*rect, colors.elevated));
-            commands.push(stroke(*rect, colors.border));
-            commands.push(label(
-                title,
-                Point::new(rect.origin.x + 8.0, rect.origin.y + 7.0),
-                if self.debug_panel.view.is_stopped() {
-                    colors.text
-                } else {
-                    colors.muted_text
-                },
-                12.0,
-            ));
+        // Sem quadro parado não há passo a dar: o botão desabilitado diz isso
+        // pelo próprio desenho, que é o que o rótulo apagado tentava dizer à mão.
+        let parado = self.debug_panel.view.is_stopped();
+        let mut faixa = self.paint_context();
+        for (rect, button) in geometry.buttons.iter().zip(&self.debug_panel.step_buttons) {
+            let mut button = button.clone();
+            button.set_disabled(!parado);
+            button.layout(&self.layout_context(), *rect);
+            button.paint(&mut faixa);
         }
+        commands.extend(faixa.into_commands());
 
-        commands.push(label(
+        self.paint_label(
+            &mut commands,
+            DEBUG_FRAMES_TITLE_ID,
             "Pilha de chamadas",
             Point::new(panel.origin.x + 12.0, geometry.frames.origin.y - 20.0),
-            colors.muted_text,
             12.0,
-        ));
+            IconTint::Muted,
+        );
         let mut frames = self.debug_panel.frames.clone();
         frames.layout(&self.layout_context(), geometry.frames);
         let mut variables = self.debug_panel.variables.clone();
@@ -141,12 +197,14 @@ impl IdeShell {
         let mut lists = self.paint_context();
         frames.paint(&mut lists);
 
-        commands.push(label(
+        self.paint_label(
+            &mut commands,
+            DEBUG_VARS_TITLE_ID,
             "Variáveis",
             Point::new(panel.origin.x + 12.0, geometry.variables.origin.y - 20.0),
-            colors.muted_text,
             12.0,
-        ));
+            IconTint::Muted,
+        );
         variables.paint(&mut lists);
         commands.extend(lists.into_commands());
         commands.push(PaintCommand::PopClip);
@@ -190,95 +248,121 @@ impl IdeShell {
         let editor_x = ACTIVITY_WIDTH + sidebar;
         let geo = self.geometry(size);
         let colors = self.context.theme.colors;
-        let mut commands = vec![
-            fill(
+        let mut commands = Vec::new();
+        // As faixas da moldura, de trás para a frente. Cada uma é uma superfície
+        // da biblioteca: o tom nomeia o nível, e o tema resolve a cor.
+        for (id, area, tone, border) in [
+            (
+                CHROME_BACKGROUND_ID,
                 Rect::new(0.0, 0.0, size.width, size.height),
-                colors.background,
+                SurfaceTone::Background,
+                false,
             ),
-            fill(
+            (
+                CHROME_TITLE_ID,
                 Rect::new(0.0, 0.0, size.width, TITLE_HEIGHT),
-                colors.elevated,
+                SurfaceTone::Elevated,
+                false,
             ),
-            fill(
+            (
+                CHROME_ACTIVITY_ID,
                 Rect::new(
                     0.0,
                     TITLE_HEIGHT,
                     ACTIVITY_WIDTH,
                     geo.content_bottom - TITLE_HEIGHT,
                 ),
-                colors.elevated,
+                SurfaceTone::Elevated,
+                false,
             ),
-            fill(
+            (
+                CHROME_SIDEBAR_ID,
                 Rect::new(
                     ACTIVITY_WIDTH,
                     TITLE_HEIGHT,
                     sidebar,
                     geo.content_bottom - TITLE_HEIGHT,
                 ),
-                colors.surface,
+                SurfaceTone::Surface,
+                false,
             ),
-            fill(
+            (
+                CHROME_TABS_ID,
                 Rect::new(editor_x, TITLE_HEIGHT, geo.editor_width, TAB_HEIGHT),
-                colors.elevated,
+                SurfaceTone::Elevated,
+                false,
             ),
-            fill(
+            (
+                CHROME_TERMINAL_ID,
                 Rect::new(
                     editor_x,
                     geo.editor_bottom,
                     geo.editor_width,
                     geo.terminal_height,
                 ),
-                colors.surface,
+                SurfaceTone::Surface,
+                true,
             ),
-            stroke(
-                Rect::new(
-                    editor_x,
-                    geo.editor_bottom,
-                    geo.editor_width,
-                    geo.terminal_height,
-                ),
-                colors.border,
+        ] {
+            self.paint_surface_band(&mut commands, id, area, tone, border);
+        }
+        for (id, texto, origem, tamanho, tom) in [
+            (
+                CHROME_TITLE_TEXT_ID,
+                "ER IDE",
+                Point::new(14.0, 9.0),
+                16.0,
+                IconTint::Text,
             ),
-            label("ER IDE", Point::new(14.0, 9.0), colors.text, 16.0),
-            label(
+            (
+                CHROME_EXPLORER_ID,
                 "EXPLORER",
                 Point::new(ACTIVITY_WIDTH + 14.0, TITLE_HEIGHT + 14.0),
-                colors.muted_text,
                 12.0,
+                IconTint::Muted,
             ),
-            label(
-                &self.explorer.workspace_name,
+            (
+                CHROME_WORKSPACE_ID,
+                self.explorer.workspace_name.as_str(),
                 Point::new(ACTIVITY_WIDTH + 14.0, TITLE_HEIGHT + 42.0),
-                colors.text,
                 14.0,
+                IconTint::Text,
             ),
-            label(
-                "⌕",
-                Point::new(15.0, TITLE_HEIGHT + 18.0),
+        ] {
+            self.paint_label(&mut commands, id, texto, origem, tamanho, tom);
+        }
+        // Os ícones da barra de atividades são desenhados pela biblioteca, com
+        // primitivas: como texto, dependiam de a fonte do sistema ter aquele
+        // glifo, e ficavam fora do tema e da acessibilidade.
+        let mut icones = self.paint_context();
+        for (icone, topo) in [
+            (Icon::Search, TITLE_HEIGHT + 8.0),
+            (Icon::Panels, TITLE_HEIGHT + 52.0),
+        ] {
+            paint_icon(
+                &mut icones,
+                Rect::new(12.0, topo, 24.0, 24.0),
+                icone,
                 colors.text,
-                22.0,
-            ),
-            label(
-                "▣",
-                Point::new(15.0, TITLE_HEIGHT + 62.0),
-                colors.text,
-                20.0,
-            ),
-        ];
-        commands.push(fill(
+            );
+        }
+        commands.extend(icones.into_commands());
+        // O botão de recolher o terminal é um botão de verdade: retângulo,
+        // borda e glifo à mão não acendiam sob o ponteiro nem chegavam à árvore
+        // de acessibilidade.
+        let (icone, nome) = if self.terminal.minimized {
+            (Icon::ChevronUp, "Mostrar o terminal")
+        } else {
+            (Icon::ChevronDown, "Recolher o terminal")
+        };
+        let mut recolher = Button::icon(TERMINAL_TOGGLE_ID, icone, nome);
+        recolher.layout(
+            &self.layout_context(),
             Rect::new(size.width - 30.0, geo.editor_bottom + 4.0, 22.0, 22.0),
-            colors.elevated,
-        ));
-        commands.push(stroke(
-            Rect::new(size.width - 30.0, geo.editor_bottom + 4.0, 22.0, 22.0),
-            colors.border,
-        ));
-        commands.push(label(
-            if self.terminal.minimized { "^" } else { "v" },
-            Point::new(size.width - 24.0, geo.editor_bottom + 7.0),
-            colors.text,
-            14.0,
-        ));
+        );
+        let mut recolher_paint = self.paint_context();
+        recolher.paint(&mut recolher_paint);
+        commands.extend(recolher_paint.into_commands());
         commands.push(PaintCommand::PushClip(Rect::new(
             ACTIVITY_WIDTH,
             EXPLORER_TOP - EXPLORER_ROW_HEIGHT,
@@ -330,12 +414,14 @@ impl IdeShell {
                 commands.extend(self.paint_scrollbar(ScrollTarget::EditorHorizontal, size));
             }
         } else {
-            commands.push(label(
+            self.paint_label(
+                &mut commands,
+                EDITOR_EMPTY_ID,
                 "Select a file in Explorer",
                 Point::new(editor_x + 55.0, geo.content_top + 30.0),
-                colors.muted_text,
                 16.0,
-            ));
+                IconTint::Muted,
+            );
         }
         commands.push(PaintCommand::PopClip);
         if self.debug_panel.view.attached {
@@ -347,21 +433,26 @@ impl IdeShell {
             let mut terminal_tabs_paint = self.paint_context();
             terminal_tabs.paint(&mut terminal_tabs_paint);
             commands.extend(terminal_tabs_paint.into_commands());
-            commands.push(fill(
+            self.paint_surface_band(
+                &mut commands,
+                TERMINAL_INPUT_ID,
                 Rect::new(editor_x, geo.editor_bottom + 30.0, geo.editor_width, 30.0),
-                colors.background,
-            ));
-            let active_terminal = &self.terminal.tabs[self.terminal.active];
-            commands.push(label(
-                &format!(
-                    "{} {}",
-                    active_terminal.session.prompt(),
-                    active_terminal.session.input()
-                ),
+                SurfaceTone::Background,
+                false,
+            );
+            let linha_de_comando = {
+                let terminal = &self.terminal.tabs[self.terminal.active];
+                format!("{} {}", terminal.session.prompt(), terminal.session.input())
+            };
+            self.paint_label(
+                &mut commands,
+                TERMINAL_PROMPT_ID,
+                &linha_de_comando,
                 Point::new(editor_x + 14.0, geo.editor_bottom + 38.0),
-                colors.text,
                 14.0,
-            ));
+                IconTint::Text,
+            );
+            let active_terminal = &self.terminal.tabs[self.terminal.active];
             let terminal_visible = ((geo.terminal_height - 62.0) / EDITOR_LINE_HEIGHT)
                 .floor()
                 .max(1.0) as usize;
@@ -371,49 +462,49 @@ impl IdeShell {
                     .line_count()
                     .saturating_sub(terminal_visible),
             );
-            for (index, line) in active_terminal
+            // A saída é do console da biblioteca: ele mede a fonte de código e é
+            // essa medida que posiciona o realce da seleção e responde onde o
+            // clique caiu. A IDE diz quais linhas, quais estão marcadas e onde.
+            let linhas: Vec<_> = active_terminal
                 .session
                 .lines()
-                .skip(terminal_offset)
-                .take(terminal_visible)
-                .enumerate()
-            {
-                let absolute_line = terminal_offset + index;
-                if let Some((start, end)) =
-                    selection_columns(self.terminal.selection, absolute_line, &line.text)
-                {
-                    commands.push(fill(
-                        Rect::new(
-                            editor_x + 14.0 + start as f32 * TERMINAL_CHAR_WIDTH,
-                            geo.editor_bottom + 66.0 + index as f32 * EDITOR_LINE_HEIGHT,
-                            (end.saturating_sub(start) as f32 * TERMINAL_CHAR_WIDTH).max(2.0),
-                            EDITOR_LINE_HEIGHT,
-                        ),
-                        colors.selection,
-                    ));
-                }
-                commands.push(label(
-                    &line.text,
-                    Point::new(
-                        editor_x + 14.0,
-                        geo.editor_bottom + 68.0 + index as f32 * EDITOR_LINE_HEIGHT,
-                    ),
-                    if line.is_error {
-                        colors.danger
-                    } else {
-                        colors.muted_text
-                    },
-                    14.0,
-                ));
-            }
+                .map(|line| ConsoleLine::new(line.text.clone(), line.is_error))
+                .collect();
+            let marcadas: Vec<_> = (terminal_offset..terminal_offset + terminal_visible)
+                .filter_map(|numero| {
+                    let linha = active_terminal.session.lines().nth(numero)?;
+                    let (inicio, fim) =
+                        selection_columns(self.terminal.selection, numero, &linha.text)?;
+                    Some((numero, inicio, fim))
+                })
+                .collect();
+            let contexto = self.layout_context();
+            let area = Rect::new(
+                editor_x,
+                geo.editor_bottom + 66.0,
+                geo.editor_width,
+                terminal_visible as f32 * EDITOR_LINE_HEIGHT,
+            );
+            let mut saida = self.paint_context();
+            // O console é o mesmo entre quadros: é a medição guardada nele que
+            // o clique consulta depois, e as duas precisam concordar.
+            let console = &mut self.terminal.console;
+            console.set_lines(linhas);
+            console.set_first_visible(terminal_offset);
+            console.set_selection(marcadas);
+            console.layout(&contexto, area);
+            console.paint(&mut saida);
+            commands.extend(saida.into_commands());
             commands.extend(self.paint_scrollbar(ScrollTarget::Terminal, size));
         } else {
-            commands.push(label(
+            self.paint_label(
+                &mut commands,
+                TERMINAL_COLLAPSED_ID,
                 "Terminal",
                 Point::new(editor_x + 10.0, geo.editor_bottom + 8.0),
-                colors.text,
                 13.0,
-            ));
+                IconTint::Text,
+            );
         }
         if !self.inspection.is_open()
             && let Some(anchor) = self.completion_anchor(size)

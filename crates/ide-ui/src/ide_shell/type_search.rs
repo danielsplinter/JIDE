@@ -8,6 +8,9 @@ use ide_domain::Location;
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{ListView, ModalHost, TextInput};
 use ui_core::{Point, Rect, Size, UiEvent, WidgetId};
+use ui_host::UiHost;
+use ui_layout_api::LayoutStyle;
+use ui_layout_taffy::TaffyLayoutEngine;
 
 use crate::search::{ContentSearchHit, TypeSearchHit};
 
@@ -19,6 +22,8 @@ const PANEL_SIZE: Size = Size::new(760.0, 420.0);
 const ROW_HEIGHT: f32 = 26.0;
 /// Quantas linhas cabem: é o que decide a rolagem e o que a seta revela.
 pub(super) const VISIBLE_ROWS: usize = 12;
+/// Raiz do anfitrião desta janela; não é desenhada.
+const HOST_ROOT_ID: WidgetId = WidgetId(10_067);
 
 /// Em que a janela está buscando.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +55,8 @@ pub(super) struct TypeSearchSurface {
     selected: usize,
     /// Primeira linha visível, que é onde a rolagem mora.
     first_visible: usize,
+    /// O runtime da janela: as áreas e o acerto.
+    host: UiHost,
 }
 
 impl Default for TypeSearchSurface {
@@ -62,6 +69,11 @@ impl Default for TypeSearchSurface {
             content_results: Vec::new(),
             selected: 0,
             first_visible: 0,
+            host: UiHost::new(
+                HOST_ROOT_ID,
+                LayoutStyle::default(),
+                Box::new(TaffyLayoutEngine),
+            ),
         }
     }
 }
@@ -128,10 +140,16 @@ impl TypeSearchSurface {
         size: Size,
     ) -> TypeSearchOutcome {
         let (_, list) = self.geometry(context, size);
-        if !list.contains(point) {
+        // O painel entra como área para o anfitrião distinguir "dentro da
+        // janela" de "fora dela", que é o que decide se ela se dispensa.
+        self.host.clear_placement();
+        self.host.place(MODAL_ID, self.modal.panel_bounds());
+        self.host.place(LIST_ID, list);
+        let alvo = self.host.click(point).target;
+        if alvo != Some(LIST_ID) {
             // Clicar fora da lista não escolhe nada, e clicar fora do painel
             // dispensa a janela.
-            if !self.modal.panel_bounds().contains(point) {
+            if alvo.is_none() {
                 self.close();
             }
             return TypeSearchOutcome::Idle;

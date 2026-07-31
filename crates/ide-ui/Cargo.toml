@@ -15,6 +15,10 @@ ui-components.workspace = true
 ui-editor.workspace = true
 ui-core.workspace = true
 ui-focus.workspace = true
+ui-host.workspace = true
+ui-commands.workspace = true
+ui-layout-api.workspace = true
+ui-layout-taffy.workspace = true
 ui-render-api.workspace = true
 ui-window-api.workspace = true
 

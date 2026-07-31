@@ -1,6 +1,7 @@
 //! Construção do shell e o que a aplicação contribui depois dela.
 
 use super::*;
+use ui_components::Console;
 
 impl IdeShell {
     pub fn from_tree(workspace: FileNode) -> Self {
@@ -70,6 +71,11 @@ impl IdeShell {
                 completion_selected: 0,
             },
             terminal: TerminalPanelState {
+                console: Console::new(TERMINAL_CONSOLE_ID, Vec::new()).with_metrics(
+                    14.0,
+                    EDITOR_LINE_HEIGHT,
+                    14.0,
+                ),
                 tabs: terminals,
                 active: 0,
                 height: TERMINAL_DEFAULT_HEIGHT,
@@ -97,6 +103,13 @@ impl IdeShell {
                 breakpoints: BTreeMap::new(),
                 verified_breakpoints: BTreeMap::new(),
                 view: DebugView::default(),
+                step_buttons: DEBUG_BUTTONS
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (title, _))| {
+                        Button::new(WidgetId(DEBUG_STEP_BASE_ID.0 + index as u64), *title)
+                    })
+                    .collect(),
                 frames: ListView::new(DEBUG_FRAMES_ID, Vec::<String>::new())
                     .with_row_height(DEBUG_ROW_HEIGHT),
                 variables: ListView::new(DEBUG_VARIABLES_ID, Vec::<String>::new())

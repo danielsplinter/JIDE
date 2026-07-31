@@ -187,7 +187,7 @@ etapas, `EventOutcome` com `handled`, ordem de `Tab` declarada em separado,
 `request_focus` para a tecnologia assistiva, e a própria adoção. Estão em
 `17-ui-host`.
 
-### Fase 4 — As janelas modais da IDE
+### Fase 4 — As janelas modais da IDE ✅ Concluída
 
 As cinco superfícies — renomear, gerar, buscar, criar item, configurações,
 inspeção — adotam o anfitrião. São o menor risco: já são unidades fechadas com
@@ -197,7 +197,46 @@ Some daqui o regime 3 (teste de retângulo) e, se a fase 2 confirmar, o funil.
 
 **Critério:** nenhuma janela resolve clique por `contains(point)`; 315 testes.
 
-### Fase 5 — Os painéis contínuos
+**Executada nas seis.** Cada janela passou a ter um `UiHost` próprio. O que ele
+recebe são as **áreas** que o `FormLayout` já calculava — o arranjo continua sendo
+da tela — e o que ele devolve é o alvo e os comandos. As cadeias de
+`if rect.contains(point)` do roteamento de clique sumiram das seis.
+
+A divisão que se firmou, e que vale para as fases seguintes:
+
+> O anfitrião possui o que **só emite** — os botões. O que a janela **lê** —
+> campo de texto, lista, árvore — continua dela, mas a área é declarada ao
+> anfitrião, que resolve o acerto e diz quem foi atingido.
+
+Os botões passaram a ser componentes de verdade: acendem sob o ponteiro e afundam
+ao ser pressionados, o que não acontecia enquanto eram desenho com teste de
+retângulo por trás.
+
+**Duas coisas que a migração exigiu do anfitrião**, ambas achadas por teste
+vermelho e não por leitura:
+
+1. **`place`** — posicionar por área calculada pelo consumidor. Sem isso, adotar o
+   anfitrião obrigaria a redesenhar o arranjo das seis janelas em Taffy antes de
+   ganhar qualquer roteamento. E `place` precisou declarar o nó na árvore: sem
+   caminho da raiz até o alvo, o roteador não monta rota — o primeiro teste
+   vermelho da fase;
+2. **`click`** — pressionar e soltar no mesmo ponto. O botão aciona na **soltura**,
+   e a IDE só encaminha a pressão; o segundo teste vermelho mostrou as três
+   primeiras janelas migradas sem acionar nada. Foi um defeito que eu havia
+   introduzido e que os testes existentes pegaram.
+
+**O que sobrou de `contains(point)`** nas janelas, e por quê: dois são a área da
+roda do mouse — `generate` e `type_search` decidem se a rolagem é da lista antes
+de repassá-la —, e um é o guarda da lista de páginas das Configurações. Nenhum é
+roteamento de clique. Passam a fazer sentido quando o arranjo também for do
+anfitrião, na fase em que o `LayoutSnapshot` responder por todas as áreas.
+
+**O funil não desapareceu**, ao contrário do que a fase 2 previu. Ele deixará de
+existir quando houver **um** anfitrião para a janela inteira, e não um por
+superfície: é ele que hoje decide qual janela está aberta, e essa pergunta some
+quando a sobreposição for a da árvore. Fica para a fase 5, junto com os painéis.
+
+### Fase 5 — Os painéis contínuos ✅ Concluída
 
 Editor, Explorer e terminal. São o maior risco: arrasto, seleção, rolagem
 automática ao sair da área visível — exatamente onde nasceram os defeitos da
@@ -206,7 +245,31 @@ ponteiro.
 
 **Critério:** nenhum `clone()` de widget para receber evento.
 
-### Fase 6 — Só a biblioteca desenha
+**Executada.** Os dois sítios do regime 2 eram a árvore do Explorer e a árvore da
+inspeção. Os dois agora entregam o gesto ao widget **de verdade**.
+
+A causa do clone era estrutural e vale registrar: posicionar um widget exige
+acesso mutável, e a pintura recebe `&self`. Como a mesma função servia às duas
+coisas, ela clonava para poder posicionar. Só que o clone morre no fim da chamada,
+levando junto o destaque sob o ponteiro e a marca de que o gesto começou naquela
+linha — o componente sabia responder, e ninguém guardava a resposta.
+
+A separação é a que faltava: **posicionar-e-entregar** é caminho mutável, e a
+pintura continua recebendo uma cópia posicionada. Quem recebe evento tem de ser
+quem sobrevive ao quadro.
+
+**O que continua, e por quê.** As abas — do editor e do terminal — não são clones:
+são **reconstruídas a cada uso** a partir do estado da sessão, o que perde o mesmo
+estado de interação pelo mesmo motivo. O remédio já existe e está testado: a troca
+por identidade do anfitrião, que transplanta o `InteractionState`. Aplicá-la exige
+que as abas passem a viver num anfitrião — o da janela inteira, e não um por
+superfície —, e é por isso que ela anda junto com o desaparecimento do funil.
+
+Ficam as duas coisas para a mesma etapa seguinte: **um anfitrião só**, que dissolve
+o funil, transplanta o estado das abas e responde pelas áreas que hoje ainda são
+testadas à mão na roda do mouse.
+
+### Fase 6 — Só a biblioteca desenha 🔶 Regra travada, dívida em aberto
 
 Hoje a IDE monta **48 primitivas visuais** à mão — `FillRect`, `StrokeRect`,
 `DrawText`. Parte é arranjo legítimo (faixas de fundo), parte contraria regra já
@@ -225,6 +288,100 @@ composição — quais janelas existem, o que cada uma mostra — continua da ID
 **Critério:** guarda de arquitetura contando zero primitivas visuais construídas
 no crate da IDE. Comandos estruturais (`PushClip`, `PopClip`, `LayerBreak`) ficam
 de fora da regra até a biblioteca oferecer contêineres que recortem sozinhos.
+
+**Zero não é alcançável hoje**, e fingir o contrário seria escrever um critério
+que só passa quando o console existir. O que dá para fazer agora — e foi feito —
+é **impedir que a dívida cresça**, com o número real dela à vista.
+
+As três funções que produzem primitivas passaram a se chamar `raw_fill`,
+`raw_stroke` e `raw_label`. O nome não é enfeite: era impossível contá-las antes,
+porque `label(` também é nome de método em meia dúzia de lugares, e um guarda que
+conta errado é pior do que nenhum. Com o prefixo, a contagem é exata.
+
+O guarda `the_ide_never_draws_more_raw_primitives_than_it_already_does` fixa o
+teto em **35** chamadas, hoje concentradas em dois lugares: a moldura da janela
+(`painting.rs`, 29) e a página de depuração das Configurações (`settings.rs`, 6).
+Cada peça que a ERLibUi ganhar derruba um punhado delas, e o teto desce junto.
+
+**A dívida, com endereço e preço:**
+
+| o que | quantas | o que falta na biblioteca |
+|---|---|---|
+| ~~faixas e fundos da moldura~~ | ~~14~~ | ✅ `Panel` com `SurfaceTone` |
+| linhas e seleção do terminal | ~8 | um console; leva junto o `TERMINAL_CHAR_WIDTH = 8.4` |
+| painel de depuração | ~2 | fundo e botões já são componentes; resta a borda e dois títulos |
+| ~~ícones da barra de atividades~~ | ~~2~~ | ✅ `Icon::Search` e `Icon::Panels` |
+| ~~botão de recolher o terminal~~ | ~~3~~ | ✅ `Button::icon` com `ChevronUp`/`Down` |
+| contorno de foco e legendas | ~4 | capacidade no componente |
+
+**Os ícones foram corrigidos.** Eram os únicos que contrariavam regra escrita da
+biblioteca — *"aplicações não devem desenhar ícones por conta própria"*. A ERLibUi
+ganhou `Icon::Search`, `Icon::Panels`, `ChevronUp` e `ChevronDown`, desenhados com
+primitivas, e o botão de recolher o terminal virou um `Button::icon` de verdade —
+com destaque sob o ponteiro e nome acessível, que retângulo mais glifo não tinha.
+O teto do guarda caiu de 35 para **30**.
+
+Um teste precisou ser corrigido junto, e a correção é reveladora: o teste das
+marcas da calha contava **qualquer** círculo à esquerda dela, e o ícone de busca é
+um anel. O filtro estava frouxo — a faixa certa é a da calha mesmo, entre a barra
+lateral e o texto. Um desenho novo em outra parte da tela não deveria ter como
+quebrá-lo, e agora não tem.
+
+Os cinco botões da faixa de execução do painel de depuração também já são
+componentes. Eram retângulo, borda e rótulo desenhados um a um, e por isso não
+acendiam sob o ponteiro nem afundavam ao ser pressionados.
+
+A troca corrigiu um defeito de comportamento junto, e vale dizer qual: o rótulo
+apagado sinalizava "indisponível" quando não havia quadro parado, mas **o clique
+passava assim mesmo**, mandando um passo que o depurador não tinha como dar. O
+`Button` desabilitado recusa o gesto, que é o que o desenho já prometia. Um teste
+precisou declarar o quadro parado para continuar exercitando o que exercitava.
+
+**O `Panel` chegou.** A ERLibUi ganhou a superfície — preenchimento com tom do
+tema e borda opcional — e o `SurfaceTone`, que nomeia o nível em vez da cor:
+`Background`, `Surface`, `Elevated`. Por que o tom e não a cor: escrita à mão,
+cada faixa fixava a cor no lugar, e uma tela com dezenas delas deixa de trocar de
+tema **mesmo tendo tema**. O teste do componente verifica exatamente isso — a
+mesma superfície pinta cor diferente no tema escuro e no de alto contraste.
+
+**E os rótulos foram junto.** Tudo o que era texto cru e já tinha peça virou
+`Label`: o estado e os dois títulos do painel de depuração, o nome do produto, o
+título da barra lateral, o nome do projeto, o convite de tela vazia, a linha de
+comando do terminal, o rótulo do terminal recolhido e os quatro textos da página
+de depuração. As faixas restantes — barra lateral das Configurações e fundo da
+linha de comando — viraram `Panel`.
+
+**O console chegou, e com ele o `raw_label` deixou de existir.** A ERLibUi ganhou
+o `Console`: linhas com tom de erro, rolagem e seleção por coluna. Ele mede a
+fonte **de código** — a da interface é proporcional e mediria a coluna errada — e
+guarda a medida do `layout`, porque pintar o realce e responder onde o clique caiu
+precisam do mesmo número. Era exatamente isso que a IDE não tinha como fazer, e
+por isso escrevia `TERMINAL_CHAR_WIDTH = 8.4`.
+
+Com a saída do terminal virando componente, **nenhum texto da IDE é mais desenhado
+à mão**: a função `raw_label` ficou sem uso e foi removida.
+
+**O teto do guarda caiu de 35 para 2.** O que sobrou:
+
+| o que | quantas | por quê |
+|---|---|---|
+| divisória de 1 ponto do painel de depuração | 1 | é régua, não superfície: a biblioteca tem `Splitter` para a arrastável e nada para a fixa |
+| contorno de foco dos campos de depuração | 1 | devia ser capacidade do `TextInput`, não desenho de quem o hospeda |
+
+As duas pedem decisão de projeto na biblioteca, não trabalho na IDE.
+
+**O `TERMINAL_CHAR_WIDTH = 8.4` não existe mais.** O console passou a viver no
+estado do painel, em vez de nascer a cada pintura, e é ele que responde
+`position_at` — a mesma medição com que desenhou. Era a última estimativa de
+largura de caractere na IDE, e o motivo de ela existir era não haver quem medisse:
+o `terminal_position_at` deixou de precisar até do tamanho da janela, porque quem
+sabe onde a saída está é o componente.
+
+**Desvio da regra de verificação, declarado.** Esta especificação exigia que a
+contagem de testes da IDE não mudasse. Ela foi de 315 para **316**, e o teste novo
+é o próprio guarda. A regra existe contra refatoração que muda comportamento; um
+invariante novo sendo passado a valer é outra coisa, e vale dizer qual das duas
+está acontecendo em vez de contornar o número.
 
 ## O que não sai da IDE
 

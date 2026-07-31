@@ -102,6 +102,29 @@ impl IdeShell {
         tree
     }
 
+    /// Entrega o gesto à árvore **de verdade**, e não a uma cópia.
+    ///
+    /// Posicionar exige acesso mutável, e a pintura recebe `&self` — foi daí que
+    /// nasceu o clone. Só que o clone morre no fim da chamada, levando junto o
+    /// destaque sob o ponteiro e a marca de que o gesto começou naquela linha.
+    /// Quem recebe evento tem de ser quem sobrevive ao quadro.
+    pub(super) fn explorer_tree_event(&mut self, point: Point, size: Size) -> Option<u64> {
+        let context = self.layout_context();
+        let bounds = self.explorer_tree_rect(size);
+        let offset = Point::new(
+            self.explorer.scroll_x,
+            self.explorer.scroll_line as f32 * EXPLORER_ROW_HEIGHT,
+        );
+        let tree = &mut self.explorer.tree;
+        tree.layout(&context, bounds);
+        tree.set_scroll_offset(offset);
+        tree.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        tree.selected()
+    }
+
     pub(super) fn explorer_path_for(&self, id: u64) -> Option<(PathBuf, bool)> {
         fn visit(node: &FileNode, id: u64) -> Option<(PathBuf, bool)> {
             if explorer_id(&node.path) == id {
@@ -184,12 +207,8 @@ impl IdeShell {
         }
         // Qual nó está sob o ponteiro é a árvore quem sabe: recuo, deslocamento
         // horizontal e virtualização são dela.
-        let mut tree = self.explorer_tree_for(size);
-        tree.event(
-            &mut EventContext::default(),
-            &UiEvent::PointerDown(primary_pointer(point)),
-        );
-        let Some((path, is_directory)) = tree.selected().and_then(|id| self.explorer_path_for(id))
+        let selecionado = self.explorer_tree_event(point, size);
+        let Some((path, is_directory)) = selecionado.and_then(|id| self.explorer_path_for(id))
         else {
             return;
         };
@@ -408,12 +427,8 @@ impl IdeShell {
         }
         // Qual nó foi clicado é a árvore quem sabe: o recuo, o deslocamento
         // horizontal e a virtualização são dela.
-        let mut tree = self.explorer_tree_for(size);
-        tree.event(
-            &mut EventContext::default(),
-            &UiEvent::PointerDown(primary_pointer(point)),
-        );
-        let entry = tree.selected().and_then(|id| self.explorer_path_for(id));
+        let selecionado = self.explorer_tree_event(point, size);
+        let entry = selecionado.and_then(|id| self.explorer_path_for(id));
         if let Some((path, is_directory)) = entry {
             self.context.focus = ShellFocus::Explorer;
             self.explorer.tree.set_selected(Some(explorer_id(&path)));

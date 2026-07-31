@@ -10,8 +10,12 @@ use std::hash::{Hash, Hasher};
 
 use ide_workspace::TextBuffer;
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
+use ui_commands::CommandEvent;
 use ui_components::{Button, IconTint, Label, ModalHost, TreeItem, TreeView};
-use ui_core::{Point, Rect, Size, UiEvent, WidgetId};
+use ui_core::{Point, Rect, Size, UiEvent, WidgetAction, WidgetId};
+use ui_host::UiHost;
+use ui_layout_api::LayoutStyle;
+use ui_layout_taffy::TaffyLayoutEngine;
 
 use super::geometry::{InspectionGeometry, inspection_geometry};
 use super::primary_pointer;
@@ -30,6 +34,10 @@ const SOURCE_CAPTION_ID: WidgetId = WidgetId(10_053);
 const MESSAGE_ID: WidgetId = WidgetId(10_054);
 const PANEL_SIZE: Size = Size::new(720.0, 420.0);
 pub(super) const ROW_HEIGHT: f32 = 26.0;
+/// Área do editor de expressões, para o anfitrião distinguir o alvo.
+const SOURCE_ID: WidgetId = WidgetId(10_068);
+/// Raiz do anfitrião desta janela; não é desenhada.
+const HOST_ROOT_ID: WidgetId = WidgetId(10_069);
 
 /// O que a janela precisa perguntar ao alvo, ou contar na barra.
 pub(super) enum InspectionRequest {
@@ -116,6 +124,8 @@ pub(super) struct InspectionSurface {
     editor: EditorPane,
     source: TextBuffer,
     run_button: Button,
+    /// O runtime da janela: as áreas, o acerto e a entrega aos botões.
+    host: UiHost,
     focus: InspectionFocus,
     message: Option<String>,
     run: Option<InspectionRun>,
@@ -131,11 +141,30 @@ impl Default for InspectionSurface {
             editor: EditorPane::new(EditorCapabilities::plain()),
             source: TextBuffer::new(String::new()),
             run_button: Button::new(RUN_ID, "Executar").with_command("inspect.run"),
+            host: new_host(),
             focus: InspectionFocus::Tree,
             message: None,
             run: None,
         }
     }
+}
+
+/// O anfitrião da janela, com os dois botões dentro dele.
+fn new_host() -> UiHost {
+    let mut host = UiHost::new(
+        HOST_ROOT_ID,
+        LayoutStyle::default(),
+        Box::new(TaffyLayoutEngine),
+    );
+    host.attach(
+        Box::new(Button::new(CLOSE_ID, "Fechar").with_command("inspect.close")),
+        false,
+    );
+    host.attach(
+        Box::new(Button::new(RUN_ID, "Executar").with_command("inspect.run")),
+        false,
+    );
+    host
 }
 
 impl InspectionSurface {
@@ -445,32 +474,43 @@ impl InspectionSurface {
         attached: bool,
     ) -> Vec<InspectionRequest> {
         let geometry = self.layout_editor(context, size);
-        if geometry.close.contains(point) {
-            self.close();
-            return Vec::new();
+        self.host.clear_placement();
+        self.host.place(TREE_ID, geometry.list);
+        self.host.place(SOURCE_ID, geometry.source);
+        self.host.place(RUN_ID, geometry.run);
+        self.host.place(CLOSE_ID, geometry.close);
+        let outcome = self.host.click(point);
+        for evento in outcome.commands {
+            if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
+                match command.0.as_str() {
+                    "inspect.close" => {
+                        self.close();
+                        return Vec::new();
+                    }
+                    "inspect.run" => return self.run_source(attached),
+                    _ => {}
+                }
+            }
         }
-        if geometry.run.contains(point) {
-            return self.run_source(attached);
-        }
-        if geometry.source.contains(point) {
+        if outcome.target == Some(SOURCE_ID) {
             // O editor cuida do próprio cursor e da própria seleção.
             self.editor.pointer_down(&self.source, point, false, false);
             self.focus = InspectionFocus::Source;
             return Vec::new();
         }
         self.focus = InspectionFocus::Tree;
-        if !geometry.list.contains(point) {
+        if outcome.target != Some(TREE_ID) {
             return Vec::new();
         }
         // Qual nó foi clicado é a árvore quem sabe: recuo, marcador de expansão e
-        // rolagem são dela.
-        let mut tree = self.tree.clone();
-        tree.layout(context, geometry.list);
-        tree.event(
+        // rolagem são dela. O gesto vai à árvore de verdade: entregue a um clone,
+        // o destaque da linha morreria no fim desta chamada.
+        self.tree.layout(context, geometry.list);
+        self.tree.event(
             &mut EventContext::default(),
             &UiEvent::PointerDown(primary_pointer(point)),
         );
-        let Some(selected) = tree.selected() else {
+        let Some(selected) = self.tree.selected() else {
             return Vec::new();
         };
         let Some(view) = self.view.as_mut() else {

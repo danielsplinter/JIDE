@@ -138,9 +138,21 @@ impl IdeShell {
             self.debug_panel_rect(size),
             self.debug_panel.view.frames.len(),
         );
-        for (rect, (_, request)) in geometry.buttons.iter().zip(DEBUG_BUTTONS) {
-            if rect.contains(point) {
-                self.commands.push(ApplicationCommand::Debug(request));
+        // O gesto vai ao botão de verdade: é ele que guarda a pressão em curso.
+        let parado = self.debug_panel.view.is_stopped();
+        let areas: Vec<_> = geometry.buttons.to_vec();
+        let context = self.layout_context();
+        for (index, rect) in areas.iter().enumerate() {
+            let Some(button) = self.debug_panel.step_buttons.get_mut(index) else {
+                continue;
+            };
+            button.set_disabled(!parado);
+            button.layout(&context, *rect);
+            if !matches!(click_widget(button, point), EventResult::Ignored)
+                && let Some((_, request)) = DEBUG_BUTTONS.get(index)
+            {
+                self.commands
+                    .push(ApplicationCommand::Debug(request.clone()));
                 return;
             }
         }

@@ -73,11 +73,11 @@ use ui_components::{
     TextInput, TreeView,
 };
 use ui_core::{
-    Color, ColorTokens, CommandId, EventResult, FontId, KeyEvent, Modifiers, Point, PointerButton,
+    Color, ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton,
     PointerEvent, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_editor::{CodeEditor, GutterMark, LineDecoration};
-use ui_render_api::{DrawTextCommand, FillRectCommand, PaintCommand, StrokeRectCommand};
+use ui_render_api::{FillRectCommand, PaintCommand, StrokeRectCommand};
 use ui_window_api::ClipboardService;
 
 pub(super) const ACTIVITY_WIDTH: f32 = 48.0;
@@ -100,10 +100,29 @@ const TERMINAL_TAB_HEIGHT: f32 = 30.0;
 const TERMINAL_DEFAULT_HEIGHT: f32 = 180.0;
 const TERMINAL_MIN_HEIGHT: f32 = 120.0;
 pub(super) const TERMINAL_COLLAPSED_HEIGHT: f32 = 30.0;
-const TERMINAL_CHAR_WIDTH: f32 = 8.4;
 const DEBUG_PANEL_WIDTH: f32 = 320.0;
 pub(super) const DEBUG_ROW_HEIGHT: f32 = 21.0;
 const MENU_BAR_ID: WidgetId = WidgetId(10_001);
+/// Faixas da moldura: superfícies de fundo, sem conteúdo próprio.
+const CHROME_BACKGROUND_ID: WidgetId = WidgetId(10_080);
+const CHROME_TITLE_ID: WidgetId = WidgetId(10_081);
+const CHROME_ACTIVITY_ID: WidgetId = WidgetId(10_082);
+const CHROME_SIDEBAR_ID: WidgetId = WidgetId(10_083);
+const CHROME_TABS_ID: WidgetId = WidgetId(10_084);
+const CHROME_TERMINAL_ID: WidgetId = WidgetId(10_085);
+const DEBUG_PANEL_SURFACE_ID: WidgetId = WidgetId(10_086);
+const TERMINAL_INPUT_ID: WidgetId = WidgetId(10_087);
+const TERMINAL_CONSOLE_ID: WidgetId = WidgetId(10_088);
+/// Textos da moldura e dos painéis, que são `Label` e não desenho.
+const CHROME_TITLE_TEXT_ID: WidgetId = WidgetId(10_090);
+const CHROME_EXPLORER_ID: WidgetId = WidgetId(10_091);
+const CHROME_WORKSPACE_ID: WidgetId = WidgetId(10_092);
+const EDITOR_EMPTY_ID: WidgetId = WidgetId(10_093);
+const TERMINAL_PROMPT_ID: WidgetId = WidgetId(10_094);
+const TERMINAL_COLLAPSED_ID: WidgetId = WidgetId(10_095);
+const DEBUG_STATUS_ID: WidgetId = WidgetId(10_096);
+const DEBUG_FRAMES_TITLE_ID: WidgetId = WidgetId(10_097);
+const DEBUG_VARS_TITLE_ID: WidgetId = WidgetId(10_098);
 /// Faixa de ids das células da lista, para não colidir com outros componentes.
 /// A janela é larga porque o valor de um objeto costuma ser longo.
 /// Fatia da janela ocupada pela lista, à esquerda.
@@ -114,6 +133,8 @@ const STOP_BUTTON_ID: WidgetId = WidgetId(10_009);
 const RUN_BUTTON_ID: WidgetId = WidgetId(10_010);
 const DEBUG_BUTTON_ID: WidgetId = WidgetId(10_011);
 const DEBUG_FRAMES_ID: WidgetId = WidgetId(10_012);
+/// Primeiro id da faixa de execução; os demais seguem em sequência.
+const DEBUG_STEP_BASE_ID: WidgetId = WidgetId(10_076);
 const DEBUG_VARIABLES_ID: WidgetId = WidgetId(10_013);
 const STATUS_BAR_ID: WidgetId = WidgetId(10_014);
 const EDITOR_TABS_ID: WidgetId = WidgetId(10_015);
@@ -126,6 +147,7 @@ const EXPLORER_HORIZONTAL_SCROLLBAR_ID: WidgetId = WidgetId(10_021);
 const EXPLORER_TREE_ID: WidgetId = WidgetId(10_020);
 const SIDEBAR_SPLITTER_ID: WidgetId = WidgetId(10_022);
 const TERMINAL_SPLITTER_ID: WidgetId = WidgetId(10_023);
+const TERMINAL_TOGGLE_ID: WidgetId = WidgetId(10_024);
 const EXPLORER_CONTEXT_MENU_ID: WidgetId = WidgetId(10_025);
 const COMPLETION_POPUP_ID: WidgetId = WidgetId(10_026);
 const COMPLETION_LIST_ID: WidgetId = WidgetId(10_027);
@@ -800,23 +822,14 @@ fn click_widget(widget: &mut dyn Widget, point: Point) -> EventResult {
     widget.event(&mut context, &UiEvent::PointerUp(pointer))
 }
 
-fn fill(rect: Rect, color: Color) -> PaintCommand {
+fn raw_fill(rect: Rect, color: Color) -> PaintCommand {
     PaintCommand::FillRect(FillRectCommand { rect, color })
 }
-fn stroke(rect: Rect, color: Color) -> PaintCommand {
+fn raw_stroke(rect: Rect, color: Color) -> PaintCommand {
     PaintCommand::StrokeRect(StrokeRectCommand {
         rect,
         color,
         width: 1.0,
-    })
-}
-fn label(text: &str, origin: Point, color: Color, size: f32) -> PaintCommand {
-    PaintCommand::DrawText(DrawTextCommand {
-        font_id: FontId(0),
-        text: text.to_owned(),
-        origin,
-        color,
-        size,
     })
 }
 

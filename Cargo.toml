@@ -50,6 +50,10 @@ ui-components = { version = "0.1.0", path = "../ERLibUi/crates/ui-components" }
 ui-core = { version = "0.1.0", path = "../ERLibUi/crates/ui-core" }
 ui-editor = { version = "0.1.0", path = "../ERLibUi/crates/ui-editor" }
 ui-focus = { version = "0.1.0", path = "../ERLibUi/crates/ui-focus" }
+ui-host = { version = "0.1.0", path = "../ERLibUi/crates/ui-host" }
+ui-commands = { version = "0.1.0", path = "../ERLibUi/crates/ui-commands" }
+ui-layout-api = { version = "0.1.0", path = "../ERLibUi/crates/ui-layout-api" }
+ui-layout-taffy = { version = "0.1.0", path = "../ERLibUi/crates/ui-layout-taffy" }
 ui-render-api = { version = "0.1.0", path = "../ERLibUi/crates/ui-render-api" }
 ui-render-wgpu = { version = "0.1.0", path = "../ERLibUi/crates/ui-render-wgpu" }
 ui-text-cosmic = { version = "0.1.0", path = "../ERLibUi/crates/ui-text-cosmic" }

@@ -160,25 +160,22 @@ impl IdeShell {
         )
     }
 
-    pub(super) fn terminal_position_at(&self, point: Point, size: Size) -> TextPosition {
-        let geo = self.geometry(size);
-        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
-        let visible = self.terminal_visible_lines(size);
+    /// Linha e coluna do texto sob um ponto do terminal.
+    ///
+    /// O tamanho da janela não entra mais na conta: quem sabe onde a saída está e
+    /// quanto mede um caractere é o console, desde a última pintura.
+    pub(super) fn terminal_position_at(&self, point: Point, _size: Size) -> TextPosition {
         let active = &self.terminal.tabs[self.terminal.active];
-        let max = active.session.line_count().saturating_sub(visible);
-        let first = active.scroll_line.min(max);
-        let row = ((point.y - (geo.editor_bottom + 68.0)) / EDITOR_LINE_HEIGHT)
-            .floor()
-            .max(0.0) as usize;
-        let line = (first + row).min(active.session.line_count().saturating_sub(1));
+        // Quem responde a coluna é o console, pela mesma medição com que
+        // desenhou: estimar a largura do caractere aqui punha o clique numa
+        // coluna e o realce noutra.
+        let (linha, column) = self.terminal.console.position_at(point);
+        let line = linha.min(active.session.line_count().saturating_sub(1));
         let line_length = active
             .session
             .lines()
             .nth(line)
             .map_or(0, |value| value.text.chars().count());
-        let column = ((point.x - (editor_x + 14.0)) / TERMINAL_CHAR_WIDTH)
-            .round()
-            .max(0.0) as usize;
         TextPosition {
             line,
             column: column.min(line_length),

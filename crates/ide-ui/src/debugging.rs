@@ -46,6 +46,11 @@ pub(super) struct DebugPanelState {
     pub(super) breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
     pub(super) verified_breakpoints: BTreeMap<PathBuf, BTreeSet<u32>>,
     pub(super) view: DebugView,
+    /// Os cinco botões da faixa de execução.
+    ///
+    /// Vivem aqui, e não são desenhados a cada quadro: é o que faz cada um
+    /// acender sob o ponteiro e afundar ao ser pressionado.
+    pub(super) step_buttons: Vec<Button>,
     pub(super) frames: ListView,
     pub(super) variables: ListView,
 }

@@ -8,17 +8,21 @@
 use ide_application::SettingsSection;
 use ui_api::{EventContext, EventResult, LayoutContext, PaintContext, Widget};
 use ui_components::{
-    Button, ComboBox, ComboBoxItem, IconTint, Label, ListSelection, ListView, ModalHost, TextInput,
+    Button, ComboBox, ComboBoxItem, IconTint, Label, ListSelection, ListView, ModalHost, Panel,
+    SurfaceTone, TextInput,
 };
 use ui_core::{
-    ColorTokens, KeyEvent, Modifiers, Point, Rect, Size, UiEvent, WidgetAction, WidgetId,
+    ColorTokens, KeyEvent, Modifiers, Point, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_render_api::PaintCommand;
 
 use super::geometry::{SettingsDialogGeometry, settings_dialog_geometry, settings_pages_rect};
-use super::{click_widget, fill, label, primary_pointer, stroke};
+use super::{click_widget, primary_pointer, raw_stroke};
 use crate::settings::SettingsPage;
 use ui_focus::FocusManager;
+use ui_host::UiHost;
+use ui_layout_api::LayoutStyle;
+use ui_layout_taffy::TaffyLayoutEngine;
 
 const MODAL_ID: WidgetId = WidgetId(10_002);
 const CLOSE_ID: WidgetId = WidgetId(10_005);
@@ -38,6 +42,13 @@ const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
 /// Última página, sempre depois das que a linguagem contribui.
 pub(super) const DEBUG_PAGE_TITLE: &str = "Depuração";
 pub(super) const PAGE_ROW_HEIGHT: f32 = 42.0;
+/// Raiz do anfitrião desta página; não é desenhada.
+const HOST_ROOT_ID: WidgetId = WidgetId(10_075);
+const SIDEBAR_ID: WidgetId = WidgetId(10_100);
+const DEBUG_TITLE_ID: WidgetId = WidgetId(10_101);
+const DEBUG_CAPTION_ID: WidgetId = WidgetId(10_102);
+const DEBUG_HINT_ID: WidgetId = WidgetId(10_103);
+const DEBUG_HINT_SCOPE_ID: WidgetId = WidgetId(10_104);
 
 /// Qual das duas escolhas da seção o gesto tocou.
 pub(super) enum ToolSlot {
@@ -84,6 +95,8 @@ pub(super) struct SettingsSurface {
     pages: ListView,
     dialog: Option<SettingsDialog>,
     page: SettingsPage,
+    /// O runtime da página de depuração: as áreas e o acerto.
+    host: UiHost,
     /// Campo em foco na página de depuração. O gerenciador é da biblioteca:
     /// guardar quem tem o foco era a conta que cada tela refazia à mão.
     focus: FocusManager,
@@ -109,6 +122,11 @@ impl Default for SettingsSurface {
                 .with_selection(ListSelection::Marker),
             dialog: None,
             page: SettingsPage::default(),
+            host: UiHost::new(
+                HOST_ROOT_ID,
+                LayoutStyle::default(),
+                Box::new(TaffyLayoutEngine),
+            ),
             focus: debug_focus(),
             debug_host: TextInput::new(DEBUG_HOST_ID, "127.0.0.1").with_placeholder("host"),
             debug_port: TextInput::new(DEBUG_PORT_ID, "8000").with_placeholder("porta"),
@@ -331,17 +349,24 @@ impl SettingsSurface {
         point: Point,
         geometry: &SettingsDialogGeometry,
     ) -> SettingsOutcome {
-        if geometry.debug_host.contains(point) {
-            self.focus.request_focus(DEBUG_HOST_ID);
-            return SettingsOutcome::Idle;
-        }
-        if geometry.debug_port.contains(point) {
-            self.focus.request_focus(DEBUG_PORT_ID);
-            return SettingsOutcome::Idle;
-        }
-        if geometry.debug_attach.contains(point) {
+        // Quem estava sob o ponteiro é o anfitrião quem diz, pelas áreas que a
+        // página lhe entregou.
+        self.host.clear_placement();
+        self.host.place(DEBUG_HOST_ID, geometry.debug_host);
+        self.host.place(DEBUG_PORT_ID, geometry.debug_port);
+        self.host.place(DEBUG_ATTACH_ID, geometry.debug_attach);
+        match self.host.click(point).target {
+            Some(DEBUG_HOST_ID) => {
+                self.focus.request_focus(DEBUG_HOST_ID);
+                return SettingsOutcome::Idle;
+            }
+            Some(DEBUG_PORT_ID) => {
+                self.focus.request_focus(DEBUG_PORT_ID);
+                return SettingsOutcome::Idle;
+            }
             // O foco é preservado para o usuário corrigir um valor recusado.
-            return self.attach();
+            Some(DEBUG_ATTACH_ID) => return self.attach(),
+            _ => {}
         }
         self.focus.request_focus(WidgetId(0));
         self.close_button.layout(context, geometry.close);
@@ -519,7 +544,10 @@ impl SettingsSurface {
         let geometry = settings_dialog_geometry(modal.panel_bounds());
         modal.paint(&mut modal_paint);
         let mut commands = modal_paint.into_commands();
-        commands.push(fill(geometry.sidebar, colors.surface));
+        // A barra lateral da janela é uma superfície da biblioteca.
+        let mut sidebar = Panel::new(SIDEBAR_ID, SurfaceTone::Surface);
+        sidebar.layout(layout, geometry.sidebar);
+        sidebar.paint(&mut component_paint);
         // A navegação entre páginas é a `ListView` da biblioteca, no estilo de
         // marcador: a linha ativa ganha a barra de destaque e continua sendo um
         // rótulo para ler.
@@ -647,38 +675,56 @@ impl SettingsSurface {
         colors: ColorTokens,
     ) -> Vec<PaintCommand> {
         let origin = geometry.debug_host.origin;
-        let mut commands = vec![
-            label(
+        // Título e explicações são `Label`: o tom diz o papel, e o tema resolve a
+        // cor. Escritos como texto cru, ficavam de fora dos dois.
+        let mut paint = PaintContext::with_theme(Theme { colors });
+        for (id, texto, origem, tamanho, tom) in [
+            (
+                DEBUG_TITLE_ID,
                 "Depuração",
                 Point::new(origin.x, origin.y - 34.0),
-                colors.text,
                 17.0,
+                IconTint::Text,
             ),
-            label(
+            (
+                DEBUG_CAPTION_ID,
                 "Host e porta de depuração do processo em execução",
                 Point::new(origin.x, origin.y - 16.0),
-                colors.muted_text,
                 13.0,
+                IconTint::Muted,
             ),
-            label(
+            (
+                DEBUG_HINT_ID,
                 "Inicie o servidor com -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8000",
                 Point::new(origin.x, geometry.debug_attach.origin.y + 48.0),
-                colors.muted_text,
                 12.0,
+                IconTint::Muted,
             ),
-            label(
+            (
+                DEBUG_HINT_SCOPE_ID,
                 "Vale para qualquer processo depurado: servidor, container ou ferramenta.",
                 Point::new(origin.x, geometry.debug_attach.origin.y + 66.0),
-                colors.muted_text,
                 12.0,
+                IconTint::Muted,
             ),
-        ];
+        ] {
+            text(
+                &LayoutContext::default(),
+                &mut paint,
+                id,
+                texto,
+                origem,
+                tamanho,
+                tom,
+            );
+        }
+        let mut commands = paint.into_commands();
         for (rect, id) in [
             (geometry.debug_host, DEBUG_HOST_ID),
             (geometry.debug_port, DEBUG_PORT_ID),
         ] {
             if self.focus.focused() == Some(id) {
-                commands.push(stroke(rect, colors.accent));
+                commands.push(raw_stroke(rect, colors.accent));
             }
         }
         commands

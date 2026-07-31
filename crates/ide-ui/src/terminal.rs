@@ -1,6 +1,7 @@
 //! Estado de abas, seleção e rolagem do terminal.
 
 use ide_terminal::{ShellKind, TerminalSession};
+use ui_components::Console;
 use ui_components::{Scrollbar, Splitter};
 
 #[derive(Clone, Copy)]
@@ -34,6 +35,12 @@ pub(super) struct TerminalTab {
 
 /// Estado do painel de terminais e de sua interação.
 pub(super) struct TerminalPanelState {
+    /// A saída, viva entre quadros.
+    ///
+    /// Não é reconstruída a cada pintura porque duas coisas dependem da medição
+    /// que ela guarda e precisam concordar: onde o realce da seleção é desenhado
+    /// e em que coluna um clique caiu.
+    pub(super) console: Console,
     pub(super) tabs: Vec<TerminalTab>,
     pub(super) active: usize,
     pub(super) height: f32,

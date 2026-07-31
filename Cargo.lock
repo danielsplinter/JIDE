@@ -788,6 +788,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "grid"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -993,10 +999,14 @@ dependencies = [
  "ide-terminal",
  "ide-workspace",
  "ui-api",
+ "ui-commands",
  "ui-components",
  "ui-core",
  "ui-editor",
  "ui-focus",
+ "ui-host",
+ "ui-layout-api",
+ "ui-layout-taffy",
  "ui-render-api",
  "ui-window-api",
 ]
@@ -2511,6 +2521,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "taffy"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "340a09581f29809fc0df82a3955501dc7f2a21f887e5d1c13dbe288fe1c0bef4"
+dependencies = [
+ "arrayvec",
+ "grid",
+ "serde",
+ "slotmap",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2829,6 +2851,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui-commands"
+version = "0.1.0"
+dependencies = [
+ "ui-core",
+]
+
+[[package]]
 name = "ui-components"
 version = "0.1.0"
 dependencies = [
@@ -2853,10 +2882,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui-events"
+version = "0.1.0"
+dependencies = [
+ "ui-core",
+ "ui-layout-api",
+ "ui-tree",
+]
+
+[[package]]
 name = "ui-focus"
 version = "0.1.0"
 dependencies = [
  "ui-core",
+]
+
+[[package]]
+name = "ui-host"
+version = "0.1.0"
+dependencies = [
+ "ui-api",
+ "ui-commands",
+ "ui-core",
+ "ui-events",
+ "ui-focus",
+ "ui-layout-api",
+ "ui-render-api",
+ "ui-tree",
+]
+
+[[package]]
+name = "ui-layout-api"
+version = "0.1.0"
+dependencies = [
+ "ui-core",
+]
+
+[[package]]
+name = "ui-layout-taffy"
+version = "0.1.0"
+dependencies = [
+ "taffy",
+ "ui-core",
+ "ui-layout-api",
 ]
 
 [[package]]
@@ -2892,6 +2960,14 @@ dependencies = [
  "cosmic-text",
  "ui-core",
  "ui-text-api",
+]
+
+[[package]]
+name = "ui-tree"
+version = "0.1.0"
+dependencies = [
+ "ui-core",
+ "ui-layout-api",
 ]
 
 [[package]]

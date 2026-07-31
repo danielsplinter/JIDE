@@ -467,17 +467,21 @@ fn the_gutter_shows_pending_and_confirmed_breakpoints_and_the_stopped_line() {
     let path = PathBuf::from("A.java");
     let size = Size::new(1280.0, 800.0);
     shell.toggle_breakpoint(&path, 1);
-    // Só as marcas da calha interessam; a janela desenha outros círculos.
-    let gutter = ACTIVITY_WIDTH + SIDEBAR_WIDTH + EDITOR_GUTTER;
+    // Só as marcas da calha interessam. A faixa é a da calha mesmo — entre a
+    // barra lateral e o texto —, e não "tudo à esquerda dela": a barra de
+    // atividades também desenha círculos, no ícone de busca.
+    let inicio = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
+    let gutter = inicio + EDITOR_GUTTER;
+    let na_calha = move |x: f32| x >= inicio && x < gutter;
     let circles = |shell: &mut IdeShell| {
         shell
             .paint(size)
             .iter()
             .fold((0, 0), |(filled, outlined), command| match command {
-                PaintCommand::FillCircle(circle) if circle.center.x < gutter => {
+                PaintCommand::FillCircle(circle) if na_calha(circle.center.x) => {
                     (filled + 1, outlined)
                 }
-                PaintCommand::StrokeCircle(circle) if circle.center.x < gutter => {
+                PaintCommand::StrokeCircle(circle) if na_calha(circle.center.x) => {
                     (filled, outlined + 1)
                 }
                 _ => (filled, outlined),
@@ -647,9 +651,12 @@ fn the_status_bar_reports_message_and_position_in_separate_segments() {
 fn debug_panel_buttons_and_menu_emit_session_requests() {
     let (mut shell, _) = shell_with_java_file();
     let size = Size::new(1280.0, 800.0);
+    // Com o quadro parado: dar um passo só faz sentido aí, e é aí que os
+    // botões da faixa aceitam o clique.
     shell.set_debug_view(DebugView {
         attached: true,
         status: "Parado".to_owned(),
+        stopped_at: Some((PathBuf::from("Pedido.java"), 3)),
         ..DebugView::default()
     });
 
