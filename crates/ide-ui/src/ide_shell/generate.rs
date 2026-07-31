@@ -13,19 +13,15 @@ use ui_components::{
 };
 use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetAction, WidgetId};
 use ui_host::UiHost;
-use ui_layout_api::LayoutStyle;
-use ui_layout_taffy::TaffyLayoutEngine;
 
 use super::primary_pointer;
 
-const MODAL_ID: WidgetId = WidgetId(10_050);
-const LIST_ID: WidgetId = WidgetId(10_052);
-const ALL_ID: WidgetId = WidgetId(10_053);
-const OK_ID: WidgetId = WidgetId(10_054);
-const ROW_ID: WidgetId = WidgetId(10_055);
+const MODAL_ID: WidgetId = WidgetId(10_300);
+const LIST_ID: WidgetId = WidgetId(10_301);
+const ALL_ID: WidgetId = WidgetId(10_302);
+const OK_ID: WidgetId = WidgetId(10_303);
+const ROW_ID: WidgetId = WidgetId(10_320);
 /// Altura de uma linha da lista, também usada pelo passo da roda.
-/// Raiz do anfitrião desta janela; não é desenhada.
-const HOST_ROOT_ID: WidgetId = WidgetId(10_066);
 pub(super) const ROW_HEIGHT: f32 = 30.0;
 const PANEL_SIZE: Size = Size::new(520.0, 420.0);
 
@@ -55,6 +51,7 @@ struct GenerateState {
     list: ComposedList,
 }
 
+#[derive(Default)]
 pub(super) struct GenerateSurface {
     modal: Option<ModalHost>,
     state: Option<GenerateState>,
@@ -62,29 +59,10 @@ pub(super) struct GenerateSurface {
     pending_kind: Option<AccessorKind>,
     /// Construtor escolhido cuja fonte a linguagem ainda não devolveu.
     pending_constructor: Option<(Vec<String>, TextPosition)>,
-    /// O runtime da janela: as áreas, o acerto e a entrega aos botões.
-    host: UiHost,
 }
 
-impl Default for GenerateSurface {
-    fn default() -> Self {
-        Self {
-            modal: Default::default(),
-            state: Default::default(),
-            pending_kind: Default::default(),
-            pending_constructor: Default::default(),
-            host: new_host(),
-        }
-    }
-}
-
-/// O anfitrião da janela, com os dois botões dentro dele.
-fn new_host() -> UiHost {
-    let mut host = UiHost::new(
-        HOST_ROOT_ID,
-        LayoutStyle::default(),
-        Box::new(TaffyLayoutEngine),
-    );
+/// Entrega os dois botões desta janela ao anfitrião da tela.
+pub(super) fn attach(host: &mut UiHost) {
     host.attach(
         Box::new(Button::new(ALL_ID, "All").with_command("generate.all")),
         false,
@@ -93,7 +71,6 @@ fn new_host() -> UiHost {
         Box::new(Button::new(OK_ID, "OK").with_command("generate.ok")),
         false,
     );
-    host
 }
 impl GenerateSurface {
     fn modal(&mut self) -> &mut ModalHost {
@@ -228,18 +205,24 @@ impl GenerateSurface {
         }
     }
 
+    /// Declara ao anfitrião da tela a área de cada peça da janela.
+    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
+        let (lista, todos, ok) = self.geometry(context, size);
+        host.place(MODAL_ID, self.panel_bounds());
+        host.place(LIST_ID, lista);
+        host.place(ALL_ID, todos);
+        host.place(OK_ID, ok);
+    }
+
     pub(super) fn pointer_down(
         &mut self,
+        host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
         size: Size,
     ) -> GenerateOutcome {
-        let (lista, todos, ok) = self.geometry(context, size);
-        self.host.clear_placement();
-        self.host.place(LIST_ID, lista);
-        self.host.place(ALL_ID, todos);
-        self.host.place(OK_ID, ok);
-        let outcome = self.host.click(point);
+        let (lista, ..) = self.geometry(context, size);
+        let outcome = host.click(point);
         for evento in outcome.commands {
             if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
                 match command.0.as_str() {
@@ -273,8 +256,8 @@ impl GenerateSurface {
             }
             return GenerateOutcome::Idle;
         }
-        // Clique fora do painel dispensa a janela.
-        if !self.panel_bounds().contains(point) {
+        // O que sobrou é o véu, atrás do painel: ali o clique dispensa a janela.
+        if outcome.target != Some(MODAL_ID) {
             self.close();
         }
         GenerateOutcome::Idle
@@ -307,6 +290,7 @@ impl GenerateSurface {
 
     pub(super) fn paint(
         &mut self,
+        host: &UiHost,
         layout: &LayoutContext,
         paint: &mut PaintContext,
         size: Size,
@@ -314,7 +298,7 @@ impl GenerateSurface {
         if !self.is_open() || self.state.is_none() {
             return false;
         }
-        let (lista, todos_rect, ok_rect) = self.geometry(layout, size);
+        let (lista, ..) = self.geometry(layout, size);
         if let Some(modal) = self.modal.as_ref() {
             let mut copia = modal.clone();
             copia.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
@@ -324,12 +308,13 @@ impl GenerateSurface {
             state.list.layout(layout, lista);
             state.list.paint(paint);
         }
-        let mut todos = Button::new(ALL_ID, "All").with_command("generate.all");
-        todos.layout(layout, todos_rect);
-        todos.paint(paint);
-        let mut ok = Button::new(OK_ID, "OK").with_command("generate.ok");
-        ok.layout(layout, ok_rect);
-        ok.paint(paint);
+        // Os botões são do anfitrião da tela, que é quem os possui — e por isso
+        // eles acendem sob o ponteiro e afundam ao ser pressionados.
+        for id in [ALL_ID, OK_ID] {
+            if let Some(button) = host.widget(id) {
+                button.paint(paint);
+            }
+        }
         true
     }
 

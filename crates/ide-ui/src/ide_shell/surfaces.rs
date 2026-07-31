@@ -111,8 +111,11 @@ impl IdeShell {
 
     /// Roteia o clique dentro da janela de renomear.
     pub(super) fn rename_pointer_down(&mut self, point: Point, size: Size) {
+        self.place_overlay(size);
         let context = self.layout_context();
-        let outcome = self.rename.pointer_down(&context, point, size);
+        let outcome = self
+            .rename
+            .pointer_down(&mut self.host, &context, point, size);
         self.apply_rename_outcome(outcome);
     }
 
@@ -144,7 +147,7 @@ impl IdeShell {
     pub(super) fn paint_rename(&mut self, commands: &mut Vec<PaintCommand>, size: Size) {
         let layout = self.layout_context();
         let mut paint = self.paint_context();
-        if self.rename.paint(&layout, &mut paint, size) {
+        if self.rename.paint(&self.host, &layout, &mut paint, size) {
             commands.extend(paint.into_commands());
         }
     }
@@ -252,23 +255,29 @@ impl IdeShell {
     }
 
     pub(super) fn generate_pointer_down(&mut self, point: Point, size: Size) {
+        self.place_overlay(size);
         let context = self.layout_context();
-        let outcome = self.generate.pointer_down(&context, point, size);
+        let outcome = self
+            .generate
+            .pointer_down(&mut self.host, &context, point, size);
         self.apply_generate_outcome(outcome);
     }
 
     pub(super) fn paint_generate(&mut self, commands: &mut Vec<PaintCommand>, size: Size) {
         let layout = self.layout_context();
         let mut paint = self.paint_context();
-        if self.generate.paint(&layout, &mut paint, size) {
+        if self.generate.paint(&self.host, &layout, &mut paint, size) {
             commands.extend(paint.into_commands());
         }
     }
 
     // ---- Buscar ----
     pub(super) fn type_search_pointer_down(&mut self, point: Point, size: Size) {
+        self.place_overlay(size);
         let context = self.layout_context();
-        let outcome = self.search.pointer_down(&context, point, size);
+        let outcome = self
+            .search
+            .pointer_down(&mut self.host, &context, point, size);
         self.apply_type_search_outcome(outcome);
     }
 
@@ -487,9 +496,12 @@ impl IdeShell {
     }
 
     pub(super) fn settings_dialog_pointer_down(&mut self, point: Point, size: Size) {
+        self.place_overlay(size);
         let context = self.layout_context();
         let sections = self.catalog.settings_sections.clone();
-        let outcome = self.settings.pointer_down(&context, point, size, &sections);
+        let outcome = self
+            .settings
+            .pointer_down(&mut self.host, &context, point, size, &sections);
         self.apply_settings_outcome(outcome);
     }
 
@@ -677,11 +689,12 @@ impl IdeShell {
 
     /// Roteia o clique dentro da janela de inspeção.
     pub(super) fn inspection_pointer_down(&mut self, point: Point, size: Size) {
+        self.place_overlay(size);
         let context = self.layout_context();
         let attached = self.debug_panel.view.attached;
-        let requests = self
-            .inspection
-            .pointer_down(&context, point, size, attached);
+        let requests =
+            self.inspection
+                .pointer_down(&mut self.host, &context, point, size, attached);
         self.apply_inspection_requests(requests);
     }
 }

@@ -429,8 +429,19 @@ impl IdeShell {
     /// declaram nada aqui.
     fn place_surface(&mut self, kind: SurfaceKind, size: Size) {
         let context = self.layout_context();
-        if kind == SurfaceKind::NewItem {
-            self.new_item.place_widgets(&mut self.host, &context, size);
+        match kind {
+            SurfaceKind::NewItem => self.new_item.place_widgets(&mut self.host, &context, size),
+            SurfaceKind::TypeSearch => self.search.place_widgets(&mut self.host, &context, size),
+            SurfaceKind::Generate => self.generate.place_widgets(&mut self.host, &context, size),
+            SurfaceKind::Rename => self.rename.place_widgets(&mut self.host, &context, size),
+            SurfaceKind::Inspection => {
+                self.inspection.place_widgets(&mut self.host, &context, size);
+            }
+            SurfaceKind::Settings => {
+                let sections = self.catalog.settings_sections.len();
+                self.settings
+                    .place_widgets(&mut self.host, &context, size, sections);
+            }
         }
     }
 
@@ -889,7 +900,10 @@ impl IdeShell {
         let layout = self.layout_context();
         let mut paint = self.paint_context();
         let attached = self.debug_panel.view.attached;
-        if self.inspection.paint(&layout, &mut paint, size, attached) {
+        if self
+            .inspection
+            .paint(&self.host, &layout, &mut paint, size, attached)
+        {
             commands.extend(paint.into_commands());
         }
     }

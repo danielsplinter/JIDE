@@ -21,8 +21,6 @@ use super::{click_widget, primary_pointer, raw_stroke};
 use crate::settings::SettingsPage;
 use ui_focus::FocusManager;
 use ui_host::UiHost;
-use ui_layout_api::LayoutStyle;
-use ui_layout_taffy::TaffyLayoutEngine;
 
 const MODAL_ID: WidgetId = WidgetId(10_002);
 const CLOSE_ID: WidgetId = WidgetId(10_005);
@@ -42,8 +40,6 @@ const DEBUG_ATTACH_ID: WidgetId = WidgetId(10_008);
 /// Última página, sempre depois das que a linguagem contribui.
 pub(super) const DEBUG_PAGE_TITLE: &str = "Depuração";
 pub(super) const PAGE_ROW_HEIGHT: f32 = 42.0;
-/// Raiz do anfitrião desta página; não é desenhada.
-const HOST_ROOT_ID: WidgetId = WidgetId(10_075);
 const SIDEBAR_ID: WidgetId = WidgetId(10_100);
 const DEBUG_TITLE_ID: WidgetId = WidgetId(10_101);
 const DEBUG_CAPTION_ID: WidgetId = WidgetId(10_102);
@@ -95,8 +91,6 @@ pub(super) struct SettingsSurface {
     pages: ListView,
     dialog: Option<SettingsDialog>,
     page: SettingsPage,
-    /// O runtime da página de depuração: as áreas e o acerto.
-    host: UiHost,
     /// Campo em foco na página de depuração. O gerenciador é da biblioteca:
     /// guardar quem tem o foco era a conta que cada tela refazia à mão.
     focus: FocusManager,
@@ -122,11 +116,6 @@ impl Default for SettingsSurface {
                 .with_selection(ListSelection::Marker),
             dialog: None,
             page: SettingsPage::default(),
-            host: UiHost::new(
-                HOST_ROOT_ID,
-                LayoutStyle::default(),
-                Box::new(TaffyLayoutEngine),
-            ),
             focus: debug_focus(),
             debug_host: TextInput::new(DEBUG_HOST_ID, "127.0.0.1").with_placeholder("host"),
             debug_port: TextInput::new(DEBUG_PORT_ID, "8000").with_placeholder("porta"),
@@ -261,8 +250,30 @@ impl SettingsSurface {
         self.modal.close();
     }
 
+    /// Declara ao anfitrião da tela a área de cada peça da janela.
+    ///
+    /// A lista de páginas e as três peças da página de depuração: são elas que o
+    /// acerto precisa distinguir. O resto da janela responde pelo painel.
+    pub(super) fn place_widgets(
+        &mut self,
+        host: &mut UiHost,
+        context: &LayoutContext,
+        size: Size,
+        section_count: usize,
+    ) {
+        let geometry = self.geometry(context, size);
+        host.place(MODAL_ID, self.modal.panel_bounds());
+        host.place(PAGES_ID, settings_pages_rect(&geometry, section_count + 1));
+        if self.page == SettingsPage::Debug {
+            host.place(DEBUG_HOST_ID, geometry.debug_host);
+            host.place(DEBUG_PORT_ID, geometry.debug_port);
+            host.place(DEBUG_ATTACH_ID, geometry.debug_attach);
+        }
+    }
+
     pub(super) fn pointer_down(
         &mut self,
+        host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
         size: Size,
@@ -279,20 +290,22 @@ impl SettingsSurface {
             &mut EventContext::default(),
             &UiEvent::PointerDown(primary_pointer(point)),
         );
+        // Se o clique caiu na navegação é o anfitrião quem diz, pela área que
+        // ela ocupa na pilha.
         if let Some(page) = pages.selected().map(|index| {
             if index < sections.len() {
                 SettingsPage::Contribution(index)
             } else {
                 SettingsPage::Debug
             }
-        }) && settings_pages_rect(&geometry, sections.len() + 1).contains(point)
+        }) && host.hit_test(point).next() == Some(PAGES_ID)
         {
             self.page = page;
             self.focus.request_focus(WidgetId(0));
             return SettingsOutcome::Idle;
         }
         if self.page == SettingsPage::Debug {
-            return self.debug_page_pointer_down(context, point, &geometry);
+            return self.debug_page_pointer_down(host, context, point, &geometry);
         }
         self.toolchain_combo.layout(context, geometry.combo);
         self.toolchain_browse_button
@@ -345,17 +358,14 @@ impl SettingsSurface {
 
     fn debug_page_pointer_down(
         &mut self,
+        host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
         geometry: &SettingsDialogGeometry,
     ) -> SettingsOutcome {
         // Quem estava sob o ponteiro é o anfitrião quem diz, pelas áreas que a
         // página lhe entregou.
-        self.host.clear_placement();
-        self.host.place(DEBUG_HOST_ID, geometry.debug_host);
-        self.host.place(DEBUG_PORT_ID, geometry.debug_port);
-        self.host.place(DEBUG_ATTACH_ID, geometry.debug_attach);
-        match self.host.click(point).target {
+        match host.click(point).target {
             Some(DEBUG_HOST_ID) => {
                 self.focus.request_focus(DEBUG_HOST_ID);
                 return SettingsOutcome::Idle;

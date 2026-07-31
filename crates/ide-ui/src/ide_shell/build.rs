@@ -172,7 +172,10 @@ impl IdeShell {
                 // construção; o que muda com a abertura é a presença deles na
                 // pilha. Ver `16-single-host`.
                 let mut host = new_host();
+                generate::attach(&mut host);
+                inspection::attach(&mut host);
                 new_item::attach(&mut host);
+                rename::attach(&mut host);
                 host
             },
         };

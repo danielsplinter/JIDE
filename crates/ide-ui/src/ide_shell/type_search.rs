@@ -9,21 +9,17 @@ use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{ListView, ModalHost, TextInput};
 use ui_core::{Point, Rect, Size, UiEvent, WidgetId};
 use ui_host::UiHost;
-use ui_layout_api::LayoutStyle;
-use ui_layout_taffy::TaffyLayoutEngine;
 
 use crate::search::{ContentSearchHit, TypeSearchHit};
 
-const MODAL_ID: WidgetId = WidgetId(10_060);
-const INPUT_ID: WidgetId = WidgetId(10_061);
-const LIST_ID: WidgetId = WidgetId(10_062);
+const MODAL_ID: WidgetId = WidgetId(10_410);
+const INPUT_ID: WidgetId = WidgetId(10_411);
+const LIST_ID: WidgetId = WidgetId(10_412);
 /// A janela é larga porque cada linha traz o caminho junto do nome.
 const PANEL_SIZE: Size = Size::new(760.0, 420.0);
 const ROW_HEIGHT: f32 = 26.0;
 /// Quantas linhas cabem: é o que decide a rolagem e o que a seta revela.
 pub(super) const VISIBLE_ROWS: usize = 12;
-/// Raiz do anfitrião desta janela; não é desenhada.
-const HOST_ROOT_ID: WidgetId = WidgetId(10_067);
 
 /// Em que a janela está buscando.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,8 +51,6 @@ pub(super) struct TypeSearchSurface {
     selected: usize,
     /// Primeira linha visível, que é onde a rolagem mora.
     first_visible: usize,
-    /// O runtime da janela: as áreas e o acerto.
-    host: UiHost,
 }
 
 impl Default for TypeSearchSurface {
@@ -69,11 +63,6 @@ impl Default for TypeSearchSurface {
             content_results: Vec::new(),
             selected: 0,
             first_visible: 0,
-            host: UiHost::new(
-                HOST_ROOT_ID,
-                LayoutStyle::default(),
-                Box::new(TaffyLayoutEngine),
-            ),
         }
     }
 }
@@ -133,26 +122,34 @@ impl TypeSearchSurface {
         &self.type_results
     }
 
+    /// Declara ao anfitrião da tela a área de cada peça da janela.
+    ///
+    /// O painel entra como área para o anfitrião distinguir "dentro da janela" de
+    /// "fora dela", que é o que decide se ela se dispensa.
+    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
+        let (_, list) = self.geometry(context, size);
+        host.place(MODAL_ID, self.modal.panel_bounds());
+        host.place(LIST_ID, list);
+    }
+
     pub(super) fn pointer_down(
         &mut self,
+        host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
         size: Size,
     ) -> TypeSearchOutcome {
         let (_, list) = self.geometry(context, size);
-        // O painel entra como área para o anfitrião distinguir "dentro da
-        // janela" de "fora dela", que é o que decide se ela se dispensa.
-        self.host.clear_placement();
-        self.host.place(MODAL_ID, self.modal.panel_bounds());
-        self.host.place(LIST_ID, list);
-        let alvo = self.host.click(point).target;
-        if alvo != Some(LIST_ID) {
-            // Clicar fora da lista não escolhe nada, e clicar fora do painel
-            // dispensa a janela.
-            if alvo.is_none() {
+        match host.click(point).target {
+            Some(LIST_ID) => {}
+            // Dentro do painel e fora da lista, o clique não escolhe nada.
+            Some(MODAL_ID) => return TypeSearchOutcome::Idle,
+            // O que sobrou é o véu, atrás do painel: ali o clique dispensa a
+            // janela.
+            _ => {
                 self.close();
+                return TypeSearchOutcome::Idle;
             }
-            return TypeSearchOutcome::Idle;
         }
         let row =
             self.first_visible + ((point.y - list.origin.y) / ROW_HEIGHT).floor().max(0.0) as usize;

@@ -14,8 +14,6 @@ use ui_commands::CommandEvent;
 use ui_components::{Button, IconTint, Label, ModalHost, TreeItem, TreeView};
 use ui_core::{Point, Rect, Size, UiEvent, WidgetAction, WidgetId};
 use ui_host::UiHost;
-use ui_layout_api::LayoutStyle;
-use ui_layout_taffy::TaffyLayoutEngine;
 
 use super::geometry::{InspectionGeometry, inspection_geometry};
 use super::primary_pointer;
@@ -36,8 +34,6 @@ const PANEL_SIZE: Size = Size::new(720.0, 420.0);
 pub(super) const ROW_HEIGHT: f32 = 26.0;
 /// Área do editor de expressões, para o anfitrião distinguir o alvo.
 const SOURCE_ID: WidgetId = WidgetId(10_068);
-/// Raiz do anfitrião desta janela; não é desenhada.
-const HOST_ROOT_ID: WidgetId = WidgetId(10_069);
 
 /// O que a janela precisa perguntar ao alvo, ou contar na barra.
 pub(super) enum InspectionRequest {
@@ -118,14 +114,11 @@ pub(super) struct InspectionSurface {
     modal: ModalHost,
     view: Option<InspectionView>,
     tree: TreeView,
-    close_button: Button,
     /// O mesmo painel do editor principal, com os comportamentos de arquivo
     /// desligados: ali não há arquivo, só a expressão a executar.
     editor: EditorPane,
     source: TextBuffer,
     run_button: Button,
-    /// O runtime da janela: as áreas, o acerto e a entrega aos botões.
-    host: UiHost,
     focus: InspectionFocus,
     message: Option<String>,
     run: Option<InspectionRun>,
@@ -137,11 +130,9 @@ impl Default for InspectionSurface {
             modal: ModalHost::new(MODAL_ID, "Inspecionar", PANEL_SIZE),
             view: None,
             tree: TreeView::new(TREE_ID, Vec::new()).with_row_height(ROW_HEIGHT),
-            close_button: Button::new(CLOSE_ID, "Fechar").with_command("inspect.close"),
             editor: EditorPane::new(EditorCapabilities::plain()),
             source: TextBuffer::new(String::new()),
             run_button: Button::new(RUN_ID, "Executar").with_command("inspect.run"),
-            host: new_host(),
             focus: InspectionFocus::Tree,
             message: None,
             run: None,
@@ -149,13 +140,8 @@ impl Default for InspectionSurface {
     }
 }
 
-/// O anfitrião da janela, com os dois botões dentro dele.
-fn new_host() -> UiHost {
-    let mut host = UiHost::new(
-        HOST_ROOT_ID,
-        LayoutStyle::default(),
-        Box::new(TaffyLayoutEngine),
-    );
+/// Entrega os dois botões desta janela ao anfitrião da tela.
+pub(super) fn attach(host: &mut UiHost) {
     host.attach(
         Box::new(Button::new(CLOSE_ID, "Fechar").with_command("inspect.close")),
         false,
@@ -164,7 +150,6 @@ fn new_host() -> UiHost {
         Box::new(Button::new(RUN_ID, "Executar").with_command("inspect.run")),
         false,
     );
-    host
 }
 
 impl InspectionSurface {
@@ -465,21 +450,27 @@ impl InspectionSurface {
         self.editor.key(&mut self.source, key, shift, control);
     }
 
+    /// Declara ao anfitrião da tela a área de cada peça da janela.
+    pub(super) fn place_widgets(&mut self, host: &mut UiHost, context: &LayoutContext, size: Size) {
+        let geometry = self.layout_editor(context, size);
+        host.place(MODAL_ID, self.modal.panel_bounds());
+        host.place(TREE_ID, geometry.list);
+        host.place(SOURCE_ID, geometry.source);
+        host.place(RUN_ID, geometry.run);
+        host.place(CLOSE_ID, geometry.close);
+    }
+
     /// Roteia o clique dentro da janela.
     pub(super) fn pointer_down(
         &mut self,
+        host: &mut UiHost,
         context: &LayoutContext,
         point: Point,
         size: Size,
         attached: bool,
     ) -> Vec<InspectionRequest> {
         let geometry = self.layout_editor(context, size);
-        self.host.clear_placement();
-        self.host.place(TREE_ID, geometry.list);
-        self.host.place(SOURCE_ID, geometry.source);
-        self.host.place(RUN_ID, geometry.run);
-        self.host.place(CLOSE_ID, geometry.close);
-        let outcome = self.host.click(point);
+        let outcome = host.click(point);
         for evento in outcome.commands {
             if let CommandEvent::Action(WidgetAction::Command(command)) = evento {
                 match command.0.as_str() {
@@ -560,6 +551,7 @@ impl InspectionSurface {
     /// Desenha a janela. Devolve `false` quando não há nada aberto.
     pub(super) fn paint(
         &self,
+        host: &UiHost,
         layout: &LayoutContext,
         paint: &mut PaintContext,
         size: Size,
@@ -646,15 +638,22 @@ impl InspectionSurface {
             widget.layout(layout, geometry.message);
             widget.paint(paint);
         }
-        let mut run = self.run_button.clone();
         // Sem sessão viva não há quadro onde executar: o botão apagado diz isso
-        // antes do clique, em vez de a mensagem dizer depois.
-        run.set_disabled(!attached);
-        run.layout(layout, geometry.run);
-        run.paint(paint);
-        let mut close = self.close_button.clone();
-        close.layout(layout, geometry.close);
-        close.paint(paint);
+        // antes do clique, em vez de a mensagem dizer depois. O `Executar` é do
+        // anfitrião da tela, e a cópia desabilitada é desenhada por cima dele.
+        if attached {
+            if let Some(button) = host.widget(RUN_ID) {
+                button.paint(paint);
+            }
+        } else {
+            let mut run = self.run_button.clone();
+            run.set_disabled(true);
+            run.layout(layout, geometry.run);
+            run.paint(paint);
+        }
+        if let Some(button) = host.widget(CLOSE_ID) {
+            button.paint(paint);
+        }
         true
     }
 
