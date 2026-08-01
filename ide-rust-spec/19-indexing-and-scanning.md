@@ -153,7 +153,7 @@ Um teste novo guarda o que a fase entrega: `activation_returns_before_the_index_
 afirma que ativar leva menos de 250 ms. Antes, no mesmo projeto, levava ~1,5 s.
 `language-java` foi de 29 para 30 testes.
 
-### Fase 3 — Os tetos saem
+### Fase 3 — Os tetos saem ✅
 
 Com a indexação em segundo plano, demorar deixa de travar alguém, e os quatro
 tetos perdem a razão de existir. Sai também a necessidade de avisar que truncou —
@@ -161,6 +161,34 @@ não haverá truncamento.
 
 **Critério:** nenhum limite silencioso; um monorepo é indexado por inteiro, no
 tempo que levar.
+
+**Feito.** Saíram os quatro: 600 caminhos, 500 fontes `.java`, 64 jars e 24.000
+classes do JDK. Nenhum protegia memória — todos existiam para a varredura terminar
+rápido, e ela não segura mais ninguém desde a fase 2.
+
+**O tamanho do que estava escondido**, medido no projeto de referência:
+
+| | com teto | real |
+|---|---|---|
+| caminhos | 600 | **40.472** |
+| fontes `.java` | 500 | **26.211** |
+| jars | 64 | 3 |
+
+A IDE indexava **1,9%** do projeto e não dizia nada. A completação simplesmente não
+conhecia 98% do código, e quem usava não tinha como distinguir isso de um tipo que
+não existe — que era exatamente o defeito que esta especificação chamou de o mais
+perigoso.
+
+**O que a remoção cobra, e é preciso dizer:** a varredura de caminhos sozinha leva
+**3,4 s** nesse projeto, e depois dela vêm 26 mil fontes para parsear e analisar. É
+trabalho de minutos, agora em segundo plano — ninguém espera, mas ele acontece, e
+recomeça do zero a cada ativação.
+
+Isso **promove a fase 4**. Reindexar tudo custava pouco quando eram 500 arquivos;
+com 26 mil, incremental deixa de ser conforto e vira o que torna a fase 3
+sustentável no uso diário.
+
+Um teste de medição marcado `#[ignore]` guarda esses números e permite refazê-los.
 
 ### Fase 4 — Índice incremental
 

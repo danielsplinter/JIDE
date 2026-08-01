@@ -11,17 +11,17 @@ use tree_sitter::Parser;
 
 use crate::{language::analyze_semantics, symbols::simple_class_name};
 
-pub(super) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>, limit: usize) {
-    if output.len() >= limit {
-        return;
-    }
+/// Todos os caminhos do projeto, sem teto.
+///
+/// Havia um limite de 600 aqui, e ele existia porque a indexação bloqueava: sem
+/// ele, um monorepo travava a IDE. Desde a fase 2 da `19` a varredura acontece em
+/// segundo plano, e demorar deixou de segurar alguém — então o limite passou a
+/// só produzir um índice incompleto **em silêncio**.
+pub(super) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
-        if output.len() >= limit {
-            break;
-        }
         let path = entry.path();
         if path.is_dir() {
             let ignored = path
@@ -29,7 +29,7 @@ pub(super) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>, li
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| matches!(name, ".git" | "target" | "node_modules" | ".gradle"));
             if !ignored {
-                collect_workspace_paths(&path, output, limit);
+                collect_workspace_paths(&path, output);
             }
         } else {
             output.push(path);
@@ -61,13 +61,6 @@ pub(super) struct WorkspaceIndex {
     /// último build pode ser mais velho que o arquivo aberto ao lado.
     pub(super) declarations: HashMap<String, PathBuf>,
 }
-
-/// Teto de classes indexadas da biblioteca padrão.
-///
-/// `java.base` tem pouco mais de seis mil; o JDK inteiro passa de trinta mil.
-/// O índice guarda só os nomes, mas guardar todos os módulos para responder
-/// sobre `java.lang` custaria memória sem melhorar resposta nenhuma.
-const MAX_JDK_CLASSES: usize = 24_000;
 
 impl WorkspaceIndex {
     /// Indexa a biblioteca padrão do JDK apontado por `JAVA_HOME`.
@@ -108,15 +101,13 @@ impl WorkspaceIndex {
                     .filter(|path| path.is_file()),
             );
         }
-        let mut remaining = MAX_JDK_CLASSES;
+        // Sem teto de classes: o limite de 24.000 existia para a varredura
+        // terminar rápido, e ela não segura mais ninguém. `usize::MAX` diz ao
+        // leitor de arquivos que não há corte.
         for archive in archives {
-            if remaining == 0 {
-                break;
-            }
-            let Ok(names) = java_classfile::list_classes(&archive, remaining) else {
+            let Ok(names) = java_classfile::list_classes(&archive, usize::MAX) else {
                 continue;
             };
-            remaining = remaining.saturating_sub(names.len());
             self.external_classes
                 .extend(names.into_iter().map(|binary| ExternalClass {
                     simple: simple_class_name(&binary),
@@ -156,19 +147,16 @@ impl WorkspaceIndex {
         parser: &mut Parser,
     ) -> Self {
         let mut paths = Vec::new();
-        collect_workspace_paths(root, &mut paths, 600);
+        collect_workspace_paths(root, &mut paths);
         let mut index = Self::default();
         // A biblioteca padrão vem antes do workspace: `String` e `System` são
         // do JDK, e um tipo do projeto com o mesmo nome simples é a exceção,
         // não a regra.
         index.scan_jdk(toolchain_root);
-        let mut java_count = 0;
-        let mut archive_count = 0;
         for path in paths {
             match path.extension().and_then(|extension| extension.to_str()) {
                 Some(extension)
                     if extension.eq_ignore_ascii_case("java")
-                        && java_count < 500
                         && (source_roots.is_empty()
                             || source_roots.iter().any(|root| path.starts_with(root))) =>
                 {
@@ -198,7 +186,6 @@ impl WorkspaceIndex {
                         }
                         index.symbols.extend(semantic.symbols);
                         merge_references(&mut index.references, references);
-                        java_count += 1;
                     }
                 }
                 Some(extension) if extension.eq_ignore_ascii_case("class") => {
@@ -212,7 +199,7 @@ impl WorkspaceIndex {
                         });
                     }
                 }
-                Some(extension) if extension.eq_ignore_ascii_case("jar") && archive_count < 64 => {
+                Some(extension) if extension.eq_ignore_ascii_case("jar") => {
                     if let Ok(classes) = java_classfile::index_jar(&path, 20_000) {
                         index
                             .external_classes
@@ -222,7 +209,6 @@ impl WorkspaceIndex {
                                 origin: path.clone(),
                             }));
                     }
-                    archive_count += 1;
                 }
                 _ => {}
             }
@@ -237,5 +223,45 @@ fn merge_references(
 ) {
     for (name, locations) in source {
         target.entry(name).or_default().extend(locations);
+    }
+}
+
+#[cfg(test)]
+mod medicao_sem_teto {
+    use std::{path::Path, time::Instant};
+
+    #[test]
+    #[ignore = "medição manual; exige o projeto de referência"]
+    fn index_cost_without_ceilings() {
+        let root = Path::new(r"C:\Users\jdani\Documents\projetos\java\camel-main\camel-main");
+        if !root.exists() {
+            return;
+        }
+        let mut paths = Vec::new();
+        let inicio = Instant::now();
+        super::collect_workspace_paths(root, &mut paths);
+        let varredura = inicio.elapsed();
+        let fontes = paths
+            .iter()
+            .filter(|caminho| {
+                caminho
+                    .extension()
+                    .and_then(|valor| valor.to_str())
+                    .is_some_and(|valor| valor.eq_ignore_ascii_case("java"))
+            })
+            .count();
+        let jars = paths
+            .iter()
+            .filter(|caminho| {
+                caminho
+                    .extension()
+                    .and_then(|valor| valor.to_str())
+                    .is_some_and(|valor| valor.eq_ignore_ascii_case("jar"))
+            })
+            .count();
+        eprintln!(
+            "caminhos={} fontes_java={fontes} jars={jars} varredura={varredura:?}",
+            paths.len()
+        );
     }
 }
