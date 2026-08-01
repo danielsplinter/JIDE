@@ -69,7 +69,7 @@ Este é um requisito arquitetural obrigatório.
 - [17 — Adoção do arranjo](17-layout-adoption.md)
 - [18 — Um terminal de verdade](18-real-terminal.md) — fases 0 a 3 feitas; a **4 é pendência**: seleção lida da grade, busca na saída e links clicáveis
 - [19 — Varredura e indexação: sair do bloqueio](19-indexing-and-scanning.md)
-- [20 — Índice no disco, memória como cache](20-index-on-disk.md) — fases 1 a 3 feitas: abrir caiu de 251 s para 3,65 s, a memória de 178 para 103 MB e uma tecla lê 2 mil registros em vez de 340 mil; falta a **fase 4**, reindexar só a diferença
+- [20 — Índice no disco, memória como cache](20-index-on-disk.md) — **completa**: abrir caiu de 251 s para 3,7 s, a memória de 178 para 103 MB, uma tecla lê 2 mil registros em vez de 340 mil e um fonte alterado custa 3,5 ms
 
 ## Escopo inicial, e o que dele já existe
 

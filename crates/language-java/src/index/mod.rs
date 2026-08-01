@@ -15,7 +15,7 @@ use crate::{language::analyze_semantics, symbols::simple_class_name};
 
 mod file;
 
-pub(super) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>) {
+pub(crate) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
@@ -227,8 +227,8 @@ impl WorkspaceIndex {
     /// Não decide se ele **ainda vale** — quem carrega é quem confere, e a
     /// conferência é da fase 4. Aqui só se responde se o arquivo existe e está
     /// íntegro.
-    pub(super) fn carregar(root: &Path) -> Option<Self> {
-        let carregado = file::Carregado::open(&file::caminho_do_indice(root)?)?;
+    pub(super) fn carregar(root: &Path, toolchain: Option<&Path>) -> Option<Self> {
+        let carregado = file::Carregado::open(&file::caminho_do_indice(root, toolchain)?)?;
         Some(Self {
             carregado: Some(carregado),
             memoria: Dados::default(),
@@ -250,9 +250,16 @@ impl WorkspaceIndex {
     ///
     /// Só faz sentido para um índice construído: um que veio do arquivo já está
     /// gravado, e regravá-lo do delta perderia tudo o que não foi reindexado.
-    pub(super) fn save(&self, root: &Path) -> bool {
+    pub(super) fn save(&self, root: &Path, toolchain: Option<&Path>) -> bool {
         self.carregado.is_none()
-            && file::caminho_do_indice(root).is_some_and(|caminho| self.save_to(&caminho))
+            && file::caminho_do_indice(root, toolchain)
+                .is_some_and(|caminho| self.save_to(&caminho))
+    }
+
+    /// Se este índice veio do arquivo.
+    #[cfg(test)]
+    pub(super) const fn veio_do_arquivo(&self) -> bool {
+        self.carregado.is_some()
     }
 
     /// Grava num caminho escolhido. Serve à medição, que não usa o cache.
@@ -260,27 +267,24 @@ impl WorkspaceIndex {
         file::write(&self.memoria, path).is_ok()
     }
 
-    /// Se o arquivo carregado ainda descreve o projeto que está no disco.
+    /// Os fontes que mudaram desde a gravação do índice.
     ///
-    /// Compara o conjunto de fontes e, de cada um, data de modificação e
-    /// tamanho. Qualquer diferença — arquivo novo, apagado ou alterado — reprova
-    /// o arquivo inteiro, e o índice é reconstruído. É grosso de propósito:
-    /// **reconstruir é caro, servir resposta vencida é errado**, e reindexar só
-    /// a diferença é o refinamento que a fase 4 traz.
+    /// Novo, alterado ou apagado — os três entram na lista, e a lista vazia quer
+    /// dizer que o arquivo ainda descreve o projeto. É a fase 4 da `20`: antes
+    /// qualquer diferença reprovava o índice inteiro, e agora ela custa
+    /// exatamente os arquivos que ela toca.
     ///
     /// Não cobre os jars: uma dependência trocada sem mexer em fonte nenhum
-    /// passa despercebida. Fica anotado como limite conhecido desta fase.
-    pub(super) fn confere_com_o_disco(&self, root: &Path, source_roots: &[PathBuf]) -> bool {
+    /// passa despercebida. Limite conhecido, herdado da fase 2.
+    pub(super) fn diferenca(&self, root: &Path, source_roots: &[PathBuf]) -> Vec<PathBuf> {
         let Some(carregado) = &self.carregado else {
-            return false;
+            return Vec::new();
         };
         let mut gravados: HashMap<PathBuf, (u64, u64)> = (0..carregado.arquivos())
             .filter_map(|indice| carregado.arquivo_gravado(indice))
             .map(|(caminho, quando, tamanho)| (PathBuf::from(caminho), (quando, tamanho)))
             .collect();
-        if gravados.is_empty() {
-            return false;
-        }
+        let mut mudaram = Vec::new();
         let mut caminhos = Vec::new();
         collect_workspace_paths(root, &mut caminhos);
         for caminho in caminhos {
@@ -293,12 +297,14 @@ impl WorkspaceIndex {
             if !fonte_java {
                 continue;
             }
-            // Fonte que o índice não conhece: ele é de antes deste arquivo.
             let Some((quando, tamanho)) = gravados.remove(&caminho) else {
-                return false;
+                // O índice não conhece este fonte: ele nasceu depois.
+                mudaram.push(caminho);
+                continue;
             };
             let Ok(dados) = fs::metadata(&caminho) else {
-                return false;
+                mudaram.push(caminho);
+                continue;
             };
             let agora = dados
                 .modified()
@@ -306,11 +312,139 @@ impl WorkspaceIndex {
                 .and_then(|instante| instante.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |desde| desde.as_secs());
             if dados.len() != tamanho || agora != quando {
-                return false;
+                mudaram.push(caminho);
             }
         }
         // O que sobrou foi apagado desde a gravação.
-        gravados.is_empty()
+        mudaram.extend(gravados.into_keys());
+        mudaram
+    }
+
+    /// Relê os fontes que mudaram, e só eles.
+    ///
+    /// Cada um passa por `reindex_file`, que já sabe tirar do carregado o que
+    /// aquele arquivo dizia e pôr no lugar o que ele diz agora — ou só tirar, se
+    /// ele sumiu do disco.
+    pub(super) fn reconciliar(&mut self, mudaram: &[PathBuf], parser: &mut Parser) {
+        for caminho in mudaram {
+            self.reindex_file(caminho, parser);
+        }
+    }
+
+    /// O índice inteiro na forma de trabalho, para poder ser regravado.
+    ///
+    /// Junta o que sobrou do carregado com o que a memória refez. Custa montar
+    /// as estruturas de novo — é o preço de devolver ao disco um índice que
+    /// nasceu de duas origens, e por isso só acontece quando houve diferença.
+    fn juntar(&self) -> Dados {
+        let mut dados = Dados::default();
+        for simbolo in self.symbols() {
+            let Some(local) = self.location_of(simbolo) else {
+                continue;
+            };
+            let file = dados.file_id(&local.path);
+            dados.symbols.push(IndexedSymbol {
+                name: simbolo.name().to_owned(),
+                kind: simbolo.kind(),
+                range: local.range,
+                type_descriptor: simbolo.type_descriptor(),
+                scope_depth: simbolo.scope_depth(),
+                file,
+            });
+        }
+        if let Some(carregado) = &self.carregado {
+            // Uma passada pelos nomes, e não uma por arquivo: percorrer os
+            // nomes dentro do laço dos arquivos seria 26 mil vezes 78 mil.
+            for nome in carregado.nomes_gravados() {
+                let convertidas: Vec<(PathBuf, TextRange)> = carregado
+                    .ocorrencias_de(nome)
+                    .filter(|ocorrencia| !self.substituidos.contains(&ocorrencia.file))
+                    .filter_map(|ocorrencia| {
+                        let caminho = PathBuf::from(carregado.arquivo(ocorrencia.file)?);
+                        Some((caminho, ocorrencia.range))
+                    })
+                    .collect();
+                if convertidas.is_empty() {
+                    continue;
+                }
+                let entrada = dados.references.entry(nome.to_owned()).or_default();
+                for (caminho, range) in convertidas {
+                    let file = match dados.file_ids.get(&caminho) {
+                        Some(id) => *id,
+                        None => {
+                            let id = u32::try_from(dados.files.len()).unwrap_or(u32::MAX);
+                            dados.files.push(caminho.clone());
+                            dados.file_ids.insert(caminho, id);
+                            id
+                        }
+                    };
+                    entrada.push(Occurrence { file, range });
+                }
+            }
+            for classe in carregado.externas() {
+                dados.external_classes.push(ExternalClass {
+                    simple: classe.simple().to_owned(),
+                    binary: classe.binary().to_owned(),
+                    origin: PathBuf::from(classe.origin()),
+                });
+            }
+        }
+        for (nome, ocorrencias) in &self.memoria.references {
+            let convertidas: Vec<Occurrence> = ocorrencias
+                .iter()
+                .filter_map(|ocorrencia| {
+                    let caminho = self.memoria.file_path(ocorrencia.file)?.to_path_buf();
+                    Some((caminho, ocorrencia.range))
+                })
+                .map(|(caminho, range)| Occurrence {
+                    file: dados.file_id(&caminho),
+                    range,
+                })
+                .collect();
+            dados
+                .references
+                .entry(nome.clone())
+                .or_default()
+                .extend(convertidas);
+        }
+        dados
+            .external_classes
+            .extend(self.memoria.external_classes.iter().cloned());
+        for simbolo in self.symbols() {
+            if matches!(
+                simbolo.kind(),
+                SymbolKind::Class | SymbolKind::Interface | SymbolKind::Record | SymbolKind::Enum
+            ) && let Some(local) = self.location_of(simbolo)
+            {
+                dados
+                    .declarations
+                    .entry(simbolo.name().to_owned())
+                    .or_insert(local.path);
+            }
+        }
+        dados
+    }
+
+    /// Devolve ao disco o índice reconciliado.
+    ///
+    /// Sem isto a próxima abertura recalcularia a mesma diferença, e ela só
+    /// cresceria: o arquivo continuaria descrevendo o projeto de duas semanas
+    /// atrás.
+    pub(super) fn regravar(&self, root: &Path, toolchain: Option<&Path>) -> bool {
+        file::caminho_do_indice(root, toolchain)
+            .is_some_and(|caminho| file::write(&self.juntar(), &caminho).is_ok())
+    }
+
+    /// Regrava num caminho escolhido, juntando as duas origens. Serve à medição.
+    #[cfg(test)]
+    pub(super) fn save_juntando(&self, path: &Path) -> bool {
+        file::write(&self.juntar(), path).is_ok()
+    }
+
+    /// Quantas declarações vieram da memória — serve aos testes da fase 4.
+    #[cfg(test)]
+    pub(super) fn memory_symbol_count(&self) -> usize {
+        self.memoria.symbol_count()
     }
 
     /// Onde um nome aparece, no projeto inteiro.
@@ -937,130 +1071,132 @@ mod tests {
         let _ = fs::remove_dir_all(&raiz);
     }
 
-    /// O índice carregado só vale se o projeto no disco for o mesmo.
+    /// A diferença enxerga o que mudou, e só o que mudou.
     #[test]
-    fn a_loaded_index_is_only_used_while_it_still_describes_the_project() {
-        let raiz = projeto("indice-confere");
+    fn the_difference_sees_what_changed_and_only_that() {
+        let raiz = projeto("indice-diferenca");
         let arquivo = raiz.join("indice.bin");
         assert!(varrer(&raiz).save_to(&arquivo));
         let fontes = vec![raiz.clone()];
         let recarregar = || match WorkspaceIndex::carregar_de(&arquivo) {
             Some(indice) => indice,
-            None => panic!("não carregou"),
+            None => panic!("nao carregou"),
         };
         assert!(
-            recarregar().confere_com_o_disco(&raiz, &fontes),
-            "sem nada mudar, o arquivo vale"
+            recarregar().diferenca(&raiz, &fontes).is_empty(),
+            "sem nada mudar, nada difere"
         );
 
-        // Um fonte alterado reprova.
+        // Alterado.
         let fonte = raiz.join("Pedido.java");
         assert!(fs::write(&fonte, "public class Pedido { int a; }\n").is_ok());
-        assert!(
-            !recarregar().confere_com_o_disco(&raiz, &fontes),
-            "fonte alterado tem de reprovar"
+        assert_eq!(
+            recarregar().diferenca(&raiz, &fontes),
+            vec![fonte.clone()],
+            "so o fonte alterado difere"
         );
 
-        // Um fonte novo reprova: o índice não sabe dele.
+        // Novo.
         assert!(varrer(&raiz).save_to(&arquivo));
-        assert!(recarregar().confere_com_o_disco(&raiz, &fontes));
-        assert!(fs::write(raiz.join("Novo.java"), "public class Novo {}\n").is_ok());
-        assert!(
-            !recarregar().confere_com_o_disco(&raiz, &fontes),
-            "fonte novo tem de reprovar"
+        let novo = raiz.join("Novo.java");
+        assert!(fs::write(&novo, "public class Novo {}\n").is_ok());
+        assert_eq!(
+            recarregar().diferenca(&raiz, &fontes),
+            vec![novo.clone()],
+            "so o fonte novo difere"
         );
 
-        // E um fonte apagado também.
+        // Apagado.
         assert!(varrer(&raiz).save_to(&arquivo));
-        assert!(recarregar().confere_com_o_disco(&raiz, &fontes));
-        assert!(fs::remove_file(raiz.join("Novo.java")).is_ok());
-        assert!(
-            !recarregar().confere_com_o_disco(&raiz, &fontes),
-            "fonte apagado tem de reprovar"
+        assert!(fs::remove_file(&novo).is_ok());
+        assert_eq!(
+            recarregar().diferenca(&raiz, &fontes),
+            vec![novo],
+            "so o fonte apagado difere"
         );
         let _ = fs::remove_dir_all(&raiz);
     }
 
-    /// A faixa por prefixo responde o mesmo que varrer, sem varrer.
+    /// Abrir relê o que mudou, e mais nada — e o disco fica em dia.
     ///
-    /// É o critério da fase 3 da `20`. As duas metades importam: se ela
-    /// respondesse menos, seria rápida e errada; se percorresse tudo, seria
-    /// certa e não teria mudado nada. O projeto aqui tem tipos de sobra para a
-    /// diferença aparecer.
+    /// É o critério da fase 4 da `20`, nas três metades: projeto inalterado não
+    /// relê nada; um fonte alterado fora da IDE relê **aquele** fonte; e depois
+    /// da reconciliação o arquivo volta a descrever o projeto, senão a próxima
+    /// abertura recalcularia a mesma diferença.
     #[test]
-    fn a_prefix_range_answers_the_same_without_walking_everything() {
-        let raiz = std::env::temp_dir().join(format!(
-            "er-ide-indice-prefixo-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&raiz);
-        assert!(fs::create_dir_all(&raiz).is_ok());
-        for inicial in ["Alfa", "Beta", "Gama", "Delta"] {
-            for numero in 0..25 {
-                let nome = format!("{inicial}Tipo{numero:02}");
-                assert!(
-                    fs::write(
-                        raiz.join(format!("{nome}.java")),
-                        format!("public class {nome} {{ int campo{numero}; }}\n"),
-                    )
-                    .is_ok()
-                );
-            }
-        }
+    fn opening_rereads_what_changed_and_nothing_else() {
+        let raiz = projeto("indice-reconcilia");
         let arquivo = raiz.join("indice.bin");
         assert!(varrer(&raiz).save_to(&arquivo));
-        let Some(indice) = WorkspaceIndex::carregar_de(&arquivo) else {
+        let fontes = vec![raiz.clone()];
+        let documentos = match Documents::new() {
+            Ok(documentos) => documentos,
+            Err(error) => panic!("analisador indisponível: {error}"),
+        };
+
+        // 1. Projeto inalterado: nada é relido.
+        let Some(intacto) = WorkspaceIndex::carregar_de(&arquivo) else {
             panic!("nao carregou");
         };
-
-        let varrendo = |prefixo: &str| -> Vec<String> {
-            let mut nomes: Vec<String> = indice
-                .symbols()
-                .filter(|simbolo| {
-                    simbolo
-                        .name()
-                        .to_ascii_lowercase()
-                        .starts_with(&prefixo.to_ascii_lowercase())
-                })
-                .map(|simbolo| simbolo.name().to_owned())
-                .collect();
-            nomes.sort();
-            nomes
-        };
-        let pela_faixa = |prefixo: &str| -> Vec<String> {
-            let mut nomes: Vec<String> = indice
-                .symbols_with_prefix(prefixo)
-                .map(|simbolo| simbolo.name().to_owned())
-                .collect();
-            nomes.sort();
-            nomes
-        };
-
-        // Mesma resposta, inclusive para o que não existe e para maiúsculas
-        // trocadas — a faixa é por minúsculas, como a busca por tipo compara.
-        for prefixo in [
-            "", "A", "Alfa", "alfa", "ALFA", "BetaTipo1", "Z", "AlfaTipo07", "d",
-        ] {
-            assert_eq!(
-                pela_faixa(prefixo),
-                varrendo(prefixo),
-                "a faixa de {prefixo:?} respondeu diferente da varredura"
-            );
-        }
-
-        // E não percorre tudo: o que a fase entrega.
-        let todos = indice.symbols().count();
-        let da_faixa = indice.symbols_with_prefix("Alfa").count();
-        assert!(todos >= 100, "o projeto tem de ser grande o bastante: {todos}");
-        assert!(
-            da_faixa * 3 < todos,
-            "a faixa devia ser uma fração do índice: {da_faixa} de {todos}"
-        );
+        assert!(intacto.diferenca(&raiz, &fontes).is_empty());
         assert_eq!(
-            indice.symbols_with_prefix("NaoExiste").count(),
+            intacto.memory_symbol_count(),
             0,
-            "prefixo sem dono nao devolve nada"
+            "projeto inalterado nao pode reler fonte nenhum"
         );
+
+        // 2. Um fonte muda fora da IDE: só ele é relido.
+        let fonte = raiz.join("Estado.java");
+        assert!(fs::write(&fonte, "public enum Situacao { NOVO }\n").is_ok());
+        let Some(mut indice) = WorkspaceIndex::carregar_de(&arquivo) else {
+            panic!("nao carregou");
+        };
+        let mudaram = indice.diferenca(&raiz, &fontes);
+        assert_eq!(mudaram, vec![fonte.clone()]);
+        assert!(
+            documentos
+                .with_parser_mut(|parser| indice.reconciliar(&mudaram, parser))
+                .is_ok()
+        );
+        // O tipo velho saiu, o novo entrou, e os outros arquivos nao foram
+        // relidos: a memoria so tem o que veio deste fonte.
+        assert!(!indice.symbols().any(|simbolo| simbolo.name() == "Estado"));
+        assert!(indice.symbols().any(|simbolo| simbolo.name() == "Situacao"));
+        assert!(indice.symbols().any(|simbolo| simbolo.name() == "Pedido"));
+        assert!(
+            indice.memory_symbol_count() < 5,
+            "so um fonte foi relido, e ele declara pouca coisa: {}",
+            indice.memory_symbol_count()
+        );
+
+        // 3. O disco volta a descrever o projeto.
+        let Some(caminho_real) = file::caminho_do_indice(&raiz, None) else {
+            panic!("sem diretorio de cache");
+        };
+        let _ = fs::remove_file(&caminho_real);
+        assert!(indice.regravar(&raiz, None), "regravar precisa dizer que gravou");
+        let Some(depois) = WorkspaceIndex::carregar_de(&caminho_real) else {
+            panic!("o indice regravado nao pode ser carregado");
+        };
+        assert!(
+            depois.diferenca(&raiz, &fontes).is_empty(),
+            "depois de regravar, nada mais difere"
+        );
+        assert!(depois.veio_do_arquivo());
+        // E o que ele responde é o que a reconciliação produziu.
+        assert!(depois.symbols().any(|simbolo| simbolo.name() == "Situacao"));
+        assert!(!depois.symbols().any(|simbolo| simbolo.name() == "Estado"));
+        assert!(depois.symbols().any(|simbolo| simbolo.name() == "Pedido"));
+        assert_eq!(
+            depois.declaring_file("Situacao"),
+            Some(fonte),
+            "e o tipo novo continua no arquivo certo depois da volta ao disco"
+        );
+        assert!(
+            !ocorrencias(&depois, "Pedido").is_empty(),
+            "as ocorrencias dos fontes intactos sobrevivem a regravacao"
+        );
+        let _ = fs::remove_file(&caminho_real);
         let _ = fs::remove_dir_all(&raiz);
     }
 
@@ -1069,22 +1205,22 @@ mod tests {
     fn saving_puts_the_file_where_it_belongs() {
         let raiz = projeto("indice-save");
         let indice = varrer(&raiz);
-        let Some(caminho) = file::caminho_do_indice(&raiz) else {
+        let Some(caminho) = file::caminho_do_indice(&raiz, None) else {
             panic!("sem diretório de cache no ambiente");
         };
         let _ = fs::remove_file(&caminho);
-        assert!(indice.save(&raiz), "gravar precisa dizer que gravou");
+        assert!(indice.save(&raiz, None), "gravar precisa dizer que gravou");
         assert!(caminho.is_file(), "o arquivo tem de existir em {caminho:?}");
         assert!(
-            WorkspaceIndex::carregar(&raiz).is_some(),
+            WorkspaceIndex::carregar(&raiz, None).is_some(),
             "e tem de ser carregável"
         );
         // Um índice que veio do disco não se regrava: o delta não é o todo.
-        let Some(carregado) = WorkspaceIndex::carregar(&raiz) else {
+        let Some(carregado) = WorkspaceIndex::carregar(&raiz, None) else {
             panic!("não carregou");
         };
         assert!(
-            !carregado.save(&raiz),
+            !carregado.save(&raiz, None),
             "regravar um índice carregado perderia o que não foi reindexado"
         );
         let _ = fs::remove_file(&caminho);

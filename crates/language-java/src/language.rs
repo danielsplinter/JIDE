@@ -209,21 +209,38 @@ impl JavaLanguage {
         let fontes = source_roots.to_vec();
         let toolchain = toolchain_root.map(Path::to_path_buf);
         thread::spawn(move || {
-            // O arquivo da abertura anterior, se ele ainda descrever este
-            // projeto. Conferir é obrigatório: servir um índice vencido é o
+            // O arquivo da abertura anterior, reconciliado com o que mudou
+            // desde então. Conferir é obrigatório: servir um índice vencido é o
             // defeito silencioso que a `19` combateu.
-            if let Some(carregado) = WorkspaceIndex::carregar(&raiz)
-                && carregado.confere_com_o_disco(&raiz, &fontes)
-            {
-                if let Ok(mut guarda) = destino.write() {
-                    *guarda = carregado;
+            if let Some(mut carregado) = WorkspaceIndex::carregar(&raiz, toolchain.as_deref()) {
+                let mudaram = carregado.diferenca(&raiz, &fontes);
+                let reconciliado = mudaram.is_empty()
+                    || Documents::new()
+                        .and_then(|documentos| {
+                            documentos
+                                .with_parser_mut(|parser| carregado.reconciliar(&mudaram, parser))
+                        })
+                        .is_ok();
+                if reconciliado {
+                    // Publicar vem primeiro: quem espera o índice já pode
+                    // trabalhar, e a volta ao disco não é da conta dele.
+                    let regravar = !mudaram.is_empty();
+                    if let Ok(mut guarda) = destino.write() {
+                        *guarda = carregado;
+                    }
+                    let (marca, condicao) = &*aviso;
+                    if let Ok(mut pronto) = marca.lock() {
+                        *pronto = true;
+                    }
+                    condicao.notify_all();
+                    // E aí sim o disco volta a descrever o projeto. Sem isto a
+                    // próxima abertura recalcularia a mesma diferença, e ela só
+                    // cresceria.
+                    if regravar && let Ok(guarda) = destino.read() {
+                        guarda.regravar(&raiz, toolchain.as_deref());
+                    }
+                    return;
                 }
-                let (marca, condicao) = &*aviso;
-                if let Ok(mut pronto) = marca.lock() {
-                    *pronto = true;
-                }
-                condicao.notify_all();
-                return;
             }
             let indice = Documents::new()
                 .and_then(|documentos| {
@@ -239,7 +256,7 @@ impl JavaLanguage {
                 .unwrap_or_default();
             // Gravado antes de publicar: quem espera o índice espera por ele
             // pronto, e não pela escrita.
-            indice.save(&raiz);
+            indice.save(&raiz, toolchain.as_deref());
             if let Ok(mut guarda) = destino.write() {
                 *guarda = indice;
             }
@@ -2109,14 +2126,18 @@ int x;";
             return;
         }
         let inicio = std::time::Instant::now();
-        let Some(indice) = WorkspaceIndex::carregar_de(&arquivo) else {
+        let Some(mut indice) = WorkspaceIndex::carregar_de(&arquivo) else {
             panic!("o indice gravado nao pode ser carregado");
         };
         eprintln!("carregado em {:?}", inicio.elapsed());
 
         let conferindo = std::time::Instant::now();
-        let vale = indice.confere_com_o_disco(&root, std::slice::from_ref(&root));
-        eprintln!("conferido em {:?}: vale={vale}", conferindo.elapsed());
+        let mudaram = indice.diferenca(&root, std::slice::from_ref(&root));
+        eprintln!(
+            "diferenca calculada em {:?}: {} fontes mudaram",
+            conferindo.elapsed(),
+            mudaram.len()
+        );
 
         // E responde: sem isto a medicao diria que abrir e rapido sem provar
         // que o que abriu serve.
@@ -2146,6 +2167,43 @@ int x;";
             indice.symbol_count() > 100_000,
             "o indice tem de estar cheio"
         );
+
+        // A fase 4: um fonte alterado custa um fonte, e nao o projeto.
+        let alvo = mudaram.first().cloned().unwrap_or_else(|| {
+            let mut caminhos = Vec::new();
+            crate::index::collect_workspace_paths(&root, &mut caminhos);
+            caminhos
+                .into_iter()
+                .find(|caminho| {
+                    caminho
+                        .extension()
+                        .and_then(|extensao| extensao.to_str())
+                        .is_some_and(|extensao| extensao.eq_ignore_ascii_case("java"))
+                })
+                .unwrap_or_default()
+        });
+        let documentos = match Documents::new() {
+            Ok(documentos) => documentos,
+            Err(error) => panic!("analisador indisponivel: {error}"),
+        };
+        let reconciliando = std::time::Instant::now();
+        assert!(
+            documentos
+                .with_parser_mut(|parser| indice
+                    .reconciliar(std::slice::from_ref(&alvo), parser))
+                .is_ok()
+        );
+        eprintln!("um fonte reconciliado em {:?}", reconciliando.elapsed());
+
+        let regravando = std::time::Instant::now();
+        let destino = std::env::temp_dir().join("er-ide-medicao-regravado.bin");
+        assert!(indice.save_juntando(&destino), "regravar o indice medido");
+        eprintln!(
+            "indice regravado em {:?}, {} MB",
+            regravando.elapsed(),
+            fs::metadata(&destino).map(|dados| dados.len()).unwrap_or(0) / 1_048_576
+        );
+        let _ = fs::remove_file(&destino);
     }
 
     /// A semântica é calculada sob demanda e refeita depois de cada mudança.

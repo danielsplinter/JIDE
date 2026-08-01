@@ -275,7 +275,7 @@ metades — se a faixa respondesse menos seria rápida e errada, se percorresse 
 seria certa e não teria mudado nada. Foi verificado que ele **falha** com a faixa
 deslocada em uma posição.
 
-### Fase 4 — A invalidação ao gravar
+### Fase 4 — A invalidação ao gravar ✅
 
 Gravar um arquivo já chama `reindex_file`, que refaz **aquele** arquivo. Com o
 índice em disco, a mesma gravação precisa alcançar o disco também.
@@ -287,6 +287,56 @@ reindexar nada; um com dez arquivos alterados paga dez.
 **Critério:** abrir um projeto inalterado não reindexa nada; alterar um arquivo
 fora da IDE e abrir reindexa aquele arquivo e mais nenhum; gravar dentro da IDE
 deixa o disco de acordo com a memória.
+
+**Feita.** A conferência da fase 2 respondia sim ou não; agora ela devolve a
+**lista** do que mudou — novo, alterado ou apagado. Cada um passa por
+`reindex_file`, que já sabia tirar do carregado o que aquele arquivo dizia e pôr
+no lugar o que ele diz agora. Depois o índice volta ao disco, senão a próxima
+abertura recalcularia a mesma diferença e ela só cresceria.
+
+**Medido no projeto de referência:**
+
+| | |
+|---|---|
+| carregar o arquivo | 31 ms |
+| calcular a diferença (26.211 fontes) | 3,68 s |
+| reconciliar **um** fonte alterado | **3,5 ms** |
+| regravar o índice | 3,35 s, fora do caminho de espera |
+
+E o que isso muda em quem abre o projeto:
+
+| | antes da fase 4 | agora |
+|---|---|---|
+| projeto inalterado | 3,7 s | 3,7 s |
+| um fonte alterado fora da IDE | **41 s** — reconstruía tudo | **3,7 s** |
+
+Os 3,5 ms são o número da fase: um fonte alterado custa um fonte.
+
+**A regravação sai do caminho de quem espera.** Ela leva 3,35 s, e o índice já
+está pronto antes dela. Publicar vem primeiro, avisar quem espera vem em seguida,
+e a volta ao disco acontece depois — não é da conta de quem abriu o projeto.
+
+**Gravar dentro da IDE** continua reindexando só o arquivo, como desde a fase 4
+da `19`. O disco não é reescrito a cada gravação, e não precisa ser: a próxima
+abertura vê exatamente aqueles arquivos na diferença e paga 3,5 ms por cada um.
+Reescrever 78 MB por gravação custaria mais do que economiza.
+
+**O defeito que a fase revelou, e que não era dela.** Um teste caiu:
+`the_indexed_jdk_is_the_one_the_ide_points_at`. O arquivo do índice era
+identificado só pela raiz do projeto, mas o **conteúdo** dele depende do JDK
+escolhido — trocar de JDK e reabrir serviria as classes do JDK anterior. Resposta
+errada em silêncio, de novo. O JDK entrou na identidade do arquivo: cada um
+guarda o seu, e voltar ao anterior reaproveita o que ele já tinha. Foi verificado
+que o teste **volta a falhar** sem isso.
+
+Só apareceu agora porque, até a fase 2, ativar sempre reconstruía — não havia
+arquivo velho para servir. É o tipo de defeito que persistência cria, e a
+especificação já o nomeava entre os riscos: *lugares que podem discordar*.
+
+`the_difference_sees_what_changed_and_only_that` cobre os três casos — novo,
+alterado, apagado. `opening_rereads_what_changed_and_nothing_else` cobre as três
+metades do critério, inclusive que depois da regravação o arquivo volta a
+descrever o projeto e o que ele responde é o que a reconciliação produziu.
 
 ## Uma ressalva sobre a ordem — vencida
 
@@ -303,6 +353,26 @@ Não é defeito, é uma janela: quem parar entre a 2 e a 3 fica com o ganho de t
 de abertura e sem o de memória. **Trocar a 3 pela 2** fecha essa janela e faz a
 fase 2 render desde o primeiro dia. Fica registrado para quem executar decidir;
 as duas ordens chegam ao mesmo lugar.
+
+## O que a `20` entregou, no total
+
+| | antes | depois |
+|---|---|---|
+| abrir um projeto inalterado | 251 s | **3,7 s** |
+| abrir com um fonte alterado | 251 s | **3,7 s** |
+| memória do índice | 178 MB | **103 MB** |
+| registros lidos por tecla | 339.664 | **1.039 a 4.308** |
+| Ctrl+clique (9.314 ocorrências) | — | **0,9 ms** |
+
+**O que ficou por fazer**, e está registrado onde importa:
+
+- **a memória não é elástica** — ver ADR-023. Trocar leitura por mapeamento é uma
+  linha, e depende de rever o `unsafe_code = "forbid"`;
+- **os 3,68 s da diferença** são uma varredura de 26 mil arquivos comparando data
+  e tamanho. É o que sobrou de caro na abertura, e um observador de sistema de
+  arquivos o eliminaria;
+- **os jars não entram na conferência.** Uma dependência trocada sem mexer em
+  fonte nenhum passa despercebida.
 
 ## Riscos
 

@@ -534,11 +534,12 @@ fn ler_faixa(bytes: &[u8], em: usize) -> Option<TextRange> {
 
 /// Onde o índice de um projeto mora.
 ///
-/// Um arquivo por raiz, com o nome derivado dela: duas IDEs em projetos
-/// diferentes não disputam o mesmo arquivo.
+/// Um arquivo por raiz **e por JDK**, com o nome derivado dos dois: dois
+/// projetos não disputam o mesmo arquivo, e trocar de JDK não faz um índice
+/// responder pelas classes do outro.
 /// A base segue o mesmo caminho de ambiente que a configuração da IDE usa: não
 /// há por que inventar outro, nem trazer dependência para descobri-lo.
-pub(in crate::index) fn caminho_do_indice(root: &Path) -> Option<PathBuf> {
+pub(in crate::index) fn caminho_do_indice(root: &Path, toolchain: Option<&Path>) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
@@ -549,6 +550,11 @@ pub(in crate::index) fn caminho_do_indice(root: &Path) -> Option<PathBuf> {
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     root.hash(&mut hasher);
+    // O JDK entra na identidade do arquivo. Sem isso, trocar de JDK e reabrir
+    // serviria as classes do anterior — resposta errada em silêncio, que é o
+    // defeito que a `19` combateu. Cada JDK guarda o seu, e voltar ao anterior
+    // reaproveita o que ele já tinha.
+    toolchain.hash(&mut hasher);
     Some(
         base?
             .join("er-ide")
@@ -690,6 +696,14 @@ impl Carregado {
     fn nome(&self, indice: usize) -> Option<&str> {
         let registro = self.registro(area::NOMES, tamanho::NOME, indice)?;
         self.texto(ler_u32(registro, 0)?)
+    }
+
+    /// Todos os nomes que têm ocorrências, na ordem em que estão gravados.
+    ///
+    /// Serve a quem precisa reconstruir o índice inteiro — a regravação da fase
+    /// 4 — e não ao caminho de consulta, que vai direto ao nome procurado.
+    pub(in crate::index) fn nomes_gravados(&self) -> impl Iterator<Item = &str> {
+        (0..self.areas[area::NOMES].1).filter_map(|indice| self.nome(indice))
     }
 
     /// Onde um nome aparece: a faixa de ocorrências dele.
