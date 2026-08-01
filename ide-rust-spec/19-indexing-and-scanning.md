@@ -153,7 +153,7 @@ Um teste novo guarda o que a fase entrega: `activation_returns_before_the_index_
 afirma que ativar leva menos de 250 ms. Antes, no mesmo projeto, levava ~1,5 s.
 `language-java` foi de 29 para 30 testes.
 
-### Fase 3 — Os tetos saem ✅
+### Fase 3 — Os tetos saem
 
 Com a indexação em segundo plano, demorar deixa de travar alguém, e os quatro
 tetos perdem a razão de existir. Sai também a necessidade de avisar que truncou —
@@ -162,33 +162,20 @@ não haverá truncamento.
 **Critério:** nenhum limite silencioso; um monorepo é indexado por inteiro, no
 tempo que levar.
 
-**Feito.** Saíram os quatro: 600 caminhos, 500 fontes `.java`, 64 jars e 24.000
-classes do JDK. Nenhum protegia memória — todos existiam para a varredura terminar
-rápido, e ela não segura mais ninguém desde a fase 2.
+**Tentada e revertida.** Os quatro tetos saíram — 600 caminhos, 500 fontes
+`.java`, 64 jars, 24.000 classes do JDK — e o que estava escondido apareceu: no
+projeto de referência são **40.472** caminhos e **26.211** fontes, contra 600 e
+500. A IDE indexava **1,9%** do projeto e não dizia nada.
 
-**O tamanho do que estava escondido**, medido no projeto de referência:
+Só que a IDE passou a abrir **em branco e sem responder** nesse projeto. A fase 2
+tirou a espera do caminho da primeira consulta, mas não tornou o trabalho barato:
+ele saiu da frente e continuou existindo, cinquenta vezes maior. A remoção foi
+revertida para devolver a IDE ao uso.
 
-| | com teto | real |
-|---|---|---|
-| caminhos | 600 | **40.472** |
-| fontes `.java` | 500 | **26.211** |
-| jars | 64 | 3 |
-
-A IDE indexava **1,9%** do projeto e não dizia nada. A completação simplesmente não
-conhecia 98% do código, e quem usava não tinha como distinguir isso de um tipo que
-não existe — que era exatamente o defeito que esta especificação chamou de o mais
-perigoso.
-
-**O que a remoção cobra, e é preciso dizer:** a varredura de caminhos sozinha leva
-**3,4 s** nesse projeto, e depois dela vêm 26 mil fontes para parsear e analisar. É
-trabalho de minutos, agora em segundo plano — ninguém espera, mas ele acontece, e
-recomeça do zero a cada ativação.
-
-Isso **promove a fase 4**. Reindexar tudo custava pouco quando eram 500 arquivos;
-com 26 mil, incremental deixa de ser conforto e vira o que torna a fase 3
-sustentável no uso diário.
-
-Um teste de medição marcado `#[ignore]` guarda esses números e permite refazê-los.
+**O que falta para a fase 3 valer:** não é tirar o teto — é a indexação parar de
+disputar a máquina com a interface. Limitar as linhas de execução, ceder tempo
+entre arquivos, e medir memória e CPU **antes** de tirar o limite. Enquanto isso
+não existir, o teto é o que segura, e ele mente — o defeito continua aberto.
 
 ### Fase 4 — Índice incremental ✅
 
