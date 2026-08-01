@@ -260,6 +260,16 @@ impl JavaLanguage {
 
 #[async_trait]
 impl ActiveLanguage for JavaLanguage {
+    async fn file_changed(&self, path: &Path) -> Result<(), LanguageError> {
+        // Só o arquivo que mudou: o resto do índice fica como está.
+        let mut indice = self
+            .workspace_index
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.documents
+            .with_parser_mut(|parser| indice.reindex_file(path, parser))
+    }
+
     async fn wait_until_indexed(&self, timeout: Duration) -> bool {
         self.wait_for_index(timeout)
     }
@@ -1857,6 +1867,62 @@ int x;";
             vec!["f"],
             "o membro da classe interna fica dentro dela"
         );
+    }
+
+    /// Uma classe criada agora entra na completação, sem reiniciar nada.
+    ///
+    /// É o critério da fase 4 da `19`. Antes, o índice era montado na ativação e
+    /// só ali: um arquivo novo aparecia na busca por tipo na **próxima** vez que
+    /// a linguagem fosse ativada.
+    #[test]
+    fn a_file_saved_now_joins_the_index() {
+        let root = std::env::temp_dir().join(format!("er-ide-incremental-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(fs::write(root.join("Antigo.java"), "public class Antigo {}\n").is_ok());
+
+        let active = match pollster::block_on(JavaLanguageProvider::new().activate(
+            LanguageActivationContext {
+                workspace_root: root.clone(),
+                source_roots: vec![root.clone()],
+                toolchains: Vec::new(),
+            },
+        )) {
+            Ok(active) => {
+                assert!(pollster::block_on(
+                    active.wait_until_indexed(Duration::from_secs(60))
+                ));
+                active
+            }
+            Err(error) => panic!("falha ao ativar o provider: {error}"),
+        };
+
+        let nomes = |active: &dyn ActiveLanguage| -> Vec<String> {
+            match pollster::block_on(active.workspace_types("", 50)) {
+                Ok(found) => found.into_iter().map(|symbol| symbol.name).collect(),
+                Err(error) => panic!("falha na busca: {error}"),
+            }
+        };
+        assert!(!nomes(active.as_ref()).iter().any(|nome| nome == "Novo"));
+
+        // A classe nasce agora, e o aviso é o que a faz entrar.
+        assert!(fs::write(root.join("Novo.java"), "public class Novo {}\n").is_ok());
+        assert!(pollster::block_on(active.file_changed(&root.join("Novo.java"))).is_ok());
+        assert!(
+            nomes(active.as_ref()).iter().any(|nome| nome == "Novo"),
+            "a classe criada precisa participar da completação: {:?}",
+            nomes(active.as_ref())
+        );
+
+        // E apagar tira: reindexar um arquivo remove o que ele declarava.
+        assert!(fs::remove_file(root.join("Novo.java")).is_ok());
+        assert!(pollster::block_on(active.file_changed(&root.join("Novo.java"))).is_ok());
+        assert!(!nomes(active.as_ref()).iter().any(|nome| nome == "Novo"));
+        assert!(
+            nomes(active.as_ref()).iter().any(|nome| nome == "Antigo"),
+            "reindexar um arquivo não pode levar os outros junto"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Ativar devolve sem esperar o índice.

@@ -23,6 +23,16 @@ pub(super) enum WorkerRequest {
         change: DocumentChange,
         response: oneshot::Sender<Result<(), LanguageHostError>>,
     },
+    /// Um arquivo mudou em disco, e o índice da linguagem precisa saber.
+    FileChanged {
+        path: std::path::PathBuf,
+        response: oneshot::Sender<Result<(), LanguageHostError>>,
+    },
+    /// Espera o índice da linguagem, para quem precisa da resposta completa.
+    WaitIndexed {
+        timeout: std::time::Duration,
+        response: oneshot::Sender<Result<bool, LanguageHostError>>,
+    },
     Close {
         context: LanguageRequestContext,
         document_id: DocumentId,
@@ -172,6 +182,26 @@ impl ProviderWorker {
         receiver
             .await
             .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    /// Espera o índice da linguagem ficar pronto.
+    pub(super) async fn wait_until_indexed(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<bool, LanguageHostError> {
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::WaitIndexed { timeout, response })?;
+        receiver.await.map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
+    /// Avisa a linguagem que um arquivo mudou em disco.
+    pub(super) async fn file_changed(
+        &self,
+        path: std::path::PathBuf,
+    ) -> Result<(), LanguageHostError> {
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::FileChanged { path, response })?;
+        receiver.await.map_err(|_| LanguageHostError::WorkerStopped)?
     }
 
     pub(super) async fn change_document(
@@ -512,6 +542,14 @@ fn run_worker(
                         .block_on(active.open_document(document))
                         .map_err(Into::into)
                 };
+                let _ = response.send(result);
+            }
+            WorkerRequest::WaitIndexed { timeout, response } => {
+                let pronto = runtime.block_on(active.wait_until_indexed(timeout));
+                let _ = response.send(Ok(pronto));
+            }
+            WorkerRequest::FileChanged { path, response } => {
+                let result = runtime.block_on(active.file_changed(&path)).map_err(Into::into);
                 let _ = response.send(result);
             }
             WorkerRequest::Change {

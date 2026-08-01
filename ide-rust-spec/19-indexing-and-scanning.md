@@ -190,12 +190,48 @@ sustentável no uso diário.
 
 Um teste de medição marcado `#[ignore]` guarda esses números e permite refazê-los.
 
-### Fase 4 — Índice incremental
+### Fase 4 — Índice incremental ✅
 
 Salvar um arquivo reindexa **aquele arquivo**, em vez de a classe nova só aparecer
 na ativação seguinte. Trocar o JDK deixa de refazer os fontes do projeto.
 
 **Critério:** uma classe criada agora participa da completação sem reiniciar nada.
+
+**Feito no índice, e provado.** `WorkspaceIndex::reindex_file` tira o que um
+arquivo declarava — símbolos, referências e a declaração do tipo — e o lê de novo;
+se ele sumiu do disco, só tira. A indexação de um fonte virou `index_source`,
+extraída da varredura, então o caminho é o mesmo para o primeiro e para o
+milésimo arquivo.
+
+O contrato ganhou o aviso, com padrão vazio para quem não tem índice:
+
+```rust
+async fn file_changed(&self, path: &Path) -> Result<(), LanguageError>
+```
+
+O teste `a_file_saved_now_joins_the_index` cobre as duas metades: a classe criada
+entra na busca por tipo, e a apagada sai — sem levar as outras junto.
+
+### O gatilho, ligado
+
+`save_document` avisa o `LanguageHost` depois de gravar, e o host avisa **todas** as
+linguagens ativas — não só a do documento: quem grava um `.java` pode estar com um
+`.xml` aberto, e cada linguagem decide se o arquivo lhe interessa. O padrão do
+contrato é ignorar.
+
+O caminho passou a existir nas três camadas: `WorkerRequest::FileChanged`,
+`LanguageHost::file_changed`, e a chamada no `native_ide`.
+
+Junto veio `wait_until_indexed` no host, pela mesma via. Ele não serve ao uso
+normal — serve a quem precisa da resposta completa, e um dia a um indicador de
+"indexando" na barra de estado.
+
+**Um teste de integração caiu no caminho**, e pelo motivo certo:
+`navigation_finds_definitions_declared_in_other_files` afirmava navegação pelo
+projeto inteiro logo após ativar. Ele passou a esperar — é o mesmo ajuste dos cinco
+testes da fase 2, agora no nível da aplicação.
+
+**327 testes na IDE.**
 
 ## A medida provisória que não entra na ordem
 

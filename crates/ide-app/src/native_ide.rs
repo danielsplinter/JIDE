@@ -308,6 +308,13 @@ impl NativeIde {
 
     fn save_document(&mut self, request: SaveDocumentRequest) {
         let result = self.workspace.save_document(&request.path, &request.text);
+        if result.is_ok()
+            && let Some(language_host) = &self.languages.host
+        {
+            // O índice acompanha a gravação: a classe criada agora entra na
+            // completação sem esperar a próxima ativação. Ver a fase 4 da `19`.
+            let _ = pollster::block_on(language_host.file_changed(&request.path));
+        }
         let Some(shell) = self.ui.shell.as_mut() else {
             return;
         };
@@ -2551,6 +2558,15 @@ mod tests {
             None => panic!("shell de teste ausente"),
         };
         ide.sync_languages();
+        // Ativar não espera mais o índice: quem afirma a navegação pelo projeto
+        // inteiro precisa dele pronto. Ver a fase 2 da `19`.
+        if let Some(host) = &ide.languages.host {
+            assert!(
+                pollster::block_on(host.wait_until_indexed(std::time::Duration::from_secs(60)))
+                    .unwrap_or(false),
+                "o índice do projeto não ficou pronto a tempo"
+            );
+        }
 
         for (token, arquivo) in [
             ("Pedido", "Pedido.java"),

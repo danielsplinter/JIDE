@@ -315,6 +315,55 @@ impl LanguageHost {
         )
     }
 
+    /// Espera as linguagens ativas terminarem seus índices.
+    ///
+    /// Existe para quem precisa da resposta completa — testes, e um dia um
+    /// indicador na barra de estado. O uso normal não espera.
+    pub async fn wait_until_indexed(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<bool, LanguageHostError> {
+        let workers: Vec<Arc<ProviderWorker>> = {
+            let registry = self
+                .registry
+                .lock()
+                .map_err(|_| LanguageHostError::WorkerStopped)?;
+            registry
+                .providers
+                .values()
+                .filter_map(|entry| entry.worker.clone())
+                .collect()
+        };
+        let mut pronto = true;
+        for worker in workers {
+            pronto &= worker.wait_until_indexed(timeout).await?;
+        }
+        Ok(pronto)
+    }
+
+    /// Avisa as linguagens ativas que um arquivo mudou em disco.
+    ///
+    /// Vai a **todas**, e não à do documento: quem grava um `.java` pode estar
+    /// com um `.xml` aberto, e cada linguagem decide se o arquivo lhe interessa
+    /// — o padrão do contrato é ignorar.
+    pub async fn file_changed(&self, path: &std::path::Path) -> Result<(), LanguageHostError> {
+        let workers: Vec<Arc<ProviderWorker>> = {
+            let registry = self
+                .registry
+                .lock()
+                .map_err(|_| LanguageHostError::WorkerStopped)?;
+            registry
+                .providers
+                .values()
+                .filter_map(|entry| entry.worker.clone())
+                .collect()
+        };
+        for worker in workers {
+            worker.file_changed(path.to_path_buf()).await?;
+        }
+        Ok(())
+    }
+
     pub async fn change_document(
         &self,
         context: LanguageRequestContext,

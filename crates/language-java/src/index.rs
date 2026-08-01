@@ -63,6 +63,51 @@ pub(super) struct WorkspaceIndex {
 }
 
 impl WorkspaceIndex {
+    /// Lê um fonte e acrescenta o que ele declara.
+    fn index_source(&mut self, path: &Path, parser: &mut Parser) {
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        let Some(tree) = parser.parse(&text, None) else {
+            return;
+        };
+        let snapshot = DocumentSnapshot {
+            id: DocumentId(0),
+            path: path.to_path_buf(),
+            version: 0,
+            text,
+        };
+        let (semantic, references) = analyze_semantics(&snapshot, &tree);
+        for symbol in &semantic.symbols {
+            if matches!(
+                symbol.kind,
+                SymbolKind::Class | SymbolKind::Interface | SymbolKind::Record | SymbolKind::Enum
+            ) {
+                self.declarations
+                    .entry(symbol.name.clone())
+                    .or_insert_with(|| path.to_path_buf());
+            }
+        }
+        self.symbols.extend(semantic.symbols);
+        merge_references(&mut self.references, references);
+    }
+
+    /// Reindexa **um** arquivo, tirando antes o que ele havia declarado.
+    ///
+    /// Salvar deixa de esperar a próxima ativação. Com 26 mil fontes, refazer o
+    /// índice inteiro a cada gravação seria trabalho de minutos.
+    pub(super) fn reindex_file(&mut self, path: &Path, parser: &mut Parser) {
+        self.symbols.retain(|symbol| symbol.location.path != path);
+        for locais in self.references.values_mut() {
+            locais.retain(|local| local.path != path);
+        }
+        self.references.retain(|_, locais| !locais.is_empty());
+        self.declarations.retain(|_, declarado| declarado != path);
+        if path.exists() {
+            self.index_source(path, parser);
+        }
+    }
+
     /// Indexa a biblioteca padrão do JDK apontado por `JAVA_HOME`.
     ///
     /// A partir do Java 9 as classes vivem em `jmods/*.jmod`, que são zips com
@@ -160,33 +205,7 @@ impl WorkspaceIndex {
                         && (source_roots.is_empty()
                             || source_roots.iter().any(|root| path.starts_with(root))) =>
                 {
-                    if let Ok(text) = fs::read_to_string(&path)
-                        && let Some(tree) = parser.parse(&text, None)
-                    {
-                        let snapshot = DocumentSnapshot {
-                            id: DocumentId(0),
-                            path: path.clone(),
-                            version: 0,
-                            text,
-                        };
-                        let (semantic, references) = analyze_semantics(&snapshot, &tree);
-                        for symbol in &semantic.symbols {
-                            if matches!(
-                                symbol.kind,
-                                SymbolKind::Class
-                                    | SymbolKind::Interface
-                                    | SymbolKind::Record
-                                    | SymbolKind::Enum
-                            ) {
-                                index
-                                    .declarations
-                                    .entry(symbol.name.clone())
-                                    .or_insert_with(|| path.clone());
-                            }
-                        }
-                        index.symbols.extend(semantic.symbols);
-                        merge_references(&mut index.references, references);
-                    }
+                    index.index_source(&path, parser);
                 }
                 Some(extension) if extension.eq_ignore_ascii_case("class") => {
                     if let Ok(bytes) = fs::read(&path)

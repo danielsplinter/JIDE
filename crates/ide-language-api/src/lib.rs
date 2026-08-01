@@ -136,6 +136,14 @@ pub trait ActiveLanguage: Send + Sync {
     async fn close_document(&self, document_id: DocumentId) -> Result<(), LanguageError>;
     async fn diagnostics(&self, document_id: DocumentId) -> Result<Vec<Diagnostic>, LanguageError>;
 
+    /// Avisa que um arquivo mudou em disco, para o índice acompanhar.
+    ///
+    /// Gravar deixa de esperar a próxima ativação: a classe criada agora entra
+    /// na completação sem reiniciar nada. Linguagens sem índice ignoram.
+    async fn file_changed(&self, _path: &std::path::Path) -> Result<(), LanguageError> {
+        Ok(())
+    }
+
     /// Espera o índice do projeto ficar pronto, se houver um.
     ///
     /// Ativar não espera mais: uma linguagem pode devolver o ambiente na hora e
