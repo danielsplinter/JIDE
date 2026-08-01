@@ -29,7 +29,7 @@ existindo.
 
 Os dois problemas são independentes, e cada fase resolve um.
 
-## Fase 1 — O observador
+## Fase 1 — O observador ✅
 
 O sistema operacional avisa quando um arquivo muda, e o evento chega a
 `reindex_file`, que já existe e custa **3,5 ms** por fonte.
@@ -152,6 +152,38 @@ a navegação responderem pelo texto novo sem nenhuma ação do usuário. Um bui
 completo não trava a IDE nem dispara mil reindexações separadas. E **não observar
 responde como hoje**: sem observador — por limite, por falha ou por plataforma —
 a IDE continua correta, com o índice envelhecendo até a próxima abertura.
+
+### Feita
+
+**Medido:** uma rajada de 400 arquivos escritos em 283 ms — 200 fontes mais 200
+em `target/`, que a indexação ignora. O índice ficou em dia **686 ms depois do
+início da rajada**: os 300 ms de silêncio mais a releitura dos 200 fontes. Uma
+reação, nada perdido, e o barulho da pasta ignorada não entrou.
+
+O filtro saiu para `fonte_java` e `caminho_ignorado`, no `index`, e é **o mesmo**
+que a varredura aplica. `the_watcher_and_the_scan_agree_on_what_matters` afirma
+isso caminho a caminho, inclusive os que não interessam.
+
+`what_changes_on_disk_reaches_the_index_by_itself` cobre o critério nas duas
+direções — a classe criada fora da IDE entra sozinha, a apagada sai — e foi
+verificado que ele **falha** com o observador desligado.
+
+**Três decisões que o código tomou e que vale registrar:**
+
+- **o observador nasce depois do índice.** Um evento chegando durante a varredura
+  reindexaria contra um índice que ainda vai ser substituído inteiro, e o
+  trabalho se perderia. Vale para as duas partidas: a que constrói e a que
+  carrega do arquivo.
+- **falhar em observar é silencioso.** `Observador::iniciar` devolve `None` e
+  ninguém trata erro nenhum — porque não há erro: a IDE volta a ser o que era. A
+  ordem de recuo do Linux está no código, na mesma função.
+- **perder evento cai na varredura.** Quando a biblioteca avisa que perdeu, a
+  resposta é `diferenca` mais reconciliação — as mesmas da abertura. Perder não
+  vira índice inventado.
+
+**O que a fase custou:** um guarda de arquitetura, que limita a fachada do
+`language-java` a 12 linhas. Ela foi para 13 por causa de uma linha de `mod`, que
+é exatamente o que a fachada deve ter. O teto subiu com a razão escrita ao lado.
 
 ## Fase 2 — A varredura em paralelo
 

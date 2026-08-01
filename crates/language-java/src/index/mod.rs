@@ -15,6 +15,35 @@ use crate::{language::analyze_semantics, symbols::simple_class_name};
 
 mod file;
 
+/// Pastas que a indexação não olha.
+///
+/// Saída de build, controle de versão e dependências baixadas: nada ali é fonte
+/// do projeto, e tudo ali muda o tempo todo.
+const PASTAS_IGNORADAS: [&str; 4] = [".git", "target", "node_modules", ".gradle"];
+
+/// Se o caminho passa por alguma pasta ignorada.
+///
+/// A varredura poda no diretório; quem recebe um caminho pronto — o observador
+/// da `21` — precisa olhar o caminho inteiro.
+pub(crate) fn caminho_ignorado(path: &Path) -> bool {
+    path.components()
+        .filter_map(|componente| componente.as_os_str().to_str())
+        .any(|nome| PASTAS_IGNORADAS.contains(&nome))
+}
+
+/// Se este caminho é um fonte que o índice guarda.
+///
+/// **É o único teste que existe.** Um segundo, escrito noutro lugar, discordaria
+/// um dia: o arquivo muda, a varredura diz que interessa, o observador diz que
+/// não, e o índice envelhece sem ninguém saber. Ver a `21`.
+pub(crate) fn fonte_java(path: &Path, source_roots: &[PathBuf]) -> bool {
+    path.extension()
+        .and_then(|extensao| extensao.to_str())
+        .is_some_and(|extensao| extensao.eq_ignore_ascii_case("java"))
+        && !caminho_ignorado(path)
+        && (source_roots.is_empty() || source_roots.iter().any(|raiz| path.starts_with(raiz)))
+}
+
 pub(crate) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -22,11 +51,11 @@ pub(crate) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let ignored = path
+            let ignorada = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| matches!(name, ".git" | "target" | "node_modules" | ".gradle"));
-            if !ignored {
+                .is_some_and(|name| PASTAS_IGNORADAS.contains(&name));
+            if !ignorada {
                 collect_workspace_paths(&path, output);
             }
         } else {
@@ -288,13 +317,7 @@ impl WorkspaceIndex {
         let mut caminhos = Vec::new();
         collect_workspace_paths(root, &mut caminhos);
         for caminho in caminhos {
-            let fonte_java = caminho
-                .extension()
-                .and_then(|extensao| extensao.to_str())
-                .is_some_and(|extensao| extensao.eq_ignore_ascii_case("java"))
-                && (source_roots.is_empty()
-                    || source_roots.iter().any(|raiz| caminho.starts_with(raiz)));
-            if !fonte_java {
+            if !fonte_java(&caminho, source_roots) {
                 continue;
             }
             let Some((quando, tamanho)) = gravados.remove(&caminho) else {
@@ -827,8 +850,7 @@ impl Dados {
             match path.extension().and_then(|extension| extension.to_str()) {
                 Some(extension)
                     if extension.eq_ignore_ascii_case("java")
-                        && (source_roots.is_empty()
-                            || source_roots.iter().any(|root| path.starts_with(root))) =>
+                        && fonte_java(&path, source_roots) =>
                 {
                     index.index_source(&path, parser);
                     // Ceder entre arquivos é o que separa "demora" de "trava":

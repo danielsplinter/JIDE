@@ -850,7 +850,9 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // funções que viviam duplicadas no shell e no editor. O teto existe para
         // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.
         ("crates/ide-ui/src/lib.rs", 31),
-        ("crates/language-java/src/lib.rs", 12),
+        // 13 desde a fase 1 da `21`: o observador de arquivos é mais um
+        // módulo, e uma linha de `mod` é o que a fachada deve ter.
+        ("crates/language-java/src/lib.rs", 13),
         ("crates/ide-language-host/src/lib.rs", 10),
     ];
     for (relative, limit) in line_limits {

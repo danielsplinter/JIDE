@@ -10,6 +10,7 @@ use std::{
 use crate::completion::{finish_member_list, member_name};
 use crate::documents::{Documents, ParsedDocument};
 use crate::index::{Dados, Simbolo, WorkspaceIndex};
+use crate::observador::Observador;
 use crate::navigation::{member_access, token_at_position, within};
 use crate::semantics::receiver_type;
 use crate::symbols::simple_class_name;
@@ -88,6 +89,9 @@ struct JavaLanguage {
     workspace_index: Arc<RwLock<WorkspaceIndex>>,
     /// Marca e aviso de que o índice chegou, para quem precisa esperá-lo.
     index_ready: Arc<(Mutex<bool>, Condvar)>,
+    /// Quem avisa que o disco mudou por fora. Nasce depois do índice, e viver
+    /// aqui é o que o mantém registrado: soltá-lo para de observar.
+    _observador: Arc<Mutex<Option<Observador>>>,
 }
 
 impl JavaLanguage {
@@ -205,6 +209,8 @@ impl JavaLanguage {
 
         let destino = Arc::clone(&workspace_index);
         let aviso = Arc::clone(&pronto);
+        let observador: Arc<Mutex<Option<Observador>>> = Arc::new(Mutex::new(None));
+        let posto = Arc::clone(&observador);
         let raiz = workspace_root.to_path_buf();
         let fontes = source_roots.to_vec();
         let toolchain = toolchain_root.map(Path::to_path_buf);
@@ -239,6 +245,7 @@ impl JavaLanguage {
                     if regravar && let Ok(guarda) = destino.read() {
                         guarda.regravar(&raiz, toolchain.as_deref());
                     }
+                    observar(&posto, &raiz, fontes, &destino);
                     return;
                 }
             }
@@ -265,6 +272,7 @@ impl JavaLanguage {
                 *pronto = true;
             }
             condicao.notify_all();
+            observar(&posto, &raiz, fontes, &destino);
         });
 
         Ok(Self {
@@ -272,10 +280,14 @@ impl JavaLanguage {
             documents,
             workspace_index,
             index_ready: pronto,
+            _observador: observador,
         })
     }
 
     /// Espera o índice terminar. Existe para quem **precisa** dele agora.
+    ///
+    /// (A função `observar` fica logo abaixo do `impl`, porque ela roda na linha
+    /// de execução do índice e não pertence a instância nenhuma.)
     ///
     /// Com limite: um índice que falhe não pode pendurar quem esperou. Quem não
     /// chama isto trabalha com o que já existe, que é o caminho normal.
@@ -295,6 +307,24 @@ impl JavaLanguage {
         self.workspace_index
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Começa a observar o disco, **depois** de o índice estar publicado.
+///
+/// Antes disso não faria sentido: um evento chegando durante a varredura
+/// reindexaria contra um índice que ainda vai ser substituído inteiro, e o
+/// trabalho se perderia. Falhar em observar é silencioso de propósito — a IDE
+/// segue correta, com o índice envelhecendo até a próxima abertura.
+fn observar(
+    posto: &Arc<Mutex<Option<Observador>>>,
+    raiz: &Path,
+    fontes: Vec<PathBuf>,
+    indice: &Arc<RwLock<WorkspaceIndex>>,
+) {
+    let vigia = Observador::iniciar(raiz, fontes, Arc::clone(indice));
+    if let Ok(mut lugar) = posto.lock() {
+        *lugar = vigia;
     }
 }
 
@@ -2005,6 +2035,176 @@ int x;";
             "reindexar um arquivo não pode levar os outros junto"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// O que muda no disco chega ao índice sem ninguém pedir.
+    ///
+    /// É o critério da fase 1 da `21`. Antes, trocar de branch ou gerar código
+    /// deixava a completação respondendo pelo texto anterior até a IDE ser
+    /// reaberta — e nada avisava.
+    #[test]
+    fn what_changes_on_disk_reaches_the_index_by_itself() {
+        let root = std::env::temp_dir().join(format!("er-ide-observador-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(fs::write(root.join("Antigo.java"), "public class Antigo {}\n").is_ok());
+
+        let active = match pollster::block_on(JavaLanguageProvider::new().activate(
+            LanguageActivationContext {
+                workspace_root: root.clone(),
+                source_roots: vec![root.clone()],
+                toolchains: Vec::new(),
+            },
+        )) {
+            Ok(active) => {
+                assert!(pollster::block_on(
+                    active.wait_until_indexed(Duration::from_secs(60))
+                ));
+                active
+            }
+            Err(error) => panic!("falha ao ativar o provider: {error}"),
+        };
+        let conhece = |nome: &str| -> bool {
+            match pollster::block_on(active.workspace_types("", 500)) {
+                Ok(found) => found.into_iter().any(|symbol| symbol.name == nome),
+                Err(error) => panic!("falha na busca: {error}"),
+            }
+        };
+        // O observador nasce depois do índice; sem esta folga o teste mediria a
+        // ordem de partida, e não o que ele faz.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!conhece("Externo"));
+
+        // Ninguém avisa a IDE: o arquivo simplesmente aparece no disco.
+        assert!(fs::write(root.join("Externo.java"), "public class Externo {}\n").is_ok());
+        let ate = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < ate && !conhece("Externo") {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            conhece("Externo"),
+            "a classe criada fora da IDE precisa chegar ao índice sozinha"
+        );
+
+        // E apagar tira, pelo mesmo caminho.
+        assert!(fs::remove_file(root.join("Externo.java")).is_ok());
+        let ate = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < ate && conhece("Externo") {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!conhece("Externo"), "e apagar fora da IDE tem de tirar");
+        assert!(
+            conhece("Antigo"),
+            "sem levar junto o que nao foi tocado"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Uma rajada vira uma reação, e o índice fica certo no fim.
+    ///
+    /// É a outra metade do critério da fase 1 da `21`. Um `mvn clean install`
+    /// mexe em milhares de arquivos durante um minuto; reagir a cada evento
+    /// seria refazer o mesmo trabalho milhares de vezes. Como a reação espera o
+    /// **silêncio**, a rajada inteira vira um lote — e o que importa medir é que
+    /// nada se perde nele.
+    #[test]
+    fn a_burst_of_changes_becomes_one_reaction() {
+        let root = std::env::temp_dir().join(format!("er-ide-rajada-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(fs::write(root.join("Base.java"), "public class Base {}\n").is_ok());
+
+        let active = match pollster::block_on(JavaLanguageProvider::new().activate(
+            LanguageActivationContext {
+                workspace_root: root.clone(),
+                source_roots: vec![root.clone()],
+                toolchains: Vec::new(),
+            },
+        )) {
+            Ok(active) => {
+                assert!(pollster::block_on(
+                    active.wait_until_indexed(Duration::from_secs(60))
+                ));
+                active
+            }
+            Err(error) => panic!("falha ao ativar o provider: {error}"),
+        };
+        std::thread::sleep(Duration::from_millis(300));
+
+        // A rajada: duzentos fontes escritos em sequência, como um gerador de
+        // código faria, mais barulho em pastas que a indexação ignora.
+        let inicio = std::time::Instant::now();
+        assert!(fs::create_dir_all(root.join("target/classes")).is_ok());
+        for numero in 0..200 {
+            assert!(
+                fs::write(
+                    root.join(format!("Gerado{numero:03}.java")),
+                    format!("public class Gerado{numero:03} {{}}\n"),
+                )
+                .is_ok()
+            );
+            assert!(
+                fs::write(
+                    root.join(format!("target/classes/Lixo{numero:03}.java")),
+                    "public class Lixo {}\n",
+                )
+                .is_ok()
+            );
+        }
+        eprintln!("rajada escrita em {:?}", inicio.elapsed());
+
+        let conhece = |nome: &str| -> bool {
+            match pollster::block_on(active.workspace_types(nome, 500)) {
+                Ok(found) => found.into_iter().any(|symbol| symbol.name == nome),
+                Err(error) => panic!("falha na busca: {error}"),
+            }
+        };
+        let ate = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < ate && !conhece("Gerado199") {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        eprintln!("indice em dia {:?} depois do inicio da rajada", inicio.elapsed());
+
+        // Nada se perdeu no lote: o primeiro, o último e o do meio entraram.
+        for nome in ["Gerado000", "Gerado099", "Gerado199"] {
+            assert!(conhece(nome), "{nome} precisa ter entrado no indice");
+        }
+        assert!(conhece("Base"), "e o que ja existia continua la");
+        // E o barulho da pasta ignorada nao entrou.
+        assert!(!conhece("Lixo"), "pasta ignorada nao pode entrar no indice");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// O observador usa o mesmo filtro da varredura, e não um seu.
+    ///
+    /// Dois filtros discordariam um dia, e a discordância seria silenciosa: o
+    /// arquivo muda, a varredura diz que interessa, o observador diz que não.
+    #[test]
+    fn the_watcher_and_the_scan_agree_on_what_matters() {
+        let raiz = PathBuf::from("projeto");
+        let fontes = vec![raiz.join("src")];
+        for aceito in ["src/Pedido.java", "src/pacote/Servico.java"] {
+            assert!(
+                crate::observador::aceita(&raiz.join(aceito), &fontes),
+                "{aceito} deveria interessar"
+            );
+        }
+        for recusado in [
+            "src/leia-me.md",
+            "src/Pedido.class",
+            "fora/Outro.java",
+            "src/target/Gerado.java",
+            "src/node_modules/pacote/Coisa.java",
+        ] {
+            assert!(
+                !crate::observador::aceita(&raiz.join(recusado), &fontes),
+                "{recusado} nao deveria interessar"
+            );
+        }
+        // E a poda de pasta é a mesma que a varredura aplica.
+        assert!(crate::observador::ignorado(&raiz.join("target/classes/A.java")));
+        assert!(crate::observador::ignorado(&raiz.join(".git/objects/x")));
+        assert!(!crate::observador::ignorado(&raiz.join("src/A.java")));
     }
 
     /// Ativar devolve sem esperar o índice.

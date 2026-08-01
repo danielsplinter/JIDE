@@ -10,6 +10,7 @@ async-trait.workspace = true
 ide-domain = { path = "../ide-domain" }
 ide-language-api = { path = "../ide-language-api" }
 java-classfile = { path = "../java-classfile" }
+notify.workspace = true
 tree-sitter.workspace = true
 tree-sitter-java.workspace = true
 
