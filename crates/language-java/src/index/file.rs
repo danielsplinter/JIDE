@@ -28,7 +28,7 @@ const MAGIC: [u8; 8] = *b"ERIDEIDX";
 /// espécies de símbolo. Um arquivo de outra versão é descartado, não convertido:
 /// reconstruir o índice é caro mas correto, e converter formato velho é código
 /// que ninguém testa.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[cfg(test)]
 pub(in crate::index) const VERSION_PARA_TESTE: u32 = VERSION;
@@ -185,7 +185,22 @@ pub(in crate::index) fn write(index: &Dados, path: &Path) -> io::Result<()> {
 
     let mut genericos: Vec<u32> = Vec::new();
     let mut simbolos = Vec::with_capacity(index.symbols.len());
-    for simbolo in &index.symbols {
+    // Ordenadas pelo nome **em minúsculas**: é o que dá faixa por prefixo sem
+    // distinção de maiúsculas, que é como a busca por tipo compara. A faixa
+    // sensível a maiúsculas, que a completação usa, é um subconjunto dela.
+    // Nada endereça um símbolo por posição, então reordenar não quebra nada.
+    let mut ordenados: Vec<&IndexedSymbol> = index.symbols.iter().collect();
+    ordenados.sort_by(|esquerda, direita| {
+        esquerda
+            .name
+            .to_ascii_lowercase()
+            .cmp(&direita.name.to_ascii_lowercase())
+            .then_with(|| esquerda.name.cmp(&direita.name))
+            .then(esquerda.file.cmp(&direita.file))
+            .then(esquerda.range.start.line.cmp(&direita.range.start.line))
+            .then(esquerda.range.start.column.cmp(&direita.range.start.column))
+    });
+    for simbolo in ordenados {
         let nome = textos.id(&simbolo.name);
         let (tipo, dimensoes, genericos_inicio, genericos_conta) = match &simbolo.type_descriptor {
             Some(descritor) => {
@@ -708,6 +723,60 @@ impl Carregado {
                 registro: self.registro(area::SIMBOLOS, tamanho::SIMBOLO, indice)?,
             })
         })
+    }
+
+    /// As declarações cujo nome começa com o prefixo, sem distinguir maiúsculas.
+    ///
+    /// É o que a fase 3 da `20` entrega. A área de símbolos é ordenada pelo nome
+    /// em minúsculas, então as que interessam são **contíguas**: acha-se a
+    /// primeira por busca binária e anda-se enquanto o prefixo valer. Digitar
+    /// uma letra deixa de percorrer as trezentas e trinta mil.
+    ///
+    /// Prefixo vazio devolve tudo — quem pede tudo recebe tudo, e é o único caso
+    /// em que percorrer tudo é a resposta certa.
+    pub(in crate::index) fn simbolos_com_prefixo(
+        &self,
+        prefixo: &str,
+    ) -> impl Iterator<Item = SimboloNoDisco<'_>> {
+        let minusculo = prefixo.to_ascii_lowercase();
+        let inicio = self.limite_inferior(&minusculo);
+        let total = self.areas[area::SIMBOLOS].1;
+        (inicio..total)
+            .map(|indice| SimboloNoDisco {
+                mapeado: self,
+                registro: self
+                    .registro(area::SIMBOLOS, tamanho::SIMBOLO, indice)
+                    .unwrap_or_default(),
+            })
+            .take_while(move |simbolo| {
+                simbolo
+                    .name()
+                    .to_ascii_lowercase()
+                    .starts_with(minusculo.as_str())
+            })
+    }
+
+    /// A primeira posição cujo nome em minúsculas não é menor que o alvo.
+    fn limite_inferior(&self, alvo: &str) -> usize {
+        let (mut baixo, mut alto) = (0usize, self.areas[area::SIMBOLOS].1);
+        while baixo < alto {
+            let meio = baixo + (alto - baixo) / 2;
+            let Some(registro) = self.registro(area::SIMBOLOS, tamanho::SIMBOLO, meio) else {
+                return alto;
+            };
+            let nome = SimboloNoDisco {
+                mapeado: self,
+                registro,
+            }
+            .name()
+            .to_ascii_lowercase();
+            if nome.as_str() < alvo {
+                baixo = meio + 1;
+            } else {
+                alto = meio;
+            }
+        }
+        baixo
     }
 
     /// Quantas declarações — serve à medição.

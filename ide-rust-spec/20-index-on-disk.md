@@ -80,9 +80,13 @@ O esboço:
 Duas decisões que carregam o resto:
 
 - **a tabela de nomes é ordenada.** Isso dá busca por nome exato em tempo
-  logarítmico **e** faixa por prefixo — que é exatamente o que a fase 3 precisa.
-  O formato da fase 1 já contém a resposta da fase 3; não é coincidência, é o
-  motivo de a fase 1 vir primeiro.
+  logarítmico, e é o que faz Ctrl+clique achar 9.314 ocorrências em 0,9 ms sem
+  tocar o resto do arquivo.
+
+  *Correção registrada na fase 3:* escreveu-se aqui que essa tabela já era a
+  resposta da fase 3. Não era — ela indexa **ocorrências**, e a completação
+  pergunta por **declarações**, que são outra área. A fase 3 precisou ordenar
+  também a área de símbolos. A ideia estava certa, o alvo estava errado.
 - **os arquivos guardam data e tamanho.** É com isso que a fase 4 decide o que
   releu e o que não precisou.
 
@@ -210,7 +214,7 @@ apagamento a IDE responderia as duas versões — o defeito silencioso de novo.
 **Limite conhecido:** a conferência não cobre os jars. Uma dependência trocada sem
 mexer em fonte nenhum passa despercebida, e o índice segue com as classes antigas.
 
-### Fase 3 — A completação vira busca
+### Fase 3 — A completação vira busca ✅
 
 Hoje `completion` percorre **todas** as declarações a cada tecla, filtrando por
 prefixo; `workspace_types` faz o mesmo filtrando por trecho. Com a tabela de nomes
@@ -221,13 +225,55 @@ contíguos.
 resolve com a mesma faixa. Ou ela passa a privilegiar o prefixo — que é o que a
 ordenação atual do resultado já faz, e o que quem digita espera —, ou ganha uma
 estrutura própria. **Decidir isso é parte da fase**, e não detalhe de
-implementação.
+implementação. *(Resolvido sem escolher nenhuma das duas: ver abaixo.)*
 
 **Critério:** digitar uma letra não toca o índice inteiro. Medido: número de
 registros lidos por tecla, que hoje é 339.664.
 
 Vale sozinha, mesmo que as fases 1 e 2 nunca existissem: varrer 340 mil registros
 por tecla é caro em memória, em disco ou onde for.
+
+**Feita.** A área de símbolos passou a ser gravada **ordenada pelo nome em
+minúsculas**, e as declarações de um prefixo ficaram contíguas: acha-se a
+primeira por busca binária e anda-se enquanto o prefixo valer. Nada endereça um
+símbolo por posição, então reordenar não quebrou nada.
+
+Minúsculas porque é como a busca por tipo compara. A faixa sensível a maiúsculas,
+que a completação usa, é um **subconjunto** dela — filtrar de novo custa nada,
+porque a faixa já é pequena.
+
+**Medido no projeto de referência**, com as 339.664 declarações:
+
+| digitado | a faixa lê | em | a varredura lia |
+|---|---|---|---|
+| `C` | 46.818 | 3,0 ms | 339.664 em 8,9 ms |
+| `Ca` | 4.308 | 0,40 ms | 339.664 em 9,1 ms |
+| `Cam` | 2.388 | 0,19 ms | 339.664 em 8,8 ms |
+| `Camel` | 2.340 | 0,20 ms | 339.664 em 8,8 ms |
+| `CamelContext` | 1.039 | 0,073 ms | 339.664 em 8,3 ms |
+
+Da terceira letra em diante são cerca de **140 vezes menos registros** e
+**45 vezes menos tempo**. A primeira letra é a pior, e ainda assim lê 14% do
+índice em vez de 100%.
+
+**A busca por tipo não perdeu nada, e essa era a decisão em aberto.** A
+especificação deixava escolher entre privilegiar o prefixo — perdendo a busca por
+trecho — ou construir outra estrutura. Nenhuma das duas foi preciso: a ordenação
+**já** punha quem começa com o digitado antes de quem só contém, e o resultado é
+truncado no limite. Então encher o limite pela faixa dá o **mesmo resultado** de
+varrer tudo, e só quando a faixa não enche é que se percorre o índice atrás de
+quem apenas contém — o que é uma busca pedida, não uma tecla digitada. Num
+monorepo, três letras já passam do limite.
+
+**O que a fase custou descobrir:** a promessa da fase 1 estava no alvo errado. A
+tabela ordenada que ela criou indexa ocorrências, e serve a Ctrl+clique; a
+completação pergunta por declarações, que vivem noutra área e não estavam
+ordenadas. O formato foi para a versão 3.
+
+`a_prefix_range_answers_the_same_without_walking_everything` guarda as duas
+metades — se a faixa respondesse menos seria rápida e errada, se percorresse tudo
+seria certa e não teria mudado nada. Foi verificado que ele **falha** com a faixa
+deslocada em uma posição.
 
 ### Fase 4 — A invalidação ao gravar
 
@@ -242,9 +288,11 @@ reindexar nada; um com dez arquivos alterados paga dez.
 fora da IDE e abrir reindexa aquele arquivo e mais nenhum; gravar dentro da IDE
 deixa o disco de acordo com a memória.
 
-## Uma ressalva sobre a ordem
+## Uma ressalva sobre a ordem — vencida
 
-Esta é a ordem pedida, e ela tem uma janela ruim entre a fase 2 e a fase 3.
+Esta era a ordem pedida, e ela tinha uma janela ruim entre a fase 2 e a fase 3.
+A janela existiu e fechou: as duas fases foram feitas em seguida. Fica o
+raciocínio, que vale para a próxima vez que uma ordem for escolhida.
 
 Com o índice mapeado (fase 2) mas a completação ainda varrendo tudo (fase 3), a
 primeira tecla digitada toca o arquivo inteiro e o traz todo para a memória

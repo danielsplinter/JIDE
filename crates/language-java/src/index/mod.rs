@@ -343,6 +343,39 @@ impl WorkspaceIndex {
         do_disco.chain(self.memoria.symbols().map(Simbolo::Memoria))
     }
 
+    /// As declarações cujo nome começa com o prefixo, sem distinguir maiúsculas.
+    ///
+    /// No arquivo isso é uma faixa contígua, achada por busca binária: é a fase
+    /// 3 da `20`, e é o que faz digitar uma letra não percorrer o índice
+    /// inteiro. Na memória — o delta reindexado desde o carregamento — a
+    /// varredura continua, e continua barata porque o delta é pequeno.
+    ///
+    /// Quem chama filtra o que ainda precisa: a completação quer prefixo
+    /// **com** distinção de maiúsculas, que é um subconjunto desta faixa.
+    pub(super) fn symbols_with_prefix<'a>(
+        &'a self,
+        prefix: &'a str,
+    ) -> impl Iterator<Item = Simbolo<'a>> {
+        let minusculo = prefix.to_ascii_lowercase();
+        let do_disco = self.carregado.iter().flat_map(move |carregado| {
+            carregado
+                .simbolos_com_prefixo(prefix)
+                .filter(|simbolo| !self.substituidos.contains(&simbolo.file()))
+                .map(Simbolo::Disco)
+        });
+        do_disco.chain(
+            self.memoria
+                .symbols()
+                .filter(move |simbolo| {
+                    simbolo
+                        .name
+                        .to_ascii_lowercase()
+                        .starts_with(minusculo.as_str())
+                })
+                .map(Simbolo::Memoria),
+        )
+    }
+
     /// Onde uma declaração está. É o que custa, então é pedido à parte.
     pub(super) fn location_of(&self, symbol: Simbolo<'_>) -> Option<Location> {
         let path = match &symbol {
@@ -944,6 +977,89 @@ mod tests {
         assert!(
             !recarregar().confere_com_o_disco(&raiz, &fontes),
             "fonte apagado tem de reprovar"
+        );
+        let _ = fs::remove_dir_all(&raiz);
+    }
+
+    /// A faixa por prefixo responde o mesmo que varrer, sem varrer.
+    ///
+    /// É o critério da fase 3 da `20`. As duas metades importam: se ela
+    /// respondesse menos, seria rápida e errada; se percorresse tudo, seria
+    /// certa e não teria mudado nada. O projeto aqui tem tipos de sobra para a
+    /// diferença aparecer.
+    #[test]
+    fn a_prefix_range_answers_the_same_without_walking_everything() {
+        let raiz = std::env::temp_dir().join(format!(
+            "er-ide-indice-prefixo-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&raiz);
+        assert!(fs::create_dir_all(&raiz).is_ok());
+        for inicial in ["Alfa", "Beta", "Gama", "Delta"] {
+            for numero in 0..25 {
+                let nome = format!("{inicial}Tipo{numero:02}");
+                assert!(
+                    fs::write(
+                        raiz.join(format!("{nome}.java")),
+                        format!("public class {nome} {{ int campo{numero}; }}\n"),
+                    )
+                    .is_ok()
+                );
+            }
+        }
+        let arquivo = raiz.join("indice.bin");
+        assert!(varrer(&raiz).save_to(&arquivo));
+        let Some(indice) = WorkspaceIndex::carregar_de(&arquivo) else {
+            panic!("nao carregou");
+        };
+
+        let varrendo = |prefixo: &str| -> Vec<String> {
+            let mut nomes: Vec<String> = indice
+                .symbols()
+                .filter(|simbolo| {
+                    simbolo
+                        .name()
+                        .to_ascii_lowercase()
+                        .starts_with(&prefixo.to_ascii_lowercase())
+                })
+                .map(|simbolo| simbolo.name().to_owned())
+                .collect();
+            nomes.sort();
+            nomes
+        };
+        let pela_faixa = |prefixo: &str| -> Vec<String> {
+            let mut nomes: Vec<String> = indice
+                .symbols_with_prefix(prefixo)
+                .map(|simbolo| simbolo.name().to_owned())
+                .collect();
+            nomes.sort();
+            nomes
+        };
+
+        // Mesma resposta, inclusive para o que não existe e para maiúsculas
+        // trocadas — a faixa é por minúsculas, como a busca por tipo compara.
+        for prefixo in [
+            "", "A", "Alfa", "alfa", "ALFA", "BetaTipo1", "Z", "AlfaTipo07", "d",
+        ] {
+            assert_eq!(
+                pela_faixa(prefixo),
+                varrendo(prefixo),
+                "a faixa de {prefixo:?} respondeu diferente da varredura"
+            );
+        }
+
+        // E não percorre tudo: o que a fase entrega.
+        let todos = indice.symbols().count();
+        let da_faixa = indice.symbols_with_prefix("Alfa").count();
+        assert!(todos >= 100, "o projeto tem de ser grande o bastante: {todos}");
+        assert!(
+            da_faixa * 3 < todos,
+            "a faixa devia ser uma fração do índice: {da_faixa} de {todos}"
+        );
+        assert_eq!(
+            indice.symbols_with_prefix("NaoExiste").count(),
+            0,
+            "prefixo sem dono nao devolve nada"
         );
         let _ = fs::remove_dir_all(&raiz);
     }

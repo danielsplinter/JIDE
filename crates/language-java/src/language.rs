@@ -9,7 +9,7 @@ use std::{
 
 use crate::completion::{finish_member_list, member_name};
 use crate::documents::{Documents, ParsedDocument};
-use crate::index::{Dados, WorkspaceIndex};
+use crate::index::{Dados, Simbolo, WorkspaceIndex};
 use crate::navigation::{member_access, token_at_position, within};
 use crate::semantics::receiver_type;
 use crate::symbols::simple_class_name;
@@ -426,22 +426,40 @@ impl ActiveLanguage for JavaLanguage {
     ) -> Result<Vec<SemanticSymbol>, LanguageError> {
         let query = query.trim().to_ascii_lowercase();
         let indice = self.index();
-        // Os dois filtros passam pela forma compacta; só o que sobra vira um
-        // `SemanticSymbol`, com o caminho lido da lista de arquivos.
+        let e_tipo = |symbol: &Simbolo<'_>| {
+            matches!(
+                symbol.kind(),
+                SymbolKind::Class | SymbolKind::Interface | SymbolKind::Record | SymbolKind::Enum
+            )
+        };
+        // Primeiro a faixa por prefixo, que no arquivo é contígua. Quem começa
+        // com o que foi digitado já vinha antes na ordenação abaixo, então
+        // encher o limite só com esses dá o **mesmo resultado** de varrer tudo —
+        // e é o caso comum: num monorepo, três letras já passam do limite.
         let mut found: Vec<SemanticSymbol> = indice
-            .symbols()
-            .filter(|symbol| {
-                matches!(
-                    symbol.kind(),
-                    SymbolKind::Class
-                        | SymbolKind::Interface
-                        | SymbolKind::Record
-                        | SymbolKind::Enum
-                )
-            })
-            .filter(|symbol| query.is_empty() || symbol.name().to_ascii_lowercase().contains(&query))
+            .symbols_with_prefix(&query)
+            .filter(e_tipo)
             .filter_map(|symbol| indice.materialize(symbol))
             .collect();
+        // Só quando o prefixo não encheu o limite é que vale procurar quem
+        // apenas **contém** o que foi digitado. Aí sim percorre-se o índice, e
+        // isso é uma busca pedida, não uma tecla digitada.
+        if found.len() < limit && !query.is_empty() {
+            let ja_achados: HashSet<(String, PathBuf)> = found
+                .iter()
+                .map(|symbol| (symbol.name.clone(), symbol.location.path.clone()))
+                .collect();
+            found.extend(
+                indice
+                    .symbols()
+                    .filter(e_tipo)
+                    .filter(|symbol| symbol.name().to_ascii_lowercase().contains(&query))
+                    .filter_map(|symbol| indice.materialize(symbol))
+                    .filter(|symbol| {
+                        !ja_achados.contains(&(symbol.name.clone(), symbol.location.path.clone()))
+                    }),
+            );
+        }
         // Quem começa com o que foi digitado vem antes de quem só contém: é o
         // que se procura ao escrever as primeiras letras de um nome.
         found.sort_by(|left, right| {
@@ -496,10 +514,10 @@ impl ActiveLanguage for JavaLanguage {
                 ));
             }
         }
-        // O índice inteiro passa por aqui a cada tecla: ler o caminho de cada
-        // declaração seria pagar trinta mil cópias para montar uma lista que
-        // não usa caminho nenhum.
-        for symbol in self.index().symbols() {
+        // Só a faixa do prefixo, e não o índice inteiro: é a fase 3 da `20`. A
+        // faixa vem sem distinguir maiúsculas, e aqui a distinção importa —
+        // filtrar de novo custa nada, porque a faixa já é pequena.
+        for symbol in self.index().symbols_with_prefix(&request.prefix) {
             if symbol.name().starts_with(&request.prefix)
                 && seen.insert(symbol.name().to_owned())
             {
@@ -2102,15 +2120,22 @@ int x;";
 
         // E responde: sem isto a medicao diria que abrir e rapido sem provar
         // que o que abriu serve.
-        let consultando = std::time::Instant::now();
-        let tipos = indice
-            .symbols()
-            .filter(|simbolo| simbolo.name().starts_with("Camel"))
-            .count();
-        eprintln!(
-            "{tipos} nomes com prefixo Camel em {:?}",
-            consultando.elapsed()
-        );
+        // A fase 3: uma tecla toca a faixa do prefixo, e nao o indice inteiro.
+        for prefixo in ["C", "Ca", "Cam", "Camel", "CamelContext"] {
+            let varrendo = std::time::Instant::now();
+            let varridos = indice
+                .symbols()
+                .filter(|simbolo| simbolo.name().starts_with(prefixo))
+                .count();
+            let varredura = varrendo.elapsed();
+            let pela_faixa = std::time::Instant::now();
+            let da_faixa = indice.symbols_with_prefix(prefixo).count();
+            eprintln!(
+                "{prefixo}: faixa le {da_faixa} em {:?} | varredura le {} para achar {varridos} em {varredura:?}",
+                pela_faixa.elapsed(),
+                indice.symbol_count()
+            );
+        }
         let ctrl_clique = std::time::Instant::now();
         let ocorrencias = indice.references_to("CamelContext").count();
         eprintln!(
