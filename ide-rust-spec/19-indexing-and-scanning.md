@@ -113,7 +113,7 @@ estava na árvore e não aparecia. Nasceu `rebuild_items`, chamado a cada carga.
 Nenhuma das três aparecia no plano: a fase foi escrita como "ler a pasta ao
 expandir", e a leitura era a parte fácil.
 
-### Fase 2 — Índice assíncrono
+### Fase 2 — Índice assíncrono ✅
 
 O provider passa a responder **"ainda indexando"** e a completar em segundo plano.
 Hoje a primeira consulta espera o índice inteiro; adiar a ativação para depois do
@@ -124,6 +124,34 @@ passa a poder receber resposta parcial, e completação, navegação e realce pr
 lidar com isso — inclusive decidindo o que mostrar enquanto o índice não terminou.
 
 **Critério:** a primeira consulta responde sem esperar o índice inteiro.
+
+**Feito, e menor do que esta especificação supunha.** O contrato **já era**
+assíncrono — `activate` e todos os métodos de `ActiveLanguage` são `async`. O
+bloqueio não estava no contrato: estava dentro do `activate`, que montava o
+`WorkspaceIndex` antes de devolver.
+
+O índice virou `Arc<RwLock<WorkspaceIndex>>`, nasce **vazio** e é montado numa
+linha de execução à parte. Os nove sítios que o leem passaram por um `index()`, e
+enquanto ele não chega respondem nada — o que depende só do documento aberto
+responde igual, porque nunca dependeu do índice.
+
+`ActiveLanguage` ganhou **um** método, com padrão `true`:
+
+```rust
+async fn wait_until_indexed(&self, timeout: Duration) -> bool
+```
+
+Com limite, porque um índice que falhe não pode pendurar quem esperou. Quem não
+chama trabalha com o que já existe, que é o caminho normal.
+
+**A medição prévia acertou.** Contados antes: cinco testes consultavam o índice
+logo após ativar. Exatamente **esses cinco** falharam, e nenhum outro — os demais
+respondem pelo arquivo aberto. Eles passaram a esperar, e continuam afirmando o
+que afirmavam.
+
+Um teste novo guarda o que a fase entrega: `activation_returns_before_the_index_is_ready`
+afirma que ativar leva menos de 250 ms. Antes, no mesmo projeto, levava ~1,5 s.
+`language-java` foi de 29 para 30 testes.
 
 ### Fase 3 — Os tetos saem
 

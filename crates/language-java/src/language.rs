@@ -2,6 +2,9 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard},
+    thread,
+    time::Duration,
 };
 
 use crate::completion::{finish_member_list, member_name};
@@ -81,7 +84,10 @@ impl LanguageProvider for JavaLanguageProvider {
 struct JavaLanguage {
     language_id: LanguageId,
     documents: Documents,
-    workspace_index: WorkspaceIndex,
+    /// Vazio até a varredura em segundo plano terminar.
+    workspace_index: Arc<RwLock<WorkspaceIndex>>,
+    /// Marca e aviso de que o índice chegou, para quem precisa esperá-lo.
+    index_ready: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl JavaLanguage {
@@ -123,7 +129,7 @@ impl JavaLanguage {
         {
             depth += 1;
             let Some(descriptor) = self
-                .workspace_index
+                .index()
                 .external_classes
                 .iter()
                 .find(|class| class.simple == name || class.binary == name)
@@ -160,7 +166,8 @@ impl JavaLanguage {
     /// A regra de o que é membro é a mesma do arquivo aberto: só a origem do
     /// texto muda.
     fn members_in_project(&self, type_name: &str) -> Vec<CompletionItem> {
-        let Some(path) = self.workspace_index.declarations.get(type_name) else {
+        let indice = self.index();
+        let Some(path) = indice.declarations.get(type_name) else {
             return Vec::new();
         };
         let Ok(text) = fs::read_to_string(path) else {
@@ -182,25 +189,81 @@ impl JavaLanguage {
         items
     }
 
+    /// Ativa sem esperar o índice.
+    ///
+    /// A varredura do projeto e do JDK leva segundos, e esperá-la aqui é o que
+    /// segurava a primeira consulta à linguagem. O índice nasce **vazio** e é
+    /// montado numa linha de execução à parte; até chegar, o que depende dele
+    /// responde nada, e o que depende só do arquivo aberto responde igual.
     fn new(
         workspace_root: &Path,
         source_roots: &[PathBuf],
         toolchain_root: Option<&Path>,
     ) -> Result<Self, LanguageError> {
         let documents = Documents::new()?;
-        let workspace_index = documents.with_parser_mut(|parser| {
-            WorkspaceIndex::scan(workspace_root, source_roots, toolchain_root, parser)
-        })?;
+        let workspace_index = Arc::new(RwLock::new(WorkspaceIndex::default()));
+        let pronto = Arc::new((Mutex::new(false), Condvar::new()));
+
+        let destino = Arc::clone(&workspace_index);
+        let aviso = Arc::clone(&pronto);
+        let raiz = workspace_root.to_path_buf();
+        let fontes = source_roots.to_vec();
+        let toolchain = toolchain_root.map(Path::to_path_buf);
+        thread::spawn(move || {
+            let indice = Documents::new()
+                .and_then(|documentos| {
+                    documentos.with_parser_mut(|parser| {
+                        WorkspaceIndex::scan(&raiz, &fontes, toolchain.as_deref(), parser)
+                    })
+                })
+                .unwrap_or_default();
+            if let Ok(mut guarda) = destino.write() {
+                *guarda = indice;
+            }
+            let (marca, condicao) = &*aviso;
+            if let Ok(mut pronto) = marca.lock() {
+                *pronto = true;
+            }
+            condicao.notify_all();
+        });
+
         Ok(Self {
             language_id: LanguageId(JAVA_LANGUAGE_ID.to_owned()),
             documents,
             workspace_index,
+            index_ready: pronto,
         })
+    }
+
+    /// Espera o índice terminar. Existe para quem **precisa** dele agora.
+    ///
+    /// Com limite: um índice que falhe não pode pendurar quem esperou. Quem não
+    /// chama isto trabalha com o que já existe, que é o caminho normal.
+    pub(super) fn wait_for_index(&self, limite: Duration) -> bool {
+        let (marca, condicao) = &*self.index_ready;
+        let Ok(pronto) = marca.lock() else {
+            return false;
+        };
+        let Ok((pronto, _)) = condicao.wait_timeout_while(pronto, limite, |pronto| !*pronto) else {
+            return false;
+        };
+        *pronto
+    }
+
+    /// O índice, para leitura.
+    fn index(&self) -> RwLockReadGuard<'_, WorkspaceIndex> {
+        self.workspace_index
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 #[async_trait]
 impl ActiveLanguage for JavaLanguage {
+    async fn wait_until_indexed(&self, timeout: Duration) -> bool {
+        self.wait_for_index(timeout)
+    }
+
     fn language_id(&self) -> &LanguageId {
         &self.language_id
     }
@@ -271,7 +334,7 @@ impl ActiveLanguage for JavaLanguage {
             .flat_map(|document| document.references.get(name).into_iter().flatten())
             .cloned()
             .chain(
-                self.workspace_index
+                self.index()
                     .references
                     .get(name)
                     .into_iter()
@@ -288,7 +351,7 @@ impl ActiveLanguage for JavaLanguage {
                 .map(|symbol| symbol.location.clone()),
         );
         locations.extend(
-            self.workspace_index
+            self.index()
                 .symbols
                 .iter()
                 .filter(|symbol| symbol.name == name)
@@ -332,8 +395,8 @@ impl ActiveLanguage for JavaLanguage {
         limit: usize,
     ) -> Result<Vec<SemanticSymbol>, LanguageError> {
         let query = query.trim().to_ascii_lowercase();
-        let mut found: Vec<SemanticSymbol> = self
-            .workspace_index
+        let indice = self.index();
+        let mut found: Vec<SemanticSymbol> = indice
             .symbols
             .iter()
             .filter(|symbol| {
@@ -394,13 +457,13 @@ impl ActiveLanguage for JavaLanguage {
             .semantic
             .symbols
             .iter()
-            .chain(self.workspace_index.symbols.iter())
+            .chain(self.index().symbols.iter())
         {
             if symbol.name.starts_with(&request.prefix) && seen.insert(symbol.name.clone()) {
                 items.push(completion_for_symbol(symbol));
             }
         }
-        for class in &self.workspace_index.external_classes {
+        for class in &self.index().external_classes {
             if class.simple.starts_with(&request.prefix) && seen.insert(class.simple.clone()) {
                 items.push(CompletionItem {
                     label: class.simple.clone(),
@@ -430,10 +493,11 @@ impl ActiveLanguage for JavaLanguage {
             .get(&request.document_id)
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))?;
         let name = token_at_position(&document.snapshot.text, request.position);
+        let indice = self.index();
         let mut symbols = documents
             .values()
             .flat_map(|document| document.semantic.symbols.iter())
-            .chain(self.workspace_index.symbols.iter())
+            .chain(indice.symbols.iter())
             .filter(|symbol| symbol.name == name)
             .collect::<Vec<_>>();
         symbols.sort_by(|left, right| {
@@ -482,7 +546,7 @@ impl ActiveLanguage for JavaLanguage {
             .values()
             .flat_map(|document| document.references.get(&name).into_iter().flatten())
             .chain(
-                self.workspace_index
+                self.index()
                     .references
                     .get(&name)
                     .into_iter()
@@ -495,7 +559,7 @@ impl ActiveLanguage for JavaLanguage {
                 documents
                     .values()
                     .flat_map(|document| document.semantic.symbols.iter())
-                    .chain(self.workspace_index.symbols.iter())
+                    .chain(self.index().symbols.iter())
                     .filter(|symbol| symbol.name == name)
                     .map(|symbol| symbol.location.clone()),
             );
@@ -1795,6 +1859,37 @@ int x;";
         );
     }
 
+    /// Ativar devolve sem esperar o índice.
+    ///
+    /// É o critério da fase 2 da `19`: a varredura do projeto e do JDK leva
+    /// segundos, e a primeira consulta à linguagem esperava por ela. Agora o
+    /// ambiente volta na hora, e quem precisa da resposta completa pede para
+    /// esperar.
+    #[test]
+    fn activation_returns_before_the_index_is_ready() {
+        let inicio = std::time::Instant::now();
+        let active = match pollster::block_on(JavaLanguageProvider::new().activate(
+            LanguageActivationContext {
+                workspace_root: ".".into(),
+                source_roots: Vec::new(),
+                toolchains: Vec::new(),
+            },
+        )) {
+            // Este teste mede a ativação: esperar aqui mediria a espera.
+            Ok(active) => active,
+            Err(error) => panic!("ativação falhou: {error}"),
+        };
+        let ativacao = inicio.elapsed();
+        assert!(
+            ativacao < Duration::from_millis(250),
+            "ativar não pode esperar a varredura: levou {ativacao:?}"
+        );
+        // E o índice chega depois, para quem quiser esperá-lo.
+        assert!(pollster::block_on(
+            active.wait_until_indexed(Duration::from_secs(60))
+        ));
+    }
+
     /// A semântica é calculada sob demanda e refeita depois de cada mudança.
     ///
     /// Ela não serve para desenhar, então sair do caminho da tecla é o ponto;
@@ -1862,7 +1957,16 @@ int x;";
                 toolchains,
             }),
         ) {
-            Ok(active) => active,
+            Ok(active) => {
+                // Os testes afirmam a resposta **completa**, então esperam o
+                // índice. A aplicação não espera: é essa diferença que a fase 2
+                // introduz.
+                assert!(
+                    pollster::block_on(active.wait_until_indexed(Duration::from_secs(60))),
+                    "o índice do projeto não ficou pronto a tempo"
+                );
+                active
+            }
             Err(error) => panic!("failed to activate Java provider: {error}"),
         }
     }
@@ -2036,7 +2140,13 @@ int x;";
                 toolchains: Vec::new(),
             },
         )) {
-            Ok(active) => active,
+            Ok(active) => {
+                assert!(
+                    pollster::block_on(active.wait_until_indexed(Duration::from_secs(60))),
+                    "o índice do projeto não ficou pronto a tempo"
+                );
+                active
+            }
             Err(error) => panic!("falha ao ativar o provider: {error}"),
         };
 
@@ -2438,7 +2548,13 @@ int x;";
                 toolchains: Vec::new(),
             },
         )) {
-            Ok(active) => active,
+            Ok(active) => {
+                assert!(
+                    pollster::block_on(active.wait_until_indexed(Duration::from_secs(60))),
+                    "o índice do projeto não ficou pronto a tempo"
+                );
+                active
+            }
             Err(error) => panic!("falha ao ativar o provider: {error}"),
         };
 
@@ -2505,7 +2621,13 @@ int x;";
                 toolchains: Vec::new(),
             },
         )) {
-            Ok(active) => active,
+            Ok(active) => {
+                assert!(
+                    pollster::block_on(active.wait_until_indexed(Duration::from_secs(60))),
+                    "o índice do projeto não ficou pronto a tempo"
+                );
+                active
+            }
             Err(error) => panic!("falha ao ativar o provider: {error}"),
         };
 
@@ -2914,7 +3036,13 @@ int x;";
             source_roots: vec![root.clone()],
             toolchains: Vec::new(),
         })) {
-            Ok(active) => active,
+            Ok(active) => {
+                assert!(
+                    pollster::block_on(active.wait_until_indexed(Duration::from_secs(60))),
+                    "o índice do projeto não ficou pronto a tempo"
+                );
+                active
+            }
             Err(error) => panic!("provider activation failed: {error}"),
         };
         let source = "class Main { Target value; }";

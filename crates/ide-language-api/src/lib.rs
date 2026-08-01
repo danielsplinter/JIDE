@@ -135,6 +135,19 @@ pub trait ActiveLanguage: Send + Sync {
     async fn change_document(&self, change: DocumentChange) -> Result<(), LanguageError>;
     async fn close_document(&self, document_id: DocumentId) -> Result<(), LanguageError>;
     async fn diagnostics(&self, document_id: DocumentId) -> Result<Vec<Diagnostic>, LanguageError>;
+
+    /// Espera o índice do projeto ficar pronto, se houver um.
+    ///
+    /// Ativar não espera mais: uma linguagem pode devolver o ambiente na hora e
+    /// montar o índice em segundo plano. Até ele chegar, o que depende do
+    /// projeto responde **o que já tem** — nada, no começo — e o que depende só
+    /// do documento aberto responde igual.
+    ///
+    /// Quem precisa da resposta completa chama isto. O padrão é `true`: uma
+    /// linguagem sem índice já está pronta.
+    async fn wait_until_indexed(&self, _timeout: std::time::Duration) -> bool {
+        true
+    }
     async fn syntax(&self, _document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {
         Err(LanguageError::Unsupported("syntax snapshot".to_owned()))
     }
