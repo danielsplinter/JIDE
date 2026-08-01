@@ -900,6 +900,18 @@ impl EditorPane {
                     }
                 }
             }
+            // Apagar para a frente: o cursor fica onde está, e o que sai é o
+            // caractere seguinte. Com seleção, some a seleção — a mesma regra do
+            // `backspace`.
+            "delete" => {
+                self.remember(buffer);
+                if !self.delete_selection(buffer) {
+                    let next = next_boundary(buffer.text(), self.cursor);
+                    if next > self.cursor {
+                        let _ = buffer.replace(self.cursor..next, "");
+                    }
+                }
+            }
             // A linha nova herda a indentação da que ficou para trás; a regra é
             // do editor da biblioteca, que também a aplica quando é ele quem
             // recebe a tecla.

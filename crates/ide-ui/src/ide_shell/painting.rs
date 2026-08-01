@@ -4,7 +4,7 @@
 //! cima, na ordem inversa do funil de eventos.
 
 use super::*;
-use ui_components::{ConsoleLine, Label, Panel, SurfaceTone, paint_icon};
+use ui_components::{Label, Panel, SurfaceTone, paint_icon};
 
 impl IdeShell {
     /// Desenha um texto solto com a `Label` da biblioteca.
@@ -430,61 +430,46 @@ impl IdeShell {
                 tabs.paint(&mut terminal_tabs_paint);
             }
             commands.extend(terminal_tabs_paint.into_commands());
-            let (saida_area, entrada_area) = self.terminal_bands();
-            self.paint_surface_band(
-                &mut commands,
-                TERMINAL_INPUT_ID,
-                entrada_area,
-                SurfaceTone::Background,
-                EdgeInsets::ZERO,
-            );
-            let linha_de_comando = {
-                let terminal = &self.terminal.tabs[self.terminal.active];
-                format!("{} {}", terminal.session.prompt(), terminal.session.input())
-            };
-            self.paint_label(
-                &mut commands,
-                TERMINAL_PROMPT_ID,
-                &linha_de_comando,
-                Point::new(entrada_area.origin.x + 14.0, entrada_area.origin.y + 8.0),
-                14.0,
-                IconTint::Text,
-            );
+            // A saída é a **grade** do emulador: o prompt que se vê é o do
+            // shell, e não um que a IDE escreve. É por isso que não há mais uma
+            // faixa de entrada — o cursor está na grade, onde o programa o pôs.
+            let (saida_area, _) = self.terminal_bands();
             let active_terminal = &self.terminal.tabs[self.terminal.active];
-            let terminal_visible = self.terminal_visible_lines();
-            let terminal_offset = active_terminal.scroll_line.min(
-                active_terminal
-                    .session
-                    .line_count()
-                    .saturating_sub(terminal_visible),
-            );
-            // A saída é do console da biblioteca: ele mede a fonte de código e é
-            // essa medida que posiciona o realce da seleção e responde onde o
-            // clique caiu. A IDE diz quais linhas, quais estão marcadas e onde.
-            let linhas: Vec<_> = active_terminal
+            let (cursor_linha, cursor_coluna) = active_terminal.session.cursor_position();
+            let no_fim = active_terminal.follow_output;
+            let linhas: Vec<Vec<TerminalCell>> = active_terminal
                 .session
-                .lines()
-                .map(|line| ConsoleLine::new(line.text.clone(), line.is_error))
-                .collect();
-            let marcadas: Vec<_> = (terminal_offset..terminal_offset + terminal_visible)
-                .filter_map(|numero| {
-                    let linha = active_terminal.session.lines().nth(numero)?;
+                .grid_rows()
+                .iter()
+                .map(|linha| linha.iter().map(celula_da_grade).collect())
+                .collect::<Vec<Vec<TerminalCell>>>();
+            // A seleção continua sendo da IDE: ela sabe onde o arrasto começou.
+            // O componente só desenha o que lhe disserem estar marcado.
+            let marcadas: Vec<_> = linhas
+                .iter()
+                .enumerate()
+                .filter_map(|(numero, linha)| {
+                    let texto: String = linha.iter().map(|celula| celula.character).collect();
                     let (inicio, fim) =
-                        selection_columns(self.terminal.selection, numero, &linha.text)?;
+                        selection_columns(self.terminal.selection, numero, &texto)?;
                     Some((numero, inicio, fim))
                 })
                 .collect();
             let contexto = self.layout_context();
-            let area = saida_area;
             let mut saida = self.paint_context();
-            // O console é o mesmo entre quadros: é a medição guardada nele que
-            // o clique consulta depois, e as duas precisam concordar.
-            let console = &mut self.terminal.console;
-            console.set_lines(linhas);
-            console.set_first_visible(terminal_offset);
-            console.set_selection(marcadas);
-            console.layout(&contexto, area);
-            console.paint(&mut saida);
+            let grade = &mut self.terminal.grid;
+            grade.set_selection(marcadas);
+            grade.set_rows(linhas);
+            // O cursor é da tela viva, não do histórico: rolado para trás, ele
+            // não aparece. Deixá-lo fixo enquanto o texto sobe era mostrá-lo
+            // sobre uma linha que já passou.
+            grade.set_cursor(TerminalCursor {
+                row: cursor_linha,
+                column: cursor_coluna,
+                visible: no_fim,
+            });
+            grade.layout(&contexto, saida_area);
+            grade.paint(&mut saida);
             commands.extend(saida.into_commands());
             commands.extend(self.paint_scrollbar(ScrollTarget::Terminal, size));
         } else {

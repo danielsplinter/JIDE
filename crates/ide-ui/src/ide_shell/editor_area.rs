@@ -166,9 +166,11 @@ impl IdeShell {
             ),
             ScrollTarget::Terminal => {
                 let active = &self.terminal.tabs[self.terminal.active];
+                // A trilha percorre o histórico do emulador, que é o que a
+                // rolagem alcança.
                 (
                     self.terminal_scrollbar_rect(size),
-                    active.session.line_count() as f32,
+                    (active.session.scrollback_len() + self.terminal_visible_lines()) as f32,
                     self.terminal_visible_lines() as f32,
                     active.scroll_line as f32,
                 )
@@ -300,14 +302,7 @@ impl IdeShell {
                 .editor_area
                 .pane
                 .set_scroll_offset((offset * EDITOR_LINE_HEIGHT).max(0.0)),
-            ScrollTarget::Terminal => {
-                let maximum = self.terminal.scrollbar.max_offset();
-                let active = self.terminal.active;
-                self.terminal.tabs[active].scroll_line = offset.round().max(0.0) as usize;
-                // Chegar ao fim volta a acompanhar a saída; parar no meio é
-                // pedir para ficar onde está.
-                self.terminal.tabs[active].follow_output = offset >= maximum;
-            }
+            ScrollTarget::Terminal => self.set_terminal_scroll(offset.round().max(0.0) as usize),
             ScrollTarget::ExplorerVertical => {
                 self.explorer.scroll_line = offset.round().max(0.0) as usize;
             }

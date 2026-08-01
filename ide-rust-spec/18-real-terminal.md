@@ -123,7 +123,7 @@ sem mudar onde o programa o deixou.
 Seis testes, e a vitrine ganhou uma grade de exemplo — saída de build com erro em
 vermelho, sucesso em verde e o cursor esperando no prompt. ERLibUi 191 → 197.
 
-## Fase 2 — O `ide-terminal` vira emulador 🔶
+## Fase 2 — O `ide-terminal` vira emulador ✅
 
 `VecDeque<TerminalLine>` sai; entra a grade do emulador escolhido. Os bytes do PTY
 passam a ser alimentados nele em vez de filtrados pelo `strip_terminal_controls`.
@@ -162,7 +162,7 @@ mudança grande demais para verificar de uma vez.
 existir, estar correta e estar testada — não a tela mudar. Se a fase 3 não vier, isto
 aqui é peso morto e deve ser revertido, não deixado.
 
-## Fase 3 — As teclas vão ao shell, e a faixa de entrada some
+## Fase 3 — As teclas vão ao shell, e a faixa de entrada some 🔶
 
 A IDE para de acumular texto e desenhar prompt. Cada tecla é escrita no PTY; o
 shell ecoa, e o eco aparece na grade como qualquer outra saída.
@@ -176,6 +176,46 @@ interrompe. Nenhum deles é implementado pela IDE — todos são o shell respond
 
 **É a fase que mais muda o que se vê**, e a que só faz sentido depois da 2: sem
 grade, o eco do shell não teria onde aparecer corretamente.
+
+**Feito, com uma pendência declarada abaixo.**
+
+A saída passou a ser a **grade**: o prompt que aparece é o do shell, não um que a
+IDE escreve. A faixa de entrada saiu da pintura, e com ela o `TERMINAL_PROMPT_ID`.
+
+As teclas vão ao PTY por `TerminalSession::send_key`, e a codificação é do
+emulador — ele conhece o modo em que o shell está. `tecla_do_terminal` traduz o
+nome que a janela recebe (`arrowup`, `tab`) na tecla que o shell entende; o texto
+digitado vai caractere a caractere, e o que se vê é o **eco**.
+
+**Duas fronteiras que a implementação obrigou a respeitar**, e ambas melhoraram o
+desenho:
+
+- **a `ide-ui` não conhece o emulador.** A primeira versão importava `justerm_core`
+  para converter cor. Agora o `ide-terminal` entrega `GridCell` — caractere e três
+  bytes, ou nada — e trocar o emulador não alcança a interface;
+- **a IDE não constrói cor.** A conversão de RGB para `Color` virou
+  `TerminalCell::with_rgb`, na biblioteca. Foi o guarda `the_interface_does_not_hardcode_colors`
+  que pegou, e ele estava certo: `Color::rgba` na IDE é a IDE decidindo cor.
+
+O teste `terminal_tabs_keep_input_and_content_isolated` perdeu a premissa — a IDE
+não acumula mais texto por aba — e virou `each_terminal_tab_has_its_own_grid`, que
+verifica o que passou a ser verdade: grades independentes.
+
+### A pendência
+
+**A seleção ainda usa coordenadas de linha, não de célula.** Ela sobreviveu ligada
+à grade, mas o mapeamento é o antigo. Remover o `selection_columns` teria matado a
+seleção do terminal em silêncio, e foi por pouco: o compilador só reclamou porque
+um teste ainda o usava.
+
+Seleção por célula é a fase 4. Até lá, o que existe funciona para o caso comum e é
+aproximado para o resto.
+
+### O que sobrou do modelo antigo
+
+`session.input()`, `submit()`, `prompt()` e o encanamento de `pending` continuam no
+`ide-terminal`, agora sem consumidor na interface — o `run()` programático ainda os
+usa para disparar compilações. Reduzi-los ao mínimo é limpeza, não fase.
 
 ## Fase 4 — O que a grade permite
 

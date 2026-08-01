@@ -1,7 +1,7 @@
 //! Estado de abas, seleção e rolagem do terminal.
 
 use ide_terminal::{ShellKind, TerminalSession};
-use ui_components::Console;
+use ui_components::{Console, TerminalView};
 use ui_components::{Scrollbar, Splitter};
 
 #[derive(Clone, Copy)]
@@ -41,6 +41,8 @@ pub(super) struct TerminalPanelState {
     /// que ela guarda e precisam concordar: onde o realce da seleção é desenhado
     /// e em que coluna um clique caiu.
     pub(super) console: Console,
+    /// A grade do emulador, desenhada pela biblioteca.
+    pub(super) grid: TerminalView,
     pub(super) tabs: Vec<TerminalTab>,
     pub(super) active: usize,
     pub(super) height: f32,
@@ -57,6 +59,8 @@ pub(super) struct TerminalPanelState {
     /// reenvio faz o programa do outro lado redesenhar, e arrastar o divisor na
     /// vertical não deveria produzir saída nenhuma.
     pub(super) pty_cols: u16,
+    /// Linhas já enviadas, pelo mesmo motivo das colunas.
+    pub(super) pty_rows: u16,
 }
 
 impl TerminalPanelState {

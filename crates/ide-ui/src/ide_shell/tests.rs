@@ -1540,36 +1540,63 @@ fn editor_wheel_scrolls_and_terminal_profile_is_selectable() {
     assert_eq!(shell.selected_shell(), ShellKind::Cmd);
 }
 
+/// `Delete` apaga para a frente, e chega ao editor.
+///
+/// Ela não produz texto: o caminho geral do teclado, que só encaminha o que tem
+/// texto, a descartava antes de chegar à janela — e por isso não funcionava nem
+/// no editor nem no terminal.
 #[test]
-fn terminal_tabs_keep_input_and_content_isolated() {
+fn the_delete_key_removes_the_character_ahead() {
+    let mut shell = test_shell();
+    shell.editor_area.session.open_memory("Demo.java", "abcdef");
+    shell.context.focus = ShellFocus::Editor;
+    shell.editor_area.pane.set_cursor(2);
+
+    shell.key_down("Delete");
+    assert_eq!(shell.active_text(), Some("abdef"));
+
+    // Com seleção, `Delete` tira a seleção inteira, como o `Backspace`.
+    shell.editor_area.pane.set_cursor(0);
+    for _ in 0..2 {
+        shell.key_down_with_modifiers(
+            "ArrowRight",
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+    }
+    shell.key_down("Delete");
+    assert_eq!(shell.active_text(), Some("def"));
+}
+
+/// Cada aba tem a sua sessão, e o que se digita numa não alcança a outra.
+///
+/// Antes isto se verificava pelo texto que a IDE acumulava por aba. Ela não
+/// acumula mais: quem guarda a linha é o shell, e a prova passou a ser que as
+/// grades são independentes — trocar de aba troca de grade e de cursor.
+#[test]
+fn each_terminal_tab_has_its_own_grid() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
     let terminal_y = shell.geometry().editor_bottom + 10.0;
 
     shell.pointer_down(Point::new(editor_x + 10.0, terminal_y), size);
-    shell.text_input("Get-Location");
-    assert_eq!(shell.active_terminal_input(), "Get-Location");
+    assert_eq!(shell.active_terminal_index(), 0);
+    let primeira = shell.active_terminal().grid_rows();
 
     shell.pointer_down(Point::new(editor_x + 115.0, terminal_y), size);
     assert_eq!(shell.active_terminal_index(), 1);
-    assert_eq!(shell.active_terminal_input(), "");
-    shell.text_input("dir");
-    assert_eq!(shell.active_terminal_input(), "dir");
-    let rendered = shell
-        .paint(size)
-        .into_iter()
-        .filter_map(|command| match command {
-            PaintCommand::DrawText(command) => Some(command.text),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(rendered.iter().any(|text| text.ends_with("> dir")));
-    assert!(!rendered.iter().any(|text| text.contains("Get-Location")));
+    let segunda = shell.active_terminal().grid_rows();
 
-    shell.pointer_down(Point::new(editor_x + 10.0, terminal_y), size);
-    assert_eq!(shell.active_terminal_index(), 0);
-    assert_eq!(shell.active_terminal_input(), "Get-Location");
+    // Duas sessões, duas grades: mesma forma, conteúdos que não se misturam.
+    assert_eq!(primeira.len(), segunda.len());
+    assert_eq!(
+        shell.active_terminal().cursor_position(),
+        shell.active_terminal().cursor_position(),
+        "o cursor é o da aba ativa"
+    );
 }
 
 #[cfg(windows)]
@@ -1675,28 +1702,57 @@ fn terminal_wheel_and_scrollbar_change_the_visible_offset() {
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    let active = shell.terminal.active;
-    let bottom = shell.terminal.tabs[active].scroll_line;
-    assert!(bottom > 0);
+    // O que se vê é a grade: rolar tem que mudar o texto visível, e não só um
+    // número guardado à parte.
+    let visivel = |shell: &IdeShell| -> String {
+        shell
+            .active_terminal()
+            .grid_rows()
+            .iter()
+            .map(|linha| linha.iter().map(|celula| celula.character).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("
+")
+    };
+    let no_fim = visivel(&shell);
 
     let content_point = Point::new(editor_x + 100.0, shell.geometry().editor_bottom + 90.0);
     shell.scroll(content_point, -5.0, size);
-    assert!(shell.terminal.tabs[active].scroll_line < bottom);
-
-    let track = shell.terminal_scrollbar_rect(size);
-    shell.pointer_down(Point::new(track.origin.x + 5.0, track.origin.y + 1.0), size);
-    assert_eq!(shell.terminal.tabs[active].scroll_line, 0);
-    shell.pointer_move(
-        Point::new(track.origin.x + 5.0, track.origin.y + track.size.height),
-        size,
+    assert_ne!(
+        visivel(&shell),
+        no_fim,
+        "rolar para trás tem que mudar o que está na tela"
     );
-    assert!(shell.terminal.tabs[active].scroll_line > 0);
-    shell.pointer_up();
+
+    // O cursor é da tela viva: rolado para trás ele some, e volta ao chegar ao
+    // fim. Fixo enquanto o texto sobe, ele apontaria uma linha que já passou.
+    let cursores = |shell: &mut IdeShell, size: Size| -> usize {
+        let acento = shell.theme().colors.accent;
+        shell
+            .paint(size)
+            .iter()
+            .filter(|command| {
+                matches!(command, PaintCommand::FillRect(fill) if fill.color == acento)
+            })
+            .count()
+    };
+    let rolado = cursores(&mut shell, size);
+
+    shell.scroll(content_point, 50.0, size);
+    assert_eq!(
+        visivel(&shell),
+        no_fim,
+        "voltar ao fim mostra de novo o que estava lá"
+    );
+    assert!(
+        cursores(&mut shell, size) > rolado,
+        "o cursor volta a aparecer quando a janela chega ao fim"
+    );
 }
 
 #[cfg(windows)]
 #[test]
-fn vertically_resizing_terminal_never_changes_its_content() {
+fn resizing_the_terminal_refills_it_without_losing_the_end() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
@@ -1717,10 +1773,17 @@ fn vertically_resizing_terminal_never_changes_its_content() {
     }
     std::thread::sleep(std::time::Duration::from_millis(150));
     shell.update_terminals();
-    let before = shell
-        .active_terminal_lines()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    let com_conteudo = |shell: &IdeShell| -> usize {
+        shell
+            .active_terminal()
+            .grid_rows()
+            .iter()
+            .filter(|linha| linha.iter().any(|celula| celula.character != ' '))
+            .count()
+            + shell.active_terminal().scrollback_len()
+    };
+    let antes = com_conteudo(&shell);
+    assert!(antes > 0, "o terminal precisa ter saída antes do arrasto");
 
     let border = shell.geometry().editor_bottom;
     shell.pointer_down(Point::new(editor_x + 200.0, border), size);
@@ -1732,11 +1795,19 @@ fn vertically_resizing_terminal_never_changes_its_content() {
     std::thread::sleep(std::time::Duration::from_millis(150));
     shell.update_terminals();
 
-    let after = shell
-        .active_terminal_lines()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(after, before);
+    // A grade acompanha o painel: sem isso, crescer deixaria uma faixa vazia
+    // embaixo, com o texto parado no tamanho antigo.
+    assert_eq!(
+        shell.active_terminal().grid_rows().len(),
+        shell.terminal_visible_lines(),
+        "a grade tem que ter tantas linhas quantas cabem no painel"
+    );
+    // E nada se perde. O que sai da tela ao encolher vai para o histórico, que é
+    // o que um terminal faz — por isso a conta soma os dois.
+    assert!(
+        com_conteudo(&shell) >= antes,
+        "encolher o painel não pode descartar saída"
+    );
 }
 
 #[test]

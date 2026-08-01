@@ -76,6 +76,11 @@ impl IdeShell {
                     EDITOR_LINE_HEIGHT,
                     14.0,
                 ),
+                grid: TerminalView::new(TERMINAL_GRID_ID, Vec::new()).with_metrics(
+                    14.0,
+                    EDITOR_LINE_HEIGHT,
+                    14.0,
+                ),
                 tabs: terminals,
                 active: 0,
                 height: TERMINAL_DEFAULT_HEIGHT,
@@ -88,6 +93,7 @@ impl IdeShell {
                 running_terminal: None,
                 // 80 é a largura com que o PTY nasce; o primeiro quadro corrige.
                 pty_cols: 80,
+                pty_rows: 24,
             },
             search: TypeSearchSurface::default(),
             inspection: InspectionSurface::default(),

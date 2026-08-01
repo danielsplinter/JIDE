@@ -80,25 +80,34 @@ impl IdeShell {
     pub fn update_terminals(&mut self) -> bool {
         let geo = self.geometry();
         let rows = self.terminal_visible_lines().max(1) as u16;
-        // Quem quebra a linha é o programa do outro lado, na largura que o
-        // terminal declarou ter: sem contar isto, ele fica nas 80 colunas com que
-        // nasceu e dobra o texto no meio de um caminho. Só a **coluna** é
-        // reenviada, porque é ela que causa a quebra — mudar a altura faria o
-        // programa redesenhar à toa a cada arrasto do divisor.
+        // O terminal tem o tamanho do painel, nas duas direções. A largura
+        // decide onde o programa quebra a linha; a altura decide quantas linhas
+        // a grade tem — e sem reenviá-la, crescer o painel deixava uma faixa
+        // vazia embaixo, porque a grade continuava com as linhas de antes.
         let cols = self.terminal_columns(geo.editor_width);
-        let mudou_largura = cols != self.terminal.pty_cols;
-        if mudou_largura {
+        let mudou = cols != self.terminal.pty_cols || rows != self.terminal.pty_rows;
+        if mudou {
             self.terminal.pty_cols = cols;
+            self.terminal.pty_rows = rows;
         }
         let mut changed = false;
         for terminal in &mut self.terminal.tabs {
-            if mudou_largura {
+            if mudou {
                 let _ = terminal.session.resize(cols, rows);
+                // Crescer traz histórico de volta; encolher empurra para o
+                // histórico. Nos dois casos o fim é onde o prompt está.
+                if terminal.follow_output {
+                    terminal.session.scroll_to_bottom();
+                    terminal.scroll_line = terminal.session.scrollback_len();
+                }
             }
             let received = terminal.session.drain_output();
             changed |= received > 0;
+            // Saída nova traz a janela de volta ao fim, que é onde o prompt
+            // está — a não ser que alguém tenha rolado para trás de propósito.
             if received > 0 && terminal.follow_output {
-                terminal.scroll_line = terminal.session.line_count().saturating_sub(rows as usize);
+                terminal.session.scroll_to_bottom();
+                terminal.scroll_line = terminal.session.scrollback_len();
             }
         }
         changed
@@ -170,6 +179,24 @@ impl IdeShell {
     }
 
     /// Quantas linhas da saída cabem — a altura da faixa, e não uma subtração.
+    /// Leva a janela visível do terminal a uma posição do histórico.
+    ///
+    /// O emulador só rola por deslocamento — não há como dizer "vá para a linha
+    /// 12". Então a IDE guarda onde está e converte em passos, e este é o
+    /// **único** lugar que faz isso: espelho em dois lugares seria espelho que
+    /// diverge.
+    pub(super) fn set_terminal_scroll(&mut self, alvo: usize) {
+        let active = self.terminal.active;
+        let maximo = self.terminal.tabs[active].session.scrollback_len();
+        let alvo = alvo.min(maximo);
+        let atual = self.terminal.tabs[active].scroll_line;
+        let passos = alvo as isize - atual as isize;
+        self.terminal.tabs[active].session.scroll_lines(passos);
+        self.terminal.tabs[active].scroll_line = alvo;
+        // No fim do histórico, a saída seguinte traz a janela junto.
+        self.terminal.tabs[active].follow_output = alvo >= maximo;
+    }
+
     pub(super) fn terminal_visible_lines(&self) -> usize {
         let (saida, _) = self.terminal_bands();
         ((saida.size.height / EDITOR_LINE_HEIGHT).floor()).max(1.0) as usize

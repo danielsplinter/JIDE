@@ -2226,6 +2226,14 @@ impl ApplicationHandler for NativeIde {
                                 shell.request_debug(request);
                             }
                         }
+                        // `Delete` não produz texto, e o ramo geral só
+                        // encaminha o que tem texto — sem este caso ela era
+                        // descartada antes de chegar à janela.
+                        Key::Named(NamedKey::Delete) => {
+                            if let Some(shell) = self.ui.shell.as_mut() {
+                                shell.key_down("Delete");
+                            }
+                        }
                         Key::Named(NamedKey::Backspace) => {
                             if let Some(shell) = self.ui.shell.as_mut() {
                                 shell.key_down("Backspace");

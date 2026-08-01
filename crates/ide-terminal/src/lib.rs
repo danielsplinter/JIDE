@@ -1,6 +1,12 @@
 #![doc = "Perfis e sessões persistentes do terminal integrado via PTY/ConPTY."]
 
-use justerm_core::{Cell, Cursor, Engine};
+use justerm_core::{Cell, Cursor, Engine, KeyEvent};
+
+/// As teclas que o terminal entende, e os modificadores.
+///
+/// Reexportadas para o consumidor não precisar depender do emulador só para
+/// dizer "seta para cima".
+pub use justerm_core::{Key as TerminalKey, Modifiers as TerminalModifiers};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::{
     collections::VecDeque,
@@ -342,6 +348,54 @@ impl TerminalSession {
         Ok(true)
     }
 
+    /// As linhas visíveis, em células neutras.
+    ///
+    /// Neutras de propósito: quem desenha não precisa conhecer o emulador, e
+    /// trocá-lo um dia não alcança a interface. A cor sai como RGB ou como
+    /// **nada** — e nada quer dizer "use a do tema", que é o que mantém a saída
+    /// acompanhando a paleta.
+    #[must_use]
+    pub fn grid_rows(&self) -> Vec<Vec<GridCell>> {
+        (0..self.pty_rows as usize)
+            .map(|linha| {
+                self.engine
+                    .viewport_line(linha)
+                    .iter()
+                    .map(|cell| GridCell {
+                        character: cell.c(),
+                        foreground: cor_neutra(cell.fg()),
+                        background: cor_neutra(cell.bg()),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Move a janela visível sobre o histórico.
+    ///
+    /// Positivo desce, negativo sobe — a mesma convenção da roda. Quem guarda a
+    /// posição é o emulador: manter um número à parte na IDE faria a rolagem e o
+    /// que se desenha discordarem assim que uma linha nova chegasse.
+    pub fn scroll_lines(&mut self, delta: isize) {
+        match delta.cmp(&0) {
+            std::cmp::Ordering::Less => self.engine.scroll_up(delta.unsigned_abs()),
+            std::cmp::Ordering::Greater => self.engine.scroll_down(delta.unsigned_abs()),
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+
+    /// Volta ao fim da saída, que é onde o prompt está.
+    pub fn scroll_to_bottom(&mut self) {
+        self.engine.scroll_to_bottom();
+    }
+
+    /// Linha e coluna do cursor, para quem desenha.
+    #[must_use]
+    pub fn cursor_position(&self) -> (usize, usize) {
+        let cursor = self.engine.cursor();
+        (cursor.row, cursor.col)
+    }
+
     /// As linhas visíveis da grade, como células.
     ///
     /// É o que a interface desenha a partir da `18`: cada célula com o caractere
@@ -351,6 +405,30 @@ impl TerminalSession {
         (0..self.pty_rows as usize)
             .map(|linha| self.engine.viewport_line(linha))
             .collect()
+    }
+
+    /// Manda uma tecla ao programa do outro lado.
+    ///
+    /// A codificação é do emulador: seta para cima, `Tab` e `Ctrl+C` viram os
+    /// bytes que aquele shell espera, no modo em que ele está. A IDE não decide
+    /// o que cada tecla significa — quem responde é o shell, e é isso que faz o
+    /// histórico e a completação funcionarem sem ninguém os implementar aqui.
+    pub fn send_key(
+        &mut self,
+        key: TerminalKey,
+        mods: TerminalModifiers,
+    ) -> Result<(), TerminalError> {
+        let evento = KeyEvent {
+            key,
+            mods,
+            ..KeyEvent::default()
+        };
+        let Some(bytes) = self.engine.encode_key(evento) else {
+            return Ok(());
+        };
+        self.process.writer.write_all(&bytes)?;
+        self.process.writer.flush()?;
+        Ok(())
     }
 
     /// Onde o programa deixou o cursor.
@@ -462,6 +540,51 @@ impl TerminalSession {
         self.lines.push_back(TerminalLine { text, is_error });
         while self.lines.len() > self.max_lines {
             self.lines.pop_front();
+        }
+    }
+}
+
+/// Uma célula da grade, sem nada do emulador dentro.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridCell {
+    pub character: char,
+    /// `None` quer dizer "a cor do tema".
+    pub foreground: Option<(u8, u8, u8)>,
+    pub background: Option<(u8, u8, u8)>,
+}
+
+/// A paleta ANSI de 16 cores, resolvida em RGB.
+///
+/// O emulador entrega índice; quem desenha não deveria precisar saber o que o
+/// índice 1 quer dizer. As oito primeiras são as normais, as oito seguintes as
+/// claras.
+const PALETA_ANSI: [(u8, u8, u8); 16] = [
+    (0x1e, 0x22, 0x2b),
+    (0xe0, 0x60, 0x5c),
+    (0x70, 0xc7, 0x7d),
+    (0xd6, 0xb5, 0x60),
+    (0x61, 0x9f, 0xd6),
+    (0xb3, 0x7f, 0xd1),
+    (0x5c, 0xbd, 0xc2),
+    (0xc8, 0xcd, 0xd6),
+    (0x5a, 0x62, 0x70),
+    (0xf0, 0x7a, 0x76),
+    (0x8e, 0xdc, 0x99),
+    (0xe6, 0xcb, 0x7e),
+    (0x82, 0xb8, 0xe8),
+    (0xc9, 0x9c, 0xe6),
+    (0x7d, 0xd4, 0xd9),
+    (0xe6, 0xea, 0xf0),
+];
+
+fn cor_neutra(cor: justerm_core::Color) -> Option<(u8, u8, u8)> {
+    match cor {
+        justerm_core::Color::Default => None,
+        justerm_core::Color::Rgb(r, g, b) => Some((r, g, b)),
+        justerm_core::Color::Indexed(indice) => {
+            PALETA_ANSI.get(indice as usize).copied().or(Some((
+                0xc8, 0xcd, 0xd6,
+            )))
         }
     }
 }

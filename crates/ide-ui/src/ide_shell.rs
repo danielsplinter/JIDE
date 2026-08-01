@@ -62,7 +62,9 @@ use ide_domain::{
     AccessorKind, CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, OutlineItem,
     SyntaxSnapshot, TextPosition as DomainTextPosition, TextRange as DomainTextRange,
 };
-use ide_terminal::{ShellKind, TerminalSession};
+use ide_terminal::{
+    GridCell, ShellKind, TerminalKey, TerminalModifiers, TerminalSession,
+};
 use ide_workspace::{EditorSession, FileNode, TextBuffer, rewrite_occurrences};
 use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 #[cfg(test)]
@@ -70,7 +72,7 @@ use ui_components::MenuEntry;
 use ui_components::{
     Button, ContextMenu, Icon, IconTint, ListView, MenuBar, MenuBarItem, MenuItem, Popup,
     Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter, StatusBar, TabItem, Tabs,
-    TextInput, TreeView,
+    TerminalCell, TerminalCursor, TerminalView, TextInput, TreeView,
 };
 use ui_core::{
     ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton,
@@ -152,13 +154,14 @@ const DEBUG_PANEL_SURFACE_ID: WidgetId = WidgetId(10_086);
 const TERMINAL_INPUT_ID: WidgetId = WidgetId(10_087);
 /// A saída, entre as abas e a linha de comando.
 const TERMINAL_OUTPUT_ID: WidgetId = WidgetId(10_476);
+/// A grade do emulador, desenhada dentro da faixa de saída.
+const TERMINAL_GRID_ID: WidgetId = WidgetId(10_477);
 const TERMINAL_CONSOLE_ID: WidgetId = WidgetId(10_088);
 /// Textos da moldura e dos painéis, que são `Label` e não desenho.
 const CHROME_TITLE_TEXT_ID: WidgetId = WidgetId(10_090);
 const CHROME_EXPLORER_ID: WidgetId = WidgetId(10_091);
 const CHROME_WORKSPACE_ID: WidgetId = WidgetId(10_092);
 const EDITOR_EMPTY_ID: WidgetId = WidgetId(10_093);
-const TERMINAL_PROMPT_ID: WidgetId = WidgetId(10_094);
 const TERMINAL_COLLAPSED_ID: WidgetId = WidgetId(10_095);
 const DEBUG_STATUS_ID: WidgetId = WidgetId(10_096);
 const DEBUG_FRAMES_TITLE_ID: WidgetId = WidgetId(10_097);
@@ -404,6 +407,37 @@ fn declare_frame(host: &mut UiHost) {
         TERMINAL_INPUT_ID,
         fixa(TERMINAL_INPUT_HEIGHT),
     );
+}
+
+/// O nome da tecla, como a janela a recebe, na tecla que o shell entende.
+fn tecla_do_terminal(key: &str) -> Option<TerminalKey> {
+    Some(match key.to_ascii_lowercase().as_str() {
+        "enter" => TerminalKey::Enter,
+        "tab" => TerminalKey::Tab,
+        "backspace" => TerminalKey::Backspace,
+        "escape" => TerminalKey::Escape,
+        "arrowup" => TerminalKey::Up,
+        "arrowdown" => TerminalKey::Down,
+        "arrowleft" => TerminalKey::Left,
+        "arrowright" => TerminalKey::Right,
+        "home" => TerminalKey::Home,
+        "end" => TerminalKey::End,
+        "pageup" => TerminalKey::PageUp,
+        "pagedown" => TerminalKey::PageDown,
+        "delete" => TerminalKey::Delete,
+        // O resto é texto, e chega por `text_input`.
+        _ => return None,
+    })
+}
+
+/// Traduz uma célula da grade na célula que a biblioteca desenha.
+///
+/// A cor ausente **não** vira cor: fica em aberto, e o componente usa a do tema.
+/// É o que faz a saída acompanhar a paleta em vez de trazer um cinza fixo. Quem
+/// converte os três bytes em cor é a biblioteca — a IDE só repassa o que o
+/// programa pediu.
+fn celula_da_grade(cell: &GridCell) -> TerminalCell {
+    TerminalCell::new(cell.character).with_rgb(cell.foreground, cell.background)
 }
 
 /// O estilo de uma camada, aberta ou fechada.
@@ -653,6 +687,18 @@ impl IdeShell {
         // O motor calcula o que foi declarado; o que veio de `place` entra no
         // lugar que a árvore lhe dá. Ver `17-layout-adoption`.
         let _ = self.host.layout(size);
+    }
+
+    /// Entrega uma tecla ao programa que está no terminal.
+    ///
+    /// A codificação é do emulador, que conhece o modo em que o shell está. Um
+    /// erro de escrita vira mensagem na barra de estado: perder a tecla em
+    /// silêncio seria pior do que dizer que ela não chegou.
+    fn send_terminal_key(&mut self, key: TerminalKey) {
+        let modificadores = TerminalModifiers::empty();
+        if let Err(erro) = self.active_terminal_mut().send_key(key, modificadores) {
+            self.context.status_message = erro.to_string();
+        }
     }
 
     /// As faixas do terminal, lidas do arranjo: a saída e a linha de comando.
@@ -1099,18 +1145,10 @@ impl IdeShell {
                 (self.editor_area.pane.scroll_offset() + passo).clamp(0.0, maximo.max(0.0));
             self.editor_area.pane.set_scroll_offset(destino);
         } else if point.y >= geo.editor_bottom && point.y < geo.content_bottom {
-            let visible = self.terminal_visible_lines();
             let active = self.terminal.active;
-            let max = self.terminal.tabs[active]
-                .session
-                .line_count()
-                .saturating_sub(visible);
-            self.terminal.tabs[active].scroll_line = self.terminal.tabs[active]
-                .scroll_line
-                .saturating_add_signed(delta_lines.round() as isize)
-                .min(max);
-            self.terminal.tabs[active].follow_output =
-                self.terminal.tabs[active].scroll_line >= max;
+            let atual = self.terminal.tabs[active].scroll_line;
+            let alvo = atual.saturating_add_signed(delta_lines.round() as isize);
+            self.set_terminal_scroll(alvo);
         }
     }
 
@@ -1128,7 +1166,13 @@ impl IdeShell {
         match self.context.focus {
             ShellFocus::Editor => self.edit_active(text),
             ShellFocus::Search => self.editor_area.search_query.push_str(text),
-            ShellFocus::Terminal => self.active_terminal_mut().input_mut().push_str(text),
+            // O texto digitado vai ao shell caractere a caractere; o eco dele
+            // é que aparece na grade. A IDE não guarda linha de comando.
+            ShellFocus::Terminal => {
+                for caractere in text.chars() {
+                    self.send_terminal_key(TerminalKey::Char(caractere));
+                }
+            }
             _ => {}
         }
     }
@@ -1168,21 +1212,18 @@ impl IdeShell {
                 ShellFocus::Search => {
                     self.editor_area.search_query.pop();
                 }
-                ShellFocus::Terminal => {
-                    self.active_terminal_mut().input_mut().pop();
-                }
+                // Apagar é do shell: ele é quem sabe o que há na linha, e é
+                // ele que redesenha. A IDE só entrega a tecla.
+                ShellFocus::Terminal => self.send_terminal_key(TerminalKey::Backspace),
                 _ => {}
             }
-        } else if self.context.focus == ShellFocus::Terminal && key.eq_ignore_ascii_case("enter") {
-            match self.active_terminal_mut().submit() {
-                Ok(()) => self.context.status_message = "Command sent to terminal".to_owned(),
-                Err(error) => self.context.status_message = error.to_string(),
+        } else if self.context.focus == ShellFocus::Terminal {
+            // Seta, `Tab`, `Enter`, `Ctrl+C`: todas vão ao shell, e é ele quem
+            // responde. Histórico e completação funcionam sem a IDE saber que
+            // existem.
+            if let Some(tecla) = tecla_do_terminal(key) {
+                self.send_terminal_key(tecla);
             }
-            let active = self.terminal.active;
-            self.terminal.tabs[active].scroll_line = self.terminal.tabs[active]
-                .session
-                .line_count()
-                .saturating_sub(1);
         } else if self.context.focus == ShellFocus::Editor {
             // Edição, seleção e movimento são do painel. O shell cuida do que
             // sobra: a lista de completação, a marca de modificado e as ações
