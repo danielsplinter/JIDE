@@ -70,6 +70,7 @@ Este é um requisito arquitetural obrigatório.
 - [18 — Um terminal de verdade](18-real-terminal.md) — fases 0 a 3 feitas; a **4 é pendência**: seleção lida da grade, busca na saída e links clicáveis
 - [19 — Varredura e indexação: sair do bloqueio](19-indexing-and-scanning.md)
 - [20 — Índice no disco, memória como cache](20-index-on-disk.md) — **completa**: abrir caiu de 251 s para 3,7 s, a memória de 178 para 103 MB, uma tecla lê 2 mil registros em vez de 340 mil e um fonte alterado custa 3,5 ms
+- [21 — O que muda fora da IDE](21-file-watcher.md) — **pendente**: com a IDE aberta, o índice ignora o que muda no disco
 
 ## Escopo inicial, e o que dele já existe
 

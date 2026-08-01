@@ -369,8 +369,10 @@ as duas ordens chegam ao mesmo lugar.
 - **a memória não é elástica** — ver ADR-023. Trocar leitura por mapeamento é uma
   linha, e depende de rever o `unsafe_code = "forbid"`;
 - **os 3,68 s da diferença** são uma varredura de 26 mil arquivos comparando data
-  e tamanho. É o que sobrou de caro na abertura, e um observador de sistema de
-  arquivos o eliminaria;
+  e tamanho. É o que sobrou de caro na abertura. *(Escreveu-se aqui que um
+  observador de sistema de arquivos o eliminaria. **Não elimina** — ele só vê o
+  que acontece enquanto está rodando, e a abertura precisa descobrir o que mudou
+  com a IDE fechada. O que barateia é paralelizar a varredura; ver a `21`.)*
 - **os jars não entram na conferência.** Uma dependência trocada sem mexer em
   fonte nenhum passa despercebida.
 
