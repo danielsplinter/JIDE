@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::{Condvar, Mutex},
     fs,
     path::{Path, PathBuf},
 };
@@ -44,24 +45,103 @@ pub(crate) fn fonte_java(path: &Path, source_roots: &[PathBuf]) -> bool {
         && (source_roots.is_empty() || source_roots.iter().any(|raiz| path.starts_with(raiz)))
 }
 
+/// Todos os arquivos do projeto, fora as pastas ignoradas.
+///
+/// **Caminha em paralelo**, e é a fase 2 da `21`. Medido no projeto de
+/// referência: a caminhada custava 4,18 s dos 4,66 s da conferência de abertura,
+/// contra 0,76 s das 26 mil consultas de data e tamanho. O caro é abrir
+/// diretório, não perguntar pelo arquivo — foi medição que disse isso, e o
+/// palpite anterior apontava para o lado errado.
+///
+/// O resultado sai **ordenado**. Custa uns milissegundos e compra determinismo:
+/// antes a ordem era a que o sistema de arquivos entregasse, e dela dependia
+/// qual arquivo ganha quando dois declaram o mesmo nome simples.
 pub(crate) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let ignorada = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| PASTAS_IGNORADAS.contains(&name));
-            if !ignorada {
-                collect_workspace_paths(&path, output);
-            }
-        } else {
-            output.push(path);
-        }
+    /// Diretórios à espera de quem os abra, e quantos estão sendo abertos.
+    ///
+    /// A contagem é o que distingue "não há trabalho agora" de "acabou": com
+    /// pendentes vazio e alguém ainda trabalhando, pode aparecer trabalho novo.
+    struct Fila {
+        pendentes: Vec<PathBuf>,
+        abrindo: usize,
     }
+
+    let fila = Mutex::new(Fila {
+        pendentes: vec![root.to_path_buf()],
+        abrindo: 0,
+    });
+    let acordar = Condvar::new();
+    let achados = Mutex::new(Vec::new());
+    let quantos = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+
+    std::thread::scope(|escopo| {
+        for _ in 0..quantos {
+            escopo.spawn(|| {
+                loop {
+                    let pasta = {
+                        let Ok(mut guarda) = fila.lock() else {
+                            return;
+                        };
+                        loop {
+                            if let Some(pasta) = guarda.pendentes.pop() {
+                                guarda.abrindo += 1;
+                                break pasta;
+                            }
+                            if guarda.abrindo == 0 {
+                                // Ninguém tem o que fazer e ninguém vai
+                                // produzir mais: acabou para todos.
+                                acordar.notify_all();
+                                return;
+                            }
+                            let Ok(proxima) = acordar.wait(guarda) else {
+                                return;
+                            };
+                            guarda = proxima;
+                        }
+                    };
+
+                    let mut subpastas = Vec::new();
+                    let mut arquivos = Vec::new();
+                    if let Ok(entradas) = fs::read_dir(&pasta) {
+                        for entrada in entradas.flatten() {
+                            let caminho = entrada.path();
+                            let pasta = entrada
+                                .file_type()
+                                .map_or_else(|_| caminho.is_dir(), |tipo| tipo.is_dir());
+                            if pasta {
+                                let ignorada = caminho
+                                    .file_name()
+                                    .and_then(|nome| nome.to_str())
+                                    .is_some_and(|nome| PASTAS_IGNORADAS.contains(&nome));
+                                if !ignorada {
+                                    subpastas.push(caminho);
+                                }
+                            } else {
+                                arquivos.push(caminho);
+                            }
+                        }
+                    }
+
+                    if !arquivos.is_empty()
+                        && let Ok(mut guarda) = achados.lock()
+                    {
+                        guarda.extend(arquivos);
+                    }
+                    let Ok(mut guarda) = fila.lock() else {
+                        return;
+                    };
+                    guarda.pendentes.extend(subpastas);
+                    guarda.abrindo -= 1;
+                    drop(guarda);
+                    acordar.notify_all();
+                }
+            });
+        }
+    });
+
+    let mut caminhos = achados.into_inner().unwrap_or_default();
+    caminhos.sort_unstable();
+    output.extend(caminhos);
 }
 
 /// Tipo compilado que o workspace alcança: `.class` do próprio projeto ou
@@ -228,6 +308,26 @@ impl Externa<'_> {
     }
 }
 
+/// Se este fonte não é mais o que o índice gravou.
+///
+/// Ausente do índice quer dizer que ele nasceu depois; presente com outra data
+/// ou outro tamanho quer dizer que mudou. Não se lê o conteúdo: comparar 149 MB
+/// de fonte custaria mais que reindexar.
+fn mudou(caminho: &Path, gravados: &HashMap<PathBuf, (u64, u64)>) -> bool {
+    let Some((quando, tamanho)) = gravados.get(caminho) else {
+        return true;
+    };
+    let Ok(dados) = fs::metadata(caminho) else {
+        return true;
+    };
+    let agora = dados
+        .modified()
+        .ok()
+        .and_then(|instante| instante.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |desde| desde.as_secs());
+    dados.len() != *tamanho || agora != *quando
+}
+
 /// Se o símbolo pode ser nomeado de fora do arquivo que o declara.
 ///
 /// É o que separa o índice do projeto da semântica do documento aberto: quem
@@ -309,37 +409,53 @@ impl WorkspaceIndex {
         let Some(carregado) = &self.carregado else {
             return Vec::new();
         };
-        let mut gravados: HashMap<PathBuf, (u64, u64)> = (0..carregado.arquivos())
+        let gravados: HashMap<PathBuf, (u64, u64)> = (0..carregado.arquivos())
             .filter_map(|indice| carregado.arquivo_gravado(indice))
             .map(|(caminho, quando, tamanho)| (PathBuf::from(caminho), (quando, tamanho)))
             .collect();
-        let mut mudaram = Vec::new();
         let mut caminhos = Vec::new();
         collect_workspace_paths(root, &mut caminhos);
-        for caminho in caminhos {
-            if !fonte_java(&caminho, source_roots) {
-                continue;
-            }
-            let Some((quando, tamanho)) = gravados.remove(&caminho) else {
-                // O índice não conhece este fonte: ele nasceu depois.
-                mudaram.push(caminho);
-                continue;
-            };
-            let Ok(dados) = fs::metadata(&caminho) else {
-                mudaram.push(caminho);
-                continue;
-            };
-            let agora = dados
-                .modified()
-                .ok()
-                .and_then(|instante| instante.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |desde| desde.as_secs());
-            if dados.len() != tamanho || agora != quando {
-                mudaram.push(caminho);
-            }
-        }
-        // O que sobrou foi apagado desde a gravação.
-        mudaram.extend(gravados.into_keys());
+        let fontes: Vec<PathBuf> = caminhos
+            .into_iter()
+            .filter(|caminho| fonte_java(caminho, source_roots))
+            .collect();
+
+        // Em paralelo, como a caminhada: são 26 mil perguntas independentes ao
+        // sistema de arquivos. Os pedaços voltam na ordem em que saíram, e a
+        // lista de fontes vem ordenada — a resposta é a mesma a cada execução.
+        let quantos = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let por_pedaco = fontes.len().div_ceil(quantos).max(1);
+        let mut mudaram: Vec<PathBuf> = std::thread::scope(|escopo| {
+            let tarefas: Vec<_> = fontes
+                .chunks(por_pedaco)
+                .map(|pedaco| {
+                    let gravados = &gravados;
+                    escopo.spawn(move || {
+                        pedaco
+                            .iter()
+                            .filter(|caminho| mudou(caminho, gravados))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            tarefas
+                .into_iter()
+                .filter_map(|tarefa| tarefa.join().ok())
+                .flatten()
+                .collect()
+        });
+
+        // O que o índice conhece e o disco não tem mais foi apagado. Ordenado
+        // pelo mesmo motivo: a ordem de um `HashMap` não é resposta.
+        let presentes: HashSet<&Path> = fontes.iter().map(PathBuf::as_path).collect();
+        let mut apagados: Vec<PathBuf> = gravados
+            .keys()
+            .filter(|caminho| !presentes.contains(caminho.as_path()))
+            .cloned()
+            .collect();
+        apagados.sort_unstable();
+        mudaram.extend(apagados);
         mudaram
     }
 

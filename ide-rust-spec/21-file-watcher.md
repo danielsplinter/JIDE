@@ -185,11 +185,11 @@ verificado que ele **falha** com o observador desligado.
 `language-java` a 12 linhas. Ela foi para 13 por causa de uma linha de `mod`, que
 é exatamente o que a fachada deve ter. O teto subiu com a razão escrita ao lado.
 
-## Fase 2 — A varredura em paralelo
+## Fase 2 — A varredura em paralelo ✅
 
-Os 3,7 s da conferência são 26 mil perguntas independentes ao sistema de
-arquivos, feitas uma a uma numa linha de execução só. Distribuí-las é o que há de
-mais simples: `std::thread::scope`, sem dependência nova, sem mudar o que a
+Os segundos da conferência são perguntas independentes ao sistema de arquivos,
+feitas uma a uma numa linha de execução só. Distribuí-las é o que há de mais
+simples: `std::thread::scope`, sem dependência nova, sem mudar o que a
 conferência responde.
 
 Vem depois do observador de propósito. O observador tapa um buraco de
@@ -198,6 +198,50 @@ a IDE responde durante a conferência desde a fase 2 da `20`.
 
 **Critério:** a conferência responde o mesmo, em fração do tempo. Medido no
 projeto de referência, contra os 3,7 s de hoje.
+
+### Feita, e a medição mudou o plano
+
+Este texto dizia que os segundos eram "26 mil perguntas ao sistema de arquivos".
+Medindo antes de mexer, não eram:
+
+| | |
+|---|---|
+| caminhar pelos diretórios | **4,18 s** |
+| 26.211 consultas de data e tamanho | 0,76 s |
+| filtrar | 0,03 s |
+
+O caro é **abrir diretório**, não perguntar pelo arquivo — cinco vezes mais. O
+plano apontava para o lado errado, e teria comprado 20% do que comprou.
+
+A caminhada virou uma fila de diretórios com tantos trabalhadores quantos a
+máquina tem. Depois dela, as consultas de metadados também foram distribuídas,
+porque aí sim elas passaram a ser a maior parte do que sobrou.
+
+| | |
+|---|---|
+| conferência, antes | **4,66 s** |
+| só a caminhada em paralelo | 1,32 s |
+| e as consultas também | **0,70 s** |
+
+Seis vezes e meia, e o número é estável — três execuções entre 692 e 724 ms.
+
+**O resultado passou a sair ordenado.** Custa poucos milissegundos e compra
+determinismo: antes a ordem era a que o sistema de arquivos entregasse, e dela
+dependia qual arquivo ganha quando dois declaram o mesmo nome simples. Com
+trabalhadores em paralelo isso deixaria de ser arbitrário para ser instável, que
+é pior. Ordenar resolve os dois, e é melhor do que era antes da fase.
+
+**A contagem de quem está abrindo é o que termina o laço.** Fila vazia não quer
+dizer que acabou: pode haver alguém abrindo um diretório que ainda vai produzir
+subpastas. Só quando a fila está vazia **e** ninguém está abrindo é que acabou
+para todos — e é aí que os trabalhadores acordam uns aos outros para sair.
+
+**Uma armadilha de medição, que vale registrar.** A instrumentação que separava
+caminhada de metadados rodava antes da conferência e esquentava o cache do
+sistema de arquivos para ela. Os números soltos oscilaram de 487 ms a 2,9 s entre
+execuções enquanto a conferência inteira ficava em 0,7 s — comparar as duas seria
+comparar coisas diferentes. A instrumentação saiu; o que ficou é a conferência
+inteira, medida do mesmo jeito nas três vezes.
 
 ## O que fica de fora, e por quê
 
@@ -245,4 +289,4 @@ E com número medido, como a `19` e a `20` fizeram:
 | fase | o que medir |
 |---|---|
 | 1 | tempo entre gravar fora da IDE e a resposta mudar; eventos absorvidos num build; quantos registros o Linux precisou e se coube no limite |
-| 2 | tempo da conferência, contra os 3,7 s de hoje |
+| 2 | tempo da conferência, contra os 3,7 s de hoje — **feito: 4,66 s → 0,70 s** |

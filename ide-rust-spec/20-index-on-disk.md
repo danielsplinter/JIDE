@@ -372,7 +372,8 @@ as duas ordens chegam ao mesmo lugar.
   e tamanho. É o que sobrou de caro na abertura. *(Escreveu-se aqui que um
   observador de sistema de arquivos o eliminaria. **Não elimina** — ele só vê o
   que acontece enquanto está rodando, e a abertura precisa descobrir o que mudou
-  com a IDE fechada. O que barateia é paralelizar a varredura; ver a `21`.)*
+  com a IDE fechada. O que barateia é paralelizar a varredura — feito na fase 2
+  da `21`, e são **0,70 s**.)*
 - **os jars não entram na conferência.** Uma dependência trocada sem mexer em
   fonte nenhum passa despercebida.
 
