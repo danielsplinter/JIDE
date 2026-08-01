@@ -217,6 +217,9 @@ impl JavaLanguage {
                     })
                 })
                 .unwrap_or_default();
+            // Gravado antes de publicar: quem espera o índice espera por ele
+            // pronto, e não pela escrita.
+            indice.save(&raiz);
             if let Ok(mut guarda) = destino.write() {
                 *guarda = indice;
             }
@@ -2014,6 +2017,23 @@ int x;";
             indice.declarations.len() > 500,
             "um monorepo declara muito mais que o teto antigo"
         );
+
+        // O tamanho em disco é o número da fase 1 da `20`.
+        let arquivo = std::env::temp_dir().join("er-ide-medicao-indice.bin");
+        let gravado = std::time::Instant::now();
+        assert!(indice.save_to(&arquivo), "gravar o índice medido");
+        eprintln!(
+            "arquivo: {} MB, gravado em {:?}",
+            fs::metadata(&arquivo).map(|dados| dados.len()).unwrap_or(0) / 1_048_576,
+            gravado.elapsed()
+        );
+        let lido = std::time::Instant::now();
+        assert!(
+            WorkspaceIndex::read_from(&arquivo).is_some(),
+            "e relido inteiro"
+        );
+        eprintln!("relido em {:?}", lido.elapsed());
+        let _ = fs::remove_file(&arquivo);
     }
 
     /// A semântica é calculada sob demanda e refeita depois de cada mudança.

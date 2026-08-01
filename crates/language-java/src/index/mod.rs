@@ -13,6 +13,8 @@ use tree_sitter::Parser;
 
 use crate::{language::analyze_semantics, symbols::simple_class_name};
 
+mod file;
+
 pub(super) fn collect_workspace_paths(root: &Path, output: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -100,6 +102,30 @@ fn declaravel(symbol: &SemanticSymbol) -> bool {
 }
 
 impl WorkspaceIndex {
+    /// Grava o índice deste projeto no disco.
+    ///
+    /// Falhar em gravar não é erro de ninguém: o índice em memória continua
+    /// completo, e a única consequência é a próxima abertura reconstruí-lo.
+    ///
+    /// **Ninguém lê isto ainda.** Ler exige antes saber o que mudou desde a
+    /// gravação, e servir um índice vencido seria o defeito silencioso que a
+    /// `19` combateu. É a fase 4 da `20`; até lá o arquivo é escrito e o formato
+    /// se prova em uso real.
+    pub(super) fn save(&self, root: &Path) -> bool {
+        file::caminho_do_indice(root).is_some_and(|caminho| self.save_to(&caminho))
+    }
+
+    /// Grava num caminho escolhido. Serve à medição, que não usa o cache.
+    pub(super) fn save_to(&self, path: &Path) -> bool {
+        file::write(self, path).is_ok()
+    }
+
+    /// Lê de um caminho escolhido. Ver `save_to`.
+    #[cfg(test)]
+    pub(super) fn read_from(path: &Path) -> Option<Self> {
+        file::read(path)
+    }
+
     /// Onde um nome aparece, no projeto inteiro.
     ///
     /// Devolve `Location` porque é o que o resto da IDE fala; o formato
@@ -378,3 +404,202 @@ impl WorkspaceIndex {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::documents::Documents;
+    use file::{CABECALHO_PARA_TESTE, VERSION_PARA_TESTE};
+
+    /// Um projeto pequeno, com o bastante para exercitar cada área do arquivo.
+    fn projeto(nome: &str) -> PathBuf {
+        let raiz = std::env::temp_dir().join(format!("er-ide-{nome}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&raiz);
+        assert!(fs::create_dir_all(&raiz).is_ok());
+        assert!(
+            fs::write(
+                raiz.join("Pedido.java"),
+                "public class Pedido {\n  private java.util.List<String> itens;\n  \
+                 public String nome() { return \"x\"; }\n}\n",
+            )
+            .is_ok()
+        );
+        assert!(
+            fs::write(
+                raiz.join("Servico.java"),
+                "public interface Servico {\n  Pedido criar(String nome);\n}\n",
+            )
+            .is_ok()
+        );
+        assert!(
+            fs::write(
+                raiz.join("Estado.java"),
+                "public enum Estado { ABERTO, FECHADO }\n",
+            )
+            .is_ok()
+        );
+        raiz
+    }
+
+    fn varrer(raiz: &Path) -> WorkspaceIndex {
+        let documentos = match Documents::new() {
+            Ok(documentos) => documentos,
+            Err(error) => panic!("analisador indisponível: {error}"),
+        };
+        match documentos
+            .with_parser_mut(|parser| WorkspaceIndex::scan(raiz, std::slice::from_ref(&raiz.to_path_buf()), None, parser))
+        {
+            Ok(indice) => indice,
+            Err(error) => panic!("varredura falhou: {error}"),
+        }
+    }
+
+    /// As quatro consultas respondem igual depois de passar pelo disco.
+    ///
+    /// É o critério da fase 1 da `20`. Comparar as estruturas byte a byte diria
+    /// menos: o que precisa sobreviver ao arquivo é o que a IDE pergunta.
+    #[test]
+    fn what_goes_to_disk_answers_the_same_when_it_comes_back() {
+        let raiz = projeto("indice-ciclo");
+        let original = varrer(&raiz);
+        let arquivo = raiz.join("indice.bin");
+        assert!(file::write(&original, &arquivo).is_ok());
+        let Some(lido) = file::read(&arquivo) else {
+            panic!("o índice gravado não pôde ser lido");
+        };
+
+        // 1. Ctrl+clique e navegação: onde um nome está declarado.
+        let declaracoes = |indice: &WorkspaceIndex, nome: &str| -> Vec<Location> {
+            let mut achados: Vec<Location> = indice
+                .symbols()
+                .filter(|simbolo| simbolo.name == nome)
+                .filter_map(|simbolo| indice.location_of(simbolo))
+                .collect();
+            achados.sort_by(|esquerda, direita| {
+                esquerda
+                    .path
+                    .cmp(&direita.path)
+                    .then(esquerda.range.start.line.cmp(&direita.range.start.line))
+            });
+            achados
+        };
+        for nome in ["Pedido", "Servico", "Estado", "nome", "criar", "itens"] {
+            assert_eq!(
+                declaracoes(&lido, nome),
+                declaracoes(&original, nome),
+                "declarações de {nome} mudaram ao passar pelo disco"
+            );
+        }
+
+        // 2. Referências e renomear: onde um nome aparece.
+        for nome in ["Pedido", "String", "nome"] {
+            let mut antes: Vec<Location> = original.references_to(nome).collect();
+            let mut depois: Vec<Location> = lido.references_to(nome).collect();
+            antes.sort_by_key(|local| (local.path.clone(), local.range.start.line));
+            depois.sort_by_key(|local| (local.path.clone(), local.range.start.line));
+            assert_eq!(depois, antes, "ocorrências de {nome} mudaram");
+        }
+
+        // 3. Completação: os nomes que começam com um prefixo, com espécie e tipo.
+        let por_prefixo = |indice: &WorkspaceIndex, prefixo: &str| -> Vec<String> {
+            let mut achados: Vec<String> = indice
+                .symbols()
+                .filter(|simbolo| simbolo.name.starts_with(prefixo))
+                .map(|simbolo| {
+                    format!(
+                        "{}|{:?}|{:?}",
+                        simbolo.name, simbolo.kind, simbolo.type_descriptor
+                    )
+                })
+                .collect();
+            achados.sort();
+            achados
+        };
+        for prefixo in ["", "P", "no", "cri"] {
+            assert_eq!(
+                por_prefixo(&lido, prefixo),
+                por_prefixo(&original, prefixo),
+                "a completação por {prefixo:?} mudou"
+            );
+        }
+
+        // 4. Busca por tipo: o arquivo que declara cada tipo.
+        let mut tipos_antes: Vec<_> = original.declarations.iter().collect();
+        let mut tipos_depois: Vec<_> = lido.declarations.iter().collect();
+        tipos_antes.sort();
+        tipos_depois.sort();
+        assert_eq!(tipos_depois, tipos_antes);
+        assert!(
+            lido.declarations.contains_key("Pedido"),
+            "o índice lido precisa conhecer os tipos do projeto"
+        );
+
+        // E o que sustenta as quatro: arquivos e classes externas.
+        assert_eq!(lido.files, original.files);
+        assert_eq!(lido.file_ids, original.file_ids);
+        assert_eq!(
+            lido.external_classes.len(),
+            original.external_classes.len()
+        );
+        let _ = fs::remove_dir_all(&raiz);
+    }
+
+    /// Gravar põe o arquivo onde ele deve estar.
+    ///
+    /// Sem isto, `save` poderia falhar em silêncio e ninguém notaria até a fase
+    /// 4 tentar ler — que foi o que aconteceu na primeira tentativa.
+    #[test]
+    fn saving_puts_the_file_where_it_belongs() {
+        let raiz = projeto("indice-save");
+        let indice = varrer(&raiz);
+        let Some(caminho) = file::caminho_do_indice(&raiz) else {
+            panic!("sem diretório de cache no ambiente");
+        };
+        let _ = fs::remove_file(&caminho);
+        assert!(indice.save(&raiz), "gravar precisa dizer que gravou");
+        assert!(caminho.is_file(), "o arquivo tem de existir em {caminho:?}");
+        assert!(file::read(&caminho).is_some(), "e tem de ser legível");
+        let _ = fs::remove_file(&caminho);
+        let _ = fs::remove_dir_all(&raiz);
+    }
+
+    /// Um arquivo que não serve é descartado, nunca lido pela metade.
+    #[test]
+    fn a_file_that_does_not_serve_is_discarded() {
+        let raiz = projeto("indice-invalido");
+        let indice = varrer(&raiz);
+        let arquivo = raiz.join("indice.bin");
+        assert!(file::write(&indice, &arquivo).is_ok());
+        let bom = match fs::read(&arquivo) {
+            Ok(bytes) => bytes,
+            Err(error) => panic!("não foi possível reler o arquivo: {error}"),
+        };
+        assert!(file::read(&arquivo).is_some());
+
+        // Assinatura de outro programa.
+        let mut outro = bom.clone();
+        outro[0] = b'X';
+        assert!(fs::write(&arquivo, &outro).is_ok());
+        assert!(file::read(&arquivo).is_none(), "assinatura errada tem de ser recusada");
+
+        // Versão futura: o formato mudou, e converter é código que ninguém testa.
+        let mut futuro = bom.clone();
+        futuro[8..12].copy_from_slice(&(VERSION_PARA_TESTE + 1).to_le_bytes());
+        assert!(fs::write(&arquivo, &futuro).is_ok());
+        assert!(file::read(&arquivo).is_none(), "outra versão tem de ser recusada");
+
+        // Truncado: um desligamento no meio da escrita.
+        for corte in [0, 8, CABECALHO_PARA_TESTE, bom.len() / 2, bom.len() - 1] {
+            assert!(fs::write(&arquivo, &bom[..corte.min(bom.len())]).is_ok());
+            assert!(
+                file::read(&arquivo).is_none(),
+                "arquivo cortado em {corte} tem de ser recusado"
+            );
+        }
+
+        // E o bom continua bom: o teste não passaria por recusar tudo.
+        assert!(fs::write(&arquivo, &bom).is_ok());
+        assert!(file::read(&arquivo).is_some());
+        let _ = fs::remove_dir_all(&raiz);
+    }
+}

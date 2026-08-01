@@ -739,8 +739,10 @@ fn phase_seven_keeps_language_state_in_its_owning_modules() {
         .unwrap_or_else(|error| panic!("não foi possível ler language.rs: {error}"));
     let documents = fs::read_to_string(java_root.join("documents.rs"))
         .unwrap_or_else(|error| panic!("não foi possível ler documents.rs: {error}"));
-    let index = fs::read_to_string(java_root.join("index.rs"))
-        .unwrap_or_else(|error| panic!("não foi possível ler index.rs: {error}"));
+    // O índice virou diretório quando ganhou o formato em disco (fase 1 da 20):
+    // `mod.rs` continua sendo quem possui a construção e a consulta.
+    let index = fs::read_to_string(java_root.join("index/mod.rs"))
+        .unwrap_or_else(|error| panic!("não foi possível ler index/mod.rs: {error}"));
     assert!(
         documents.contains("struct Documents")
             && documents.contains("parser: JavaParser")

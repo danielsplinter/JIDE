@@ -60,7 +60,7 @@ para **todas** as consultas em vez de duas de quatro.
 
 ## A ordem
 
-### Fase 1 — O formato em disco
+### Fase 1 — O formato em disco ✅
 
 Um arquivo, por projeto, com registros de **tamanho fixo** e as cadeias de texto
 numa área à parte. Consultar é saltar e ler, nunca desserializar o todo.
@@ -94,6 +94,47 @@ da `19`, e serve aqui sem mudança de modelo.
 montá-lo do zero, para as quatro consultas. Um arquivo de versão diferente,
 truncado ou corrompido é descartado e o índice é reconstruído — nunca lido pela
 metade.
+
+**Feita, e o número é o argumento inteiro desta especificação:**
+
+| | |
+|---|---|
+| arquivo, no projeto de referência | **78 MB** |
+| gravar | 1,05 s |
+| **reler** | **262 ms** |
+| reconstruir, que é o que ele substitui | 51 s com disco quente, 283 s frio |
+
+Duzentas vezes.
+
+**Gravar já está em uso; ler não.** A varredura em segundo plano grava o arquivo
+ao terminar, e assim o formato se prova em uso real. Nada o lê ainda, e isso é
+deliberado: ler exige antes saber o que mudou desde a gravação, e servir um
+índice vencido é o defeito silencioso que a `19` combateu. O leitor existe, está
+coberto por teste, e entra em uso na fase 4.
+
+**O que a fase custou descobrir:**
+
+- **os números das espécies de símbolo são escritos à mão.** Derivá-los da ordem
+  do `enum` faria reordenar uma variante corromper, em silêncio, todo arquivo já
+  gravado. Mexer nos números existentes obriga a mudar a versão do formato.
+- **os genéricos não cabem em registro fixo.** `TypeDescriptor` tem uma lista de
+  argumentos; ela virou uma área própria, alcançada por `(início, quantos)`,
+  como as ocorrências.
+- **gravar é num temporário e renomear.** Um desligamento no meio da escrita
+  deixaria arquivo pela metade, e ler índice truncado é pior que não ter índice.
+- **a ordem tem de ser estável.** As declarações saem de um `HashMap`, cuja ordem
+  não é; sem ordená-las, dois arquivos gravados do mesmo índice sairiam
+  diferentes, e nenhuma comparação futura valeria.
+
+`what_goes_to_disk_answers_the_same_when_it_comes_back` compara as quatro
+consultas antes e depois do disco — comparar as estruturas byte a byte diria
+menos, porque o que precisa sobreviver ao arquivo é o que a IDE pergunta.
+`a_file_that_does_not_serve_is_discarded` recusa assinatura errada, versão
+futura e cinco pontos de corte, e confirma que o arquivo bom continua sendo
+aceito — senão o teste passaria recusando tudo.
+
+O módulo `index` virou diretório para receber o codec ao lado: `index/mod.rs`
+continua dono da construção e da consulta, `index/file.rs` é o formato.
 
 ### Fase 2 — O mapeamento
 
