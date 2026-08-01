@@ -41,7 +41,11 @@ fn search_node(
         return;
     }
     if node.is_directory {
-        for child in &node.children {
+        // A árvore em memória é rasa desde a `19`: ela tem só o que foi
+        // expandido. A busca lê o diretório na hora, para responder pelo projeto
+        // inteiro e não pelo que o usuário abriu no Explorer.
+        let filhos = crate::tree::children_of(filesystem, &node.path).unwrap_or_default();
+        for child in &filhos {
             search_node(filesystem, child, scope, query, limit, output);
             if output.len() >= limit {
                 break;

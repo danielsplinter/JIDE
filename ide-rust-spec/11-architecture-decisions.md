@@ -200,6 +200,11 @@ São três, e nenhuma está resolvida:
 pontos acima são o que precisa mudar antes de ela atender projetos grandes, e o
 primeiro é o mais perigoso, porque falha em silêncio.
 
+**A ordem em que atacá-los está na especificação `19`**, junto da varredura do
+Explorer. Uma correção de leitura registrada lá: o teto de 600 é **sintoma**, e não
+causa — tirá-lo antes de a indexação sair do caminho síncrono trocaria uma resposta
+errada em silêncio por uma IDE travada.
+
 Fora do índice, e por isso registrada em `08-storage-and-memory`, há uma quarta
 pendência do mesmo tema: a **árvore do Explorer não tem teto nenhum** e é varrida
 inteira, de forma síncrona, ao abrir o projeto — 2,17 s medidos sobre 56 mil

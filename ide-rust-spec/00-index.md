@@ -68,6 +68,7 @@ Este é um requisito arquitetural obrigatório.
 - [16 — Um anfitrião só](16-single-host.md)
 - [17 — Adoção do arranjo](17-layout-adoption.md)
 - [18 — Um terminal de verdade](18-real-terminal.md)
+- [19 — Varredura e indexação: sair do bloqueio](19-indexing-and-scanning.md)
 
 ## Escopo inicial, e o que dele já existe
 

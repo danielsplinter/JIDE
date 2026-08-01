@@ -45,6 +45,71 @@ impl WorkspaceService {
         tree::scan(self.filesystem.as_ref(), root)
     }
 
+    /// Todos os arquivos de uma extensão sob a raiz.
+    ///
+    /// Lê o filesystem, e não a árvore do Explorer: desde a `19` a árvore tem só
+    /// o que foi expandido, e responder por ela devolveria uma lista incompleta
+    /// **sem avisar** — que é o defeito que aquela especificação combate.
+    pub fn source_files(&self, root: &Path, extension: &str) -> Vec<PathBuf> {
+        let mut encontrados = Vec::new();
+        self.collect_sources(root, extension, &mut encontrados);
+        encontrados
+    }
+
+    fn collect_sources(&self, directory: &Path, extension: &str, output: &mut Vec<PathBuf>) {
+        let Ok(filhos) = tree::children_of(self.filesystem.as_ref(), directory) else {
+            return;
+        };
+        for filho in filhos {
+            if filho.is_directory {
+                self.collect_sources(&filho.path, extension, output);
+            } else if filho
+                .path
+                .extension()
+                .and_then(|valor| valor.to_str())
+                .is_some_and(|valor| valor.eq_ignore_ascii_case(extension))
+            {
+                output.push(filho.path);
+            }
+        }
+    }
+
+    /// Os níveis até uma pasta, da raiz para ela, cada um com os seus filhos.
+    ///
+    /// Uma resposta só, e **em ordem**: quem insere na árvore sempre encontra o
+    /// pai já lá. Pedir pasta a pasta obrigava a árvore a existir antes do
+    /// pedido, e um nível fundo se perdia por chegar cedo demais.
+    pub fn scan_path(&self, root: &Path, target: &Path) -> Vec<(PathBuf, Vec<FileNode>)> {
+        let Ok(relativo) = target.strip_prefix(root) else {
+            return Vec::new();
+        };
+        let mut niveis = Vec::new();
+        let mut atual = root.to_path_buf();
+        while let Ok(filhos) = tree::children_of(self.filesystem.as_ref(), &atual) {
+            niveis.push((atual.clone(), filhos));
+            let Some(proximo) = relativo
+                .strip_prefix(atual.strip_prefix(root).unwrap_or(Path::new("")))
+                .ok()
+                .and_then(|resto| resto.components().next())
+            else {
+                break;
+            };
+            atual = atual.join(proximo);
+            if atual == target {
+                if let Ok(filhos) = tree::children_of(self.filesystem.as_ref(), &atual) {
+                    niveis.push((atual.clone(), filhos));
+                }
+                break;
+            }
+        }
+        niveis
+    }
+
+    /// Os filhos de uma pasta, para quando ela é expandida.
+    pub fn scan_children(&self, directory: &Path) -> Result<Vec<FileNode>, WorkspaceError> {
+        tree::children_of(self.filesystem.as_ref(), directory)
+    }
+
     pub fn read_document(&self, path: &Path) -> Result<String, WorkspaceError> {
         self.filesystem.read_text(path).map_err(Into::into)
     }
@@ -174,5 +239,60 @@ mod tests {
         ));
         assert_eq!(fs::read_to_string(&file).unwrap_or_default(), "primeiro");
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod medicao {
+    use std::{path::Path, time::Instant};
+
+    fn contar_recursivo(dir: &Path) -> usize {
+        let Ok(entradas) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        let mut total = 0;
+        for entrada in entradas.flatten() {
+            let nome = entrada.file_name();
+            if matches!(nome.to_str(), Some(".git" | "target")) {
+                continue;
+            }
+            total += 1;
+            if entrada.path().is_dir() {
+                total += contar_recursivo(&entrada.path());
+            }
+        }
+        total
+    }
+
+    #[test]
+    #[ignore = "medição manual; exige o projeto de referência"]
+    fn scan_time_on_a_real_project() {
+        let root = Path::new(r"C:\Users\jdani\Documents\projetos\java\camel-main\camel-main");
+        if !root.exists() {
+            return;
+        }
+        let service = super::WorkspaceService::native();
+        let inicio = Instant::now();
+        let Ok(arvore) = service.scan(root) else {
+            return;
+        };
+        let raso = inicio.elapsed();
+        // A varredura profunda, para comparar: é o que a IDE fazia na abertura.
+        fn profunda(node: &super::FileNode) -> usize {
+            1 + node.children.iter().map(profunda).sum::<usize>()
+        }
+        let _ = profunda(&arvore);
+        let inicio = Instant::now();
+        let total = contar_recursivo(root);
+        eprintln!("profunda equivalente: {:?}, entradas={total}", inicio.elapsed());
+        fn conta(node: &super::FileNode) -> usize {
+            1 + node.children.iter().map(conta).sum::<usize>()
+        }
+        eprintln!("raso: {raso:?}, nós={}", conta(&arvore));
+
+        let alvo = root.join("core");
+        let inicio = Instant::now();
+        let niveis = service.scan_path(root, &alvo);
+        eprintln!("caminho até core: {:?}, níveis={}", inicio.elapsed(), niveis.len());
     }
 }

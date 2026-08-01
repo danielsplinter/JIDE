@@ -4545,6 +4545,7 @@ fn reloading_the_workspace_shows_what_was_created() {
         panic!("workspace de teste não abriu");
     };
     shell.reveal_in_explorer(&package);
+    shell.fulfill_directory_loads();
     let size = Size::new(1280.0, 800.0);
     let shows = |shell: &mut IdeShell, needle: &str| {
         shell.paint(size).iter().any(|command| match command {
@@ -4557,6 +4558,7 @@ fn reloading_the_workspace_shows_what_was_created() {
     assert!(std::fs::write(package.join("Pedido.java"), "class Pedido {}").is_ok());
     assert!(shell.reload_workspace().is_ok());
     shell.reveal_in_explorer(&package);
+    shell.fulfill_directory_loads();
     assert!(
         shows(&mut shell, "Pedido.java"),
         "a classe criada precisa aparecer na árvore"
@@ -4706,8 +4708,35 @@ impl IdeShell {
             .map(Self::from_tree)
     }
 
+    /// Atende os pedidos de leitura de pasta, como a aplicação faria.
+    ///
+    /// A varredura é rasa desde a `19`: o shell pede as pastas que precisa, e
+    /// quem lê o disco é a aplicação. Nos testes não há laço de aplicação, e sem
+    /// isto a árvore ficaria só com o primeiro nível.
+    #[cfg(test)]
+    fn fulfill_directory_loads(&mut self) {
+        let service = ide_workspace::WorkspaceService::native();
+        let raiz = self.workspace_root().to_path_buf();
+        while let Some(ApplicationCommand::LoadDirectory(path)) = self
+            .take_test_command(|command| matches!(command, ApplicationCommand::LoadDirectory(_)))
+        {
+            self.insert_path_children(service.scan_path(&raiz, &path));
+        }
+    }
+
     #[cfg(test)]
     fn open_file(&mut self, path: &Path) -> Result<DocumentId, String> {
+        // Abrir um arquivo revela o caminho dele, e revelar pede leitura das
+        // pastas: a aplicação atenderia no laço seguinte, e aqui atendemos na
+        // hora, antes e depois.
+        self.fulfill_directory_loads();
+        let resultado = self.open_file_inner(path);
+        self.fulfill_directory_loads();
+        resultado
+    }
+
+    #[cfg(test)]
+    fn open_file_inner(&mut self, path: &Path) -> Result<DocumentId, String> {
         if self
             .editor_area
             .session
@@ -4766,6 +4795,9 @@ impl IdeShell {
     fn reload_workspace(&mut self) -> Result<(), ide_workspace::WorkspaceError> {
         let tree = ide_workspace::WorkspaceService::native().scan(&self.explorer.workspace.path)?;
         self.replace_workspace_tree(tree);
+        // Trocar a árvore pede de volta as pastas abertas; na aplicação quem
+        // atende é o laço, e aqui somos nós.
+        self.fulfill_directory_loads();
         Ok(())
     }
 

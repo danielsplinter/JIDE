@@ -83,7 +83,13 @@ impl NativeIde {
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         let request = WindowRequest {
             title: "ER IDE — Rust Native IDE".to_owned(),
+            // O tamanho de restauração: é para ele que a janela volta quando
+            // alguém desmaximiza.
             logical_size: Size::new(1280.0, 800.0),
+            // Uma IDE abre ocupando a tela: editor, explorador, terminal e
+            // painel de depuração convivem, e em janela pequena nenhum deles
+            // cabe inteiro.
+            maximized: true,
         };
         let window = WinitWindow::create_hidden(event_loop, WindowId(1), &request)
             .map_err(|error| error.to_string())?;
@@ -1517,6 +1523,19 @@ impl NativeIde {
                 UiAction::SaveDocument(request) => self.save_document(request),
                 UiAction::RenameDocument(request) => self.rename_document(request),
                 UiAction::ReloadWorkspace => self.reload_workspace(),
+                UiAction::LoadDirectory(path) => {
+                    let raiz = self
+                        .ui
+                        .shell
+                        .as_ref()
+                        .map(|shell| shell.workspace_root().to_path_buf());
+                    if let Some(raiz) = raiz {
+                        let niveis = self.workspace.scan_path(&raiz, &path);
+                        if let Some(shell) = self.ui.shell.as_mut() {
+                            shell.insert_path_children(niveis);
+                        }
+                    }
+                }
                 UiAction::OpenProject => self.choose_project(),
                 UiAction::OpenSettings => {
                     self.open_toolchain_selector(&java_contribution::language_id());
@@ -1751,7 +1770,13 @@ impl NativeIde {
             .first()
             .map(String::as_str)
             .unwrap_or_default();
-        let source_files = project_sources(shell.source_files(extension), model.as_ref());
+        // A lista vem do filesystem, e não da árvore do Explorer: desde a `19`
+        // ela é rasa, e responderia só pelo que estivesse expandido.
+        let raiz = shell.workspace_root().to_path_buf();
+        let source_files = project_sources(
+            self.workspace.source_files(&raiz, extension),
+            model.as_ref(),
+        );
         if source_files.is_empty() {
             shell.set_status_message(format!(
                 "Nenhum arquivo-fonte encontrado para {}",

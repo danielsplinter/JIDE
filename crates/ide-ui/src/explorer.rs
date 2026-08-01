@@ -44,6 +44,15 @@ impl ExplorerState {
         &self.workspace
     }
 
+    /// Repõe as linhas da árvore a partir do que está em memória.
+    ///
+    /// Carregar uma pasta muda o `FileNode` e não a `TreeView`: sem repor os
+    /// itens, a árvore continua desenhando a varredura anterior — o arquivo está
+    /// lá dentro e não aparece.
+    pub(super) fn rebuild_items(&mut self, source_root_names: &[String]) {
+        self.tree.set_roots(items(&self.workspace, source_root_names));
+    }
+
     pub(super) fn replace_workspace(&mut self, workspace: FileNode, source_root_names: &[String]) {
         self.workspace_name = workspace
             .path

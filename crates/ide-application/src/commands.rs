@@ -16,6 +16,10 @@ pub enum ApplicationCommand {
     OpenDocument(OpenDocumentRequest),
     SaveDocument(SaveDocumentRequest),
     ReloadWorkspace,
+    /// Lê os filhos de uma pasta que acabou de ser expandida.
+    ///
+    /// A árvore é rasa: só o que foi aberto está em memória. Ver a `19`.
+    LoadDirectory(std::path::PathBuf),
     OpenProject,
     OpenSettings,
     OpenToolchainSettings,

@@ -13,6 +13,12 @@ impl IdeShell {
                 self.explorer.expanded.insert(ancestor.to_path_buf());
             }
         }
+        debug_assert!(
+            path.extension().is_none() || path.is_dir(),
+            "revelar espera uma pasta: um arquivo entre os expandidos pediria              leitura que nunca chega"
+        );
+        // Revelar um caminho abre pastas que podem nunca ter sido lidas.
+        self.request_expanded_directories();
         self.sync_explorer_tree();
     }
 
@@ -62,6 +68,12 @@ impl IdeShell {
         };
         let target = explorer_id(&path);
         if self.explorer_path_for(target).is_none() {
+            // A árvore é rasa: o caminho pode existir em disco e ainda não ter
+            // sido lido. Revelar a **pasta** dele — o arquivo em si nunca tem
+            // filhos, e pedi-lo faria o pedido se repetir para sempre.
+            if let Some(pasta) = path.parent() {
+                self.reveal_in_explorer(pasta);
+            }
             return;
         }
 
@@ -71,6 +83,7 @@ impl IdeShell {
             }
             self.explorer.expanded.insert(ancestor.to_path_buf());
         }
+        self.request_expanded_directories();
         self.sync_explorer_tree();
         self.explorer.tree.set_selected(Some(target));
 
@@ -158,6 +171,85 @@ impl IdeShell {
         );
         splitter.set_position(ACTIVITY_WIDTH + self.sidebar_width(size));
         splitter
+    }
+
+    /// Pede à aplicação os filhos de tudo o que está expandido.
+    ///
+    /// Da raiz para as folhas: carregar um pai substitui a lista de filhos dele,
+    /// e fazer isso **depois** de carregar um neto apagaria o neto. A ordem por
+    /// profundidade é o que garante que cada carga só acrescente.
+    pub(super) fn request_expanded_directories(&mut self) {
+        let mut pastas: Vec<PathBuf> = self
+            .explorer
+            .expanded
+            .iter()
+            .filter(|pasta| self.directory_needs_children(pasta))
+            .cloned()
+            .collect();
+        pastas.sort_by_key(|caminho| caminho.components().count());
+        for pasta in pastas {
+            self.commands
+                .push(ApplicationCommand::LoadDirectory(pasta));
+        }
+    }
+
+    /// Se a pasta ainda não teve os filhos lidos.
+    ///
+    /// Pasta vazia e pasta não lida têm a mesma forma — distinguir custaria um
+    /// campo em todo lugar que monta um nó. Reler uma pasta vazia custa uma
+    /// leitura de diretório, que é o lado barato de errar.
+    fn directory_needs_children(&self, path: &Path) -> bool {
+        fn procurar<'arvore>(node: &'arvore FileNode, path: &Path) -> Option<&'arvore FileNode> {
+            if node.path == path {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|filho| procurar(filho, path))
+        }
+        // Ausente da árvore também precisa: os ancestrais dela vêm antes, e a
+        // ordem por profundidade garante que, quando este pedido for atendido, o
+        // pai já esteja lá.
+        procurar(&self.explorer.workspace, path).is_none_or(|node| node.children.is_empty())
+    }
+
+    /// Guarda os níveis de um caminho, da raiz para a folha.
+    ///
+    /// Em ordem, e por isso cada inserção encontra o pai já na árvore. É o que
+    /// substitui pedir pasta a pasta, que perdia o nível fundo por ele chegar
+    /// antes do pai.
+    pub fn insert_path_children(&mut self, niveis: Vec<(PathBuf, Vec<FileNode>)>) {
+        let mut mudou = false;
+        for (pasta, filhos) in niveis {
+            mudou |= self.insert_children_at(&pasta, filhos);
+        }
+        if !mudou {
+            return;
+        }
+        self.explorer
+            .rebuild_items(&self.catalog.source_root_names);
+        self.sync_explorer_tree();
+        // A árvore mudou: o documento ativo pode finalmente existir nela.
+        self.sync_explorer_to_active();
+    }
+
+    /// Guarda os filhos que a aplicação leu para uma pasta expandida.
+    fn insert_children_at(&mut self, path: &Path, children: Vec<FileNode>) -> bool {
+        fn inserir(node: &mut FileNode, path: &Path, children: &mut Option<Vec<FileNode>>) -> bool {
+            if node.path == path {
+                if let Some(filhos) = children.take() {
+                    node.children = filhos;
+                }
+                return true;
+            }
+            node.children
+                .iter_mut()
+                .any(|filho| inserir(filho, path, children))
+        }
+        let mut children = Some(children);
+        // Devolve se mudou algo: quem chama reconcilia uma vez, ao fim da
+        // cadeia, e não a cada nível.
+        inserir(&mut self.explorer.workspace, path, &mut children)
     }
 
     pub(super) fn sidebar_width(&self, size: Size) -> f32 {
@@ -436,10 +528,19 @@ impl IdeShell {
             self.context.focus = ShellFocus::Explorer;
             self.explorer.tree.set_selected(Some(explorer_id(&path)));
             if is_directory {
-                if !self.explorer.expanded.remove(&path) {
+                if self.explorer.expanded.remove(&path) {
+                    self.sync_explorer_tree();
+                } else {
+                    // Abrir uma pasta é o momento de lê-la: a árvore guarda só o
+                    // que já foi aberto, e é isso que tira a varredura inteira
+                    // do caminho da abertura do projeto.
+                    if self.directory_needs_children(&path) {
+                        self.commands
+                            .push(ApplicationCommand::LoadDirectory(path.clone()));
+                    }
                     self.explorer.expanded.insert(path);
+                    self.sync_explorer_tree();
                 }
-                self.sync_explorer_tree();
             } else {
                 self.commands
                     .push(ApplicationCommand::OpenDocument(OpenDocumentRequest::new(

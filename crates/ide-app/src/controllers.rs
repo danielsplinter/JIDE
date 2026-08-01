@@ -57,6 +57,20 @@ pub(super) struct WorkspaceController {
 }
 
 impl WorkspaceController {
+    /// Os arquivos de uma extensão sob a raiz, lidos do filesystem.
+    pub(super) fn source_files(&self, root: &Path, extension: &str) -> Vec<std::path::PathBuf> {
+        self.service.source_files(root, extension)
+    }
+
+    /// Os níveis até uma pasta, da raiz para ela.
+    pub(super) fn scan_path(
+        &self,
+        root: &Path,
+        target: &Path,
+    ) -> Vec<(std::path::PathBuf, Vec<FileNode>)> {
+        self.service.scan_path(root, target)
+    }
+
     pub(super) fn scan(&self, root: &Path) -> Result<FileNode, WorkspaceError> {
         self.service.scan(root)
     }
