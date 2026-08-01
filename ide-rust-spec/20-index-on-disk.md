@@ -136,7 +136,7 @@ aceito — senão o teste passaria recusando tudo.
 O módulo `index` virou diretório para receber o codec ao lado: `index/mod.rs`
 continua dono da construção e da consulta, `index/file.rs` é o formato.
 
-### Fase 2 — O mapeamento
+### Fase 2 — O mapeamento ✅ *(com uma ressalva)*
 
 O arquivo é mapeado em memória, e não lido. O sistema operacional passa a fazer o
 que um cache escrito à mão faria: mantém residente o que foi tocado e despeja o
@@ -156,6 +156,59 @@ se ele está mapeado, lido ou em memória.
 
 **Critério:** abrir o projeto pela segunda vez não reconstrói o índice, e a
 memória residente da IDE cresce com o uso em vez de nascer no tamanho do índice.
+
+**Feita a primeira metade; a segunda esbarrou numa decisão de arquitetura.**
+
+`memmap2::Mmap::map` é `unsafe`, e o workspace declara `unsafe_code = "forbid"`.
+Isso não é detalhe de implementação — é a mesma decisão que deixou o Ctrl+C do
+terminal sem funcionar, registrada na ADR-013. Não foi furada aqui, e o exame que
+levou a mantê-la está na **ADR-023**, inclusive por que uma exceção pontual não
+era possível: `forbid` não se desliga localmente.
+
+O que se construiu no lugar: o arquivo é **lido para um vetor de bytes**, e as
+consultas saem dos bytes, sem materializar estrutura nenhuma. Tudo abaixo do
+carregamento trabalha sobre `&[u8]`, então **trocar leitura por mapeamento é uma
+linha** no dia em que a decisão mudar.
+
+O que se ganhou assim mesmo:
+
+| | reconstruindo | do arquivo |
+|---|---|---|
+| abrir o projeto | **251 s** | **3,65 s** |
+| memória | 178 MB | **103 MB** |
+
+E o que as consultas custam, já respondendo do arquivo:
+
+| | |
+|---|---|
+| carregar | 34 ms |
+| conferir se ainda vale | 3,6 s |
+| Ctrl+clique — 9.314 ocorrências de `CamelContext` | **1,2 ms** |
+| percorrer as 339.664 declarações por prefixo | 12,6 ms |
+
+O 1,2 ms é a tabela ordenada da fase 1 fazendo o que ela prometia: busca binária
+pelo nome, e só as ocorrências dele são tocadas.
+
+**O que ficou de fora, e é preciso dizer** — ver ADR-023: a **elasticidade**. Esses 103 MB são
+memória nossa, retida enquanto a IDE viver; com mapeamento, o sistema operacional
+recuperaria as páginas frias sob pressão. O ganho de 178 para 103 MB é real, mas
+é redução, não empréstimo — que era o prêmio secundário anunciado no começo desta
+especificação.
+
+**Conferir custa 3,6 dos 3,65 segundos.** É uma varredura de diretório comparando
+data e tamanho de cada fonte. Qualquer diferença — arquivo novo, apagado ou
+alterado — reprova o arquivo **inteiro** e o índice é reconstruído. É grosso de
+propósito: reconstruir é caro, servir resposta vencida é errado, e reindexar só a
+diferença é exatamente o que a fase 4 traz.
+
+**Duas origens convivem**, e é isso que permite a fase 4 existir sem outro
+formato: o arquivo responde por quase tudo, a memória guarda o que foi reindexado
+desde o carregamento, e um fonte refeito na memória **some** do arquivo. Sem esse
+apagamento a IDE responderia as duas versões — o defeito silencioso de novo.
+`what_the_memory_redid_hides_what_the_file_says` é quem guarda isso.
+
+**Limite conhecido:** a conferência não cobre os jars. Uma dependência trocada sem
+mexer em fonte nenhum passa despercebida, e o índice segue com as classes antigas.
 
 ### Fase 3 — A completação vira busca
 

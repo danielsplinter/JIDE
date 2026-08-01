@@ -69,7 +69,7 @@ Este é um requisito arquitetural obrigatório.
 - [17 — Adoção do arranjo](17-layout-adoption.md)
 - [18 — Um terminal de verdade](18-real-terminal.md) — fases 0 a 3 feitas; a **4 é pendência**: seleção lida da grade, busca na saída e links clicáveis
 - [19 — Varredura e indexação: sair do bloqueio](19-indexing-and-scanning.md)
-- [20 — Índice no disco, memória como cache](20-index-on-disk.md) — fase 1 feita: o índice é gravado em 78 MB e relido em 262 ms; **ninguém lê ainda**, isso é a fase 4
+- [20 — Índice no disco, memória como cache](20-index-on-disk.md) — fases 1 e 2 feitas: abrir caiu de 251 s para 3,65 s e a memória de 178 para 103 MB; o mapeamento esbarrou no `unsafe_code = "forbid"`
 
 ## Escopo inicial, e o que dele já existe
 

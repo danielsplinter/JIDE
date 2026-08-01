@@ -17,7 +17,7 @@ use std::{
 
 use ide_domain::{SymbolKind, TextPosition, TextRange, TypeDescriptor};
 
-use super::{ExternalClass, IndexedSymbol, Occurrence, WorkspaceIndex};
+use super::{Dados, ExternalClass, IndexedSymbol, Occurrence};
 
 /// Assinatura do arquivo. Um arquivo que não comece assim não é nosso.
 const MAGIC: [u8; 8] = *b"ERIDEIDX";
@@ -28,7 +28,7 @@ const MAGIC: [u8; 8] = *b"ERIDEIDX";
 /// espécies de símbolo. Um arquivo de outra versão é descartado, não convertido:
 /// reconstruir o índice é caro mas correto, e converter formato velho é código
 /// que ninguém testa.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[cfg(test)]
 pub(in crate::index) const VERSION_PARA_TESTE: u32 = VERSION;
@@ -143,7 +143,7 @@ impl Textos {
 /// Grava num arquivo temporário e renomeia: um desligamento no meio da escrita
 /// deixaria um arquivo pela metade, e ler índice truncado é pior que não ter
 /// índice.
-pub(in crate::index) fn write(index: &WorkspaceIndex, path: &Path) -> io::Result<()> {
+pub(in crate::index) fn write(index: &Dados, path: &Path) -> io::Result<()> {
     let mut textos = Textos::default();
 
     // Os arquivos primeiro: símbolos e ocorrências os alcançam por número, e a
@@ -219,14 +219,25 @@ pub(in crate::index) fn write(index: &WorkspaceIndex, path: &Path) -> io::Result
         ));
     }
 
-    let mut declaracoes: Vec<(u32, u32)> = index
+    // Ordenadas pelo **texto** do nome, e não pelo número: é assim que quem lê o
+    // mapeamento acha um tipo sem percorrer os trinta mil. Ordem estável também
+    // resolve o outro problema: a de um `HashMap` não é.
+    let mut declaracoes: Vec<(String, u32, u32)> = index
         .declarations
         .iter()
-        .map(|(nome, arquivo)| (textos.id(nome), textos.id_do_caminho(arquivo)))
+        .map(|(nome, arquivo)| {
+            (
+                nome.clone(),
+                textos.id(nome),
+                textos.id_do_caminho(arquivo),
+            )
+        })
         .collect();
-    // Ordem estável: dois arquivos gravados do mesmo índice têm de ser iguais,
-    // e a ordem de um `HashMap` não é.
     declaracoes.sort_unstable();
+    let declaracoes: Vec<(u32, u32)> = declaracoes
+        .into_iter()
+        .map(|(_, nome, arquivo)| (nome, arquivo))
+        .collect();
 
     let externas: Vec<(u32, u32, u32)> = index
         .external_classes
@@ -356,7 +367,7 @@ fn escrever_faixa(saida: &mut Vec<u8>, faixa: TextRange) {
 // ele existe, está coberto por teste e não é usado — ler sem checar o que mudou
 // serviria um índice vencido, que é o defeito que a `19` combateu.
 #[allow(dead_code, reason = "o leitor entra em uso na fase 4 da 20")]
-pub(in crate::index) fn read(path: &Path) -> Option<WorkspaceIndex> {
+pub(in crate::index) fn read(path: &Path) -> Option<Dados> {
     let bytes = fs::read(path).ok()?;
     if bytes.len() < CABECALHO || bytes.get(..8)? != MAGIC || ler_u32(&bytes, 8)? != VERSION {
         return None;
@@ -471,7 +482,7 @@ pub(in crate::index) fn read(path: &Path) -> Option<WorkspaceIndex> {
         });
     }
 
-    Some(WorkspaceIndex {
+    Some(Dados {
         symbols,
         references,
         files,
@@ -528,4 +539,306 @@ pub(in crate::index) fn caminho_do_indice(root: &Path) -> Option<PathBuf> {
             .join("er-ide")
             .join(format!("indice-{:016x}.bin", hasher.finish())),
     )
+}
+
+/// O índice **carregado**: as respostas saem dos bytes, sem materializar nada.
+///
+/// É a fase 2 da `20`. A diferença para `read` é toda a razão de existir: `read`
+/// devolve estruturas — nomes, caminhos e vetores que a IDE segura enquanto
+/// viver. Aqui os bytes do arquivo são a estrutura, e uma consulta é um salto
+/// dentro deles.
+///
+/// **A especificação pedia mapeamento, e isto é uma leitura.** `memmap2::Mmap`
+/// exige `unsafe`, e o workspace tem `unsafe_code = "forbid"` — decisão de
+/// arquitetura, com precedente na ADR-013. A troca é de uma linha no dia em que
+/// essa decisão mudar, porque tudo abaixo trabalha sobre `&[u8]` e não sobre o
+/// que os produziu. O que se perde enquanto isso é a **elasticidade**: estes
+/// bytes são memória nossa, e o sistema operacional não os recupera sozinho.
+pub(in crate::index) struct Carregado {
+    mapa: Vec<u8>,
+    textos: (usize, usize),
+    /// `(início, quantos)` de cada área, na ordem em que o cabeçalho as lista.
+    areas: [(usize, usize); 8],
+}
+
+/// Índices das áreas dentro de `areas`, para não escrever número solto.
+mod area {
+    pub(super) const TEXTOS: usize = 0;
+    pub(super) const NOMES: usize = 1;
+    pub(super) const ARQUIVOS: usize = 2;
+    pub(super) const SIMBOLOS: usize = 3;
+    pub(super) const OCORRENCIAS: usize = 4;
+    pub(super) const DECLARACOES: usize = 5;
+    pub(super) const EXTERNAS: usize = 6;
+    pub(super) const GENERICOS: usize = 7;
+}
+
+/// Um símbolo lido do arquivo, ainda em bytes.
+#[derive(Clone, Copy)]
+pub(crate) struct SimboloNoDisco<'a> {
+    mapeado: &'a Carregado,
+    registro: &'a [u8],
+}
+
+/// Uma classe externa lida do arquivo, ainda em bytes.
+#[derive(Clone, Copy)]
+pub(crate) struct ExternaNoDisco<'a> {
+    mapeado: &'a Carregado,
+    registro: &'a [u8],
+}
+
+impl Carregado {
+    /// Mapeia o arquivo, conferindo tudo o que dá para conferir sem lê-lo.
+    ///
+    /// Recusa o que `read` recusaria: assinatura, versão e qualquer área que
+    /// caia fora do arquivo. O que não dá para conferir aqui — um número de
+    /// texto inválido lá dentro — é conferido ao ler cada registro, que responde
+    /// vazio em vez de estourar.
+    pub(in crate::index) fn open(path: &Path) -> Option<Self> {
+        let mapa = fs::read(path).ok()?;
+        if mapa.len() < CABECALHO || mapa.get(..8)? != MAGIC || ler_u32(&mapa, 8)? != VERSION {
+            return None;
+        }
+        let textos_inicio = usize::try_from(ler_u64(&mapa, 16)?).ok()?;
+        let textos_tamanho = usize::try_from(ler_u64(&mapa, 24)?).ok()?;
+        if textos_inicio.checked_add(textos_tamanho)? > mapa.len() {
+            return None;
+        }
+        let tamanhos = [
+            tamanho::TEXTO,
+            tamanho::NOME,
+            tamanho::ARQUIVO,
+            tamanho::SIMBOLO,
+            tamanho::OCORRENCIA,
+            tamanho::DECLARACAO,
+            tamanho::EXTERNA,
+            tamanho::GENERICO,
+        ];
+        let mut areas = [(0usize, 0usize); 8];
+        for (indice, area) in areas.iter_mut().enumerate() {
+            let base = 32 + indice * 16;
+            let inicio = usize::try_from(ler_u64(&mapa, base)?).ok()?;
+            let quantos = ler_u32(&mapa, base + 8)? as usize;
+            if inicio.checked_add(quantos.checked_mul(tamanhos[indice])?)? > mapa.len() {
+                return None;
+            }
+            *area = (inicio, quantos);
+        }
+        Some(Self {
+            mapa,
+            textos: (textos_inicio, textos_tamanho),
+            areas,
+        })
+    }
+
+    fn registro(&self, area: usize, tamanho: usize, indice: usize) -> Option<&[u8]> {
+        let (inicio, quantos) = self.areas[area];
+        if indice >= quantos {
+            return None;
+        }
+        let de = inicio + indice * tamanho;
+        self.mapa.get(de..de + tamanho)
+    }
+
+    /// Um texto, pelo número. Sem cópia: aponta para dentro do arquivo lido.
+    fn texto(&self, id: u32) -> Option<&str> {
+        let registro = self.registro(area::TEXTOS, tamanho::TEXTO, id as usize)?;
+        let inicio = self.textos.0 + ler_u32(registro, 0)? as usize;
+        let fim = inicio + ler_u32(registro, 4)? as usize;
+        std::str::from_utf8(self.mapa.get(inicio..fim)?).ok()
+    }
+
+    /// O caminho de um arquivo, pelo número.
+    pub(in crate::index) fn arquivo(&self, id: u32) -> Option<&str> {
+        let registro = self.registro(area::ARQUIVOS, tamanho::ARQUIVO, id as usize)?;
+        self.texto(ler_u32(registro, 0)?)
+    }
+
+    /// Quantos arquivos o índice conhece.
+    pub(in crate::index) fn arquivos(&self) -> usize {
+        self.areas[area::ARQUIVOS].1
+    }
+
+    /// Caminho, data de modificação e tamanho de um arquivo indexado.
+    ///
+    /// É o que a fase 4 compara para saber o que mudou desde a gravação.
+    pub(in crate::index) fn arquivo_gravado(&self, indice: usize) -> Option<(&str, u64, u64)> {
+        let registro = self.registro(area::ARQUIVOS, tamanho::ARQUIVO, indice)?;
+        Some((
+            self.texto(ler_u32(registro, 0)?)?,
+            ler_u64(registro, 8)?,
+            ler_u64(registro, 16)?,
+        ))
+    }
+
+    /// O nome na posição dada da tabela **ordenada** de nomes.
+    fn nome(&self, indice: usize) -> Option<&str> {
+        let registro = self.registro(area::NOMES, tamanho::NOME, indice)?;
+        self.texto(ler_u32(registro, 0)?)
+    }
+
+    /// Onde um nome aparece: a faixa de ocorrências dele.
+    ///
+    /// Busca binária sobre a tabela ordenada — é para isto que ela é ordenada, e
+    /// é o que faz Ctrl+clique não tocar o resto do arquivo.
+    pub(in crate::index) fn ocorrencias_de(&self, nome: &str) -> impl Iterator<Item = Occurrence> {
+        let faixa = self.procurar(area::NOMES, nome, |indice| self.nome(indice));
+        let (inicio, quantas) = faixa
+            .and_then(|indice| {
+                let registro = self.registro(area::NOMES, tamanho::NOME, indice)?;
+                Some((ler_u32(registro, 4)? as usize, ler_u32(registro, 8)? as usize))
+            })
+            .unwrap_or((0, 0));
+        (inicio..inicio + quantas).filter_map(|indice| self.ocorrencia(indice))
+    }
+
+    fn ocorrencia(&self, indice: usize) -> Option<Occurrence> {
+        let registro = self.registro(area::OCORRENCIAS, tamanho::OCORRENCIA, indice)?;
+        Some(Occurrence {
+            file: ler_u32(registro, 0)?,
+            range: ler_faixa(registro, 4)?,
+        })
+    }
+
+    /// Todas as declarações do projeto.
+    pub(in crate::index) fn simbolos(&self) -> impl Iterator<Item = SimboloNoDisco<'_>> {
+        (0..self.areas[area::SIMBOLOS].1).filter_map(|indice| {
+            Some(SimboloNoDisco {
+                mapeado: self,
+                registro: self.registro(area::SIMBOLOS, tamanho::SIMBOLO, indice)?,
+            })
+        })
+    }
+
+    /// Quantas declarações — serve à medição.
+    #[cfg(test)]
+    pub(in crate::index) fn simbolos_conta(&self) -> usize {
+        self.areas[area::SIMBOLOS].1
+    }
+
+    /// O arquivo que declara um tipo, pelo nome simples.
+    pub(in crate::index) fn declaracao(&self, nome: &str) -> Option<&str> {
+        let indice = self.procurar(area::DECLARACOES, nome, |indice| {
+            let registro = self.registro(area::DECLARACOES, tamanho::DECLARACAO, indice)?;
+            self.texto(ler_u32(registro, 0)?)
+        })?;
+        let registro = self.registro(area::DECLARACOES, tamanho::DECLARACAO, indice)?;
+        self.texto(ler_u32(registro, 4)?)
+    }
+
+    /// Quantos tipos declarados — serve à medição.
+    #[cfg(test)]
+    pub(in crate::index) fn declaracoes_conta(&self) -> usize {
+        self.areas[area::DECLARACOES].1
+    }
+
+    /// As classes do JDK e dos jars.
+    pub(in crate::index) fn externas(&self) -> impl Iterator<Item = ExternaNoDisco<'_>> {
+        (0..self.areas[area::EXTERNAS].1).filter_map(|indice| {
+            Some(ExternaNoDisco {
+                mapeado: self,
+                registro: self.registro(area::EXTERNAS, tamanho::EXTERNA, indice)?,
+            })
+        })
+    }
+
+    /// Busca binária numa área ordenada por texto.
+    fn procurar<'a>(
+        &'a self,
+        area: usize,
+        alvo: &str,
+        chave: impl Fn(usize) -> Option<&'a str>,
+    ) -> Option<usize> {
+        let (mut baixo, mut alto) = (0usize, self.areas[area].1);
+        while baixo < alto {
+            let meio = baixo + (alto - baixo) / 2;
+            match chave(meio)?.cmp(alvo) {
+                std::cmp::Ordering::Less => baixo = meio + 1,
+                std::cmp::Ordering::Greater => alto = meio,
+                std::cmp::Ordering::Equal => return Some(meio),
+            }
+        }
+        None
+    }
+}
+
+impl SimboloNoDisco<'_> {
+    pub(in crate::index) fn name(&self) -> &str {
+        ler_u32(self.registro, 0)
+            .and_then(|id| self.mapeado.texto(id))
+            .unwrap_or_default()
+    }
+
+    pub(in crate::index) fn kind(&self) -> SymbolKind {
+        self.registro
+            .get(4)
+            .copied()
+            .and_then(especie_do_numero)
+            .unwrap_or(SymbolKind::LocalVariable)
+    }
+
+    /// Só o nome do tipo: é o que a completação mostra, e assim ela não paga
+    /// montagem de descritor por símbolo.
+    pub(in crate::index) fn type_name(&self) -> Option<&str> {
+        let tipo = ler_u32(self.registro, 32)?;
+        if tipo == SEM_TIPO {
+            return None;
+        }
+        self.mapeado.texto(tipo)
+    }
+
+    /// O descritor inteiro, para quem devolve `SemanticSymbol`.
+    pub(in crate::index) fn type_descriptor(&self) -> Option<TypeDescriptor> {
+        let tipo = ler_u32(self.registro, 32)?;
+        if tipo == SEM_TIPO {
+            return None;
+        }
+        let inicio = ler_u32(self.registro, 36)? as usize;
+        let quantos = ler_u32(self.registro, 40)? as usize;
+        let generic_arguments = (inicio..inicio + quantos)
+            .filter_map(|indice| {
+                let registro = self
+                    .mapeado
+                    .registro(area::GENERICOS, tamanho::GENERICO, indice)?;
+                Some(self.mapeado.texto(ler_u32(registro, 0)?)?.to_owned())
+            })
+            .collect();
+        Some(TypeDescriptor {
+            name: self.mapeado.texto(tipo)?.to_owned(),
+            array_dimensions: self.registro.get(5).copied().unwrap_or(0),
+            generic_arguments,
+        })
+    }
+
+    pub(in crate::index) fn range(&self) -> TextRange {
+        ler_faixa(self.registro, 8).unwrap_or_default()
+    }
+
+    pub(in crate::index) fn scope_depth(&self) -> u32 {
+        ler_u32(self.registro, 24).unwrap_or(0)
+    }
+
+    pub(in crate::index) fn file(&self) -> u32 {
+        ler_u32(self.registro, 28).unwrap_or(u32::MAX)
+    }
+}
+
+impl ExternaNoDisco<'_> {
+    pub(in crate::index) fn simple(&self) -> &str {
+        ler_u32(self.registro, 0)
+            .and_then(|id| self.mapeado.texto(id))
+            .unwrap_or_default()
+    }
+
+    pub(in crate::index) fn binary(&self) -> &str {
+        ler_u32(self.registro, 4)
+            .and_then(|id| self.mapeado.texto(id))
+            .unwrap_or_default()
+    }
+
+    pub(in crate::index) fn origin(&self) -> &str {
+        ler_u32(self.registro, 8)
+            .and_then(|id| self.mapeado.texto(id))
+            .unwrap_or_default()
+    }
 }

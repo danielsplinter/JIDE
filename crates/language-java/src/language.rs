@@ -9,7 +9,7 @@ use std::{
 
 use crate::completion::{finish_member_list, member_name};
 use crate::documents::{Documents, ParsedDocument};
-use crate::index::{ExternalClass, WorkspaceIndex};
+use crate::index::{Dados, WorkspaceIndex};
 use crate::navigation::{member_access, token_at_position, within};
 use crate::semantics::receiver_type;
 use crate::symbols::simple_class_name;
@@ -130,10 +130,9 @@ impl JavaLanguage {
             depth += 1;
             let Some(descriptor) = self
                 .index()
-                .external_classes
-                .iter()
-                .find(|class| class.simple == name || class.binary == name)
-                .and_then(ExternalClass::descriptor)
+                .external_classes()
+                .find(|class| class.simple() == name || class.binary() == name)
+                .and_then(|class| class.descriptor())
             else {
                 break;
             };
@@ -167,10 +166,10 @@ impl JavaLanguage {
     /// texto muda.
     fn members_in_project(&self, type_name: &str) -> Vec<CompletionItem> {
         let indice = self.index();
-        let Some(path) = indice.declarations.get(type_name) else {
+        let Some(path) = indice.declaring_file(type_name) else {
             return Vec::new();
         };
-        let Ok(text) = fs::read_to_string(path) else {
+        let Ok(text) = fs::read_to_string(&path) else {
             return Vec::new();
         };
         let Ok(tree) = self.documents.parse_tree(&text) else {
@@ -210,10 +209,31 @@ impl JavaLanguage {
         let fontes = source_roots.to_vec();
         let toolchain = toolchain_root.map(Path::to_path_buf);
         thread::spawn(move || {
+            // O arquivo da abertura anterior, se ele ainda descrever este
+            // projeto. Conferir é obrigatório: servir um índice vencido é o
+            // defeito silencioso que a `19` combateu.
+            if let Some(carregado) = WorkspaceIndex::carregar(&raiz)
+                && carregado.confere_com_o_disco(&raiz, &fontes)
+            {
+                if let Ok(mut guarda) = destino.write() {
+                    *guarda = carregado;
+                }
+                let (marca, condicao) = &*aviso;
+                if let Ok(mut pronto) = marca.lock() {
+                    *pronto = true;
+                }
+                condicao.notify_all();
+                return;
+            }
             let indice = Documents::new()
                 .and_then(|documentos| {
                     documentos.with_parser_mut(|parser| {
-                        WorkspaceIndex::scan(&raiz, &fontes, toolchain.as_deref(), parser)
+                        WorkspaceIndex::construido(Dados::scan(
+                            &raiz,
+                            &fontes,
+                            toolchain.as_deref(),
+                            parser,
+                        ))
                     })
                 })
                 .unwrap_or_default();
@@ -363,7 +383,7 @@ impl ActiveLanguage for JavaLanguage {
         locations.extend(
             indice
                 .symbols()
-                .filter(|symbol| symbol.name == name)
+                .filter(|symbol| symbol.name() == name)
                 .filter_map(|symbol| indice.location_of(symbol))
                 .filter(do_indice),
         );
@@ -412,14 +432,14 @@ impl ActiveLanguage for JavaLanguage {
             .symbols()
             .filter(|symbol| {
                 matches!(
-                    symbol.kind,
+                    symbol.kind(),
                     SymbolKind::Class
                         | SymbolKind::Interface
                         | SymbolKind::Record
                         | SymbolKind::Enum
                 )
             })
-            .filter(|symbol| query.is_empty() || symbol.name.to_ascii_lowercase().contains(&query))
+            .filter(|symbol| query.is_empty() || symbol.name().to_ascii_lowercase().contains(&query))
             .filter_map(|symbol| indice.materialize(symbol))
             .collect();
         // Quem começa com o que foi digitado vem antes de quem só contém: é o
@@ -469,7 +489,10 @@ impl ActiveLanguage for JavaLanguage {
                 items.push(completion_for_symbol(
                     &symbol.name,
                     symbol.kind,
-                    symbol.type_descriptor.as_ref(),
+                    symbol
+                        .type_descriptor
+                        .as_ref()
+                        .map(|descritor| descritor.name.as_str()),
                 ));
             }
         }
@@ -477,19 +500,23 @@ impl ActiveLanguage for JavaLanguage {
         // declaração seria pagar trinta mil cópias para montar uma lista que
         // não usa caminho nenhum.
         for symbol in self.index().symbols() {
-            if symbol.name.starts_with(&request.prefix) && seen.insert(symbol.name.clone()) {
+            if symbol.name().starts_with(&request.prefix)
+                && seen.insert(symbol.name().to_owned())
+            {
                 items.push(completion_for_symbol(
-                    &symbol.name,
-                    symbol.kind,
-                    symbol.type_descriptor.as_ref(),
+                    symbol.name(),
+                    symbol.kind(),
+                    symbol.type_name(),
                 ));
             }
         }
-        for class in &self.index().external_classes {
-            if class.simple.starts_with(&request.prefix) && seen.insert(class.simple.clone()) {
+        for class in self.index().external_classes() {
+            if class.simple().starts_with(&request.prefix)
+                && seen.insert(class.simple().to_owned())
+            {
                 items.push(CompletionItem {
-                    label: class.simple.clone(),
-                    detail: Some(format!("class file em {}", class.origin.display())),
+                    label: class.simple().to_owned(),
+                    detail: Some(format!("class file em {}", class.binary())),
                     kind: CompletionKind::Class,
                 });
             }
@@ -524,7 +551,7 @@ impl ActiveLanguage for JavaLanguage {
             .chain(
                 indice
                     .symbols()
-                    .filter(|symbol| symbol.name == name)
+                    .filter(|symbol| symbol.name() == name)
                     .filter_map(|symbol| indice.materialize(symbol)),
             )
             .collect::<Vec<_>>();
@@ -587,7 +614,7 @@ impl ActiveLanguage for JavaLanguage {
                     .chain(
                         indice
                             .symbols()
-                            .filter(|symbol| symbol.name == name)
+                            .filter(|symbol| symbol.name() == name)
                             .filter_map(|symbol| indice.location_of(symbol)),
                     ),
             );
@@ -1026,14 +1053,10 @@ fn parse_type(value: &str) -> TypeDescriptor {
     }
 }
 
-fn completion_for_symbol(
-    name: &str,
-    kind: SymbolKind,
-    type_descriptor: Option<&TypeDescriptor>,
-) -> CompletionItem {
+fn completion_for_symbol(name: &str, kind: SymbolKind, type_name: Option<&str>) -> CompletionItem {
     CompletionItem {
         label: name.to_owned(),
-        detail: type_descriptor.map(|kind| kind.name.clone()),
+        detail: type_name.map(str::to_owned),
         kind: match kind {
             // Um registro se completa como o tipo que ele é.
             SymbolKind::Class | SymbolKind::Record | SymbolKind::Annotation => {
@@ -1774,6 +1797,11 @@ pub(super) fn point_after_text(start: Point, inserted: &str) -> Point {
 mod tests {
     use super::*;
 
+    /// O projeto grande usado nas medições. Só existe na máquina de quem
+    /// desenvolve, e por isso as medições são `#[ignore]`.
+    const PROJETO_DE_REFERENCIA: &str =
+        r"C:\Users\jdani\Documents\projetos\java\camel-main\camel-main";
+
     /// A conversão de posição não varre o arquivo, e continua correta.
     ///
     /// O índice existe por causa de desempenho, mas o que ele substitui era
@@ -1987,7 +2015,7 @@ int x;";
     #[test]
     #[ignore = "mede um projeto grande local; ver a fase 3 da 19"]
     fn indexing_a_large_project_costs_what_the_spec_says() {
-        let root = PathBuf::from(r"C:\Users\jdani\Documents\projetos\java\camel-main\camel-main");
+        let root = PathBuf::from(PROJETO_DE_REFERENCIA);
         if !root.is_dir() {
             eprintln!("projeto de referência ausente: {}", root.display());
             return;
@@ -1998,7 +2026,12 @@ int x;";
             Err(error) => panic!("analisador indisponível: {error}"),
         };
         let indice = match documentos.with_parser_mut(|parser| {
-            WorkspaceIndex::scan(&root, std::slice::from_ref(&root), None, parser)
+            WorkspaceIndex::construido(Dados::scan(
+                &root,
+                std::slice::from_ref(&root),
+                None,
+                parser,
+            ))
         }) {
             Ok(indice) => indice,
             Err(error) => panic!("varredura falhou: {error}"),
@@ -2010,16 +2043,16 @@ int x;";
             indice.symbol_count(),
             indice.reference_counts().0,
             indice.reference_counts().1,
-            indice.external_classes.len(),
-            indice.declarations.len(),
+            indice.external_classes().count(),
+            indice.declaration_count(),
         );
         assert!(
-            indice.declarations.len() > 500,
+            indice.declaration_count() > 500,
             "um monorepo declara muito mais que o teto antigo"
         );
 
         // O tamanho em disco é o número da fase 1 da `20`.
-        let arquivo = std::env::temp_dir().join("er-ide-medicao-indice.bin");
+        let arquivo = caminho_da_medicao();
         let gravado = std::time::Instant::now();
         assert!(indice.save_to(&arquivo), "gravar o índice medido");
         eprintln!(
@@ -2029,11 +2062,65 @@ int x;";
         );
         let lido = std::time::Instant::now();
         assert!(
-            WorkspaceIndex::read_from(&arquivo).is_some(),
+            WorkspaceIndex::carregar_de(&arquivo).is_some(),
             "e relido inteiro"
         );
         eprintln!("relido em {:?}", lido.elapsed());
-        let _ = fs::remove_file(&arquivo);
+    }
+
+    /// O arquivo de medicao, compartilhado pelas duas medicoes da `20`.
+    fn caminho_da_medicao() -> PathBuf {
+        std::env::temp_dir().join("er-ide-medicao-indice.bin")
+    }
+
+    /// O custo de **abrir** um projeto grande a partir do indice gravado.
+    ///
+    /// E a medicao da fase 2 da `20`. Roda depois de
+    /// `indexing_a_large_project_costs_what_the_spec_says`, que e quem grava o
+    /// arquivo; medir a memoria exige rodar **este** teste sozinho, senao o pico
+    /// medido e o da construcao.
+    ///
+    /// `cargo test -p language-java --release -- --ignored --nocapture opening_a_large_project`
+    #[test]
+    #[ignore = "mede um projeto grande local; ver a fase 2 da 20"]
+    fn opening_a_large_project_from_the_saved_index() {
+        let root = PathBuf::from(PROJETO_DE_REFERENCIA);
+        let arquivo = caminho_da_medicao();
+        if !arquivo.is_file() {
+            eprintln!("grave o indice antes: rode indexing_a_large_project");
+            return;
+        }
+        let inicio = std::time::Instant::now();
+        let Some(indice) = WorkspaceIndex::carregar_de(&arquivo) else {
+            panic!("o indice gravado nao pode ser carregado");
+        };
+        eprintln!("carregado em {:?}", inicio.elapsed());
+
+        let conferindo = std::time::Instant::now();
+        let vale = indice.confere_com_o_disco(&root, std::slice::from_ref(&root));
+        eprintln!("conferido em {:?}: vale={vale}", conferindo.elapsed());
+
+        // E responde: sem isto a medicao diria que abrir e rapido sem provar
+        // que o que abriu serve.
+        let consultando = std::time::Instant::now();
+        let tipos = indice
+            .symbols()
+            .filter(|simbolo| simbolo.name().starts_with("Camel"))
+            .count();
+        eprintln!(
+            "{tipos} nomes com prefixo Camel em {:?}",
+            consultando.elapsed()
+        );
+        let ctrl_clique = std::time::Instant::now();
+        let ocorrencias = indice.references_to("CamelContext").count();
+        eprintln!(
+            "{ocorrencias} ocorrencias de CamelContext em {:?}",
+            ctrl_clique.elapsed()
+        );
+        assert!(
+            indice.symbol_count() > 100_000,
+            "o indice tem de estar cheio"
+        );
     }
 
     /// A semântica é calculada sob demanda e refeita depois de cada mudança.

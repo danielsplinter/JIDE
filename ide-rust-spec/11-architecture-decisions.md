@@ -431,3 +431,46 @@ chega a ele pelo contexto de pintura.
 a IDE resolvendo à mão o que a biblioteca deveria oferecer. Nas quatro, o sinal
 foi o mesmo: um número mágico ou uma mecânica repetida. Vale como regra de
 inspeção do que ainda resta.
+
+## ADR-023 — O índice é lido, e não mapeado
+
+**Decisão:** o índice em disco é carregado para um vetor de bytes, e as consultas
+respondem a partir desses bytes. **Não** há mapeamento de memória, embora a fase 2
+da `20` o tivesse pedido pelo nome.
+
+**Motivo:** `memmap2::Mmap::map` é `unsafe`, e o workspace declara
+`unsafe_code = "forbid"` em `[workspace.lints.rust]`. Mapear é `unsafe` por uma
+razão concreta, não formal: os bytes lidos são páginas do arquivo, e um processo
+que trunque esse arquivo com o mapeamento aberto faz as páginas sumirem debaixo
+do programa. Não é erro tratável — é o processo morrendo ou lendo lixo. O risco
+não é hipotético aqui: duas IDEs abertas na mesma raiz, uma regravando o índice
+enquanto a outra o tem aberto, está listado entre os riscos da própria `20`.
+
+**O que se examinou antes de decidir:**
+
+- **`#[allow(unsafe_code)]` na função que mapeia** não existe. `forbid` é o nível
+  que **não pode** ser desligado localmente; um `allow` interno é erro de
+  compilação. A exceção obrigaria o `language-java` a deixar de herdar a regra do
+  workspace e declarar uma sua, mais fraca — não é exceção pontual, é um crate
+  inteiro saindo da garantia mais forte do projeto;
+- **o que se ganharia** é a elasticidade: com mapeamento, o sistema operacional
+  recupera as páginas frias sob pressão, e a IDE deixaria de reter os 103 MB do
+  índice. Some também a leitura de 78 MB na abertura, que custa 34 ms — irrelevante
+  perto dos 3,6 s que a conferência leva;
+- **o que se perde** é a regra deixar de ser absoluta, que é de onde vem o valor
+  dela.
+
+**Consequência:** a memória do índice é **reduzida, não emprestada**. Foi de
+178 MB para 103 MB, e esses 103 MB ficam retidos enquanto a IDE viver. O prêmio
+secundário anunciado no começo da `20` — memória elástica — não foi entregue, e a
+especificação diz isso onde antes prometia.
+
+**O caminho de volta é curto, e isso é de propósito.** Tudo abaixo do
+carregamento trabalha sobre `&[u8]`, não sobre o que produziu esses bytes: trocar
+`fs::read` por `Mmap::map` é uma linha. No dia em que a decisão mudar, nada mais
+muda.
+
+**Precedente:** é o segundo caso em que a regra custa uma capacidade. O primeiro
+está na ADR-013 — `GenerateConsoleCtrlEvent` exigiria Win32 direto, e o botão de
+parar continua sem interromper a aplicação. Nos dois, o comportamento desejado
+ficou escrito em vez de apagado, para voltar a valer se a decisão for revista.
