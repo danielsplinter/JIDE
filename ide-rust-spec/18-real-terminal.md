@@ -217,15 +217,47 @@ aproximado para o resto.
 `ide-terminal`, agora sem consumidor na interface — o `run()` programático ainda os
 usa para disparar compilações. Reduzi-los ao mínimo é limpeza, não fase.
 
-## Fase 4 — O que a grade permite
+## Fase 4 — O que a grade permite — **pendente**
 
-Com grade e cursor, três coisas passam a ser possíveis e hoje não são:
+Com grade e cursor, três coisas passaram a ser possíveis. Nenhuma é requisito
+para o terminal parecer de verdade — as fases 0 a 3 entregaram isso —, mas as
+três ficam registradas como **pendências**, e não como ideias.
 
-- **seleção por célula**, incluindo retangular;
-- **busca na saída**, que precisa saber em que célula o achado está;
-- **links clicáveis** — caminho de arquivo com linha e coluna vira navegação.
+### 1. Seleção por célula, e a fonte errada
 
-Nenhuma é requisito para o terminal parecer de verdade. Entram depois, se valerem.
+A seleção **já** tem linha e coluna: `TerminalSelection` guarda âncora e foco em
+`TextPosition`. O que falta é de onde ela lê.
+
+`selected_terminal_text` percorre `lines()`, que é uma lista de linhas acumulada
+à parte; o que está **desenhado** vem de `grid_rows()`, a viewport do emulador.
+São duas fontes diferentes para a mesma tela. Enquanto forem, selecionar na tela
+e colar pode dar textos diferentes — quando a grade quebra, preenche ou rola, as
+duas listas divergem.
+
+**Critério:** copiar devolve exatamente os caracteres das células selecionadas,
+lidos da grade. A seleção retangular vem junto, porque na grade ela é o caso
+fácil: dois números de coluna em vez de um por linha.
+
+### 2. Busca na saída
+
+Achar um texto exige saber em **que célula** ele está, para destacá-lo e rolar
+até lá. Hoje não há como apontar para uma célula.
+
+**Critério:** procurar um texto na saída destaca as ocorrências e leva a vista
+até a escolhida, inclusive no que já rolou para o histórico.
+
+### 3. Links clicáveis
+
+`Arquivo.java:42:7` na saída do compilador é uma coordenada, e a IDE sabe abrir
+coordenadas. Reconhecer o padrão nas células e transformar o clique em navegação
+é o que falta.
+
+**Critério:** clicar num caminho com linha e coluna na saída abre o arquivo no
+editor, naquela posição.
+
+**A ordem entre as três não importa** — são independentes. A primeira é a que
+tem consequência hoje, porque as outras duas são recursos ausentes e ela é uma
+divergência entre o que se vê e o que se copia.
 
 ## Riscos
 
