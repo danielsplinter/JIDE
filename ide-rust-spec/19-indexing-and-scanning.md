@@ -176,7 +176,7 @@ Um teste novo guarda o que a fase entrega: `activation_returns_before_the_index_
 afirma que ativar leva menos de 250 ms. Antes, no mesmo projeto, levava ~1,5 s.
 `language-java` foi de 29 para 30 testes.
 
-### Fase 3 — Os tetos saem
+### Fase 3 — Os tetos saem ✅
 
 Com a indexação em segundo plano, demorar deixa de travar alguém, e os quatro
 tetos perdem a razão de existir. Sai também a necessidade de avisar que truncou —
@@ -185,20 +185,85 @@ não haverá truncamento.
 **Critério:** nenhum limite silencioso; um monorepo é indexado por inteiro, no
 tempo que levar.
 
-**Tentada e revertida.** Os quatro tetos saíram — 600 caminhos, 500 fontes
-`.java`, 64 jars, 24.000 classes do JDK — e o que estava escondido apareceu: no
-projeto de referência são **40.472** caminhos e **26.211** fontes, contra 600 e
-500. A IDE indexava **1,9%** do projeto e não dizia nada.
+**Feita, na segunda tentativa.** Os quatro saíram: 600 caminhos, 500 fontes
+`.java`, 64 jars e 24.000 classes do JDK. O que estava escondido, medido no
+projeto de referência:
 
-Só que a IDE passou a abrir **em branco e sem responder** nesse projeto. A fase 2
-tirou a espera do caminho da primeira consulta, mas não tornou o trabalho barato:
-ele saiu da frente e continuou existindo, cinquenta vezes maior. A remoção foi
-revertida para devolver a IDE ao uso.
+| | com teto | real |
+|---|---|---|
+| caminhos | 600 | **40.472** |
+| fontes `.java` | 500 | **26.211** |
+| tipos declarados | ~500 | **30.745** |
+| classes externas | 24.000 | 22.951 |
 
-**O que falta para a fase 3 valer:** não é tirar o teto — é a indexação parar de
-disputar a máquina com a interface. Limitar as linhas de execução, ceder tempo
-entre arquivos, e medir memória e CPU **antes** de tirar o limite. Enquanto isso
-não existir, o teto é o que segura, e ele mente — o defeito continua aberto.
+A IDE indexava **1,9%** do projeto e não dizia nada. A completação não conhecia
+98% do código, e quem usava não distinguia isso de um tipo que não existe — o
+defeito que esta especificação chamou de o mais perigoso.
+
+**A primeira tentativa foi revertida por engano.** A IDE abria branca e sem
+responder, e eu atribuí à indexação sem teto. Era outra coisa: a cascata de
+leituras do Explorer, descrita na fase 1. Vale registrar porque o erro tem forma
+reconhecível — a suspeita caiu sobre a mudança mais recente, e não sobre a
+medida.
+
+#### O que a fase custou, e o que a fez caber
+
+**1. Ceder entre arquivos.** A indexação é uma linha de execução só, e o que ela
+não pode atrapalhar é a que desenha. Um `yield` a cada fonte é o que separa
+"demora" de "trava".
+
+**2. Guardar só o que outro arquivo pode nomear.** O índice acumulava **todo**
+símbolo de todo fonte, parâmetros e variáveis locais inclusive. Nenhum consumidor
+os queria: quem pergunta pelo arquivo em que está recebe a semântica dele, com
+locais; o índice responde pelo resto do projeto, e ali um local de outro arquivo
+não é destino de navegação nem sugestão de completação. Guardá-los era memória
+paga por resposta errada.
+
+**3. O arquivo guardado uma vez, não por ocorrência.** Este foi o número grande.
+São **2.741.995** ocorrências de nomes no projeto, e cada uma carregava uma cópia
+do caminho do arquivo — caminhos longos, num monorepo. Trocar o `PathBuf` de cada
+ocorrência por um número, com a lista de arquivos ao lado, não muda o que o índice
+sabe: `references_to` devolve `Location` como antes, e o formato compacto existe
+só dentro do índice.
+
+**4. E o mesmo nas declarações.** Sobravam **339.664** delas, cada uma repetindo o
+seu caminho. `IndexedSymbol` é o `SemanticSymbol` sem o `Location`, e o índice
+materializa **só o que a consulta acerta** — que é o ponto: a completação passa
+por todas as declarações a cada tecla, e ali ler trinta mil caminhos para montar
+uma lista que não usa caminho nenhum trocaria memória por lentidão. Por isso
+`symbols()` devolve a forma compacta, e `location_of`/`materialize` são pedidos à
+parte.
+
+| | pico de memória |
+|---|---|
+| como estava | **927 MB** |
+| sem locais e parâmetros | 822 MB |
+| ocorrências com o arquivo por número | 266 MB |
+| declarações também | **178 MB** |
+
+Cinco vezes menos, com as contagens idênticas nos dois extremos: 339.664
+declarações, 2.741.995 ocorrências, 30.745 tipos, 22.951 classes externas. Não é
+menos índice — é o mesmo índice sem repetir nome de arquivo.
+
+#### Os números da fase
+
+Índice completo do projeto de referência, em release: **283 s** com o disco frio,
+**42 s** com ele quente. E a IDE inteira, em debug, aberta no mesmo projeto:
+
+| | 10 s | 60 s | 180 s | 240 s |
+|---|---|---|---|---|
+| responde | sim | sim | sim | sim |
+| memória | 433 MB | 488 MB | 572 MB | 576 MB |
+
+A CPU deixa de subir entre 180 s e 240 s: é a indexação terminando. A memória
+estabiliza em 576 MB — o que a IDE já usava, uns 430 MB, mais o índice. Os dois
+números medem coisas diferentes e convém não confundi-los: os 178 MB são o índice
+sozinho, num processo que não tem janela, fontes nem terminal. Ninguém
+espera por nada disso, e é esse o ponto da ordem escolhida: a fase 2 tirou a
+espera do caminho, e só por isso a 3 pôde tirar os limites.
+
+`indexing_a_large_project_costs_what_the_spec_says`, marcado `#[ignore]`, guarda
+esses números e permite refazê-los.
 
 ### Fase 4 — Índice incremental ✅
 
@@ -243,15 +308,15 @@ testes da fase 2, agora no nível da aplicação.
 
 **327 testes na IDE.**
 
-## A medida provisória que não entra na ordem
+## A medida provisória que não chegou a ser precisa
 
-Enquanto as fases 2 e 3 não existirem, o índice pode **relatar que truncou** — uma
-mensagem na barra de estado dizendo que o projeto passou dos limites e a
-completação está incompleta.
+Enquanto as fases 2 e 3 não existissem, o índice podia **relatar que truncou** —
+uma mensagem na barra de estado dizendo que o projeto passou dos limites. Isso
+não consertava: só parava de mentir.
 
-Isso não conserta: só para de mentir. Vale como curativo se as fases seguintes
-demorarem, e some quando a 3 chegar. **Não é um passo do caminho** — é o que se faz
-enquanto o caminho não anda.
+Não foi preciso. As fases 2 e 3 chegaram antes, e sem teto não há o que relatar.
+Fica registrado como o curativo que se faz quando o caminho não anda — e como
+lembrete de que ele **não era um passo do caminho**.
 
 ## O que não muda
 

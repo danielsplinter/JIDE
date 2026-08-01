@@ -162,7 +162,7 @@ quando ele muda. Em troca, quem produzir realce por outro caminho precisa invali
 a entrada — a revisão do buffer é o que decide, e um realce novo com revisão antiga
 é ignorado em vez de exibido fora de lugar.
 
-## ADR-015 — Indexação Java: síncrona, integral e com tetos silenciosos
+## ADR-015 — Indexação Java: era síncrona, integral e com tetos silenciosos
 
 **Situação:** a completação, a navegação e a busca por nome se apoiam num índice
 montado uma vez, quando o provider Java é ativado. Ele tem duas metades: os nomes
@@ -179,38 +179,35 @@ depuração**. O peso está em parsear e analisar os fontes, não em ler os `jmo
 linguagens acontece depois do primeiro quadro, para que a espera aconteça com a
 IDE já desenhada.
 
-### Pendências conhecidas
+### Pendências conhecidas — todas resolvidas
 
-São três, e nenhuma está resolvida:
+Eram três, e a especificação `19` as executou nesta ordem, com a varredura do
+Explorer na frente:
 
-- **Os tetos são silenciosos.** A varredura para em 600 caminhos, 500 arquivos
-  `.java`, 64 jars e 24.000 classes do JDK. Passando disso, o índice fica
-  incompleto **sem avisar**: a completação simplesmente não conhece parte do
-  código, e quem usa não tem como distinguir isso de um tipo que não existe. Um
-  monorepo cruza esses limites com facilidade.
-- **A indexação não é incremental.** Ela roda inteira na ativação e é refeita do
-  zero ao trocar o JDK. Salvar um arquivo não reindexa, então uma classe nova só
-  entra no índice na ativação seguinte.
-- **Ela é síncrona.** Adiá-la para depois do primeiro quadro tirou a janela em
-  branco, mas não o bloqueio: a primeira consulta à linguagem ainda espera o
-  índice inteiro. O caminho é o provider responder *ainda indexando* e completar
-  em segundo plano, e aí nem o realce esperaria.
+- **Os tetos silenciosos saíram.** Eram 600 caminhos, 500 arquivos `.java`, 64
+  jars e 24.000 classes do JDK. No projeto de referência, isso era **1,9%** do
+  código: 30.745 tipos existem onde o teto mostrava uns 500. Hoje não há limite,
+  e portanto não há truncamento a relatar.
+- **A indexação é incremental.** Gravar um arquivo reindexa **aquele** arquivo, e
+  a classe criada agora participa da completação sem reiniciar nada.
+- **Ela é assíncrona.** O índice nasce vazio e é montado em segundo plano; ativar
+  volta em menos de 250 ms, e quem precisa da resposta completa pede para
+  esperar, com limite.
 
-**Consequência:** vale para projetos do tamanho dos que a IDE atende hoje. Os três
-pontos acima são o que precisa mudar antes de ela atender projetos grandes, e o
-primeiro é o mais perigoso, porque falha em silêncio.
+**O que tornou os tetos dispensáveis** foi a fase 2, não a coragem de removê-los:
+enquanto a indexação bloqueava, o teto de 600 era **sintoma**, e tirá-lo antes
+trocaria uma resposta errada em silêncio por uma IDE travada. A ordem importava.
 
-**A ordem em que atacá-los está na especificação `19`**, junto da varredura do
-Explorer. Uma correção de leitura registrada lá: o teto de 600 é **sintoma**, e não
-causa — tirá-lo antes de a indexação sair do caminho síncrono trocaria uma resposta
-errada em silêncio por uma IDE travada.
+**O que a remoção cobrou, e como coube:** indexar o projeto inteiro custava 927 MB.
+Três mudanças no que o índice guarda o levaram a **178 MB** sem perder nada —
+parâmetros e variáveis locais de outros arquivos saíram (nenhum consumidor os
+queria), e o caminho do arquivo passou a ser guardado uma vez, em lugar de uma
+por ocorrência e uma por declaração: eram 2,7 milhões e 340 mil cópias de trinta
+mil nomes. Os números e o método estão na fase 3 da `19`.
 
-Fora do índice, e por isso registrada em `08-storage-and-memory`, há uma quarta
-pendência do mesmo tema: a **árvore do Explorer não tem teto nenhum** e é varrida
-inteira, de forma síncrona, ao abrir o projeto — 2,17 s medidos sobre 56 mil
-arquivos. Os tetos do índice fazem a indexação terminar rápido em qualquer
-projeto; é a varredura do Explorer que decide quanto tempo a janela fica parada
-ao abrir um projeto grande.
+A quarta pendência do mesmo tema, registrada em `08-storage-and-memory` — a
+**árvore do Explorer varrida inteira ao abrir o projeto** — também saiu: a
+varredura é rasa e por caminho, e a abertura foi de 3,22 s para 3 ms.
 
 ## ADR-016 — Análise por tecla: uma passada, sob demanda o resto
 

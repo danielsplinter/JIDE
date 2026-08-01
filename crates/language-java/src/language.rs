@@ -345,12 +345,8 @@ impl ActiveLanguage for JavaLanguage {
             .cloned()
             .chain(
                 self.index()
-                    .references
-                    .get(name)
-                    .into_iter()
-                    .flatten()
-                    .filter(|location| do_indice(location))
-                    .cloned(),
+                    .references_to(name)
+                    .filter(|location| do_indice(location)),
             )
             .collect::<Vec<_>>();
         locations.extend(
@@ -360,14 +356,15 @@ impl ActiveLanguage for JavaLanguage {
                 .filter(|symbol| symbol.name == name)
                 .map(|symbol| symbol.location.clone()),
         );
+        let indice = self.index();
         locations.extend(
-            self.index()
-                .symbols
-                .iter()
+            indice
+                .symbols()
                 .filter(|symbol| symbol.name == name)
-                .map(|symbol| symbol.location.clone())
+                .filter_map(|symbol| indice.location_of(symbol))
                 .filter(do_indice),
         );
+        drop(indice);
         locations.sort_by(|esquerda, direita| {
             esquerda.path.cmp(&direita.path).then(
                 (esquerda.range.start.line, esquerda.range.start.column)
@@ -406,9 +403,10 @@ impl ActiveLanguage for JavaLanguage {
     ) -> Result<Vec<SemanticSymbol>, LanguageError> {
         let query = query.trim().to_ascii_lowercase();
         let indice = self.index();
+        // Os dois filtros passam pela forma compacta; só o que sobra vira um
+        // `SemanticSymbol`, com o caminho lido da lista de arquivos.
         let mut found: Vec<SemanticSymbol> = indice
-            .symbols
-            .iter()
+            .symbols()
             .filter(|symbol| {
                 matches!(
                     symbol.kind,
@@ -419,7 +417,7 @@ impl ActiveLanguage for JavaLanguage {
                 )
             })
             .filter(|symbol| query.is_empty() || symbol.name.to_ascii_lowercase().contains(&query))
-            .cloned()
+            .filter_map(|symbol| indice.materialize(symbol))
             .collect();
         // Quem começa com o que foi digitado vem antes de quem só contém: é o
         // que se procura ao escrever as primeiras letras de um nome.
@@ -463,14 +461,25 @@ impl ActiveLanguage for JavaLanguage {
         }
         let mut items = Vec::new();
         let mut seen = HashSet::new();
-        for symbol in document
-            .semantic
-            .symbols
-            .iter()
-            .chain(self.index().symbols.iter())
-        {
+        for symbol in &document.semantic.symbols {
             if symbol.name.starts_with(&request.prefix) && seen.insert(symbol.name.clone()) {
-                items.push(completion_for_symbol(symbol));
+                items.push(completion_for_symbol(
+                    &symbol.name,
+                    symbol.kind,
+                    symbol.type_descriptor.as_ref(),
+                ));
+            }
+        }
+        // O índice inteiro passa por aqui a cada tecla: ler o caminho de cada
+        // declaração seria pagar trinta mil cópias para montar uma lista que
+        // não usa caminho nenhum.
+        for symbol in self.index().symbols() {
+            if symbol.name.starts_with(&request.prefix) && seen.insert(symbol.name.clone()) {
+                items.push(completion_for_symbol(
+                    &symbol.name,
+                    symbol.kind,
+                    symbol.type_descriptor.as_ref(),
+                ));
             }
         }
         for class in &self.index().external_classes {
@@ -507,8 +516,14 @@ impl ActiveLanguage for JavaLanguage {
         let mut symbols = documents
             .values()
             .flat_map(|document| document.semantic.symbols.iter())
-            .chain(indice.symbols.iter())
             .filter(|symbol| symbol.name == name)
+            .cloned()
+            .chain(
+                indice
+                    .symbols()
+                    .filter(|symbol| symbol.name == name)
+                    .filter_map(|symbol| indice.materialize(symbol)),
+            )
             .collect::<Vec<_>>();
         symbols.sort_by(|left, right| {
             let left_same_file = left.location.path == document.snapshot.path;
@@ -552,26 +567,26 @@ impl ActiveLanguage for JavaLanguage {
             .get(&request.document_id)
             .ok_or_else(|| LanguageError::Provider("Java document is not open".to_owned()))?;
         let name = token_at_position(&document.snapshot.text, request.position);
+        let indice = self.index();
         let mut locations = documents
             .values()
             .flat_map(|document| document.references.get(&name).into_iter().flatten())
-            .chain(
-                self.index()
-                    .references
-                    .get(&name)
-                    .into_iter()
-                    .flatten(),
-            )
             .cloned()
+            .chain(indice.references_to(&name))
             .collect::<Vec<_>>();
         if request.include_declaration {
             locations.extend(
                 documents
                     .values()
                     .flat_map(|document| document.semantic.symbols.iter())
-                    .chain(self.index().symbols.iter())
                     .filter(|symbol| symbol.name == name)
-                    .map(|symbol| symbol.location.clone()),
+                    .map(|symbol| symbol.location.clone())
+                    .chain(
+                        indice
+                            .symbols()
+                            .filter(|symbol| symbol.name == name)
+                            .filter_map(|symbol| indice.location_of(symbol)),
+                    ),
             );
         }
         locations.sort_by(|left, right| {
@@ -1008,14 +1023,15 @@ fn parse_type(value: &str) -> TypeDescriptor {
     }
 }
 
-fn completion_for_symbol(symbol: &SemanticSymbol) -> CompletionItem {
+fn completion_for_symbol(
+    name: &str,
+    kind: SymbolKind,
+    type_descriptor: Option<&TypeDescriptor>,
+) -> CompletionItem {
     CompletionItem {
-        label: symbol.name.clone(),
-        detail: symbol
-            .type_descriptor
-            .as_ref()
-            .map(|kind| kind.name.clone()),
-        kind: match symbol.kind {
+        label: name.to_owned(),
+        detail: type_descriptor.map(|kind| kind.name.clone()),
+        kind: match kind {
             // Um registro se completa como o tipo que ele é.
             SymbolKind::Class | SymbolKind::Record | SymbolKind::Annotation => {
                 CompletionKind::Class
@@ -1954,6 +1970,50 @@ int x;";
         assert!(pollster::block_on(
             active.wait_until_indexed(Duration::from_secs(60))
         ));
+    }
+
+    /// O custo real de indexar um projeto grande, sem teto nenhum.
+    ///
+    /// É a medição que a fase 3 da `19` exige antes de confiar na remoção dos
+    /// tetos: quanto tempo, quantos símbolos e quanta memória. Fica marcado
+    /// `#[ignore]` porque depende de um projeto que só existe na máquina de
+    /// quem desenvolve, e porque leva minutos.
+    ///
+    /// Rodar com:
+    /// `cargo test -p language-java --release -- --ignored --nocapture indexing_a_large_project`
+    #[test]
+    #[ignore = "mede um projeto grande local; ver a fase 3 da 19"]
+    fn indexing_a_large_project_costs_what_the_spec_says() {
+        let root = PathBuf::from(r"C:\Users\jdani\Documents\projetos\java\camel-main\camel-main");
+        if !root.is_dir() {
+            eprintln!("projeto de referência ausente: {}", root.display());
+            return;
+        }
+        let inicio = std::time::Instant::now();
+        let documentos = match Documents::new() {
+            Ok(documentos) => documentos,
+            Err(error) => panic!("analisador indisponível: {error}"),
+        };
+        let indice = match documentos.with_parser_mut(|parser| {
+            WorkspaceIndex::scan(&root, std::slice::from_ref(&root), None, parser)
+        }) {
+            Ok(indice) => indice,
+            Err(error) => panic!("varredura falhou: {error}"),
+        };
+        eprintln!("índice completo em {:?}", inicio.elapsed());
+        // Onde a memória está, para quem for decidir se ela custa demais.
+        eprintln!(
+            "símbolos: {} | nomes referenciados: {} | ocorrências: {} | classes externas: {} | tipos declarados: {}",
+            indice.symbol_count(),
+            indice.reference_counts().0,
+            indice.reference_counts().1,
+            indice.external_classes.len(),
+            indice.declarations.len(),
+        );
+        assert!(
+            indice.declarations.len() > 500,
+            "um monorepo declara muito mais que o teto antigo"
+        );
     }
 
     /// A semântica é calculada sob demanda e refeita depois de cada mudança.
