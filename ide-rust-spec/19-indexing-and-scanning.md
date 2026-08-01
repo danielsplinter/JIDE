@@ -88,7 +88,7 @@ Medido no projeto de referência — `camel-main`, **65.322 entradas**:
 Mil vezes. E o tempo de abertura deixou de depender do tamanho do projeto: são 47
 nós lidos, os do primeiro nível, em vez de 65 mil.
 
-### As três coisas que a fase custou descobrir
+### As quatro coisas que a fase custou descobrir
 
 **1. A seleção desistia antes de tentar.** `sync_explorer_to_active` fazia
 `if self.explorer_path_for(target).is_none() { return; }`. Com a árvore profunda o
@@ -110,7 +110,30 @@ expandidos; as linhas da `TreeView` vêm de `items(&workspace)`, montadas quando
 árvore é substituída. Inserir filhos mudava o `FileNode` e não a lista — o arquivo
 estava na árvore e não aparecia. Nasceu `rebuild_items`, chamado a cada carga.
 
-Nenhuma das três aparecia no plano: a fase foi escrita como "ler a pasta ao
+**4. Uma pasta vazia pedia leitura para sempre — e isso travou a IDE.** Na
+árvore, pasta vazia e pasta não lida têm a mesma forma. Responder a leitura de
+uma pasta vazia não a tirava da lista de pendentes, e cada resposta fazia a
+reconciliação da seleção pedir **todas** as outras de novo.
+
+Com quarenta pastas expandidas o número medido foi: `request_expanded_directories`
+chamada **1099 vezes**, **2490** leituras numa fila só, e um único evento
+`Resized` levando **21,7 s** dentro de `dispatch_application_commands`. O laço de
+eventos nunca voltava ao sistema — a janela abria branca e não respondia.
+
+O que separa as duas formas é lembrar **o que já foi perguntado**: um conjunto de
+caminhos pedidos no Explorer. Perguntar uma vez por pasta responde a pergunta de
+vez, e uma pasta que veio vazia veio vazia mesmo. Recarregar o projeto limpa o
+conjunto, porque aí o pedido é justamente ler tudo de novo.
+
+**O diagnóstico custou mais que o conserto**, e por um motivo que vale registrar:
+as primeiras tentativas foram palpite sobre o código, e o teste que as
+acompanhava passava com e sem o defeito — logo não provava nada. O que resolveu
+foi medir o processo: CPU acumulada (girando, não em impasse), carimbo de tempo
+em cada etapa da partida (`initialize` terminava em 1,5 s), e então dentro do
+evento até chegar na fila de comandos. `the_queue_of_directory_reads_settles`
+guarda o resultado, e foi verificado que **falha sem o conserto**.
+
+Nenhuma das quatro aparecia no plano: a fase foi escrita como "ler a pasta ao
 expandir", e a leitura era a parte fácil.
 
 ### Fase 2 — Índice assíncrono ✅

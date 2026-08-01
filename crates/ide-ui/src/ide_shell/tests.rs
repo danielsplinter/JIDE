@@ -1570,6 +1570,127 @@ fn the_delete_key_removes_the_character_ahead() {
     assert_eq!(shell.active_text(), Some("def"));
 }
 
+/// Recarregar o mesmo caminho não gera trabalho novo.
+///
+/// Este teste existe por causa de um travamento: `insert` respondia "mudou" por
+/// ter **achado** o nó, e não por o conteúdo ser outro. A reconciliação da
+/// seleção então revelava o caminho, que pedia a leitura de novo, que reconciliava
+/// de novo — a fila nunca esvaziava, o laço da janela nunca chegava a desenhar, e
+/// a IDE abria em branco. A suíte inteira passava.
+#[test]
+fn loading_the_same_path_twice_asks_for_nothing_more() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: vec![FileNode {
+            path: root.join("src"),
+            is_directory: true,
+            children: Vec::new(),
+        }],
+    });
+    let filhos = vec![FileNode {
+        path: root.join("src/Arquivo.java"),
+        is_directory: false,
+        children: Vec::new(),
+    }];
+
+    // Um documento ativo que a árvore não tem: é ele que faz a reconciliação
+    // revelar o caminho, e revelar é o que pede leitura.
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("src/Fantasma.java"), "class Fantasma {}");
+
+    shell.insert_path_children(vec![(root.join("src"), filhos.clone())]);
+    let pendentes = |shell: &IdeShell| {
+        shell
+            .commands
+            .iter()
+            .filter(|command| matches!(command, ApplicationCommand::LoadDirectory(_)))
+            .count()
+    };
+    let depois_da_primeira = pendentes(&shell);
+
+    // A mesma resposta de novo: nada mudou, então nada mais é pedido.
+    shell.insert_path_children(vec![(root.join("src"), filhos)]);
+    assert_eq!(
+        pendentes(&shell),
+        depois_da_primeira,
+        "recarregar o mesmo conteúdo não pode pedir mais leitura"
+    );
+}
+
+/// A fila de leituras termina, e é por isso que a janela chega a desenhar.
+///
+/// Este é o defeito que deixou a IDE branca e sem responder: uma pasta **vazia
+/// no disco** tem a mesma forma de uma pasta não lida, então respondê-la não a
+/// tirava da lista de pendentes. Cada resposta fazia a reconciliação da seleção
+/// pedir todas as outras de novo — quarenta pastas expandidas viravam milhares
+/// de leituras por quadro, e o laço de eventos nunca voltava.
+///
+/// O teste acima não pegava isso porque tem **uma** pasta e **uma** rodada; a
+/// cascata precisa de várias pastas e do laço da aplicação.
+#[test]
+fn the_queue_of_directory_reads_settles() {
+    let root = PathBuf::from("workspace");
+    let vazias = ["a", "b", "c", "d", "e"];
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: vazias
+            .iter()
+            .map(|nome| FileNode {
+                path: root.join(nome),
+                is_directory: true,
+                children: Vec::new(),
+            })
+            .collect(),
+    });
+
+    // Um documento ativo ausente da árvore: é ele que dispara a reconciliação a
+    // cada carga, e era a reconciliação que realimentava a cascata.
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("a/Fantasma.java"), "class Fantasma {}");
+    for nome in vazias {
+        shell.reveal_in_explorer(&root.join(nome));
+    }
+
+    // O laço da aplicação: tira os pedidos, lê o "disco" — onde toda pasta está
+    // vazia — e devolve. Sem o conserto isto não converge.
+    let mut rodadas = 0;
+    let mut lidas = 0;
+    loop {
+        let pedidos = shell
+            .drain_application_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                ApplicationCommand::LoadDirectory(path) => Some(path),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if pedidos.is_empty() {
+            break;
+        }
+        lidas += pedidos.len();
+        rodadas += 1;
+        assert!(
+            rodadas < 20 && lidas < 200,
+            "a fila de leituras não termina: {rodadas} rodadas, {lidas} leituras"
+        );
+        for pasta in pedidos {
+            shell.insert_path_children(vec![(pasta, Vec::new())]);
+        }
+    }
+
+    assert!(
+        lidas <= vazias.len(),
+        "cada pasta é lida uma vez, e não {lidas} vezes"
+    );
+}
+
 /// Cada aba tem a sua sessão, e o que se digita numa não alcança a outra.
 ///
 /// Antes isto se verificava pelo texto que a IDE acumulava por aba. Ela não

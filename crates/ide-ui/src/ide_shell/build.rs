@@ -13,6 +13,7 @@ impl IdeShell {
             .to_owned();
         let mut expanded = HashSet::new();
         expanded.insert(workspace.path.clone());
+        let raiz_lida = workspace.path.clone();
         let terminal_root = if workspace.is_directory {
             workspace.path.clone()
         } else {
@@ -42,6 +43,8 @@ impl IdeShell {
                 context_menu_target: None,
                 context_menu_file: None,
                 expanded,
+                // A varredura de abertura já trouxe os filhos da raiz.
+                requested: std::iter::once(raiz_lida).collect(),
                 scroll_x: 0.0,
                 scroll_line: 0,
                 sidebar_width: SIDEBAR_WIDTH,

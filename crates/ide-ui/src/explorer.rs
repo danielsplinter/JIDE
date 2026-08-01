@@ -25,6 +25,13 @@ pub(super) struct ExplorerState {
     /// acontece; renomear fala do arquivo, e são caminhos diferentes.
     pub(super) context_menu_file: Option<PathBuf>,
     pub(super) expanded: HashSet<PathBuf>,
+    /// Pastas cujos filhos já foram pedidos à aplicação.
+    ///
+    /// Sem isto, uma pasta **vazia no disco** pede leitura para sempre: ela tem
+    /// a mesma forma de uma pasta não lida, e cada resposta faz a reconciliação
+    /// da seleção pedir todas as outras de novo. Com quarenta pastas expandidas
+    /// vira milhar de leituras por quadro, e a janela não chega a desenhar.
+    pub(super) requested: HashSet<PathBuf>,
     pub(super) scroll_x: f32,
     pub(super) scroll_line: usize,
     pub(super) sidebar_width: f32,
@@ -66,6 +73,9 @@ impl ExplorerState {
         self.expanded
             .retain(|path| path.starts_with(&self.workspace.path));
         self.expanded.insert(self.workspace.path.clone());
+        // Outra árvore, outra leitura: recarregar o projeto é justamente o
+        // pedido de ler tudo de novo.
+        self.requested.clear();
         self.context_menu.close();
         self.context_menu_target = None;
         self.context_menu_file = None;

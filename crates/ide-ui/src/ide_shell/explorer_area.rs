@@ -188,6 +188,7 @@ impl IdeShell {
             .collect();
         pastas.sort_by_key(|caminho| caminho.components().count());
         for pasta in pastas {
+            self.explorer.requested.insert(pasta.clone());
             self.commands
                 .push(ApplicationCommand::LoadDirectory(pasta));
         }
@@ -195,10 +196,14 @@ impl IdeShell {
 
     /// Se a pasta ainda não teve os filhos lidos.
     ///
-    /// Pasta vazia e pasta não lida têm a mesma forma — distinguir custaria um
-    /// campo em todo lugar que monta um nó. Reler uma pasta vazia custa uma
-    /// leitura de diretório, que é o lado barato de errar.
+    /// Pasta vazia e pasta não lida têm a mesma forma na árvore — distinguir ali
+    /// custaria um campo em todo lugar que monta um nó. Quem separa as duas é
+    /// `requested`: perguntar uma vez por pasta responde a pergunta de vez, e
+    /// uma pasta que veio vazia veio vazia mesmo.
     fn directory_needs_children(&self, path: &Path) -> bool {
+        if self.explorer.requested.contains(path) {
+            return false;
+        }
         fn procurar<'arvore>(node: &'arvore FileNode, path: &Path) -> Option<&'arvore FileNode> {
             if node.path == path {
                 return Some(node);
@@ -221,6 +226,9 @@ impl IdeShell {
     pub fn insert_path_children(&mut self, niveis: Vec<(PathBuf, Vec<FileNode>)>) {
         let mut mudou = false;
         for (pasta, filhos) in niveis {
+            // Veio, logo não se pergunta mais: uma leitura por caminho traz
+            // vários níveis, e nenhum deles precisa ser pedido outra vez.
+            self.explorer.requested.insert(pasta.clone());
             mudou |= self.insert_children_at(&pasta, filhos);
         }
         if !mudou {
@@ -237,9 +245,16 @@ impl IdeShell {
     fn insert_children_at(&mut self, path: &Path, children: Vec<FileNode>) -> bool {
         fn inserir(node: &mut FileNode, path: &Path, children: &mut Option<Vec<FileNode>>) -> bool {
             if node.path == path {
-                if let Some(filhos) = children.take() {
-                    node.children = filhos;
+                let Some(filhos) = children.take() else {
+                    return false;
+                };
+                // Mudou só se o conteúdo é outro. Responder "mudou" por ter
+                // achado o nó faz a reconciliação da seleção pedir a mesma
+                // leitura de novo, e nada garante que esse ciclo termine.
+                if node.children == filhos {
+                    return false;
                 }
+                node.children = filhos;
                 return true;
             }
             node.children
@@ -535,6 +550,7 @@ impl IdeShell {
                     // que já foi aberto, e é isso que tira a varredura inteira
                     // do caminho da abertura do projeto.
                     if self.directory_needs_children(&path) {
+                        self.explorer.requested.insert(path.clone());
                         self.commands
                             .push(ApplicationCommand::LoadDirectory(path.clone()));
                     }
