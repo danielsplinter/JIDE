@@ -5,6 +5,7 @@
 //! ele não tratou significa.
 
 use super::*;
+use crate::editor::Posicao;
 
 impl IdeShell {
     pub const fn focus(&self) -> ShellFocus {
@@ -397,13 +398,136 @@ impl IdeShell {
             .sync(&context, &document.buffer, syntax, decorations, focused);
     }
 
+    /// `Ctrl+F`: abre a barra de busca do arquivo aberto, ou a fecha.
+    ///
+    /// Fechar apaga o que se procurava **e** as marcas: destaque que sobrevive à
+    /// janela vira sujeira na tela, sem nada que diga de onde veio.
     pub fn toggle_search(&mut self) {
-        if self.context.focus == ShellFocus::Search {
-            self.editor_area.search_query.clear();
-            self.context.focus = ShellFocus::Editor;
+        if !self.editor_area.search_open {
+            self.editor_area.search_open = true;
+            self.context.focus = ShellFocus::Search;
+        } else if self.context.focus == ShellFocus::Search {
+            // Aberta e com o foco: `Ctrl+F` de novo fecha.
+            self.close_search();
         } else {
+            // Aberta e sem o foco — porque houve um clique no editor. Aqui
+            // `Ctrl+F` devolve o foco em vez de fechar: fechar puniria quem
+            // clicou no código e voltou para continuar procurando.
             self.context.focus = ShellFocus::Search;
         }
+        self.refresh_search_hits();
+    }
+
+    /// Fecha a barra e apaga o que ela deixou na tela.
+    pub(super) fn close_search(&mut self) {
+        self.editor_area.search_open = false;
+        self.editor_area.search_query.clear();
+        if self.context.focus == ShellFocus::Search {
+            self.context.focus = ShellFocus::Editor;
+        }
+    }
+
+    /// Remarca as ocorrências do que está escrito na barra.
+    ///
+    /// Chamado a cada tecla: procurar é sobre o texto **atual**, e uma marca de
+    /// duas letras atrás apontaria para outro lugar.
+    pub(super) fn refresh_search_hits(&mut self) {
+        // O destaque acompanha a **barra**, e não o foco: clicar no editor não
+        // pode apagar o que se estava procurando.
+        let procurado = if self.editor_area.search_open {
+            self.editor_area.search_query.clone()
+        } else {
+            String::new()
+        };
+        // O buffer inteiro era clonado aqui a cada tecla. Ele não precisa
+        // ser: o que a marcação lê é o texto.
+        let Some(document) = self.editor_area.session.active() else {
+            return;
+        };
+        let texto = document.buffer.text().to_owned();
+        self.editor_area.pane.set_search_hits(&texto, &procurado);
+    }
+
+    /// `Enter` na barra: o cursor vai à próxima ocorrência, dando a volta.
+    pub fn go_to_next_search_hit(&mut self) -> bool {
+        let Some(document) = self.editor_area.session.active() else {
+            return false;
+        };
+        let texto = document.buffer.text().to_owned();
+        self.editor_area.pane.go_to_next_search_hit(&texto).is_some()
+    }
+
+    /// A área que o arranjo deu à barra de busca.
+    #[must_use]
+    pub fn search_box_area(&self) -> Rect {
+        self.host.bounds(SEARCH_POPUP_ID).unwrap_or_default()
+    }
+
+    /// Se a barra de busca está na tela.
+    #[must_use]
+    pub const fn search_is_open(&self) -> bool {
+        self.editor_area.search_open
+    }
+
+    /// As ocorrências marcadas, para os testes.
+    #[cfg(test)]
+    pub(super) fn search_hits(&self) -> &[(usize, usize)] {
+        self.editor_area.pane.search_hits()
+    }
+
+    /// Onde o cursor está agora, na forma que o histórico guarda.
+    ///
+    /// Documento sem arquivo por trás não entra: voltar para ele significaria
+    /// abrir um caminho que não existe.
+    pub(super) fn posicao_atual(&self) -> Option<Posicao> {
+        let caminho = self.active_document_path()?;
+        let posicao = self.cursor_position()?;
+        Some(Posicao {
+            caminho,
+            linha: posicao.line as usize,
+            coluna: posicao.column as usize,
+        })
+    }
+
+    /// `Ctrl+Alt+Esquerda`: volta um passo no caminho do `Ctrl+clique`.
+    ///
+    /// Devolve se houve para onde voltar, para quem chama saber se a tecla foi
+    /// consumida.
+    pub fn navigate_back(&mut self) -> bool {
+        let Some(atual) = self.posicao_atual() else {
+            return false;
+        };
+        let Some(destino) = self.editor_area.history.back(atual) else {
+            return false;
+        };
+        self.abrir_posicao(&destino);
+        true
+    }
+
+    /// `Ctrl+Alt+Direita`: avança um passo, desfazendo o último retorno.
+    pub fn navigate_forward(&mut self) -> bool {
+        let Some(atual) = self.posicao_atual() else {
+            return false;
+        };
+        let Some(destino) = self.editor_area.history.forward(atual) else {
+            return false;
+        };
+        self.abrir_posicao(&destino);
+        true
+    }
+
+    /// Pede à aplicação o arquivo do passo, na linha e coluna de onde se saiu.
+    fn abrir_posicao(&mut self, destino: &Posicao) {
+        self.commands.push(ApplicationCommand::OpenDocument(
+            OpenDocumentRequest::new(destino.caminho.clone())
+                .at(destino.linha, destino.coluna),
+        ));
+    }
+
+    /// Quantos passos há de cada lado, para os testes.
+    #[cfg(test)]
+    pub(super) const fn history_depth(&self) -> (usize, usize) {
+        self.editor_area.history.depth()
     }
 
     /// Executa o que o painel de edição pediu.
@@ -418,6 +542,11 @@ impl IdeShell {
                     self.active_text().and_then(|text| token_at(text, offset)),
                 ) {
                     self.context.status_message = format!("Go to definition: {token}");
+                    // De onde se está saindo, antes de sair: é isto que
+                    // `Ctrl+Alt+Esquerda` devolve depois.
+                    if let Some(origem) = self.posicao_atual() {
+                        self.editor_area.history.record(origem);
+                    }
                     self.commands
                         .push(ApplicationCommand::Navigate(NavigationRequest {
                             document_id,

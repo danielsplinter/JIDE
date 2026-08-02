@@ -62,6 +62,7 @@ impl IdeShell {
                 session: EditorSession::default(),
                 pane: EditorPane::new(EditorCapabilities::full()),
                 search_query: String::new(),
+                search_open: false,
                 navigated: None,
                 scrollbar: Scrollbar::new(EDITOR_SCROLLBAR_ID, ScrollbarOrientation::Vertical),
                 horizontal_scrollbar: Scrollbar::new(
@@ -72,6 +73,7 @@ impl IdeShell {
                 syntax_spans: HashMap::new(),
                 completion_items: Vec::new(),
                 completion_selected: 0,
+                history: NavigationHistory::default(),
             },
             terminal: TerminalPanelState {
                 console: Console::new(TERMINAL_CONSOLE_ID, Vec::new()).with_metrics(
@@ -99,6 +101,7 @@ impl IdeShell {
                 pty_rows: 24,
             },
             search: TypeSearchSurface::default(),
+            tab_switcher: TabSwitcherSurface::default(),
             inspection: InspectionSurface::default(),
             settings: SettingsSurface::default(),
             debug_panel: DebugPanelState {
@@ -186,6 +189,10 @@ impl IdeShell {
                 inspection::attach(&mut host, surface_layer_id(SurfaceKind::Inspection));
                 settings::attach(&mut host, surface_layer_id(SurfaceKind::Settings));
                 new_item::attach(&mut host, surface_layer_id(SurfaceKind::NewItem));
+                tab_switcher::attach(
+                    &mut host,
+                    surface_layer_id(SurfaceKind::TabSwitcher),
+                );
                 rename::attach(&mut host, surface_layer_id(SurfaceKind::Rename));
                 type_search::attach(&mut host, surface_layer_id(SurfaceKind::TypeSearch));
                 host

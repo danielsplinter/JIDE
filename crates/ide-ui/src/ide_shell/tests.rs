@@ -5044,3 +5044,528 @@ impl IdeShell {
         }
     }
 }
+
+/// `Ctrl+Tab` percorre as abas, e soltar o `Ctrl` ativa a escolhida.
+///
+/// O gesto tem três partes e nenhuma vale sozinha: segurar abre a janela na
+/// **próxima** aba, cada `Tab` desce um item, e a soltura conclui. Enquanto o
+/// `Ctrl` está segurado o editor não muda — o que anda é o destaque.
+#[test]
+fn holding_control_and_tabbing_walks_the_open_tabs() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    for nome in ["Primeiro.java", "Segundo.java", "Terceiro.java"] {
+        shell
+            .editor_area
+            .session
+            .open_memory(root.join(nome), "class A {}");
+    }
+    let terceiro = root.join("Terceiro.java");
+    // Documento em memória não é persistente, e `active_document_path` filtra
+    // por isso: quem responde aqui é a sessão.
+    let ativo = |shell: &IdeShell| -> Option<PathBuf> {
+        shell
+            .editor_area
+            .session
+            .active()
+            .map(|documento| documento.path.clone())
+    };
+    assert_eq!(ativo(&shell), Some(terceiro.clone()), "a última aberta é a ativa");
+
+    let ctrl = Modifiers {
+        control: true,
+        ..Modifiers::default()
+    };
+    // Primeiro `Tab`: a janela abre já na próxima aba — que, da última, é a
+    // primeira. Nada mudou no editor ainda.
+    shell.key_down_with_modifiers("Tab", ctrl);
+    assert!(shell.tab_switcher.is_open(), "a janela precisa abrir");
+    assert_eq!(shell.tab_switcher.scroll_state().0, 0);
+    assert_eq!(
+        ativo(&shell),
+        Some(terceiro.clone()),
+        "segurar o Ctrl nao pode trocar de aba ainda"
+    );
+
+    // Segundo `Tab`: desce mais um.
+    shell.key_down_with_modifiers("Tab", ctrl);
+    assert_eq!(shell.tab_switcher.scroll_state().0, 1);
+    assert_eq!(ativo(&shell), Some(terceiro));
+
+    // Soltar o `Ctrl` conclui.
+    assert!(shell.release_control(), "a soltura precisa concluir");
+    assert!(!shell.tab_switcher.is_open(), "e fechar a janela");
+    assert_eq!(
+        ativo(&shell),
+        Some(root.join("Segundo.java")),
+        "a aba destacada precisa ficar ativa"
+    );
+    // Soltar de novo, sem janela aberta, nao faz nada.
+    assert!(!shell.release_control());
+}
+
+/// A lista dá a volta, e uma aba só não abre janela nenhuma.
+#[test]
+fn the_tab_list_wraps_and_a_single_tab_opens_nothing() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    let ctrl = Modifiers {
+        control: true,
+        ..Modifiers::default()
+    };
+
+    // Uma aba só: não há para onde ir, e uma janela que não muda nada é ruído.
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("Unico.java"), "class A {}");
+    shell.key_down_with_modifiers("Tab", ctrl);
+    assert!(!shell.tab_switcher.is_open());
+    assert!(!shell.release_control());
+
+    // Com duas, o ciclo dá a volta e volta ao começo.
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("Outro.java"), "class B {}");
+    shell.key_down_with_modifiers("Tab", ctrl);
+    assert_eq!(shell.tab_switcher.scroll_state().0, 0);
+    shell.key_down_with_modifiers("Tab", ctrl);
+    assert_eq!(shell.tab_switcher.scroll_state().0, 1);
+    shell.key_down_with_modifiers("Tab", ctrl);
+    assert_eq!(
+        shell.tab_switcher.scroll_state().0,
+        0,
+        "do fim da lista, o proximo e o comeco"
+    );
+}
+
+/// `Tab` sem `Ctrl` continua sendo do editor.
+///
+/// Sem esta separação, indentar viraria troca de aba — e é o mesmo caractere
+/// chegando do sistema nos dois casos.
+#[test]
+fn tab_without_control_still_belongs_to_the_editor() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    for nome in ["Primeiro.java", "Segundo.java"] {
+        shell
+            .editor_area
+            .session
+            .open_memory(root.join(nome), "class A {}");
+    }
+    let antes = shell
+        .editor_area
+        .session
+        .active()
+        .map(|documento| documento.path.clone());
+    shell.key_down_with_modifiers("Tab", Modifiers::default());
+    assert!(
+        !shell.tab_switcher.is_open(),
+        "Tab sozinho nao abre a troca de abas"
+    );
+    assert_eq!(
+        shell
+            .editor_area
+            .session
+            .active()
+            .map(|documento| documento.path.clone()),
+        antes
+    );
+}
+
+/// O caminho do `Ctrl+clique` tem volta, e a volta tem ida.
+///
+/// Descer três camadas e voltar pelas mesmas três é o gesto inteiro. O que se
+/// guarda é **posição**, e não só arquivo: voltar devolve o cursor à linha de
+/// onde ele saiu, senão cair no topo do arquivo faria a volta perder o lugar.
+#[test]
+fn control_click_leaves_a_trail_that_can_be_walked_back() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    let ctrl_alt = Modifiers {
+        control: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+
+    // Sem histórico, as duas teclas não fazem nada — e nem por isso quebram.
+    shell.key_down_with_modifiers("ArrowLeft", ctrl_alt);
+    shell.key_down_with_modifiers("ArrowRight", ctrl_alt);
+    assert_eq!(shell.history_depth(), (0, 0));
+
+    // Descendo: cada Ctrl+clique registra de onde saiu.
+    let camadas = ["Primeiro.java", "Segundo.java", "Terceiro.java"];
+    for nome in camadas {
+        shell
+            .editor_area
+            .session
+            .open(&root.join(nome), "class A {\n    int a;\n}\n");
+    }
+    for _ in 0..2 {
+        shell.handle_editor_action(EditorAction::Navigate(0));
+    }
+    assert_eq!(
+        shell.history_depth(),
+        (1, 0),
+        "dois saltos do mesmo lugar sao um passo so"
+    );
+
+    // Um salto de outro lugar acrescenta um passo.
+    shell.editor_area.pane.set_cursor(6);
+    shell.handle_editor_action(EditorAction::Navigate(6));
+    assert_eq!(shell.history_depth(), (2, 0));
+
+    // Voltar: pede o arquivo na linha e coluna de onde se saiu.
+    shell.drain_application_commands();
+    assert!(shell.navigate_back());
+    let pedido = shell
+        .drain_application_commands()
+        .into_iter()
+        .find_map(|command| match command {
+            ApplicationCommand::OpenDocument(request) => Some(request),
+            _ => None,
+        });
+    let Some(pedido) = pedido else {
+        panic!("voltar precisa pedir a abertura do passo anterior");
+    };
+    assert_eq!(pedido.path, root.join("Terceiro.java"));
+    assert_eq!(
+        (pedido.line, pedido.column),
+        (0, 6),
+        "a volta devolve a coluna de onde se saiu, e nao o topo do arquivo"
+    );
+    assert_eq!(shell.history_depth(), (1, 1), "o que voltou fica adiante");
+
+    // Avançar desfaz a volta.
+    assert!(shell.navigate_forward());
+    assert_eq!(shell.history_depth(), (2, 0));
+
+    // E um salto novo descarta o que havia adiante.
+    assert!(shell.navigate_back());
+    assert_eq!(shell.history_depth(), (1, 1));
+    shell.handle_editor_action(EditorAction::Navigate(0));
+    assert_eq!(
+        shell.history_depth().1,
+        0,
+        "saltar de novo apaga o caminho para a frente"
+    );
+}
+
+/// A busca marca todas as ocorrências e o `Enter` anda por elas.
+///
+/// Marcar é o que diz onde elas estão; andar é o que leva até lá. Uma coisa sem
+/// a outra deixa o gesto pela metade — ver tudo sem chegar, ou chegar sem ver.
+#[test]
+fn the_search_bar_marks_every_hit_and_enter_walks_them() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    // "nome" aparece três vezes, em linhas diferentes.
+    shell.editor_area.session.open_memory(
+        root.join("Pedido.java"),
+        "class Pedido {\n    String nome;\n    String nome() { return nome; }\n}\n",
+    );
+
+    // Sem a barra aberta, nada é marcado.
+    assert!(shell.search_hits().is_empty());
+
+    shell.toggle_search();
+    for letra in ["n", "o", "m", "e"] {
+        shell.text_input(letra);
+    }
+    let marcas = shell.search_hits().to_vec();
+    assert_eq!(marcas.len(), 3, "as tres ocorrencias precisam ser marcadas");
+    let texto = "class Pedido {\n    String nome;\n    String nome() { return nome; }\n}\n";
+    for (inicio, fim) in &marcas {
+        assert_eq!(&texto[*inicio..*fim], "nome", "cada marca e a palavra");
+    }
+
+    // O `Enter` leva o cursor à primeira ocorrência depois dele, e dá a volta.
+    shell.editor_area.pane.set_cursor(0);
+    for esperada in [marcas[0].0, marcas[1].0, marcas[2].0, marcas[0].0] {
+        assert!(shell.go_to_next_search_hit(), "precisa haver para onde ir");
+        assert_eq!(
+            shell.editor_area.pane.cursor(),
+            esperada,
+            "o cursor anda de ocorrencia em ocorrencia e volta ao comeco"
+        );
+    }
+
+    // Apagar uma letra muda o que se procura, e as marcas acompanham.
+    shell.key_down("Backspace");
+    assert!(
+        shell.search_hits().len() >= 3,
+        "procurar por menos acha pelo menos o mesmo"
+    );
+
+    // Fechar a barra apaga o que se procurava e as marcas junto.
+    shell.toggle_search();
+    assert!(
+        shell.search_hits().is_empty(),
+        "destaque nao pode sobreviver a janela que o criou"
+    );
+}
+
+/// Procurar o que não existe não marca nada e não move o cursor.
+#[test]
+fn searching_for_what_is_not_there_marks_nothing() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("Pedido.java"), "class Pedido {}\n");
+    shell.toggle_search();
+    for letra in ["z", "z", "z"] {
+        shell.text_input(letra);
+    }
+    assert!(shell.search_hits().is_empty());
+    shell.editor_area.pane.set_cursor(3);
+    assert!(!shell.go_to_next_search_hit(), "sem ocorrencia, nao anda");
+    assert_eq!(shell.editor_area.pane.cursor(), 3, "e o cursor fica onde estava");
+}
+
+/// Quanto custa uma tecla na barra de busca, num arquivo grande.
+///
+/// Mede antes de consertar: a tecla no editor já teve dois episódios de lentidão
+/// (ADR-016 e ADR-017), e a resposta das duas vezes veio de medir, não de supor.
+#[test]
+#[ignore = "medicao; rodar com --ignored --nocapture"]
+fn typing_in_the_search_bar_costs_this_much() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    // Um arquivo grande de verdade: 3.000 linhas, como as classes que doem.
+    let mut texto = String::new();
+    for numero in 0..3_000 {
+        texto.push_str(&format!(
+            "    private String nome{numero} = \"valor{numero}\";\n"
+        ));
+    }
+    eprintln!("arquivo com {} KB", texto.len() / 1024);
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("Grande.java"), texto);
+
+    shell.toggle_search();
+    let inicio = std::time::Instant::now();
+    for letra in ["n", "o", "m", "e"] {
+        let tecla = std::time::Instant::now();
+        shell.text_input(letra);
+        eprintln!("tecla {letra:?}: {:?}", tecla.elapsed());
+    }
+    eprintln!(
+        "quatro teclas: {:?}, {} ocorrencias",
+        inicio.elapsed(),
+        shell.search_hits().len()
+    );
+}
+
+/// A ocorrência sob o cursor é a que a IDE marca como em foco.
+///
+/// É o que dá a borda. Sem escolher uma, todas ficam iguais e quem procura
+/// perde o próprio lugar assim que a tela rola.
+#[test]
+fn the_hit_under_the_cursor_is_the_focused_one() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("Pedido.java"), "nome e nome e nome");
+    shell.toggle_search();
+    for letra in ["n", "o", "m", "e"] {
+        shell.text_input(letra);
+    }
+    let marcas = shell.search_hits().to_vec();
+    assert_eq!(marcas.len(), 3);
+
+    // O `Enter` leva o cursor a uma ocorrência, e é ela que fica em foco.
+    shell.editor_area.pane.set_cursor(0);
+    for esperada in [marcas[1], marcas[2], marcas[0]] {
+        assert!(shell.go_to_next_search_hit());
+        shell.sync_editor_pane(Size::new(1280.0, 800.0));
+        assert_eq!(
+            shell.editor_area.pane.focused_search_hit(),
+            Some(esperada),
+            "a ocorrencia sob o cursor e a que recebe a borda"
+        );
+    }
+
+    // Fora de qualquer ocorrência, nenhuma fica em foco.
+    shell.editor_area.pane.set_cursor(4);
+    shell.sync_editor_pane(Size::new(1280.0, 800.0));
+    assert_eq!(shell.editor_area.pane.focused_search_hit(), None);
+}
+
+/// `Esc` fecha a busca e leva o destaque junto.
+///
+/// Marca que sobrevive à barra fica na tela sem nada dizendo de onde veio nem
+/// como tirar. É a mesma regra do fechamento por `Ctrl+F`, e ela precisava valer
+/// nos dois caminhos.
+#[test]
+fn escape_closes_the_search_and_takes_the_marks_with_it() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("Pedido.java"), "nome e nome e nome");
+    shell.toggle_search();
+    for letra in ["n", "o", "m", "e"] {
+        shell.text_input(letra);
+    }
+    assert_eq!(shell.search_hits().len(), 3);
+
+    shell.escape();
+    assert!(
+        shell.search_hits().is_empty(),
+        "o destaque tem de sair junto com a busca"
+    );
+    shell.sync_editor_pane(Size::new(1280.0, 800.0));
+    assert_eq!(shell.editor_area.pane.focused_search_hit(), None);
+}
+
+/// Clicar no editor tira o foco da barra, mas não a fecha.
+///
+/// Aberta e focada são coisas diferentes. Amarrá-las fazia o destaque sumir a
+/// cada clique no código, e reencontrar o lugar exigia digitar tudo de novo —
+/// justamente quando se clica para ler o que a busca achou.
+#[test]
+fn clicking_the_editor_unfocuses_the_search_without_closing_it() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("Pedido.java"), "nome e nome e nome");
+    shell.toggle_search();
+    for letra in ["n", "o", "m", "e"] {
+        shell.text_input(letra);
+    }
+    assert_eq!(shell.search_hits().len(), 3);
+
+    // Um clique no corpo do editor.
+    let size = Size::new(1280.0, 800.0);
+    let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
+    shell.pointer_down(Point::new(editor_x + 40.0, TITLE_HEIGHT + 80.0), size);
+
+    assert!(shell.search_is_open(), "a barra continua na tela");
+    assert_eq!(
+        shell.search_hits().len(),
+        3,
+        "e o destaque continua marcando o que se procurava"
+    );
+
+    // Digitar agora é código, e não consulta.
+    shell.text_input("x");
+    assert_eq!(
+        shell.search_hits().len(),
+        3,
+        "o texto digitado no editor nao entra na busca"
+    );
+
+    // `Ctrl+F` com a barra aberta e sem foco devolve o foco, e não fecha.
+    shell.toggle_search();
+    assert!(shell.search_is_open(), "voltar para a busca nao pode fecha-la");
+    shell.text_input("!");
+    assert!(
+        shell.search_hits().is_empty(),
+        "e agora o que se digita volta a ser consulta"
+    );
+
+    // Só o segundo `Ctrl+F`, já com o foco, fecha.
+    shell.toggle_search();
+    assert!(!shell.search_is_open());
+    assert!(shell.search_hits().is_empty());
+}
+
+/// Clicar **dentro** da barra devolve o foco, e o clique não atravessa.
+///
+/// A barra fica sobre o código. Sem perguntar ao anfitrião onde o ponto caiu, o
+/// clique nela moveria o cursor do editor embaixo — e o campo continuaria sem
+/// foco, de modo que digitar iria para o lugar errado.
+#[test]
+fn clicking_inside_the_search_bar_focuses_it_instead_of_the_code() {
+    let root = PathBuf::from("workspace");
+    let mut shell = IdeShell::from_tree(FileNode {
+        path: root.clone(),
+        is_directory: true,
+        children: Vec::new(),
+    });
+    shell
+        .editor_area
+        .session
+        .open_memory(root.join("Pedido.java"), "nome e nome e nome");
+    let size = Size::new(1280.0, 800.0);
+    shell.toggle_search();
+    shell.place_overlay(size);
+
+    // O clique no editor tira o foco, como já se sabia.
+    let editor_x = ACTIVITY_WIDTH + SIDEBAR_WIDTH;
+    shell.pointer_down(Point::new(editor_x + 40.0, TITLE_HEIGHT + 200.0), size);
+    assert!(shell.search_is_open());
+    let cursor_antes = shell.editor_area.pane.cursor();
+
+    // Agora um clique no meio da barra: o anfitrião diz que o ponto é dela.
+    let caixa = shell.search_box_area();
+    assert!(caixa.size.width > 0.0, "a barra precisa ter area declarada");
+    shell.pointer_down(
+        Point::new(
+            caixa.origin.x + caixa.size.width / 2.0,
+            caixa.origin.y + caixa.size.height / 2.0,
+        ),
+        size,
+    );
+    assert_eq!(
+        shell.editor_area.pane.cursor(),
+        cursor_antes,
+        "o clique na barra nao pode mover o cursor do codigo embaixo"
+    );
+
+    // E o foco voltou: o que se digita agora é consulta.
+    for letra in ["n", "o", "m", "e"] {
+        shell.text_input(letra);
+    }
+    assert_eq!(shell.search_hits().len(), 3, "digitar depois do clique e busca");
+}

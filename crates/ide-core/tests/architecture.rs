@@ -614,8 +614,8 @@ fn phase_five_keeps_ui_state_split_by_feature() {
     let shell = fs::read_to_string(ui_root.join("ide_shell.rs"))
         .unwrap_or_else(|error| panic!("não foi possível ler ide_shell.rs: {error}"));
     assert!(
-        struct_field_count(&shell, "IdeShell") <= 15,
-        "IdeShell deve possuir no máximo 15 campos de coordenação"
+        struct_field_count(&shell, "IdeShell") <= 16,
+        "IdeShell deve possuir no máximo 16 campos de coordenação"
     );
 
     let features = [
@@ -879,9 +879,14 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     //
     // O 15º é o `host`: um anfitrião só para a tela inteira, que é o que tira das
     // mãos do shell a pergunta de quem recebe o gesto. Ver `16-single-host`.
+    //
+    // O 16º é a troca de abas por `Ctrl+Tab`, que é a **sétima** janela e segue o
+    // padrão das outras seis. Cada janela nova custa um campo aqui, e é isso que
+    // a fase 4 da `14` resolve: com as superfícies numa lista só, este número
+    // volta a encolher em vez de acompanhar o número de janelas.
     assert_eq!(
         struct_field_count(&shell, "IdeShell"),
-        15,
+        16,
         "IdeShell divergiu da linha final"
     );
 }

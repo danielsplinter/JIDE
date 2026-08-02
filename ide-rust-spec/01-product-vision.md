@@ -101,6 +101,57 @@ Na inicialização e em toda troca de aba, a `TreeView` deve acompanhar o docume
 ativo: expandir todos os diretórios ancestrais, selecionar o arquivo
 correspondente e ajustar a rolagem vertical para deixá-lo visível.
 
+`Ctrl+F` abre a barra de busca no arquivo aberto — uma faixa de uma linha só, no
+alto da região do editor, com um campo e nada mais. Cada ocorrência do que se
+digita recebe **o mesmo destaque do `Ctrl+D`**, e `Enter` leva o cursor à próxima
+delas, dando a volta no fim do arquivo. Ao contrário do `Ctrl+D`, que é edição
+múltipla, aqui só o cursor anda: o texto não muda por causa da busca.
+
+A ocorrência **sob o cursor** ganha uma borda, e não outra cor: trocar a cor a
+tiraria do conjunto, e ela é uma das marcadas. Sem esse diferencial, todas ficam
+iguais e quem procura perde o próprio lugar assim que a tela rola.
+
+**Aberta e focada são estados diferentes.** Clicar no editor tira o foco da barra
+— o que se digita volta a ser código —, mas **não a fecha**: o destaque continua
+marcando o que se procurava, que é justamente o que se foi ler. Clicar **dentro**
+da barra devolve o foco, e o clique não atravessa até o código embaixo. Com a
+barra aberta e sem foco, `Ctrl+F` também devolve o foco em vez de fechar; fechar
+puniria quem clicou no código e voltou para continuar.
+
+A barra é **declarada ao anfitrião**, e não posicionada por conta própria: a área
+que ela ocupa é a mesma que o clique consulta, então desenho e gesto concordam
+sem ninguém repetir coordenada (ADR-020).
+
+Fechar é `Esc`, ou `Ctrl+F` com o foco já na barra. Fechar apaga o que se
+procurava **e** as marcas, senão o destaque sobreviveria à janela que o criou sem
+nada dizer de onde veio nem como tirar. Remarcar acontece a cada tecla, porque
+procurar é sobre o texto atual.
+
+`Ctrl+clique` desce uma camada — entra na definição —, e o caminho de volta é
+`Ctrl+Alt+Esquerda`, um passo por vez; `Ctrl+Alt+Direita` avança de novo. São
+duas pilhas, como as de um navegador: voltar tira de uma e põe na outra, e um
+salto novo **descarta o que havia adiante**, porque avançar para um lugar sem
+relação com onde se está é pior que não avançar.
+
+O que se guarda é **posição**, e não só arquivo: um `Ctrl+clique` também salta
+dentro do mesmo arquivo, e a volta devolve o cursor à linha e coluna de onde ele
+saiu. Dois saltos do mesmo lugar contam como um passo, e o histórico tem teto de
+cem — o consumo não pode acompanhar o tempo de uso.
+
+`Ctrl+Alt+seta` e não `Ctrl+seta` porque este último é, em todo editor, o pulo
+por palavra: ocupá-lo com navegação tiraria a tecla de quem a usa mais.
+
+`Ctrl+Tab` troca de aba com a janela aberta enquanto o `Ctrl` estiver segurado:
+uma lista das abas abertas, cada `Tab` desce um item, e **soltar o `Ctrl`** ativa
+a destacada. A janela nasce já na próxima aba — destacar a atual faria o gesto
+mais curto não levar a lugar nenhum — e a lista dá a volta ao chegar ao fim. Com
+uma aba só nada abre, porque não há para onde ir.
+
+É o único gesto da IDE em que a **soltura** de um modificador conclui alguma
+coisa. A aplicação avisa o shell quando o `Ctrl` cai, e não só quando ele desce;
+sem esse aviso a janela abriria e nunca fecharia. Um clique numa linha escolhe
+como a soltura faria, e um clique fora dispensa sem trocar de aba.
+
 `Ctrl+L` abre a busca de tipos do projeto e `Ctrl+Shift+L` reutiliza o mesmo
 `ModalHost`, campo e lista para buscar pelo conteúdo dos arquivos. No segundo
 modo, a varredura fica estritamente limitada aos descendentes de diretórios

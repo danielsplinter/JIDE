@@ -43,6 +43,9 @@ pub(super) struct NativeWindowState {
     pub(super) click_tracker: ClickTracker,
     pub(super) control_pressed: bool,
     pub(super) shift_pressed: bool,
+    /// `Alt` segurado. Com `Ctrl`, é o que separa as setas do editor do caminho
+    /// de volta da navegação.
+    pub(super) alt_pressed: bool,
     /// Botão primário segurado, o que caracteriza um arrasto em curso.
     ///
     /// É o que autoriza o relógio a continuar rolando a seleção; sem essa

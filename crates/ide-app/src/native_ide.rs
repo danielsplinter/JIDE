@@ -2054,8 +2054,20 @@ impl ApplicationHandler for NativeIde {
                 window.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
+                let control_antes = self.window.control_pressed;
                 self.window.control_pressed = modifiers.state().control_key();
                 self.window.shift_pressed = modifiers.state().shift_key();
+                self.window.alt_pressed = modifiers.state().alt_key();
+                // Soltar o `Ctrl` é o que conclui a troca de abas. É o único
+                // gesto da IDE em que a **soltura** de um modificador decide
+                // algo, e por isso ele precisa de um aviso próprio.
+                if control_antes
+                    && !self.window.control_pressed
+                    && let Some(shell) = self.ui.shell.as_mut()
+                    && shell.release_control()
+                {
+                    window.request_redraw();
+                }
                 let navigation_hover = self.ui.shell.as_ref().is_some_and(|shell| {
                     shell.navigation_hover(
                         self.window.cursor,
@@ -2184,6 +2196,14 @@ impl ApplicationHandler for NativeIde {
                         );
                     }
                 } else if self.window.control_pressed
+                    && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("f"))
+                {
+                    // A busca no arquivo aberto. Era `F3`, que ninguém procura
+                    // primeiro; `Ctrl+F` é o que a mão faz sozinha.
+                    if let Some(shell) = self.ui.shell.as_mut() {
+                        shell.toggle_search();
+                    }
+                } else if self.window.control_pressed
                     && matches!(&event.logical_key, Key::Character(value) if value.eq_ignore_ascii_case("d"))
                 {
                     if let Some(shell) = self.ui.shell.as_mut() {
@@ -2221,11 +2241,6 @@ impl ApplicationHandler for NativeIde {
                         Key::Named(NamedKey::Escape) => {
                             if let Some(shell) = self.ui.shell.as_mut() {
                                 shell.escape();
-                            }
-                        }
-                        Key::Named(NamedKey::F3) => {
-                            if let Some(shell) = self.ui.shell.as_mut() {
-                                shell.toggle_search();
                             }
                         }
                         Key::Named(NamedKey::F5) => {
@@ -2302,6 +2317,7 @@ impl ApplicationHandler for NativeIde {
                                     Modifiers {
                                         shift: self.window.shift_pressed,
                                         control: self.window.control_pressed,
+                                        alt: self.window.alt_pressed,
                                         ..Modifiers::default()
                                     },
                                 );
@@ -2317,6 +2333,7 @@ impl ApplicationHandler for NativeIde {
                                     Modifiers {
                                         shift: self.window.shift_pressed,
                                         control: self.window.control_pressed,
+                                        alt: self.window.alt_pressed,
                                         ..Modifiers::default()
                                     },
                                 );

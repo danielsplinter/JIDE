@@ -474,3 +474,49 @@ muda.
 está na ADR-013 — `GenerateConsoleCtrlEvent` exigiria Win32 direto, e o botão de
 parar continua sem interromper a aplicação. Nos dois, o comportamento desejado
 ficou escrito em vez de apagado, para voltar a valer se a decisão for revista.
+
+## ADR-024 — Git é uma crate, e a IDE não sabe como ele fala com o Git
+
+**Decisão:** o suporte a Git é **uma** crate, `ide-git`, com as capacidades como
+módulos internos. Os adapters — hoje a linha de comando — são `mod` privados. A
+IDE conhece os conceitos do Git e depende dos traits públicos; ela nunca vê
+processo, argumento, `stderr` ou biblioteca concreta. Ver a `22`.
+
+**Motivo:** o que separa a IDE da implementação não é a fronteira de crate, é a
+privacidade de módulo. `pub(crate)` faz o compilador garantir o que seria
+disciplina, e uma crate a mais não acrescentaria encapsulamento — acrescentaria
+arquivos. A regra da `12` decide o resto: crate para fronteira de dependência,
+substituição, isolamento ou distribuição; módulo para o que é compilado e
+alterado como uma unidade só. Git é o segundo caso.
+
+**O que se examinou antes de decidir:**
+
+- **Separar contrato e implementação em duas crates**, como a ERLibUi faz em
+  `ui-text-api`/`ui-text-cosmic`, resolve um problema que aqui não existe. Lá o
+  contrato é consumido por muitas crates e nenhuma pode arrastar `cosmic-text`
+  junto. Aqui o consumidor é um, e a troca de backend é um `feature` interno —
+  não uma dependência diferente no `Cargo.toml` de quem consome;
+- **Esconder o Git atrás de um contrato genérico de versionamento**, para que o
+  núcleo não saiba se é Git, Mercurial ou SVN, custa o modelo de domínio.
+  *Index*, *rebase*, *stash* e *detached HEAD* não existem nos outros e não
+  sobrevivem inteiros à generalização; o que resta é um denominador comum com o
+  qual não se desenha tela nenhuma. É a fragmentação prematura que a `12` recusa,
+  paga hoje por um segundo sistema de versionamento que ninguém pediu;
+- **Uma crate por capacidade** — branch, commit, merge — foi descartada pelo
+  mesmo argumento: elas evoluem e são distribuídas juntas.
+
+**Consequência:** a IDE **sabe** que existe Git, e isso é deliberado. Branch,
+commit, stage e conflito aparecem nos menus e no vocabulário de quem usa; fingir
+que não estão lá tornaria o código mais pobre que a tela. O que ela não sabe é
+como esses conceitos viram chamadas.
+
+**O caminho de volta é curto, e isso é de propósito.** No dia em que um segundo
+sistema de versionamento entrar, os traits e os tipos de domínio mudam de crate e
+`ide-git` passa a implementá-los. Nenhuma linha de lógica muda. Vale o mesmo
+raciocínio da ADR-023: decisão barata é a que se revisa sem reescrever.
+
+**A regra tem uma guarda, porque disciplina sozinha não segura.** Nenhuma crate
+fora de `ide-git` pode mencionar `Command::new("git")`, `git2` ou `gix`, e um
+teste falha no dia em que alguém tomar o atalho. Sem ela, o primeiro `push` com
+pressa vira uma chamada direta no painel, e a fronteira passa a existir só no
+documento.

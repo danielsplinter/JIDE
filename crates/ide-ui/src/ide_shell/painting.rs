@@ -217,6 +217,7 @@ impl IdeShell {
             SurfaceKind::TypeSearch => self.paint_type_search(commands, size),
             SurfaceKind::Inspection => self.paint_inspection(commands, size),
             SurfaceKind::NewItem => self.paint_new_item_dialog(commands, size),
+            SurfaceKind::TabSwitcher => self.paint_tab_switcher(commands, size),
             SurfaceKind::Settings => commands.extend(self.settings.paint(
                 &self.host,
                 &self.layout_context(),
@@ -487,28 +488,32 @@ impl IdeShell {
         {
             self.paint_completion(&mut commands, size, anchor);
         }
-        if self.context.focus == ShellFocus::Search {
-            // Também da biblioteca: a caixa é um campo de texto sobre uma
-            // superfície flutuante, e a IDE só escolhe o canto e o conteúdo.
-            let width = SEARCH_BOX_WIDTH.min((geo.editor_width - 24.0).max(100.0));
+        if self.editor_area.search_open {
+            // A área vem do arranjo, e não de uma conta aqui: é o que faz o
+            // clique e o desenho concordarem sem ninguém repetir coordenada.
+            // Ver ADR-020.
+            let caixa = self.host.bounds(SEARCH_POPUP_ID).unwrap_or_default();
             let mut surface = Popup::new(SEARCH_POPUP_ID).with_padding(6.0);
-            surface.set_content_size(Size::new(width - 12.0, SEARCH_BOX_HEIGHT - 12.0));
+            surface.set_content_size(Size::new(
+                (caixa.size.width - 12.0).max(0.0),
+                (caixa.size.height - 12.0).max(0.0),
+            ));
             surface.layout(
                 &self.layout_context(),
                 Rect::new(0.0, 0.0, size.width, size.height),
             );
-            surface.open_at(Point::new(
-                size.width - width - 12.0,
-                geo.content_top + 12.0,
-            ));
+            surface.open_at(caixa.origin);
             let mut search_paint = self.paint_context();
             surface.paint(&mut search_paint);
             if let Some(content) = surface.content_rect() {
                 let mut field = TextInput::new(SEARCH_INPUT_ID, &self.editor_area.search_query)
                     .with_placeholder("Buscar no arquivo");
-                // A busca só aparece quando tem o foco do shell, então o campo
-                // é desenhado no estado focado — é ali que o cursor está.
-                field.event(&mut EventContext::default(), &UiEvent::FocusGained);
+                // O campo mostra o cursor quando **ele** tem o foco. A barra
+                // continua na tela depois de um clique no editor, e ali o cursor
+                // que pisca é o do código.
+                if self.context.focus == ShellFocus::Search {
+                    field.event(&mut EventContext::default(), &UiEvent::FocusGained);
+                }
                 field.layout(&self.layout_context(), content);
                 field.paint(&mut search_paint);
             }

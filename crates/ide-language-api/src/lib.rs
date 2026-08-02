@@ -1,20 +1,19 @@
 #![doc = "Contratos versionados e independentes de linguagem."]
 
 use async_trait::async_trait;
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use ide_domain::{
     AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
     DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location, ProviderId,
     ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextPosition,
 };
+
+/// O cancelamento é do domínio, e não deste contrato.
+///
+/// Fica reexportado para quem já o importava daqui, e para que o contrato de
+/// linguagens continue legível sem ir procurar noutra crate. Ver a ADR-024.
+pub use ide_domain::CancellationToken;
 use thiserror::Error;
 
 pub const LANGUAGE_API_VERSION: ApiVersion = ApiVersion { major: 2, minor: 0 };
@@ -89,27 +88,6 @@ impl LanguageActivationContext {
 pub struct MemberAccess {
     pub receiver: String,
     pub prefix: String,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl CancellationToken {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
 }
 
 #[derive(Clone, Debug)]

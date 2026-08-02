@@ -382,6 +382,72 @@ impl IdeShell {
         }
     }
 
+    // ---- Troca de abas ----
+
+    /// `Ctrl+Tab`: abre a janela na próxima aba, ou desce mais uma.
+    ///
+    /// O gesto inteiro é este mais a soltura do `Ctrl`. Enquanto ele estiver
+    /// segurado nada muda no editor — o que se vê é o destaque andando.
+    pub fn cycle_tab(&mut self) {
+        if self.tab_switcher.is_open() {
+            self.tab_switcher.advance();
+            return;
+        }
+        let abas: Vec<AbaAberta> = self
+            .editor_area
+            .session
+            .tabs()
+            .map(|documento| AbaAberta {
+                documento: documento.id.0,
+                caminho: documento.path.clone(),
+            })
+            .collect();
+        let ativa = self.editor_area.session.active_id().and_then(|ativo| {
+            self.editor_area
+                .session
+                .tabs()
+                .position(|documento| documento.id == ativo)
+        });
+        let raiz = self.explorer.workspace.path.clone();
+        self.tab_switcher.open(abas, ativa, &raiz);
+    }
+
+    /// O `Ctrl` soltou: ativa a aba destacada e fecha a janela.
+    ///
+    /// A aplicação chama isto sempre que o modificador cai, sem perguntar se a
+    /// janela estava aberta — quem sabe disso é a janela, e ela responde nada
+    /// quando não há o que concluir.
+    pub fn release_control(&mut self) -> bool {
+        let Some(documento) = self.tab_switcher.commit() else {
+            return false;
+        };
+        let _ = self.editor_area.session.activate(DocumentId(documento));
+        self.sync_editor_tabs();
+        self.sync_explorer_to_active();
+        true
+    }
+
+    pub(super) fn paint_tab_switcher(&self, commands: &mut Vec<PaintCommand>, size: Size) {
+        let layout = self.layout_context();
+        let mut paint = self.paint_context();
+        if self
+            .tab_switcher
+            .paint(&self.host, &layout, &mut paint, size)
+        {
+            commands.extend(paint.into_commands());
+        }
+    }
+
+    /// O clique dentro da janela de abas escolhe, como soltar o `Ctrl` faria.
+    pub(super) fn tab_switcher_pointer_down(&mut self, point: Point, size: Size) {
+        self.place_overlay(size);
+        if let Some(documento) = self.tab_switcher.pointer_down(&mut self.host, point) {
+            let _ = self.editor_area.session.activate(DocumentId(documento));
+            self.sync_editor_tabs();
+            self.sync_explorer_to_active();
+        }
+    }
+
     // ---- Criar item ----
     #[must_use]
     pub const fn new_item_dialog_open(&self) -> bool {

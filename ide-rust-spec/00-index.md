@@ -71,6 +71,7 @@ Este é um requisito arquitetural obrigatório.
 - [19 — Varredura e indexação: sair do bloqueio](19-indexing-and-scanning.md)
 - [20 — Índice no disco, memória como cache](20-index-on-disk.md) — **completa**: abrir caiu de 251 s para 3,7 s, a memória de 178 para 103 MB, uma tecla lê 2 mil registros em vez de 340 mil e um fonte alterado custa 3,5 ms
 - [21 — O que muda fora da IDE](21-file-watcher.md) — **completa**: o que muda no disco chega ao índice em ~700 ms sem ação do usuário, e a conferência da abertura caiu de 4,66 s para 0,70 s
+- [22 — Git](22-git-integration.md) — **não iniciada**: a crate `ide-git`, uma só, com as capacidades em módulos e a implementação atrás de traits
 
 ## Escopo inicial, e o que dele já existe
 

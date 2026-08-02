@@ -23,11 +23,13 @@ use crate::text::{
 };
 
 use crate::editor::{
-    CachedSyntax, EditorAction, EditorAreaState, EditorCapabilities, EditorPane, SyntaxView,
+    CachedSyntax, EditorAction, EditorAreaState, EditorCapabilities, EditorPane, NavigationHistory,
+    SyntaxView,
 };
 use crate::explorer::{
     ExplorerState, id as explorer_id, items as explorer_items, visible_row as visible_tree_row,
 };
+use crate::ide_shell::tab_switcher::{AbaAberta, TabSwitcherSurface};
 use crate::ide_shell::type_search::TypeSearchSurface;
 
 use crate::settings::SettingsPage;
@@ -196,6 +198,12 @@ const COMPLETION_POPUP_ID: WidgetId = WidgetId(10_026);
 const COMPLETION_LIST_ID: WidgetId = WidgetId(10_027);
 const SEARCH_POPUP_ID: WidgetId = WidgetId(10_028);
 const SEARCH_INPUT_ID: WidgetId = WidgetId(10_029);
+/// A faixa que leva a barra de busca ao alto do editor, encostada à direita.
+///
+/// Existe porque um filho de sobreposição com tamanho declarado cola no canto
+/// **superior esquerdo**; a faixa preenche a área e alinha ao fim, e é ela que
+/// põe a barra do outro lado sem ninguém calcular coordenada.
+const SEARCH_STRIP_ID: WidgetId = WidgetId(10_482);
 /// Linhas visíveis da lista de completação antes de precisar rolar.
 const COMPLETION_VISIBLE_ROWS: usize = 8;
 const COMPLETION_ROW_HEIGHT: f32 = 24.0;
@@ -242,15 +250,17 @@ enum SurfaceKind {
     Inspection,
     NewItem,
     Settings,
+    TabSwitcher,
 }
 
-const SURFACES: [SurfaceKind; 6] = [
+const SURFACES: [SurfaceKind; 7] = [
     SurfaceKind::Rename,
     SurfaceKind::Generate,
     SurfaceKind::TypeSearch,
     SurfaceKind::Inspection,
     SurfaceKind::NewItem,
     SurfaceKind::Settings,
+    SurfaceKind::TabSwitcher,
 ];
 
 /// Uma camada da tela, do fundo para a frente.
@@ -270,9 +280,10 @@ enum Layer {
 ///
 /// É `SURFACES` lida de trás para frente — a ordem em que as janelas são
 /// desenhadas — com a lista de completação declarada no lugar que ela ocupa.
-const OVERLAY: [Layer; 7] = [
+const OVERLAY: [Layer; 8] = [
     Layer::Surface(SurfaceKind::Settings),
     Layer::Surface(SurfaceKind::NewItem),
+    Layer::Surface(SurfaceKind::TabSwitcher),
     Layer::Surface(SurfaceKind::Inspection),
     Layer::Completion,
     Layer::Surface(SurfaceKind::TypeSearch),
@@ -357,7 +368,21 @@ fn declare_frame(host: &mut UiHost) {
         LayoutStyle {
             flex_grow: 1.0,
             min_height: Some(EDITOR_MIN_HEIGHT),
+            // Sobreposição: a barra de busca vive **sobre** o código, e não
+            // empurrando-o para baixo. O texto continua ocupando a área inteira
+            // do nó, que é o que a pintura lê.
+            direction: LayoutDirection::Overlay,
             ..coluna
+        },
+    );
+    let _ = host.declare(FRAME_EDITOR_ID, SEARCH_STRIP_ID, LayoutStyle::default());
+    let _ = host.declare(
+        SEARCH_STRIP_ID,
+        SEARCH_POPUP_ID,
+        LayoutStyle {
+            width: Some(SEARCH_BOX_WIDTH),
+            height: Some(SEARCH_BOX_HEIGHT),
+            ..LayoutStyle::default()
         },
     );
     // Os cinco passos dividem a fileira em partes iguais, com folga entre eles.
@@ -465,6 +490,8 @@ pub struct IdeShell {
     editor_area: EditorAreaState,
     terminal: TerminalPanelState,
     search: TypeSearchSurface,
+    /// A troca de abas por `Ctrl+Tab`.
+    tab_switcher: TabSwitcherSurface,
     inspection: InspectionSurface,
     settings: SettingsSurface,
     debug_panel: DebugPanelState,
@@ -666,6 +693,20 @@ impl IdeShell {
                 }
             }
         }
+        // A faixa da busca é declarada uma vez e escondida quando a barra não
+        // está na tela: nó escondido não entra no instantâneo, e por isso não
+        // recebe clique nem ocupa área.
+        self.host.set_style(
+            SEARCH_STRIP_ID,
+            LayoutStyle {
+                direction: LayoutDirection::Row,
+                main_align: MainAlign::End,
+                cross_align: CrossAlign::Start,
+                padding: EdgeInsets::only(12.0, 0.0, 0.0, 12.0),
+                hidden: !self.editor_area.search_open,
+                ..LayoutStyle::default()
+            },
+        );
         let _ = self.host.layout(size);
 
         // A moldura é o fundo da pilha: as janelas a cobrem.
@@ -787,6 +828,7 @@ impl IdeShell {
             SurfaceKind::TypeSearch => self.search.is_open(),
             SurfaceKind::Inspection => self.inspection.is_open(),
             SurfaceKind::NewItem => self.new_item.is_open(),
+            SurfaceKind::TabSwitcher => self.tab_switcher.is_open(),
             SurfaceKind::Settings => self.settings.is_open(),
         }
     }
@@ -799,6 +841,7 @@ impl IdeShell {
             SurfaceKind::TypeSearch => self.close_type_search(),
             SurfaceKind::Inspection => self.close_inspection(),
             SurfaceKind::NewItem => self.close_new_item_dialog(),
+            SurfaceKind::TabSwitcher => self.tab_switcher.close(),
             // Esc nas configurações é cancelar: fechar sem descartar o que foi
             // mexido salvaria pela porta dos fundos.
             SurfaceKind::Settings => self.settings.cancel(),
@@ -812,6 +855,7 @@ impl IdeShell {
             SurfaceKind::TypeSearch => self.type_search_pointer_down(point, size),
             SurfaceKind::Inspection => self.inspection_pointer_down(point, size),
             SurfaceKind::NewItem => self.new_item_pointer_down(point, size),
+            SurfaceKind::TabSwitcher => self.tab_switcher_pointer_down(point, size),
             SurfaceKind::Settings => self.settings_dialog_pointer_down(point, size),
         }
     }
@@ -869,7 +913,7 @@ impl IdeShell {
                 true
             }
             SurfaceKind::Settings => true,
-            SurfaceKind::Inspection | SurfaceKind::NewItem => false,
+            SurfaceKind::Inspection | SurfaceKind::NewItem | SurfaceKind::TabSwitcher => false,
         }
     }
 
@@ -881,6 +925,10 @@ impl IdeShell {
             SurfaceKind::TypeSearch => self.type_search_key(key),
             SurfaceKind::Inspection => self.inspection_key(key, modifiers),
             SurfaceKind::NewItem => self.new_item_key(key),
+            // A janela de abas só responde ao ciclo e ao Escape, e os dois
+            // chegam por fora: o ciclo antes do roteamento, o Escape pelo
+            // fechamento genérico.
+            SurfaceKind::TabSwitcher => false,
             SurfaceKind::Settings => {
                 let outcome = self.settings.key(key, modifiers);
                 self.apply_settings_outcome(outcome);
@@ -905,6 +953,7 @@ impl IdeShell {
             SurfaceKind::TypeSearch => self.type_search_text_input(text),
             SurfaceKind::Inspection => self.inspection_text_input(text),
             SurfaceKind::NewItem => self.new_item_text_input(text),
+            SurfaceKind::TabSwitcher => false,
             SurfaceKind::Settings => self.settings.text_input(text),
         }
     }
@@ -938,9 +987,11 @@ impl IdeShell {
         {
             return;
         }
-        if self.context.focus == ShellFocus::Search {
-            self.editor_area.search_query.clear();
-            self.context.focus = ShellFocus::Editor;
+        if self.editor_area.search_open {
+            self.close_search();
+            // As marcas saem com a busca. Deixá-las para trás encheria a tela de
+            // destaque sem nada que dissesse de onde veio nem como tirar.
+            self.refresh_search_hits();
         }
     }
 
@@ -976,6 +1027,18 @@ impl IdeShell {
         }
         if let Some(surface) = self.open_surface() {
             self.surface_pointer_down(surface, point, size);
+            return;
+        }
+        // A barra de busca está sobre o código: sem perguntar ao anfitrião, o
+        // clique nela atravessaria e moveria o cursor do editor. Quem diz que o
+        // ponto caiu ali é a área declarada, e não uma conta repetida aqui.
+        if self.editor_area.search_open
+            && self
+                .host
+                .hit_test(point)
+                .any(|id| id == SEARCH_POPUP_ID || id == SEARCH_INPUT_ID)
+        {
+            self.context.focus = ShellFocus::Search;
             return;
         }
         if point.y < TITLE_HEIGHT && self.action_buttons_pointer_down(point) {
@@ -1165,7 +1228,10 @@ impl IdeShell {
         }
         match self.context.focus {
             ShellFocus::Editor => self.edit_active(text),
-            ShellFocus::Search => self.editor_area.search_query.push_str(text),
+            ShellFocus::Search => {
+                self.editor_area.search_query.push_str(text);
+                self.refresh_search_hits();
+            }
             // O texto digitado vai ao shell caractere a caractere; o eco dele
             // é que aparece na grade. A IDE não guarda linha de comando.
             ShellFocus::Terminal => {
@@ -1187,6 +1253,25 @@ impl IdeShell {
     /// o estado das teclas modificadoras precisa chegar aqui — o nome da tecla
     /// sozinho não diz se é para indentar ou recolher.
     pub fn key_down_with_modifiers(&mut self, key: &str, modifiers: Modifiers) {
+        // Antes de tudo: com o `Ctrl` segurado, `Tab` é troca de aba e não
+        // indentação. Precisa vir antes do roteamento por janela porque a
+        // própria janela de abas é quem estaria aberta, e ela não recebe teclas.
+        if modifiers.control && key.eq_ignore_ascii_case("tab") {
+            self.cycle_tab();
+            return;
+        }
+        // O caminho de volta do `Ctrl+clique`. Vem antes do editor porque as
+        // setas são dele, e com `Ctrl+Alt` elas deixam de ser.
+        if modifiers.control && modifiers.alt {
+            if key.eq_ignore_ascii_case("arrowleft") {
+                self.navigate_back();
+                return;
+            }
+            if key.eq_ignore_ascii_case("arrowright") {
+                self.navigate_forward();
+                return;
+            }
+        }
         if self.context_menu_key(key, modifiers) {
             return;
         }
@@ -1211,11 +1296,19 @@ impl IdeShell {
                 ShellFocus::Editor => self.backspace(),
                 ShellFocus::Search => {
                     self.editor_area.search_query.pop();
+                    self.refresh_search_hits();
                 }
                 // Apagar é do shell: ele é quem sabe o que há na linha, e é
                 // ele que redesenha. A IDE só entrega a tecla.
                 ShellFocus::Terminal => self.send_terminal_key(TerminalKey::Backspace),
                 _ => {}
+            }
+        } else if self.context.focus == ShellFocus::Search {
+            // Na barra, `Enter` é o gesto inteiro: leva o cursor à próxima
+            // ocorrência e dá a volta no fim do arquivo. O resto do texto entra
+            // por `text_input`, e as setas continuam sendo do editor.
+            if key.eq_ignore_ascii_case("enter") {
+                self.go_to_next_search_hit();
             }
         } else if self.context.focus == ShellFocus::Terminal {
             // Seta, `Tab`, `Enter`, `Ctrl+C`: todas vão ao shell, e é ele quem
@@ -1303,6 +1396,7 @@ mod rename;
 mod settings;
 mod surfaces;
 mod terminal_area;
+mod tab_switcher;
 mod type_search;
 
 #[cfg(test)]

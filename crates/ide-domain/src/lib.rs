@@ -1,6 +1,12 @@
 #![doc = "Tipos de domínio independentes de linguagem e infraestrutura."]
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -270,6 +276,37 @@ pub struct ReferencesRequest {
     pub document_id: DocumentId,
     pub position: TextPosition,
     pub include_declaration: bool,
+}
+
+/// Aviso de que ninguém mais quer o resultado desta operação.
+///
+/// Mora aqui, e não no contrato de linguagens onde nasceu, porque cancelar não
+/// é assunto de linguagem: quem lê o disco, fala com o Git ou consulta um
+/// processo externo cancela pelo mesmo motivo. Um segundo tipo com o mesmo nome
+/// noutra crate discordaria um dia, e a discordância apareceria como
+/// comportamento estranho e não como erro de compilação. Ver a `22`.
+///
+/// Quem observa o token decide onde olhar. Ele não interrompe trabalho em curso;
+/// ele diz que o trabalho deixou de valer.
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(test)]

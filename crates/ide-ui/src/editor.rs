@@ -14,6 +14,7 @@ use crate::text::{
     byte_at_column, line_column, next_boundary, offset_for_line_column, previous_boundary,
 };
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use ide_domain::{CompletionItem, DocumentId, SyntaxSnapshot};
 use ide_workspace::{EditorSession, TextBuffer};
@@ -30,6 +31,13 @@ pub(super) struct EditorAreaState {
     pub(super) session: EditorSession,
     pub(super) pane: EditorPane,
     pub(super) search_query: String,
+    /// Se a barra de busca está na tela.
+    ///
+    /// Separado do foco de propósito: clicar no editor tira o foco da barra —
+    /// para digitar código, e não consulta —, mas não a fecha. Amarrar as duas
+    /// coisas fazia o destaque sumir a cada clique, e reencontrar o lugar exigia
+    /// digitar tudo de novo.
+    pub(super) search_open: bool,
     pub(super) navigated: Option<(usize, usize)>,
     pub(super) scrollbar: Scrollbar,
     /// Barra lateral, para as linhas que passam da área visível.
@@ -42,6 +50,72 @@ pub(super) struct EditorAreaState {
     pub(super) syntax_spans: HashMap<DocumentId, CachedSyntax>,
     pub(super) completion_items: Vec<CompletionItem>,
     pub(super) completion_selected: usize,
+    /// Por onde a navegação passou, para poder voltar.
+    pub(super) history: NavigationHistory,
+}
+
+/// Onde o cursor estava antes de um salto.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Posicao {
+    pub(super) caminho: PathBuf,
+    pub(super) linha: usize,
+    pub(super) coluna: usize,
+}
+
+/// O caminho percorrido a `Ctrl+clique`, e o caminho de volta.
+///
+/// Duas pilhas, como a de um navegador: `Ctrl+Alt+Esquerda` tira de `atras` e
+/// põe em `adiante`, `Ctrl+Alt+Direita` faz o contrário. Um salto novo **descarta
+/// o que havia adiante** — avançar para um lugar sem relação com onde se está
+/// seria pior que não avançar.
+///
+/// Guarda **posição**, e não só arquivo: um `Ctrl+clique` também salta dentro do
+/// mesmo arquivo, e voltar precisa devolver o cursor à linha de onde ele saiu.
+#[derive(Default)]
+pub(super) struct NavigationHistory {
+    atras: Vec<Posicao>,
+    adiante: Vec<Posicao>,
+}
+
+/// Quantos passos o histórico guarda.
+///
+/// Cem é bem mais do que uma sessão de leitura percorre, e o teto existe para o
+/// consumo não acompanhar o tempo de uso.
+const MAXIMO: usize = 100;
+
+impl NavigationHistory {
+    /// Registra de onde se está saindo, antes do salto.
+    pub(super) fn record(&mut self, origem: Posicao) {
+        if self.atras.last() == Some(&origem) {
+            // Dois saltos do mesmo lugar não são dois passos de volta.
+            return;
+        }
+        self.atras.push(origem);
+        if self.atras.len() > MAXIMO {
+            self.atras.remove(0);
+        }
+        self.adiante.clear();
+    }
+
+    /// Volta um passo, guardando o lugar atual para poder avançar de novo.
+    pub(super) fn back(&mut self, atual: Posicao) -> Option<Posicao> {
+        let destino = self.atras.pop()?;
+        self.adiante.push(atual);
+        Some(destino)
+    }
+
+    /// Avança um passo, desfazendo o último `back`.
+    pub(super) fn forward(&mut self, atual: Posicao) -> Option<Posicao> {
+        let destino = self.adiante.pop()?;
+        self.atras.push(atual);
+        Some(destino)
+    }
+
+    /// Quantos passos há de cada lado, para os testes.
+    #[cfg(test)]
+    pub(super) const fn depth(&self) -> (usize, usize) {
+        (self.atras.len(), self.adiante.len())
+    }
 }
 
 pub(super) struct CachedSyntax {
@@ -175,6 +249,12 @@ pub struct EditorPane {
     history: UndoHistory,
     /// Edição em várias ocorrências, aberta pelo `Ctrl+D`.
     multi: Option<MultiEdit>,
+    /// Ocorrências do que se procura na barra de busca, em bytes.
+    ///
+    /// Separadas do `multi` de propósito: aquilo é **edição** múltipla, e digitar
+    /// com ele ativo troca todas as marcas de uma vez. A busca só mostra onde
+    /// está, e o texto não muda por causa dela.
+    search_hits: Vec<(usize, usize)>,
 }
 
 /// Ocorrências marcadas juntas, editadas ao mesmo tempo.
@@ -226,6 +306,7 @@ impl EditorPane {
             syntax_key: None,
             source: None,
             pending_reveal: None,
+            search_hits: Vec::new(),
             history: UndoHistory::default(),
             multi: None,
         }
@@ -681,6 +762,60 @@ impl EditorPane {
         true
     }
 
+    /// Marca todas as ocorrências do que se procura.
+    ///
+    /// Texto vazio apaga as marcas: parar de procurar é deixar de destacar.
+    ///
+    /// **Uma passada só, em bytes.** A tentação era reusar `next_occurrence`, que
+    /// o `Ctrl+D` chama; ela devolve deslocamentos em caracteres e, para isso,
+    /// monta um `Vec<char>` com o arquivo inteiro **a cada chamada**. Uma vez por
+    /// tecla é aceitável; uma vez por ocorrência custou 600 ms por tecla num
+    /// arquivo de 123 KB com três mil ocorrências — e a letra digitada só
+    /// aparecia depois disso. `match_indices` faz a mesma busca numa varredura, e
+    /// já entrega byte, que é o que se guarda aqui.
+    pub fn set_search_hits(&mut self, text: &str, needle: &str) {
+        self.search_hits.clear();
+        if needle.is_empty() {
+            return;
+        }
+        self.search_hits.extend(
+            text.match_indices(needle)
+                .map(|(inicio, achado)| (inicio, inicio + achado.len())),
+        );
+    }
+
+    /// Leva o cursor à próxima ocorrência, dando a volta no fim do arquivo.
+    ///
+    /// Devolve a linha para quem precisa revelá-la; `None` quando não há
+    /// ocorrência nenhuma.
+    pub fn go_to_next_search_hit(&mut self, text: &str) -> Option<usize> {
+        let alvo = self
+            .search_hits
+            .iter()
+            .find(|(start, _)| *start > self.cursor)
+            .or_else(|| self.search_hits.first())?;
+        self.cursor = alvo.0;
+        self.selection = None;
+        let (linha, _) = line_column(text, self.cursor);
+        self.pending_reveal = Some(linha);
+        Some(linha)
+    }
+
+    /// A ocorrência sob o cursor, em bytes — a que recebe a borda.
+    #[must_use]
+    pub fn focused_search_hit(&self) -> Option<(usize, usize)> {
+        self.search_hits
+            .iter()
+            .copied()
+            .find(|(start, end)| self.cursor >= *start && self.cursor < *end)
+    }
+
+    /// As ocorrências marcadas pela busca, para os testes.
+    #[must_use]
+    pub fn search_hits(&self) -> &[(usize, usize)] {
+        &self.search_hits
+    }
+
     /// Confirma a edição múltipla, mantendo o texto como está.
     pub fn confirm_occurrences(&mut self) -> bool {
         if self.multi.take().is_none() {
@@ -1107,10 +1242,21 @@ impl EditorPane {
             .multi
             .iter()
             .flat_map(|multi| multi.ranges.iter())
+            .chain(self.search_hits.iter())
             .map(|(start, end)| {
                 EditorRange::new(chars_before(text, *start), chars_before(text, *end))
             })
             .collect();
+        // A ocorrência de agora é a que contém o cursor. Só a busca tem foco:
+        // no `Ctrl+D` todas as marcas recebem a mesma tecla, e distinguir uma
+        // delas diria algo que não é verdade.
+        let focada = self
+            .search_hits
+            .iter()
+            .find(|(start, end)| self.cursor >= *start && self.cursor < *end)
+            .map(|(start, end)| {
+                EditorRange::new(chars_before(text, *start), chars_before(text, *end))
+            });
         let bounds = self.bounds;
         let scroll_offset = self.scroll_offset;
         let scroll_x = self.scroll_x;
@@ -1151,6 +1297,9 @@ impl EditorPane {
         // Depois do cursor: `set_cursor` significa "cursor movido, sem seleção".
         editor.set_selection(selection);
         editor.set_extra_selections(extra);
+        // Qual delas está sob o cursor: é a que ganha borda. Sem isto todas são
+        // iguais, e quem procura perde o próprio lugar assim que a tela rola.
+        editor.set_focused_extra(focada);
         editor.set_scroll_offset(scroll_offset);
         editor.set_scroll_x(scroll_x);
         if let Some(line) = reveal {
