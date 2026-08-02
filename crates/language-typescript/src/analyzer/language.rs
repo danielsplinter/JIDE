@@ -18,8 +18,8 @@ use ide_language_api::{
     LanguageError, LanguageMetadata, LanguageProvider,
 };
 
-use crate::parser::TypeScriptParser;
-use crate::syntax;
+use super::parser::TypeScriptParser;
+use super::syntax;
 
 pub const TYPESCRIPT_LANGUAGE_ID: &str = "typescript";
 pub const TYPESCRIPT_PROVIDER_ID: &str = "typescript.syntax";

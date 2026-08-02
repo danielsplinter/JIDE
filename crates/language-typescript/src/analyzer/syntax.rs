@@ -9,7 +9,7 @@ use ide_domain::{
 };
 use tree_sitter::{Node, Tree};
 
-use crate::lines::{LineIndex, node_range};
+use super::lines::{LineIndex, node_range};
 
 /// O que uma passada pela árvore produz.
 pub(crate) struct SyntaxPass {

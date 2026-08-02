@@ -9,10 +9,16 @@ rust-version.workspace = true
 async-trait.workspace = true
 ide-domain = { path = "../ide-domain" }
 ide-language-api = { path = "../ide-language-api" }
+ide-process = { path = "../ide-process" }
+ide-project = { path = "../ide-project" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 tree-sitter.workspace = true
 tree-sitter-typescript.workspace = true
 
 [dev-dependencies]
+ide-process = { path = "../ide-process" }
 pollster.workspace = true
 
 [lints]

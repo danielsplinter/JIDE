@@ -4,9 +4,8 @@
 #![doc = "Toolchain, build e o analisador externo entram aqui como módulos nas"]
 #![doc = "fases seguintes da `23`, e não como crates novas."]
 
-mod language;
-mod lines;
-mod parser;
-mod syntax;
+mod analyzer;
+mod project;
 
-pub use language::{TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID, TypeScriptLanguageProvider};
+pub use analyzer::{TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID, TypeScriptLanguageProvider};
+pub use project::{NPM_BUILD_SYSTEM_ID, NpmAdapter, TsConfig, TsConfigError, npm::scripts, tsconfig};

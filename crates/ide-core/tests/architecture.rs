@@ -259,9 +259,18 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
         // `the_java_analyzer_cannot_reach_process_or_project`.
         // A segunda linguagem custou **uma** crate, que é o que a fase 8 da `12`
         // veio comprar. No formato antigo teria custado até seis.
+        //
+        // `ide-process` e `ide-project` entraram na fase 2 da `23`, com o
+        // sistema de build de npm — e é por isso que o analisador dela passou a
+        // precisar da mesma cerca que o de Java tem.
         (
             "language-typescript",
-            BTreeSet::from(["ide-domain", "ide-language-api"]),
+            BTreeSet::from([
+                "ide-domain",
+                "ide-language-api",
+                "ide-process",
+                "ide-project",
+            ]),
         ),
         (
             "language-java",
@@ -350,7 +359,7 @@ fn the_analyzer_of_a_language_cannot_reach_process_or_project() {
     let forbidden = ["ide_process", "ide_project"];
     let mut debt = BTreeSet::new();
 
-    for language in ["language-java"] {
+    for language in ["language-java", "language-typescript"] {
         let analyzer = root.join("crates").join(language).join("src/analyzer");
         assert!(
             analyzer.is_dir(),

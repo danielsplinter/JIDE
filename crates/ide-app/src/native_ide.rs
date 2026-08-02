@@ -187,9 +187,10 @@ impl NativeIde {
         let secondary = self.tool_home(&java_contribution::language_id(), ToolRole::Secondary);
         java_contribution::register_build_systems(
             &mut self.project.build_systems,
-            processes,
+            processes.clone(),
             secondary,
         );
+        typescript_contribution::register_build_systems(&mut self.project.build_systems, processes);
         let (tool_sender, tool_events) = mpsc::channel();
         self.tasks.sender = Some(tool_sender);
         self.tasks.events = Some(tool_events);
