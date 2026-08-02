@@ -1,4 +1,12 @@
 #![doc = "Supervisão de processos externos com timeout e cancelamento."]
+#![doc = ""]
+#![doc = "Duas formas, e elas não se substituem: `execute` roda e coleta, para"]
+#![doc = "quem responde e morre; `converse` abre uma conversa, para quem vive"]
+#![doc = "junto com a IDE. Ver a fase 3a da `23`."]
+
+mod conversation;
+
+pub use conversation::ProcessConversation;
 
 use std::{
     collections::HashMap,
@@ -46,6 +54,22 @@ pub trait ProcessSupervisor: Send + Sync {
     async fn terminate(&self, process_id: ProcessId) -> Result<(), ProcessError>;
     async fn status(&self, process_id: ProcessId) -> Result<ProcessStatus, ProcessError>;
     async fn execute(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessError>;
+
+    /// Abre uma conversa com um processo que vai continuar rodando.
+    ///
+    /// O `timeout` do pedido é ignorado aqui: quem conversa não tem prazo para
+    /// terminar — quem tem prazo é cada pergunta, e isso é de quem pergunta.
+    ///
+    /// Tem padrão porque as duas formas são independentes: um supervisor pode
+    /// legitimamente saber só rodar e coletar, e os dublês de teste de quem
+    /// executa build são exatamente isso. Quem não implementa **recusa**, e não
+    /// finge — a recusa é uma resposta, e quem chama já sabe degradar.
+    async fn converse(
+        &self,
+        _request: ProcessRequest,
+    ) -> Result<Box<dyn ProcessConversation>, ProcessError> {
+        Err(ProcessError::ConversationUnsupported)
+    }
 }
 
 #[derive(Default)]
@@ -92,6 +116,13 @@ impl ProcessSupervisor for NativeProcessSupervisor {
             Some(status) => Ok(ProcessStatus::Exited(status.code().unwrap_or(-1))),
             None => Ok(ProcessStatus::Running),
         }
+    }
+
+    async fn converse(
+        &self,
+        request: ProcessRequest,
+    ) -> Result<Box<dyn ProcessConversation>, ProcessError> {
+        Ok(Box::new(conversation::NativeConversation::start(request)?))
     }
 
     async fn execute(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessError> {
@@ -160,6 +191,10 @@ pub enum ProcessError {
     UnknownProcess(ProcessId),
     #[error("process spawn timed out")]
     Timeout,
+    #[error("este supervisor não abre conversas")]
+    ConversationUnsupported,
+    #[error("a conversa com o processo já foi encerrada")]
+    ConversationClosed,
     #[error("process I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }

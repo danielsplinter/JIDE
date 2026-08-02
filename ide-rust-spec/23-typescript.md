@@ -613,7 +613,9 @@ respeita `primary` e `fallbacks` quando há seleção; o `CancellationToken` est
 contrato; `wait_until_indexed` existe para o analisador dizer que ainda monta; e
 `max_active_providers` é 8, folgado para três providers.
 
-#### Fase 3a — Um processo com quem se conversa
+#### Fase 3a — Um processo com quem se conversa ✅ Concluída
+
+**Estado: concluída em 02/08/2026.**
 
 Nenhuma linha de TypeScript. `ProcessSupervisor` ganha a forma longeva:
 processo com stdin e stdout ligados, escrita e leitura por linha, encerramento
@@ -625,8 +627,30 @@ conversacional seria pagar complexidade em quem não precisa.
 
 **Critério:** um processo de teste que ecoa linhas recebe três pedidos e responde
 os três, na ordem. Matá-lo por fora é percebido, e não trava quem espera. E
-encerrar o supervisor não deixa processo órfão — o que é verificável contando
-processos antes e depois.
+encerrar o supervisor não deixa processo órfão.
+
+##### Feita, e o que ela revelou
+
+**A saída de erro precisou ser drenada, e isso não é zelo.** Ligar o canal de
+erro e nunca lê-lo enche o buffer do sistema operacional, e o processo filho
+trava ao escrever nele — um analisador falante travaria sozinho, sem erro nenhum
+a apontar. A saída vai para o registro, numa tarefa própria.
+
+**`converse` ganhou implementação padrão, e por um motivo e não por preguiça.**
+Acrescentá-la como obrigatória quebrou três dublês de teste de quem executa
+build — e eles estão certos em não conversar: as duas formas são independentes, e
+um supervisor pode legitimamente saber só rodar e coletar. O padrão **recusa**, e
+recusar é uma resposta; quem chama já sabe degradar. A suíte voltou ao verde sem
+nenhum teste alterado.
+
+**O fim da saída é o sinal de morte.** `receive` devolve `None` quando o canal
+fecha, e é disso que a fase 3b vai depender para cair no provider nativo. Sem
+esse sinal, quem espera resposta esperaria para sempre — que é o defeito que a
+ADR-025 promete não ter.
+
+**Os testes são presos ao Windows**, como o de `execute` que já existia: não há
+processo de eco portátil, e o laço é de PowerShell. Está anotado no arquivo que é
+ali que se acrescenta o equivalente no dia em que a IDE rodar noutro lugar.
 
 #### Fase 3b — O provider que cai quando o de baixo falha
 
