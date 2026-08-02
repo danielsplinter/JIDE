@@ -260,3 +260,33 @@ fn the_type_search_finds_what_the_project_declares() {
     assert!(runtime.block_on(ativo.shutdown()).is_ok());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A instalação detectada diz qual versão é.
+///
+/// A IDE resolve o Node pelo `PATH` do próprio processo, e quem troca de versão
+/// com um gerenciador muda o `PATH` do **shell** — a IDE aberta não vê a troca.
+/// Não há como ler o shell de outra pessoa; há como mostrar qual foi encontrada,
+/// e é isso que permite a quem usa perceber que não é a esperada.
+#[test]
+#[ignore = "exige Node no PATH"]
+fn the_detected_node_says_which_version_it_is() {
+    use ide_toolchain_api::{DetectionContext, ToolchainProvider};
+    let runtime = runtime();
+    let encontradas = match runtime.block_on(
+        language_typescript::NodeToolchainProvider::new()
+            .detect(DetectionContext { workspace_root: None }),
+    ) {
+        Ok(encontradas) => encontradas,
+        Err(erro) => panic!("a detecção precisa responder: {erro}"),
+    };
+    let Some(node) = encontradas.first() else {
+        panic!("com Node no PATH, a detecção precisa achar alguma coisa");
+    };
+    let Some(versao) = node.version.as_deref() else {
+        panic!("a instalação precisa dizer a versão, e não só o caminho");
+    };
+    assert!(
+        versao.starts_with('v'),
+        "a versão vem como o Node a relata: {versao}"
+    );
+}

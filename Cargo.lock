@@ -883,6 +883,7 @@ dependencies = [
  "ide-ui",
  "ide-workspace",
  "language-java",
+ "language-style",
  "language-typescript",
  "pollster",
  "rfd",
@@ -1222,6 +1223,18 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-java",
  "zip",
+]
+
+[[package]]
+name = "language-style"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ide-domain",
+ "ide-language-api",
+ "pollster",
+ "tree-sitter",
+ "tree-sitter-css",
 ]
 
 [[package]]
@@ -2880,6 +2893,16 @@ dependencies = [
  "regex",
  "regex-syntax",
  "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-css"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ad6489794d41350d12a7fbe520e5199f688618f43aace5443980d1ddcf1b29e"
+dependencies = [
+ "cc",
  "tree-sitter-language",
 ]
 

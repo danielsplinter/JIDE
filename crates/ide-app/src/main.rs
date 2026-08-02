@@ -5,6 +5,7 @@ mod debug;
 mod java_contribution;
 mod native_ide;
 mod run;
+mod style_contribution;
 mod typescript_contribution;
 mod ui_bridge;
 mod window;

@@ -14,7 +14,7 @@ use crate::controllers::{
     WorkspaceController,
 };
 use crate::ui_bridge::{UiAction, UiBridge};
-use crate::{debug, java_contribution, run, typescript_contribution};
+use crate::{debug, java_contribution, run, style_contribution, typescript_contribution};
 use ide_application::{
     ApplicationCommand, DebugRequest, IdeEvent, NavigationRequest, NewItemRequest,
     OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, SearchScope,
@@ -174,6 +174,14 @@ impl NativeIde {
         self.languages
             .contributions
             .register(typescript)
+            .map_err(|error| error.to_string())?;
+        let estilo = style_contribution::contribution();
+        language_host
+            .register(estilo.provider.clone())
+            .map_err(|error| error.to_string())?;
+        self.languages
+            .contributions
+            .register(estilo)
             .map_err(|error| error.to_string())?;
         self.languages.host = Some(language_host);
         let tree = self

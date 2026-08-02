@@ -62,10 +62,11 @@ impl ToolchainProvider for NodeToolchainProvider {
         let Some(home) = home_of(&executable) else {
             return Ok(Vec::new());
         };
+        let version = version_of(&home);
         Ok(vec![ToolchainInstallation {
             id: self.toolchain_id(),
             home,
-            version: None,
+            version,
         }])
     }
 
@@ -99,12 +100,39 @@ impl ToolchainProvider for NodeToolchainProvider {
                 home.display()
             )));
         }
+        let version = version_of(&home);
         Ok(ToolchainInstallation {
             id: self.toolchain_id(),
             home,
-            version: None,
+            version,
         })
     }
+}
+
+/// A versão que esta instalação relata, perguntando a ela.
+///
+/// **Existe para a IDE poder mostrá-la.** Ela resolve o Node pelo `PATH` do
+/// próprio processo, e quem troca de versão com um gerenciador muda o `PATH` do
+/// **shell** — a IDE aberta não vê a troca. Não há como ler o shell de outra
+/// pessoa; há como dizer qual foi encontrada, e deixar quem usa perceber que não
+/// é a esperada.
+///
+/// Sem número, a barra de estado mostrava só o caminho, e um caminho que é um
+/// link simbólico não diz versão nenhuma — que é exatamente como um gerenciador
+/// de versões instala.
+///
+/// Falhar é silencioso: uma instalação sem versão legível continua utilizável, e
+/// recusá-la por não saber se apresentar seria pior.
+fn version_of(home: &Path) -> Option<String> {
+    let saida = std::process::Command::new(node_executable(home))
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !saida.status.success() {
+        return None;
+    }
+    let texto = String::from_utf8_lossy(&saida.stdout).trim().to_owned();
+    (!texto.is_empty()).then_some(texto)
 }
 
 #[cfg(windows)]

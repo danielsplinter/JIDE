@@ -81,6 +81,17 @@ envelheceu. Some junto.
 cobrem o que se faz com CSS dentro de uma IDE de aplicação; completação de
 propriedade e resolução de seletor são um projeto próprio.
 
+**Feito ✅, e `.scss` entrou junto** — porque é o que um projeto Angular usa de
+verdade: o `angular.json` do projeto de referência declara `"style": "scss"`, e
+ele tem 37 arquivos `.scss` e **zero** `.css`. Um provider só de CSS não
+atenderia arquivo nenhum.
+
+A gramática é a de CSS: a de SCSS não compila com o MSVC daqui. Medido, ela erra
+**quatro nós de sessenta e dois** numa amostra pequena de SCSS — `$cor`, `&:hover`
+e `@mixin` viram erro num arquivo correto. Por isso o **diagnóstico sai só para
+`.css`**: realçar quase tudo é útil, acusar o que não se entende é mentira. É a
+mesma regra que a `24` fixa para o template.
+
 **JavaScript fica de fora por honestidade.** O provider de TypeScript leria `.js`
 mal e sem tipo nenhum. Um arquivo sem provider abre como texto, que é uma resposta
 correta — melhor do que meia resposta com cara de resposta inteira.
