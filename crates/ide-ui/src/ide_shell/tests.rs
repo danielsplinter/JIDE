@@ -12,7 +12,7 @@ use crate::ide_shell::settings::SettingsDialogGeometry;
 use crate::ide_shell::inspection::InspectionGeometry;
 use crate::search::{ContentSearchHit, TypeSearchHit};
 use ide_application::{NewItemRequest, NewItemTemplate};
-use ide_domain::{AccessorCandidate, AccessorPlan, Location, SyntaxHighlightKind};
+use ide_domain::{AccessorCandidate, AccessorPlan, Location, SyntaxHighlightKind, ToolRole};
 use ui_components::TreeItem;
 use ui_editor::TokenKind;
 
@@ -2853,7 +2853,13 @@ fn the_secondary_tool_answers_the_pointer() {
         shell
             .drain_application_commands()
             .iter()
-            .any(|comando| matches!(comando, ApplicationCommand::BrowseSecondaryTool)),
+            .any(|comando| matches!(
+                comando,
+                ApplicationCommand::BrowseTool {
+                    role: ToolRole::Secondary,
+                    ..
+                }
+            )),
         "o botão precisa pedir o seletor de pasta"
     );
 }
@@ -4933,18 +4939,32 @@ impl IdeShell {
 
     #[cfg(test)]
     fn take_settings_jdk_result(&mut self) -> Option<usize> {
-        match self
-            .take_test_command(|command| matches!(command, ApplicationCommand::SelectToolchain(_)))
-        {
-            Some(ApplicationCommand::SelectToolchain(index)) => Some(index),
+        match self.take_test_command(|command| {
+            matches!(
+                command,
+                ApplicationCommand::SelectTool {
+                    role: ToolRole::Primary,
+                    ..
+                }
+            )
+        }) {
+            Some(ApplicationCommand::SelectTool { index, .. }) => Some(index),
             _ => None,
         }
     }
 
     #[cfg(test)]
     fn take_browse_jdk_request(&mut self) -> bool {
-        self.take_test_command(|command| matches!(command, ApplicationCommand::BrowseToolchain))
-            .is_some()
+        self.take_test_command(|command| {
+            matches!(
+                command,
+                ApplicationCommand::BrowseTool {
+                    role: ToolRole::Primary,
+                    ..
+                }
+            )
+        })
+        .is_some()
     }
 
     #[cfg(test)]

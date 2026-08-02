@@ -256,7 +256,7 @@ impl ProjectModel {
 
     /// Diretórios de saída e artefatos de dependências, na ordem de resolução.
     #[must_use]
-    pub fn classpath_entries(&self) -> Vec<PathBuf> {
+    pub fn library_paths(&self) -> Vec<PathBuf> {
         let mut entries = Vec::new();
         for module in &self.modules {
             push_unique(&mut entries, module.output_directory.clone());
@@ -392,7 +392,7 @@ mod tests {
         let mut model = ProjectModel::new(BuildSystemId("gradle".to_owned()), "/p", "demo");
         model.modules = vec![module("app", "/p/app"), module("lib", "/p/lib")];
 
-        let entries = model.classpath_entries();
+        let entries = model.library_paths();
         assert_eq!(entries.len(), 5);
         assert_eq!(entries[0], PathBuf::from("/p/app/target/classes"));
         assert_eq!(entries[4], PathBuf::from("/repo/shared-2.0.jar"));

@@ -278,6 +278,32 @@ pub struct ReferencesRequest {
     pub include_declaration: bool,
 }
 
+/// Qual das escolhas de uma seção de configurações.
+///
+/// A contribuição declara os rótulos em `SettingsSection`; ninguém acima sabe o
+/// que a ferramenta é. Em Java a principal é o JDK e a segunda o Maven; noutra
+/// linguagem serão outras, ou não haverá segunda.
+///
+/// Mora aqui porque três camadas precisavam do mesmo conceito — a configuração
+/// que grava, o comando que diz o que o usuário clicou e a janela que desenha —
+/// e três definições da mesma coisa discordam um dia. Ver a fase 0 da `23`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum ToolRole {
+    Primary,
+    Secondary,
+}
+
+impl ToolRole {
+    /// Chave estável para gravar em arquivo.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Secondary => "secondary",
+        }
+    }
+}
+
 /// Aviso de que ninguém mais quer o resultado desta operação.
 ///
 /// Mora aqui, e não no contrato de linguagens onde nasceu, porque cancelar não

@@ -53,7 +53,7 @@ impl TaskExecutor for JavaTaskExecutor {
         let output_directory = context.workspace_root.join(".er-ide").join("classes");
         let mut builder =
             ClasspathBuilder::new().workspace_defaults(&context.workspace_root, &output_directory);
-        for entry in context.classpath_entries {
+        for entry in context.library_paths {
             builder = builder.with_entry(entry);
         }
         let classpath = builder.build();

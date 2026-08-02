@@ -205,7 +205,7 @@ fn application_contracts_accept_a_fake_language_without_java_dependencies() {
             workspace_root: "fake-workspace".into(),
             source_files: vec!["sample.fake".into()],
             active_document: None,
-            classpath_entries: Vec::new(),
+            library_paths: Vec::new(),
             installation: ToolchainInstallation {
                 id: ToolchainId("fake-runtime".to_owned()),
                 home: "fake-runtime".into(),

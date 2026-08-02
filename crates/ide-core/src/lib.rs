@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use ide_domain::ToolRole;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
@@ -32,25 +33,6 @@ impl Default for AppConfig {
             run: RunConfig::default(),
             debug: DebugConfig::default(),
             toolchains: ToolchainConfig::default(),
-        }
-    }
-}
-
-/// Qual das duas escolhas de uma seção de configurações.
-///
-/// A contribuição declara os rótulos em `SettingsSection`; o núcleo só sabe que
-/// há uma principal e, às vezes, uma segunda ao lado.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ToolRole {
-    Primary,
-    Secondary,
-}
-
-impl ToolRole {
-    const fn key(self) -> &'static str {
-        match self {
-            Self::Primary => "primary",
-            Self::Secondary => "secondary",
         }
     }
 }

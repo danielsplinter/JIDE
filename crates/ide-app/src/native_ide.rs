@@ -910,6 +910,59 @@ impl NativeIde {
         }
     }
 
+    /// Abre o seletor de pasta para a ferramenta de uma seção.
+    ///
+    /// A seção volta a ser uma linguagem aqui, pelo registro de contribuições —
+    /// a tela nunca soube de qual linguagem falava, e é assim que deve ser.
+    fn browse_tool(&mut self, section: &str, role: ToolRole) {
+        let Some(language) = self.languages.contributions.language_for_section(section) else {
+            tracing::warn!(section, "seção de configurações sem contribuição");
+            return;
+        };
+        match role {
+            ToolRole::Primary => self.choose_toolchain_home(&language),
+            ToolRole::Secondary => self.browse_secondary_tool(&language),
+        }
+    }
+
+    /// Aplica a instalação escolhida na lista de uma seção.
+    fn select_tool(&mut self, section: &str, role: ToolRole, index: usize) {
+        let Some(language) = self.languages.contributions.language_for_section(section) else {
+            tracing::warn!(section, "seção de configurações sem contribuição");
+            return;
+        };
+        match role {
+            ToolRole::Primary => self.select_toolchain(&language, index),
+            ToolRole::Secondary => self.select_secondary_tool(&language, index),
+        }
+    }
+
+    /// A segunda ferramenta ainda é atendida por linguagem, uma a uma.
+    ///
+    /// A principal já é genérica — o registro de toolchains é por linguagem
+    /// desde sempre. A segunda não é: o que existe é um controlador com detecção
+    /// e rótulos próprios, e generalizá-lo é trabalho de quando houver uma
+    /// segunda linguagem com segunda ferramenta.
+    ///
+    /// O que a fase 0 da `23` conserta é o comando **poder** distinguir: antes,
+    /// o botão genérico chamava a ferramenta de Java direto, e com duas seções
+    /// não haveria como dizer qual foi clicada.
+    fn browse_secondary_tool(&mut self, language: &LanguageId) {
+        if language == &java_contribution::language_id() {
+            self.choose_maven_home();
+            return;
+        }
+        tracing::warn!(language = language.0, "seção sem segunda ferramenta");
+    }
+
+    fn select_secondary_tool(&mut self, language: &LanguageId, index: usize) {
+        if language == &java_contribution::language_id() {
+            self.select_maven(index);
+            return;
+        }
+        tracing::warn!(language = language.0, "seção sem segunda ferramenta");
+    }
+
     /// Ferramenta em vigor para uma seção, resolvida no projeto aberto.
     ///
     /// A ordem — sobreposição do projeto, padrão global, nada — está em
@@ -1595,14 +1648,12 @@ impl NativeIde {
                     }
                     self.open_toolchain_selector(&java_contribution::language_id());
                 }
-                UiAction::BrowseToolchain => {
-                    self.choose_toolchain_home(&java_contribution::language_id());
-                }
-                UiAction::SelectToolchain(index) => {
-                    self.select_toolchain(&java_contribution::language_id(), index);
-                }
-                UiAction::SelectSecondaryTool(index) => self.select_maven(index),
-                UiAction::BrowseSecondaryTool => self.choose_maven_home(),
+                UiAction::BrowseTool { section, role } => self.browse_tool(&section, role),
+                UiAction::SelectTool {
+                    section,
+                    role,
+                    index,
+                } => self.select_tool(&section, role, index),
                 UiAction::BuildProject => self.start_project_build(),
                 UiAction::ReimportProject => self.reimport_project(),
                 UiAction::RunProject => self.run_application(),
@@ -1845,9 +1896,9 @@ impl NativeIde {
             workspace_root: workspace,
             source_files,
             active_document: active,
-            classpath_entries: model
+            library_paths: model
                 .as_ref()
-                .map(ProjectModel::classpath_entries)
+                .map(ProjectModel::library_paths)
                 .unwrap_or_default(),
             installation,
         };

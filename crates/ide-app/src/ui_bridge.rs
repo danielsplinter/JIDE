@@ -6,6 +6,7 @@ use ide_application::{
     ApplicationCommand, DebugRequest, EventBus, IdeEvent, NavigationRequest, NewItemRequest,
     OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, TaskId,
 };
+use ide_domain::ToolRole;
 use ide_ui::IdeShell;
 
 pub(super) enum UiAction {
@@ -16,10 +17,15 @@ pub(super) enum UiAction {
     OpenProject,
     OpenSettings,
     OpenToolchainSettings,
-    BrowseToolchain,
-    SelectToolchain(usize),
-    SelectSecondaryTool(usize),
-    BrowseSecondaryTool,
+    BrowseTool {
+        section: String,
+        role: ToolRole,
+    },
+    SelectTool {
+        section: String,
+        role: ToolRole,
+        index: usize,
+    },
     BuildProject,
     ReimportProject,
     RunProject,
@@ -38,8 +44,6 @@ impl From<ApplicationCommand> for UiAction {
     fn from(command: ApplicationCommand) -> Self {
         match command {
             ApplicationCommand::OpenDocument(value) => Self::OpenDocument(value),
-            ApplicationCommand::SelectSecondaryTool(value) => Self::SelectSecondaryTool(value),
-            ApplicationCommand::BrowseSecondaryTool => Self::BrowseSecondaryTool,
             ApplicationCommand::RenameDocument(value) => Self::RenameDocument(value),
             ApplicationCommand::SaveDocument(value) => Self::SaveDocument(value),
             ApplicationCommand::ReloadWorkspace => Self::ReloadWorkspace,
@@ -47,8 +51,18 @@ impl From<ApplicationCommand> for UiAction {
             ApplicationCommand::OpenProject => Self::OpenProject,
             ApplicationCommand::OpenSettings => Self::OpenSettings,
             ApplicationCommand::OpenToolchainSettings => Self::OpenToolchainSettings,
-            ApplicationCommand::BrowseToolchain => Self::BrowseToolchain,
-            ApplicationCommand::SelectToolchain(value) => Self::SelectToolchain(value),
+            ApplicationCommand::BrowseTool { section, role } => {
+                Self::BrowseTool { section, role }
+            }
+            ApplicationCommand::SelectTool {
+                section,
+                role,
+                index,
+            } => Self::SelectTool {
+                section,
+                role,
+                index,
+            },
             ApplicationCommand::BuildProject => Self::BuildProject,
             ApplicationCommand::ReimportProject => Self::ReimportProject,
             ApplicationCommand::RunProject => Self::RunProject,

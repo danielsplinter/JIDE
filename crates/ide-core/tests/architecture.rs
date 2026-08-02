@@ -397,6 +397,10 @@ fn neutral_crates_expose_no_language_specific_public_api() {
         "npm",
         "tsconfig",
         "angular",
+        // Não é nome de linguagem, é de plataforma — e vazou do mesmo jeito,
+        // como `classpath_entries` num contrato de tarefa que não pode saber o
+        // que é uma JVM.
+        "classpath",
     ];
     let mut actual_debt = BTreeSet::new();
 

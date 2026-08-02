@@ -42,7 +42,14 @@ pub struct TaskExecutionContext {
     pub workspace_root: PathBuf,
     pub source_files: Vec<PathBuf>,
     pub active_document: Option<DocumentSnapshot>,
-    pub classpath_entries: Vec<PathBuf>,
+    /// Onde o código já compilado está: a saída do próprio projeto e os
+    /// artefatos das dependências, na ordem de resolução.
+    ///
+    /// Chamava-se `classpath_entries`, que é vocabulário da JVM num contrato que
+    /// não pode ter nenhum. Cada linguagem chama isto de um jeito — *classpath*,
+    /// referências, `sys.path` —, e o contrato descreve a coisa, não o nome que
+    /// uma delas lhe dá. Ver a fase 0 da `23`.
+    pub library_paths: Vec<PathBuf>,
     pub installation: ToolchainInstallation,
 }
 
@@ -170,6 +177,22 @@ impl ContributionRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.contributions.is_empty()
+    }
+
+    /// Qual linguagem declarou esta seção de configurações.
+    ///
+    /// A janela devolve o identificador da seção que recebeu o clique, e é aqui
+    /// que ele volta a ser uma linguagem. A tela não conhece linguagem nenhuma;
+    /// ela ecoa o que lhe foi entregue no catálogo.
+    #[must_use]
+    pub fn language_for_section(&self, section_id: &str) -> Option<LanguageId> {
+        self.contributions.values().find_map(|contribution| {
+            contribution
+                .settings_sections
+                .iter()
+                .any(|section| section.id == section_id)
+                .then(|| contribution.descriptor.language_id.clone())
+        })
     }
 
     #[must_use]

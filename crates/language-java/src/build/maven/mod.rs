@@ -661,7 +661,7 @@ mod tests {
         assert!(model.contains_source(&root.join("app/src/main/java/Main.java")));
         assert!(
             model
-                .classpath_entries()
+                .library_paths()
                 .contains(&root.join("app/target/classes"))
         );
         let _ = fs::remove_dir_all(root);

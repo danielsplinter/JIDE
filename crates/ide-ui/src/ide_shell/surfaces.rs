@@ -10,7 +10,9 @@ use super::generate::GenerateOutcome;
 use super::inspection::InspectionRequest;
 use super::new_item::NewItemOutcome;
 use super::rename::RenameOutcome;
-use super::settings::{SettingsOutcome, ToolSlot};
+use ide_domain::ToolRole;
+
+use super::settings::SettingsOutcome;
 use super::type_search::{TypeSearchOutcome, WorkspaceSearchMode};
 use super::*;
 use crate::debugging::DebugVariableView;
@@ -567,6 +569,18 @@ impl IdeShell {
         self.apply_settings_outcome(outcome);
     }
 
+    /// Identificador da seção pelo índice que a janela devolveu.
+    ///
+    /// A tela guarda a lista que recebeu no catálogo e ecoa o identificador; ela
+    /// não sabe o que a seção significa nem a que linguagem pertence. Quem
+    /// traduz de volta é o registro de contribuições, na aplicação.
+    fn section_id(&self, index: usize) -> Option<String> {
+        self.catalog
+            .settings_sections
+            .get(index)
+            .map(|section| section.id.clone())
+    }
+
     /// Executa o que a janela de configurações decidiu.
     ///
     /// A janela não alcança a fila de comandos nem a barra de status: ela diz o
@@ -574,23 +588,31 @@ impl IdeShell {
     pub(super) fn apply_settings_outcome(&mut self, outcome: SettingsOutcome) {
         match outcome {
             SettingsOutcome::Idle => {}
-            SettingsOutcome::Browse(ToolSlot::Primary) => {
-                self.commands.push(ApplicationCommand::BrowseToolchain);
-            }
-            SettingsOutcome::Browse(ToolSlot::Secondary) => {
-                self.commands.push(ApplicationCommand::BrowseSecondaryTool);
+            SettingsOutcome::Browse { section, role } => {
+                if let Some(section) = self.section_id(section) {
+                    self.commands
+                        .push(ApplicationCommand::BrowseTool { section, role });
+                }
             }
             SettingsOutcome::Save {
-                toolchain,
+                section,
+                primary,
                 secondary,
             } => {
-                if let Some(index) = toolchain {
-                    self.commands
-                        .push(ApplicationCommand::SelectToolchain(index));
-                }
-                if let Some(index) = secondary {
-                    self.commands
-                        .push(ApplicationCommand::SelectSecondaryTool(index));
+                let Some(section) = self.section_id(section) else {
+                    return;
+                };
+                for (role, index) in [
+                    (ToolRole::Primary, primary),
+                    (ToolRole::Secondary, secondary),
+                ] {
+                    if let Some(index) = index {
+                        self.commands.push(ApplicationCommand::SelectTool {
+                            section: section.clone(),
+                            role,
+                            index,
+                        });
+                    }
                 }
             }
             SettingsOutcome::Attach { host, port } => {

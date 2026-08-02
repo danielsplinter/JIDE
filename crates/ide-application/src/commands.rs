@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use ide_domain::{DocumentId, TextRange};
+use ide_domain::{DocumentId, TextRange, ToolRole};
 use thiserror::Error;
 
 use crate::TaskId;
@@ -23,12 +23,19 @@ pub enum ApplicationCommand {
     OpenProject,
     OpenSettings,
     OpenToolchainSettings,
-    BrowseToolchain,
-    SelectToolchain(usize),
-    /// Escolhe a segunda ferramenta da seção pelo índice na lista.
-    SelectSecondaryTool(usize),
-    /// Abre o seletor de pasta para apontar a segunda ferramenta.
-    BrowseSecondaryTool,
+    /// Abre o seletor de pasta para apontar uma instalação.
+    ///
+    /// Carrega **de qual seção** o clique veio. Antes não carregava, e
+    /// funcionava porque só existia uma: com duas, o comando não teria como
+    /// dizer qual foi clicada, e a aplicação ligava o botão genérico direto na
+    /// ferramenta de Java. Ver a fase 0 da `23` e a ADR-026.
+    BrowseTool { section: String, role: ToolRole },
+    /// Escolhe uma das instalações detectadas, pelo índice na lista.
+    SelectTool {
+        section: String,
+        role: ToolRole,
+        index: usize,
+    },
     BuildProject,
     ReimportProject,
     RunProject,

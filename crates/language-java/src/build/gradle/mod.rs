@@ -484,7 +484,7 @@ mod tests {
         );
         assert!(
             model
-                .classpath_entries()
+                .library_paths()
                 .contains(&root.join("app/build/classes/java/main"))
         );
         let _ = fs::remove_dir_all(root);

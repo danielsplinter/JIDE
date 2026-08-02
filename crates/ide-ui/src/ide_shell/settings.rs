@@ -46,6 +46,8 @@ impl SettingsDialogGeometry {
     }
 }
 use super::{click_widget, primary_pointer};
+use ide_domain::ToolRole;
+
 use crate::settings::SettingsPage;
 use ui_focus::FocusManager;
 use ui_host::UiHost;
@@ -266,20 +268,28 @@ const DEBUG_HINT_ID: WidgetId = WidgetId(10_103);
 const DEBUG_HINT_SCOPE_ID: WidgetId = WidgetId(10_104);
 
 /// Qual das duas escolhas da seção o gesto tocou.
-pub(super) enum ToolSlot {
-    Primary,
-    Secondary,
+/// Índice da seção que recebeu o gesto, quando ela é de contribuição.
+///
+/// A janela sabe qual página está aberta; o que faltava era dizê-lo no
+/// resultado. Sem isso, o comando não tinha como identificar a seção, e com uma
+/// seção só ninguém percebia. Ver a fase 0 da `23`.
+fn contribution_section(page: SettingsPage) -> Option<usize> {
+    match page {
+        SettingsPage::Contribution(index) => Some(index),
+        SettingsPage::Debug => None,
+    }
 }
 
 /// O que a janela concluiu, para o shell executar.
 pub(super) enum SettingsOutcome {
     /// O gesto não concluiu nada — o que ele mudou já está na janela.
     Idle,
-    /// Pedir à aplicação que aponte uma instalação.
-    Browse(ToolSlot),
+    /// Pedir à aplicação que aponte uma instalação para um papel da seção.
+    Browse { section: usize, role: ToolRole },
     /// Aplicar o que mudou e nada além disso.
     Save {
-        toolchain: Option<usize>,
+        section: usize,
+        primary: Option<usize>,
         secondary: Option<usize>,
     },
     /// Conectar ao alvo de depuração informado.
@@ -736,8 +746,8 @@ impl SettingsSurface {
             return (SettingsOutcome::Idle, false);
         };
         match command.0.as_str() {
-            "toolchain.browse" => (SettingsOutcome::Browse(ToolSlot::Primary), true),
-            "tool.browse" => (SettingsOutcome::Browse(ToolSlot::Secondary), true),
+            "toolchain.browse" => (self.browse(ToolRole::Primary), true),
+            "tool.browse" => (self.browse(ToolRole::Secondary), true),
             "settings.save" => (self.save(), true),
             "settings.cancel" => {
                 self.cancel();
@@ -761,10 +771,21 @@ impl SettingsSurface {
         });
         self.modal.close();
         self.dialog = None;
+        let Some(section) = contribution_section(self.page) else {
+            return SettingsOutcome::Idle;
+        };
         SettingsOutcome::Save {
-            toolchain,
+            section,
+            primary: toolchain,
             secondary,
         }
+    }
+
+    /// Pede a pasta de uma instalação, dizendo de qual seção e papel.
+    fn browse(&self, role: ToolRole) -> SettingsOutcome {
+        contribution_section(self.page).map_or(SettingsOutcome::Idle, |section| {
+            SettingsOutcome::Browse { section, role }
+        })
     }
 
     /// Desenha a janela inteira, na ordem em que ela se sobrepõe.
