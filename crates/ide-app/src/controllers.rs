@@ -155,6 +155,8 @@ pub(super) struct LanguageController {
     pub(super) host: Option<LanguageHost>,
     pub(super) contributions: ContributionRegistry,
     pub(super) toolchains: ToolchainRegistry,
+    /// Quando se perguntou pela última vez se havia provider ocioso.
+    pub(super) last_suspension_check: Option<Instant>,
     /// Realces pedidos e ainda não entregues.
     ///
     /// Guardá-los é o que permite não esperar: a tecla posta o pedido, e o

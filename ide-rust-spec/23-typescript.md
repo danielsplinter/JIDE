@@ -684,7 +684,10 @@ ADR-025 promete não ter.
 processo de eco portátil, e o laço é de PowerShell. Está anotado no arquivo que é
 ali que se acrescenta o equivalente no dia em que a IDE rodar noutro lugar.
 
-#### Fase 3b — O provider que cai quando o de baixo falha
+#### Fase 3b — O provider que cai quando o de baixo falha ✅ Concluída
+
+**Estado: concluída em 02/08/2026.** Sem o teto de memória, que fica para a 3c —
+ver "O que ficou para a 3c".
 
 Também sem TypeScript. Quando o provider ativo de um documento falha de forma que
 não é do pedido — o processo morreu, o canal fechou —, o host reencaminha o
@@ -702,6 +705,52 @@ morrendo no meio da sessão, a resposta seguinte vem do segundo, e a IDE não pa
 A ordem entre eles é a declarada, e não a alfabética — verificável trocando os
 identificadores de lugar sem que o comportamento mude. Um provider ocioso é
 suspenso e volta ao ser pedido.
+
+##### Feita, e o que ela revelou
+
+**A distinção entrou no contrato.** `LanguageError::Unavailable` diz "deixei de
+existir", contra `Provider`, que diz "este pedido falhou". Sem ela a queda não
+teria como acontecer: o host trataria a morte do processo como mais um erro.
+
+**O worker passou a saber o próprio nome.** Quando uma resposta diz que o
+provider morreu, é preciso saber qual demitir — e espalhar essa pergunta pelas
+onze chamadas assíncronas seria repeti-la onze vezes. Com o identificador no
+worker, a demissão fica num lugar só.
+
+**Faltava uma peça, e o teste a encontrou.** A primeira execução reabriu o
+documento **no mesmo provider morto**: `candidate_ids` excluía só `Disabled`, e um
+provider `Failed` continuava candidato. Agora `Failed` sai junto, e voltar é por
+`enable` — de propósito, e não por acaso.
+
+**As duas falhas têm tratamento oposto, no mesmo ponto do código.** Rota perdida
+faz a aplicação **esquecer** o documento, para reabri-lo no candidato seguinte;
+fila cheia **mantém** o registro, para recalcular a diferença do mesmo ponto
+(ADR-017). Ficaram comentadas lado a lado, porque a diferença não é óbvia lendo.
+
+**A suspensão só vale para quem não tem aba aberta.** Um provider com documento
+aberto não está ocioso por mais parado que esteja: a tecla seguinte custaria
+reindexar o projeto no meio da digitação, e o remédio seria pior. O caso que ela
+resolve é o comum — abrir um `.ts` de manhã, fechá-lo, e passar o dia em Java com
+o índice do outro retido.
+
+**Quem tem relógio é a aplicação; o host tem o estado.** `suspend_idle` é chamado
+do tique da janela, a cada dez segundos, com limite de cinco minutos. Um
+temporizador dentro do host seria uma segunda fonte de tempo no processo.
+
+##### O que ficou para a 3c
+
+**O teto de memória.** `MemoryBudget` continua só na `08`, sem código. Ele foi
+adiado por um motivo e não por esquecimento: um teto sem nada que o consuma é um
+número que ninguém verifica. Ele entra com o processo externo, que é a primeira
+coisa na IDE cuja memória vale a pena limitar — e aí o número tem contra o que ser
+medido.
+
+##### Uma correção ao levantamento
+
+O levantamento disse que "ninguém configura `ProviderSelection`", a partir de um
+grep por `set_selection`. O método existe e se chama **`configure_selection`**. A
+conclusão estava certa por acidente — ninguém o chamava mesmo, fora dos testes —,
+mas a evidência era outra.
 
 #### Fase 3c — O `tsserver`
 

@@ -18,6 +18,12 @@ pub(super) struct ProviderEntry {
     pub(super) state: ProviderState,
     pub(super) worker: Option<Arc<ProviderWorker>>,
     pub(super) last_error: Option<String>,
+    /// Quando este provider respondeu pela última vez.
+    ///
+    /// É o relógio da suspensão por ociosidade. Ele avança a cada pedido, e não
+    /// a cada tecla: o que interessa é o provider ter sido **usado**, e não a
+    /// janela estar aberta. Ver a fase 3b da `23`.
+    pub(super) last_used: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -47,6 +53,7 @@ impl Registry {
         self.providers.insert(
             metadata.provider_id.clone(),
             ProviderEntry {
+                last_used: std::time::Instant::now(),
                 capabilities: provider.capabilities(),
                 provider,
                 metadata,

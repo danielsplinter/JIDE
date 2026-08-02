@@ -598,6 +598,59 @@ impl LanguageHost {
         Ok(())
     }
 
+    /// Suspende os providers que não são usados há mais que o limite.
+    ///
+    /// Suspender é derrubar o worker e soltar o `ActiveLanguage` — é ali que o
+    /// índice mora, e é por isso que a memória volta. O provider **continua
+    /// candidato**: o próximo pedido o reativa sozinho, e a única coisa que se
+    /// nota é essa primeira resposta ser mais lenta.
+    ///
+    /// **Só entra quem não tem documento aberto.** Um provider com aba aberta
+    /// não está ocioso, por mais parado que esteja: a tecla seguinte custaria
+    /// reindexar o projeto inteiro no meio da digitação, e o remédio seria pior.
+    /// Na prática, o caso que isto resolve é o comum — abrir um `.ts` de manhã,
+    /// fechá-lo, e passar o dia em Java com o índice do outro retido.
+    ///
+    /// Quem tem relógio é a aplicação; o host tem o estado. Por isso isto é
+    /// chamado de fora, e não por um temporizador aqui dentro.
+    ///
+    /// Difere de `disable`: suspender é automático e reversível sem ninguém
+    /// saber; desligar é decisão de quem usa, e tira a linguagem da tela.
+    pub async fn suspend_idle(
+        &self,
+        idle_for: std::time::Duration,
+    ) -> Result<Vec<ProviderId>, LanguageHostError> {
+        let agora = std::time::Instant::now();
+        let ociosos = {
+            let mut registry = self
+                .registry
+                .lock()
+                .map_err(|_| LanguageHostError::WorkerStopped)?;
+            let com_documento: std::collections::HashSet<ProviderId> =
+                registry.document_routes.values().cloned().collect();
+            registry
+                .providers
+                .iter_mut()
+                .filter(|(id, entry)| {
+                    entry.worker.is_some()
+                        && entry.state == ProviderState::Active
+                        && !com_documento.contains(*id)
+                        && agora.duration_since(entry.last_used) >= idle_for
+                })
+                .filter_map(|(id, entry)| {
+                    entry.state = ProviderState::Suspended;
+                    entry.worker.take().map(|worker| (id.clone(), worker))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut suspensos = Vec::new();
+        for (id, worker) in ociosos {
+            worker.shutdown().await?;
+            suspensos.push(id);
+        }
+        Ok(suspensos)
+    }
+
     pub fn enable(&self, provider_id: &ProviderId) -> Result<(), LanguageHostError> {
         let mut registry = self
             .registry
@@ -666,6 +719,7 @@ impl LanguageHost {
             if entry.state == ProviderState::Disabled {
                 return Err(LanguageHostError::ProviderDisabled(provider_id.clone()));
             }
+            entry.last_used = std::time::Instant::now();
             if let Some(worker) = &entry.worker {
                 return Ok(Arc::clone(worker));
             }
@@ -1095,6 +1149,96 @@ mod tests {
         assert!(
             pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
             "depois da queda, a IDE continua respondendo"
+        );
+    }
+
+    /// O provider ocioso cai, e volta sozinho quando é pedido.
+    ///
+    /// Suspender solta o `ActiveLanguage`, e é ali que o índice mora — a `20`
+    /// mediu 103 MB só o de Java. O que se cobra aqui é que ele saia e volte
+    /// sem ninguém precisar saber.
+    #[test]
+    fn an_idle_provider_is_suspended_and_comes_back_when_asked() {
+        let host = LanguageHost::new(".");
+        let provider = Arc::new(TestProvider::new(
+            "java.native",
+            LanguageCapabilities::SYNTAX,
+        ));
+        success(host.register(provider.clone()));
+
+        let documento = DocumentSnapshot {
+            id: DocumentId(1),
+            path: PathBuf::from("/w/Pedido.java"),
+            version: 1,
+            text: "class Pedido {}".to_owned(),
+        };
+        success(pollster::block_on(
+            host.open_document(host.request_context(), documento.clone()),
+        ));
+        assert_eq!(provider.activations.load(Ordering::Relaxed), 1);
+
+        // Com documento aberto ele não é ocioso, por mais parado que esteja:
+        // a tecla seguinte custaria reindexar no meio da digitação.
+        let com_aba = success(pollster::block_on(
+            host.suspend_idle(std::time::Duration::ZERO),
+        ));
+        assert!(
+            com_aba.is_empty(),
+            "provider com aba aberta não pode ser suspenso: {com_aba:?}"
+        );
+
+        // Fechada a última aba, ele passa a ser candidato à suspensão.
+        success(pollster::block_on(
+            host.close_document(host.request_context(), DocumentId(1)),
+        ));
+        let suspensos = success(pollster::block_on(
+            host.suspend_idle(std::time::Duration::ZERO),
+        ));
+        assert_eq!(suspensos, vec![ProviderId("java.native".to_owned())]);
+        assert_eq!(
+            provider.shutdowns.load(Ordering::Relaxed),
+            1,
+            "suspender precisa soltar o ActiveLanguage, que é onde o índice mora"
+        );
+
+        // E ele continua candidato: o pedido seguinte o traz de volta sozinho.
+        success(pollster::block_on(
+            host.open_document(host.request_context(), documento),
+        ));
+        assert_eq!(
+            provider.activations.load(Ordering::Relaxed),
+            2,
+            "voltar é reativar, e é a única coisa que se nota"
+        );
+        assert!(pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok());
+    }
+
+    /// Quem foi usado agora não é suspenso.
+    #[test]
+    fn a_provider_in_use_is_not_suspended() {
+        let host = LanguageHost::new(".");
+        success(host.register(Arc::new(TestProvider::new(
+            "java.native",
+            LanguageCapabilities::SYNTAX,
+        ))));
+        success(pollster::block_on(host.open_document(
+            host.request_context(),
+            DocumentSnapshot {
+                id: DocumentId(1),
+                path: PathBuf::from("/w/Pedido.java"),
+                version: 1,
+                text: "class Pedido {}".to_owned(),
+            },
+        )));
+        success(pollster::block_on(
+            host.close_document(host.request_context(), DocumentId(1)),
+        ));
+        let suspensos = success(pollster::block_on(
+            host.suspend_idle(std::time::Duration::from_secs(300)),
+        ));
+        assert!(
+            suspensos.is_empty(),
+            "usado agora, o provider fica de pé: {suspensos:?}"
         );
     }
 

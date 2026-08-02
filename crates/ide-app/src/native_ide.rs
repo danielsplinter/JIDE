@@ -45,6 +45,19 @@ use ui_render_wgpu::WgpuRenderer;
 use ui_window_api::WindowRequest;
 use ui_window_winit::WinitWindow;
 
+/// Quanto tempo sem uso derruba um provider de linguagem.
+///
+/// Cinco minutos é longo o bastante para não punir quem alterna entre duas
+/// linguagens no mesmo trabalho, e curto o bastante para devolver a memória de
+/// uma linguagem que se parou de usar. Ver a fase 3b da `23`.
+const LANGUAGE_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// De quanto em quanto se pergunta se há provider ocioso.
+///
+/// O tique da janela é de 30 ms, e perguntar trinta vezes por segundo por algo
+/// que muda em minutos seria trabalho por trabalho.
+const SUSPENSION_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -1408,6 +1421,39 @@ impl NativeIde {
     /// `package.json`, e mudam de projeto para projeto. Declarar um conjunto
     /// fixo na contribuição seria adivinhar nomes — a tabela de compatibilidade
     /// que a `23` proíbe, com outro nome.
+    /// Derruba os providers que ninguém usa há um tempo.
+    ///
+    /// Quem tem relógio é a aplicação; o host tem o estado. A conta é barata —
+    /// olhar carimbo de tempo — e roda no mesmo tique de 30 ms que recolhe o
+    /// realce, mas só a cada `SUSPENSION_CHECK`, porque não há por que perguntar
+    /// trinta vezes por segundo.
+    ///
+    /// O que se ganha é o índice de uma linguagem que se parou de usar: a `20`
+    /// mediu 103 MB só o de Java, e na fase 3c serão centenas de megabytes de um
+    /// processo externo. Ver a fase 3b da `23`.
+    fn suspend_idle_languages(&mut self) {
+        let agora = std::time::Instant::now();
+        if self
+            .languages
+            .last_suspension_check
+            .is_some_and(|anterior| agora.duration_since(anterior) < SUSPENSION_CHECK)
+        {
+            return;
+        }
+        self.languages.last_suspension_check = Some(agora);
+        let Some(host) = self.languages.host.as_ref() else {
+            return;
+        };
+        match pollster::block_on(host.suspend_idle(LANGUAGE_IDLE_LIMIT)) {
+            Ok(suspensos) => {
+                for provider in suspensos {
+                    tracing::info!(provider = provider.0, "provider suspenso por ociosidade");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "suspensão por ociosidade falhou"),
+        }
+    }
+
     fn refresh_project_tasks(&mut self, root: &Path) {
         let language = typescript_contribution::language_id();
         let tasks = typescript_contribution::project_tasks(root);
@@ -2090,6 +2136,7 @@ impl ApplicationHandler for NativeIde {
             std::time::Instant::now() + std::time::Duration::from_millis(30),
         ));
         let mut changed = false;
+        self.suspend_idle_languages();
         // O realce vem da thread do provider e chega quando fica pronto: é aqui
         // que ele encontra a tela, sem que a tecla tenha esperado por ele.
         let realces = self.languages.collect_syntax();
