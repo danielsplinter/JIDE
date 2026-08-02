@@ -165,8 +165,47 @@ pub struct MemoryBudget {
     pub index_cache_bytes: usize,
     pub ui_cache_bytes: usize,
     pub plugin_bytes: usize,
+    /// Teto somado dos analisadores que rodam fora do processo.
+    ///
+    /// Não é memória nossa e é problema nosso. Ver "São dois números".
+    pub external_analyzer_bytes: usize,
 }
 ```
+
+### São dois números, e ignorar o segundo é mentir para si mesmo
+
+Um analisador externo — o de TypeScript da `23` é o primeiro — roda em processo
+próprio, com espaço de endereçamento próprio. O que ele aloca não entra no nosso
+heap, não fragmenta a nossa memória, e um estouro lá não derruba a IDE.
+
+Contabilmente separado; fisicamente, a mesma RAM. Se a soma passar do que a
+máquina tem, quem parece lento é a IDE, porque é ela que está na frente de quem
+usa. **"Não é o meu processo" é verdade contábil que não significa nada para
+quem está com a máquina paginando.**
+
+No Windows há um detalhe que fecha o argumento: o Gerenciador de Tarefas agrupa
+processos filhos sob o pai e **soma no total exibido**. O analisador aparece como
+memória da IDE para quem olha, esteja ou não no nosso heap.
+
+Por isso:
+
+- o orçamento tem **dois números** — o do processo da IDE e o da máquina, somando
+  os analisadores. Um orçamento que ignora um processo de centenas de megabytes
+  que nós mesmos criamos não é orçamento, é recorte conveniente;
+- a **política de degradação dispara pelo total**. Passou do teto, o analisador
+  externo cai e o provider nativo assume — o objetivo é a máquina continuar
+  utilizável, e não a nossa linha do Gerenciador de Tarefas continuar bonita;
+- o teto do processo externo é **imposto por nós**, e não sofrido: um runtime que
+  aceite limite de heap o recebe na linha de comando. É literalmente o que esta
+  seção chama de orçamento explícito, aplicado a um processo em vez de a uma
+  estrutura.
+
+Em compensação, essa memória tem uma propriedade que a nossa não tem: **ela é
+recuperável**. Matar e reabrir o analisador devolve tudo, e o provider nativo
+responde enquanto ele não volta. A ADR-023 registra que o índice em disco ficou
+"reduzido, não emprestado" — os 103 MB dele ficam retidos enquanto a IDE viver.
+A elasticidade que não se conseguiu lá aparece aqui de graça, por uma decisão
+tomada para outro motivo.
 
 ## Política de cache
 

@@ -520,3 +520,165 @@ fora de `ide-git` pode mencionar `Command::new("git")`, `git2` ou `gix`, e um
 teste falha no dia em que alguém tomar o atalho. Sem ela, o primeiro `push` com
 pressa vira uma chamada direta no painel, e a fronteira passa a existir só no
 documento.
+
+## ADR-025 — O analisador de uma linguagem pode morar fora do processo, e nunca ser obrigatório
+
+**Decisão:** o suporte a TypeScript tem **dois** providers. `typescript.syntax` é
+nativo, sobre tree-sitter, e responde por realce, estrutura, símbolos e navegação
+por nome. `typescript.service` fala com o `tsserver`, num processo Node, e
+responde com tipo. O externo é o principal quando existe; o nativo é o chão, e
+não sai. Ver a `23`.
+
+**Motivo:** o sistema de tipos do TypeScript — condicionais, mapeados, literais de
+template, estreitamento por fluxo — não é uma fase de trabalho, é um projeto do
+tamanho da IDE. Reimplementá-lo não está no orçamento de nenhuma versão previsível,
+e entregar meia verificação seria pior do que nenhuma: diagnóstico errado em código
+certo é a resposta velha com cara de resposta nova, que a `21` já nomeou como a
+família de defeito mais perigosa.
+
+**A regra que isto parecia violar, e por que não viola.** A `00` diz que
+ferramenta externa serve "para compilar, executar ou depurar projetos do usuário,
+nunca para implementar a IDE", e analisar não está na lista. A `04`, por outro
+lado, lista `jdtls-adapter` e `remote-java-service` como providers legítimos. Os
+dois documentos discordavam desde que foram escritos, e ninguém tinha exercido o
+caso.
+
+A fronteira é o **núcleo**, e não a tecnologia. Interface, editor, host, índice,
+modelo de projeto e infraestrutura são nossos e continuam sendo. Um
+`LanguageProvider` é, pela ADR-003, substituível — e a `04` já previa provider
+externo pelo nome.
+
+**A consequência é a que dá dente à decisão:** nenhuma capacidade da IDE pode
+depender de o usuário ter Node instalado. Sem ele, um projeto Angular abre,
+destaca, navega e roda as tarefas que não precisam dele. É degradação, como a do
+observador da `21` quando não consegue observar — a IDE volta a ser menos, e não
+deixa de ser.
+
+**Por isso o provider nativo não é provisório.** Ele não é o andaime que sai
+quando o externo chegar; ele é o piso que fica embaixo. Um provider externo que se
+tornasse a única resposta transformaria uma dependência opcional em requisito de
+instalação, e aí sim a regra da `00` teria sido quebrada — não por onde o código
+roda, mas por ter deixado de haver IDE sem ele.
+
+## ADR-026 — A ferramenta escolhida é de uma seção, e não de um campo
+
+**Decisão:** `ToolchainConfig` deixa de ter `jdk_home` e `maven_home` como campos
+e passa a guardar escolhas por `LanguageId` e por papel — o principal e o
+secundário que `SettingsSection` já declara —, com **padrão global e sobreposição
+por raiz de workspace**. Os comandos de configuração passam a dizer de qual seção
+falam. `classpath_entries` sai do `TaskExecutionContext` genérico.
+
+**Motivo:** o formato antigo cresce com o número de linguagens, o que é a
+definição de não ser neutro. Node exigiria um terceiro campo e npm um quarto, e
+`UiAction::BrowseSecondaryTool` — que é genérico no contrato — chamava
+`choose_maven_home` direto na aplicação, porque com uma seção só não havia
+ambiguidade a resolver.
+
+**Por que a escolha é por projeto, e não só por linguagem:** Angular 11 e Angular
+15 exigem Node de faixas diferentes, e a CLI de cada um recusa a do outro — quem
+tem os dois projetos não tem um Node que sirva aos dois. E o caso não nasceu com
+TypeScript: um projeto em Java 8 e outro em Java 21 sempre tiveram o mesmo
+problema, resolvido na mão até hoje. A sobreposição mora na configuração da IDE, e
+**não** dentro do repositório, porque um caminho de instalação é específico da
+máquina: escrevê-lo no projeto o tornaria inútil para qualquer outra pessoa, e
+ainda criaria arquivo a ser comitado sem ninguém pedir.
+
+**O que isto revela, e é o mais útil da decisão:** o contrato estava certo e a
+fiação é que era curta. `SettingsSection::secondary_caption` já previa por escrito
+"em Java é o Maven; em outra linguagem será outra coisa". A abstração foi bem
+desenhada e nunca exercida, e **uma abstração com uma implementação só é uma
+hipótese**. A segunda linguagem é o experimento.
+
+**Consequência:** a guarda cresce junto, porque foi ela que deixou passar.
+`neutral_crates_expose_no_language_specific_public_api` não incluía `ide-core` —
+exatamente a crate onde `jdk_home` mora — e só examinava linhas de declaração de
+item público, o que nunca alcançaria um campo de struct. Corrigida, ela **falha no
+código de hoje**, e é assim que se sabe que passou a valer alguma coisa.
+
+## ADR-027 — Quais arquivos compõem o projeto é o `tsconfig.json` quem diz
+
+**Decisão:** em TypeScript, as raízes de fonte do `ProjectModel` são **importadas
+do `tsconfig.json`**, e não deduzidas por convenção. O `BuildSystemAdapter` lê o
+arquivo — com `extends`, `include` e `exclude` — e produz o modelo a partir dele.
+Ninguém do nosso lado adivinha que o código está em `src/`. Ver a `23`.
+
+**Motivo:** o `tsserver` faz descoberta própria, subindo do arquivo aberto até o
+`tsconfig.json` mais próximo. Se o nosso modelo deduzisse as raízes por conta, a
+IDE teria **duas definições de qual é o projeto**, e elas discordariam em casos
+que não são raros: monorepo com vários `tsconfig`, `references`, testes excluídos
+do build, `paths` remapeando módulos, arquivo fora do `rootDir` puxado por um
+`import`.
+
+A discordância seria silenciosa, que é a pior forma — o índice responde sobre um
+arquivo que o analisador considera fora do projeto, a navegação leva a um lugar
+sobre o qual a completação não sabe nada, e uma renomeação reescreve um arquivo
+que o compilador nunca vê. É a família de defeito que a `21` chama de resposta
+velha com cara de resposta certa.
+
+**A origem única é o arquivo, e não um processo — e isso é a parte importante.**
+Nós lemos o `tsconfig.json`; o `tsserver` lê o mesmo `tsconfig.json`. O modelo de
+projeto **não** pergunta ao analisador, porque isso criaria uma dependência do
+núcleo a uma ferramenta externa, exatamente o que a ADR-025 proíbe: sem Node, a
+IDE deixaria de saber o que é o projeto.
+
+**Consequência:** o nosso leitor é aproximado e o deles é exato. O formato aceita
+comentários, `extends` encadeado e vírgula sobrando, e a lista efetiva exige
+expandir globs — vamos errar em algum canto.
+
+Mas errar contra a mesma fonte é um **defeito com forma conhecida e testável**,
+enquanto duas definições diferentes seriam desacordo por desenho, que nenhum teste
+apanha porque os dois lados estão certos. Daí sai a verificação: com o analisador
+de pé, comparar a nossa lista de arquivos com a que ele reporta, e tratar
+divergência como defeito nosso.
+
+**Precedente:** vale para qualquer linguagem cujo projeto esteja declarado num
+arquivo, e não numa convenção de diretório. Java é o caso oposto — `src/main/java`
+é convenção do Maven, e o `pom.xml` a confirma —, e é por isso que a armadilha só
+apareceu agora.
+
+## ADR-028 — O analisador é o que o projeto fixa, e hoje isso é o `tsserver`
+
+**Decisão:** a porta de análise de TypeScript admite mais de um adapter, e qual
+deles sobe é resolvido na abertura, a partir do que está no `node_modules` do
+projeto. O adapter construído agora é o **`tsserver`**, sobre Node, falando o
+protocolo próprio dele por stdin/stdout. O `tsgo` — a porta nativa em Go, que fala
+LSP — fica registrado como o segundo adapter, para quando fizer sentido. Ver a
+`23` e a `24`.
+
+**Motivo:** a versão do analisador não é escolha nossa. Cada versão do Angular
+fixa uma faixa estreita de TypeScript — a 11 na casa do 4.1, a 15 do 4.9, a 19 do
+5.6 —, e o `tsgo` é a porta do TypeScript do 5.8 em diante. Analisar um projeto
+presos ao 4.1 com um 7.x daria respostas que não batem com o build, e "a versão do
+TypeScript é do projeto" é regra da `23` justamente por isso.
+
+O caso concreto que decidiu: há projetos em Angular 11 e em Angular 15 em uso.
+Nenhum dos dois é atendível pelo `tsgo`, nem hoje nem quando ele amadurecer.
+
+**O que se examinou antes de decidir:**
+
+- **Padronizar no `tsgo`** era atraente por três razões — cerca de metade da
+  memória da versão em JavaScript nos números publicados pela Microsoft, LSP
+  nativo em vez de protocolo próprio, e binário autocontido, que dispensaria o
+  runtime de Node e afrouxaria a tensão da ADR-025. Nenhuma delas sobrevive ao
+  parágrafo acima: um analisador que não atende os projetos existentes não é uma
+  otimização, é uma regressão;
+- **Angular no `tsgo`** não existe e não é iminente. O próprio Angular declara que
+  o suporte está em prototipagem e exige mudanças arquiteturais grandes, porque a
+  integração deles com a API do compilador de TypeScript é das mais profundas que
+  existem;
+- **Escrever a nossa engine de tipos** é a ADR-025, e continua recusado.
+
+**Consequência:** o Node permanece requisito do caminho externo, e a tensão da
+ADR-025 **não** se dissolve — ela fica inteira, resolvida como já estava: o
+provider nativo é o chão, e sem Node a IDE degrada em vez de parar.
+
+**O que salva o custo de suportar as duas pontas:** o protocolo do `tsserver` é
+estável ao longo dessas versões. Um adapter só atende TypeScript 4.1 e 5.6 sem
+ramificar por versão — o que muda entre projetos é qual arquivo se executa, não
+como se conversa com ele. É por isso que "o analisador é o do projeto" custa
+pouco, e é o que torna a decisão sustentável.
+
+**O caminho de volta existe e está nomeado.** No dia em que os projetos migrarem e
+o Angular estiver portado, entra o segundo adapter atrás da mesma porta, e o
+primeiro fica para quem ficou para trás. É a composição de capacidades da `04`,
+um nível abaixo de onde ela foi escrita.
