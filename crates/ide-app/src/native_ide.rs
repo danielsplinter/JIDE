@@ -541,28 +541,52 @@ impl NativeIde {
         let Some(host) = self.languages.host.as_ref() else {
             return;
         };
-        let found = pollster::block_on(host.workspace_types(
-            host.request_context(),
-            "java",
-            query,
-            TYPE_SEARCH_LIMIT,
-        ));
-        if let Some(shell) = self.ui.shell.as_mut() {
-            match found {
-                Ok(symbols) => shell.set_type_search_results(
-                    symbols
-                        .into_iter()
-                        .filter_map(|symbol| {
-                            Some(TypeSearchHit {
-                                name: symbol.name,
-                                kind: type_kind_label(symbol.kind)?.to_owned(),
-                                location: symbol.location,
-                            })
-                        })
-                        .collect(),
-                ),
-                Err(error) => shell.set_status_message(error.to_string()),
+        // A pergunta vai a **todas** as linguagens registradas, uma extensão de
+        // cada. Ela dizia `java` à mão, e com uma linguagem só ninguém percebia:
+        // num projeto TypeScript, o atalho de abrir um tipo pelo nome não achava
+        // nada. Ver a fase 0 da `23`, que apontou o vazamento e não o corrigiu.
+        let extensoes: Vec<String> = self
+            .languages
+            .contributions
+            .iter()
+            .filter_map(|contribution| contribution.descriptor.extensions.first().cloned())
+            .collect();
+        let mut encontrados = Vec::new();
+        let mut ultimo_erro = None;
+        for extensao in extensoes {
+            match pollster::block_on(host.workspace_types(
+                host.request_context(),
+                &extensao,
+                query.clone(),
+                TYPE_SEARCH_LIMIT,
+            )) {
+                Ok(symbols) => encontrados.extend(symbols),
+                // Uma linguagem que não sabe responder não estraga a busca das
+                // outras: sem índice, a resposta dela é "nada", e nada é uma
+                // resposta.
+                Err(error) => ultimo_erro = Some(error),
             }
+        }
+        encontrados.truncate(TYPE_SEARCH_LIMIT);
+        if let Some(shell) = self.ui.shell.as_mut() {
+            if encontrados.is_empty()
+                && let Some(error) = ultimo_erro
+            {
+                shell.set_status_message(error.to_string());
+                return;
+            }
+            shell.set_type_search_results(
+                encontrados
+                    .into_iter()
+                    .filter_map(|symbol| {
+                        Some(TypeSearchHit {
+                            name: symbol.name,
+                            kind: type_kind_label(symbol.kind)?.to_owned(),
+                            location: symbol.location,
+                        })
+                    })
+                    .collect(),
+            );
         }
     }
 

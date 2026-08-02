@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use ide_domain::{
     CompletionItem, CompletionKind, CompletionRequest, DefinitionRequest, Diagnostic,
     DiagnosticSeverity, DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location,
-    ProviderId, TextPosition, TextRange,
+    ProviderId, SemanticSymbol, SymbolKind, TextPosition, TextRange,
 };
 use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
@@ -318,10 +318,73 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .unwrap_or_default())
     }
 
+    /// Tipos do projeto cujo nome casa com o que foi digitado.
+    ///
+    /// É o `navto` do analisador — a mesma pergunta que a busca por nome faz, e
+    /// que o provider nativo não sabe responder: sem índice, ele só conhece o
+    /// arquivo aberto.
+    ///
+    /// Só entram símbolos com arquivo, porque o resultado existe para ser
+    /// aberto, e um tipo declarado dentro de um `.d.ts` de dependência não tem
+    /// onde ser aberto de forma útil.
+    async fn workspace_types(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticSymbol>, LanguageError> {
+        // Consulta vazia devolve tudo o que couber, para a janela ter o que
+        // mostrar antes da primeira letra — é o que o contrato da `03` pede.
+        let busca = if query.is_empty() { "*" } else { query };
+        let resposta = self
+            .session
+            .request(
+                "navto",
+                serde_json::json!({
+                    "searchValue": busca,
+                    "maxResultCount": limit,
+                }),
+                REQUEST_TIMEOUT,
+            )
+            .await
+            .map_err(|detalhe| self.failure(detalhe))?;
+        Ok(resposta
+            .as_array()
+            .map(|itens| itens.iter().filter_map(symbol_from).collect())
+            .unwrap_or_default())
+    }
+
     async fn shutdown(&self) -> Result<(), LanguageError> {
         self.session.shutdown().await;
         Ok(())
     }
+}
+
+fn symbol_from(valor: &serde_json::Value) -> Option<SemanticSymbol> {
+    let name = valor.get("name")?.as_str()?.to_owned();
+    let kind = match valor.get("kind").and_then(serde_json::Value::as_str)? {
+        "class" | "local class" => SymbolKind::Class,
+        "interface" => SymbolKind::Interface,
+        "enum" => SymbolKind::Enum,
+        "type" | "alias" => SymbolKind::Class,
+        // Só tipo entra na busca por tipo: função e variável soltas encheriam a
+        // lista com o que a pergunta não é.
+        _ => return None,
+    };
+    let inicio = position_from(valor.get("start")?)?;
+    let fim = position_from(valor.get("end")?).unwrap_or(inicio);
+    Some(SemanticSymbol {
+        name,
+        kind,
+        location: Location {
+            path: PathBuf::from(valor.get("file")?.as_str()?),
+            range: TextRange {
+                start: inicio,
+                end: fim,
+            },
+        },
+        type_descriptor: None,
+        scope_depth: 0,
+    })
 }
 
 impl ActiveTypeScriptService {

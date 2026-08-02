@@ -183,3 +183,80 @@ fn completion_answers_with_the_members_of_the_right_type() {
     assert!(runtime.block_on(ativo.shutdown()).is_ok());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A busca por tipo encontra o que o projeto declara.
+///
+/// É o `Ctrl+L` da IDE. O provider nativo não sabe responder — sem índice, ele
+/// só conhece o arquivo aberto —, e por isso a pergunta cai no analisador.
+#[test]
+#[ignore = "exige Node instalado e `npm install typescript` no projeto de teste"]
+fn the_type_search_finds_what_the_project_declares() {
+    let root = temporary("busca-tipo");
+    assert!(std::fs::write(root.join("package.json"), r#"{"name":"t"}"#).is_ok());
+    assert!(
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{ "include": ["src/**/*.ts"] }"#,
+        )
+        .is_ok()
+    );
+    let fonte = root.join("src");
+    assert!(std::fs::create_dir_all(&fonte).is_ok());
+    let arquivo = fonte.join("pedido.ts");
+    assert!(
+        std::fs::write(
+            &arquivo,
+            "export class PedidoDeCompra {}\nexport interface ResumoDoPedido {}\n",
+        )
+        .is_ok()
+    );
+
+    #[cfg(windows)]
+    const NPM: &str = "npm.cmd";
+    #[cfg(not(windows))]
+    const NPM: &str = "npm";
+    let instalado = std::process::Command::new(NPM)
+        .args(["install", "typescript@5", "--no-audit", "--no-fund"])
+        .current_dir(&root)
+        .status();
+    assert!(instalado.is_ok_and(|status| status.success()));
+
+    let runtime = runtime();
+    let ativo = match runtime.block_on(provider().activate(context(&root))) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador precisa subir: {erro}"),
+    };
+    assert!(
+        runtime
+            .block_on(ativo.open_document(DocumentSnapshot {
+                id: DocumentId(1),
+                path: arquivo,
+                version: 1,
+                text: "export class PedidoDeCompra {}\nexport interface ResumoDoPedido {}\n"
+                    .to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+
+    let achados = match runtime.block_on(ativo.workspace_types("Pedido", 50)) {
+        Ok(achados) => achados,
+        Err(erro) => panic!("a busca por tipo precisa responder: {erro}"),
+    };
+    let nomes: Vec<_> = achados.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        nomes.contains(&"PedidoDeCompra") && nomes.contains(&"ResumoDoPedido"),
+        "os tipos do projeto precisam aparecer, e vieram: {nomes:?}"
+    );
+    // Só tipo entra: função e variável soltas encheriam a lista com o que a
+    // pergunta não é.
+    assert!(
+        achados
+            .iter()
+            .all(|s| matches!(s.kind, ide_domain::SymbolKind::Class | ide_domain::SymbolKind::Interface | ide_domain::SymbolKind::Enum)),
+        "a busca por tipo só devolve tipo: {achados:?}"
+    );
+
+    assert!(runtime.block_on(ativo.shutdown()).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}
