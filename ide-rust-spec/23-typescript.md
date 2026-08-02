@@ -568,11 +568,91 @@ que a versão detectada pode não ser a que o terminal usaria, e devia.
 
 ### Fase 3 — O analisador externo
 
-O provider `typescript.service` sobre o `tsserver` do projeto, como processo
-supervisionado, com o nativo como fallback. Completação, diagnóstico e definição
-com tipo.
+**Levantamento de 02/08/2026, antes do código.** Ele mudou a forma da fase: o que
+parecia ser sobre TypeScript é, na maior parte, sobre o que a IDE ainda não sabe
+fazer. Três coisas que este documento assumia prontas não existem, e nenhuma
+delas é de linguagem nenhuma.
 
-Três exigências que não são negociáveis:
+É o mesmo padrão da fase 0, e vale registrá-lo como padrão: **uma capacidade nova
+cobra primeiro o que a infraestrutura devia e ninguém tinha cobrado.**
+
+#### O que o levantamento encontrou
+
+**O `ProcessSupervisor` não sabe conversar.** Ele oferece `spawn`, `terminate`,
+`status` e `execute`, e `spawn` não configura `Stdio::piped()` — herda a saída do
+processo pai e guarda o `Child` num mapa. Não há como escrever no stdin nem ler o
+stdout incrementalmente.
+
+A porta existe pelo nome e não pela forma: foi desenhada para `javac` e Maven —
+rodar, responder, morrer. O analisador é o oposto: vive junto com a IDE e mantém
+estado entre pedidos. A tabela da seção "O que exatamente se executa" aponta o
+`ProcessSupervisor` como o maquinário certo, e continua certa; o que falta é ele
+ter a forma que ela descreve.
+
+**A queda para o nativo não acontece em tempo de execução.** `ProviderSelection`
+com `primary` e `fallbacks` existe e é testado — mas o teste cobre falha na
+**ativação**. Depois que um documento é aceito, `worker_for_document` o mantém
+preso ao provider que o aceitou, e um erro depois disso não re-roteia. Um
+`tsserver` que morra no meio da sessão deixaria o documento preso ao provider
+morto, que é exatamente o que a ADR-025 promete não acontecer.
+
+**`ProviderState::Suspended` nunca é usado.** Os outros seis estados aparecem no
+código; este não. A política de ociosidade da `04` é declarada e nunca exercida —
+e a seção "O caminho mais barato de memória" conta com ela.
+
+**`MemoryBudget` só existe na `08`.** Nenhuma linha de código o menciona, e o
+orçamento de dois números não tem onde se ligar.
+
+**Ninguém configura `ProviderSelection`.** O host tem `set_selection` e nenhum
+chamador fora dos testes. Com dois providers para `.ts`, a ordem sairia da
+ordenação alfabética dos identificadores — `typescript.service` antes de
+`typescript.syntax` por acaso, e não por decisão.
+
+**O que já serve:** o roteamento por extensão com vários candidatos funciona e já
+respeita `primary` e `fallbacks` quando há seleção; o `CancellationToken` está no
+contrato; `wait_until_indexed` existe para o analisador dizer que ainda monta; e
+`max_active_providers` é 8, folgado para três providers.
+
+#### Fase 3a — Um processo com quem se conversa
+
+Nenhuma linha de TypeScript. `ProcessSupervisor` ganha a forma longeva:
+processo com stdin e stdout ligados, escrita e leitura por linha, encerramento
+explícito e detecção de morte.
+
+Fica **ao lado** de `execute`, e não no lugar dele. Rodar e coletar continua
+sendo o certo para `javac`, Maven e `npm run` — trocar todos por um mecanismo
+conversacional seria pagar complexidade em quem não precisa.
+
+**Critério:** um processo de teste que ecoa linhas recebe três pedidos e responde
+os três, na ordem. Matá-lo por fora é percebido, e não trava quem espera. E
+encerrar o supervisor não deixa processo órfão — o que é verificável contando
+processos antes e depois.
+
+#### Fase 3b — O provider que cai quando o de baixo falha
+
+Também sem TypeScript. Quando o provider ativo de um documento falha de forma que
+não é do pedido — o processo morreu, o canal fechou —, o host reencaminha o
+documento para o próximo candidato e responde por ele.
+
+É o que dá dente à ADR-025. Sem isto, "o nativo é o chão" é uma frase.
+
+Junto vem o que falta em volta: a raiz de composição passa a **declarar** a ordem
+com `set_selection`, em vez de deixá-la sair da ordem alfabética; e
+`ProviderState::Suspended` passa a ser exercido por uma política de ociosidade,
+com o teto de memória do `MemoryBudget` saindo da `08` para o código.
+
+**Critério:** com dois providers registrados para a mesma extensão e o primeiro
+morrendo no meio da sessão, a resposta seguinte vem do segundo, e a IDE não para.
+A ordem entre eles é a declarada, e não a alfabética — verificável trocando os
+identificadores de lugar sem que o comportamento mude. Um provider ocioso é
+suspenso e volta ao ser pedido.
+
+#### Fase 3c — O `tsserver`
+
+Aí sim: o provider `typescript.service` sobre o `tsserver` **do projeto**, com o
+nativo como fallback. Completação, diagnóstico e definição com tipo.
+
+Três exigências que não são negociáveis, e que agora têm onde se apoiar:
 
 **Cair para o nativo** quando o processo morrer, quando o Node não existir ou
 quando o projeto não trouxer o pacote `typescript` — sem a IDE parar.
@@ -585,10 +665,6 @@ heap declarado, e o gasto entra no segundo número do orçamento da `08` — o d
 máquina, não o do nosso heap. Passar do teto derruba o analisador e devolve a
 palavra ao nativo, em vez de deixar a máquina paginar.
 
-**Um processo por workspace, preguiçoso na subida e suspenso na ociosidade**, como
-a seção "O caminho mais barato de memória" determina. A suspensão usa o estado
-`Suspended` que a `04` define e que nenhum provider exerce até hoje.
-
 E uma quarta que é o fecho da fase 2: com o analisador de pé, comparar a nossa
 lista de arquivos do projeto com a dele. Divergência é defeito **nosso**, e o
 teste diz onde.
@@ -599,6 +675,13 @@ Matar o processo do analisador na mão degrada para o nativo e a IDE continua
 respondendo. O consumo de memória do conjunto está medido — os dois números —, e
 o teto derruba antes de a máquina sofrer. E as duas listas de arquivos batem, ou
 a diferença está registrada com nome.
+
+#### E a navegação de TypeScript entra aqui
+
+A fase 1 prometeu índice de símbolos e navegação por nome e não os entregou,
+porque em TypeScript quem decide o que um nome alcança é o `import`, e não o nome.
+O analisador sabe de módulos: definição e referências de `.ts` são desta fase, e
+não da 1.
 
 ### Fase 4 — Depurar
 
