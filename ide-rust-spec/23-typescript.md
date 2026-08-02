@@ -598,7 +598,7 @@ um gerenciador num terminal não muda o que a IDE já resolveu na partida — é
 motivo de a escolha por projeto existir, e ela cobre o caso. Mas a IDE não avisa
 que a versão detectada pode não ser a que o terminal usaria, e devia.
 
-### Fase 3 — O analisador externo
+### Fase 3 — O analisador externo ✅ Concluída
 
 **Levantamento de 02/08/2026, antes do código.** Ele mudou a forma da fase: o que
 parecia ser sobre TypeScript é, na maior parte, sobre o que a IDE ainda não sabe
@@ -831,7 +831,8 @@ a escrita enfileirada atrás dela — e a escrita bloqueada é o pedido que
 produziria a resposta esperada. Dois canais, dois laços em paralelo. O impasse
 dependia de quem chegasse primeiro, o que o tornava pior de diagnosticar.
 
-**O `
+**O `
+
 ` depois do corpo.** O analisador fecha a mensagem com uma quebra de
 linha, e a leitura a tomava por início da mensagem seguinte: bloco sem
 `Content-Length`, interpretado como morte. **O analisador era dado por morto na
@@ -863,15 +864,77 @@ porque em TypeScript quem decide o que um nome alcança é o `import`, e não o 
 O analisador sabe de módulos: definição e referências de `.ts` são desta fase, e
 não da 1.
 
-### Fase 4 — Depurar
+### Fase 4 — Depurar ⬜ Fora de escopo
 
-Adapter CDP, ponto de parada no `.ts`, com o source map fazendo o mapeamento.
+**A IDE não vai escrever um depurador de TypeScript. Quem depura é o navegador.**
 
-**Critério:** um ponto de parada colocado no `.ts` para a execução no lugar certo,
-com as variáveis do quadro legíveis.
+O DevTools já está instalado, lê source maps sozinho, entende os mapas que um
+bundler produz, e ainda dá rede, DOM e desempenho — coisas que a IDE não daria.
+Construir o nosso custaria dependência de WebSocket, o protocolo CDP, e um
+resolvedor de source maps nos dois sentidos, para entregar menos.
+
+#### Por que Java é diferente, e a assimetria não é arbitrária
+
+A depuração de Java foi construída em casa porque **não havia alternativa**: não
+existe ferramenta ao lado que depure uma JVM, e construir era a única forma de a
+capacidade existir.
+
+No navegador existe, vem junto, e é melhor do que o que sairia daqui no primeiro
+ano. A assimetria entre as duas linguagens reflete uma diferença real entre os
+dois alvos, e não uma inconsistência de desenho.
+
+#### O levantamento que levou a isto
+
+Antes de escrever código, uma sonda contra o Node com `--inspect` mostrou o que o
+CDP exige, e são duas camadas que a IDE não tem:
+
+```text
+HTTP  GET /json/list  →  webSocketDebuggerUrl: ws://127.0.0.1:9339/<uuid>
+WebSocket             →  {"id":1,"method":"Debugger.enable"}
+```
+
+O `host` e a `port` do `DebugSessionRequest` da `03` não bastam: a porta serve um
+endpoint HTTP que devolve uma URL com um identificador que muda a cada execução.
+E a conversa é por WebSocket — handshake de upgrade, enquadramento por frames,
+mascaramento, ping —, contra o `TcpStream` cru que o adapter de JDWP usa.
+
+**O que decide não é o transporte: são os source maps.** O `.js` que executa não é
+o `.ts` que se escreve, e traduzir nos dois sentidos é o corpo real do trabalho.
+O modo de falhar é o pior que existe: o ponto de parada cai numa linha próxima, ou
+não dispara, **sem erro nenhum** — a família que a `21` nomeou e que a fase 3c
+encontrou de novo.
+
+#### O que se perde, e é honesto dizer
+
+**Contexto.** O ponto de parada é posto no navegador, e não no editor onde o
+código foi escrito; as duas janelas não compartilham nada. É o único item da
+conta, e é real.
+
+#### O que a IDE entrega no lugar
+
+Uma **tarefa que abre o alvo com a depuração à mão** — o `ng serve` já rodando, e
+a IDE abrindo o navegador na porta certa. Um item na lista de tarefas, sem
+protocolo, sem dependência, sem processo. Captura a maior parte do valor por
+quase nada.
+
+#### O que isto custa se a decisão mudar
+
+No dia em que a IDE quiser ponto de parada no editor de `.ts`, **nada do que
+existe hoje serve**: a fase volta inteira, com o transporte, o protocolo e os
+mapas. Fica escrito para que seja decisão revista, e não esquecimento
+descoberto.
+
+E o caminho, se voltar, tem uma bifurcação já mapeada: falar CDP por conta, ou
+usar o `js-debug` do VS Code como adapter externo — que fala DAP, o mesmo
+enquadramento por `Content-Length` que a fase 3a já implementa, e que não exigiria
+dependência nova. A escolha entre os dois depende de quanto do trabalho de source
+map se quer possuir.
 
 ## O que fica de fora, e por quê
 
+- **Depurar dentro da IDE**, que era a fase 4 e virou decisão: quem depura
+  TypeScript é o navegador, que já tem a ferramenta e a faz melhor. A razão está
+  na fase, e o custo de reverter também;
 - **Angular**, e qualquer framework. É a `24`, e a razão de ser uma especificação
   separada está lá: framework não é linguagem, e o que ele pede entra por portas
   diferentes das desta;
