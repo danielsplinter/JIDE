@@ -147,3 +147,65 @@ fn dropping_the_conversation_kills_the_process() {
         // soltar não entra em pânico nem trava.
     });
 }
+
+/// Uma mensagem enquadrada por tamanho é lida inteira, com quebra de linha dentro.
+///
+/// É o formato do `tsserver`, verificado sondando o processo de verdade:
+/// cabeçalho `Content-Length`, linha em branco, e o corpo com o tamanho
+/// anunciado. O corpo deste teste **contém** uma quebra de linha de propósito —
+/// é o caso em que ler por linha partiria a mensagem ao meio sem erro nenhum a
+/// apontar, e é por ele que `receive_exact` existe.
+#[test]
+fn a_length_framed_message_is_read_whole() {
+    let runtime = runtime();
+    let supervisor = NativeProcessSupervisor::default();
+    // O corpo tem uma quebra de linha no meio: `receive` pararia nela.
+    let script = "$corpo = \"{`\"a`\":1,`n`\"b`\":2}\"; \
+                  $n = [Text.Encoding]::UTF8.GetByteCount($corpo); \
+                  [Console]::Out.Write(\"Content-Length: $n`r`n`r`n$corpo\"); \
+                  [Console]::Out.Flush(); Start-Sleep -Seconds 30";
+    let conversa = match runtime.block_on(supervisor.converse(eco_request(script))) {
+        Ok(conversa) => conversa,
+        Err(error) => panic!("a conversa precisa abrir: {error}"),
+    };
+
+    runtime.block_on(async {
+        let cabecalho = tokio::time::timeout(Duration::from_secs(30), conversa.receive()).await;
+        let tamanho = match cabecalho {
+            Ok(Ok(Some(linha))) => {
+                let Some(valor) = linha.strip_prefix("Content-Length: ") else {
+                    panic!("cabeçalho inesperado: {linha:?}");
+                };
+                match valor.trim().parse::<usize>() {
+                    Ok(tamanho) => tamanho,
+                    Err(erro) => panic!("tamanho ilegível em {linha:?}: {erro}"),
+                }
+            }
+            outro => panic!("o cabeçalho precisa chegar: {outro:?}"),
+        };
+
+        // A linha em branco que separa cabeçalho de corpo.
+        let branco = tokio::time::timeout(Duration::from_secs(30), conversa.receive()).await;
+        assert!(matches!(branco, Ok(Ok(Some(ref linha))) if linha.is_empty()));
+
+        // E o corpo, pelo tamanho anunciado — inteiro, com a quebra dentro.
+        let corpo = tokio::time::timeout(
+            Duration::from_secs(30),
+            conversa.receive_exact(tamanho),
+        )
+        .await;
+        match corpo {
+            Ok(Ok(Some(bytes))) => {
+                assert_eq!(bytes.len(), tamanho);
+                let texto = String::from_utf8_lossy(&bytes);
+                assert!(
+                    texto.contains('\n'),
+                    "o corpo precisa trazer a quebra de linha que partiria a leitura por linha: {texto:?}"
+                );
+                assert!(texto.starts_with('{') && texto.ends_with('}'));
+            }
+            outro => panic!("o corpo precisa chegar inteiro: {outro:?}"),
+        }
+        assert!(conversa.shutdown().await.is_ok());
+    });
+}

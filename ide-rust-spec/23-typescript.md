@@ -684,6 +684,36 @@ ADR-025 promete não ter.
 processo de eco portátil, e o laço é de PowerShell. Está anotado no arquivo que é
 ali que se acrescenta o equivalente no dia em que a IDE rodar noutro lugar.
 
+##### Completada depois, e o motivo é uma lição
+
+A fase 3a nasceu **incompleta**, e a falta só apareceu no primeiro passo da 3c: o
+`tsserver` não responde por linha. A entrada é JSON por linha, mas a saída é
+enquadrada por tamanho, como LSP:
+
+```text
+Content-Length: 105
+                          (linha em branco)
+{"seq":0,"type":"response","command":"status","request_seq":1,...}
+```
+
+Ler o corpo com `receive` funcionaria **por acidente**, enquanto nenhum JSON
+trouxesse quebra de linha dentro de uma string. Uma resposta de completação que
+carregue trecho de código traz, e aí a mensagem seria partida ao meio sem erro
+nenhum a apontar — a família de defeito que a `21` já nomeou.
+
+Entrou `receive_exact`, que lê uma quantidade exata de bytes, **ao lado** de
+`receive`, que continua certo para quem fala por linha. O teste usa um corpo com
+quebra de linha dentro, de propósito: é o caso que a leitura por linha erraria.
+
+**Por que a falta passou.** O levantamento da fase 3 examinou o que a IDE tinha e
+não examinou o que o `tsserver` fala. A suposição "processo longevo conversa por
+linha" atravessou o levantamento inteiro sem prova, porque parecia óbvia demais
+para ser verificada.
+
+O que a corrigiu foi uma sonda de três minutos: instalar o TypeScript num
+diretório temporário, mandar um pedido, e olhar os bytes crus. **Levantar o que se
+tem não substitui sondar o que se vai integrar.**
+
 #### Fase 3b — O provider que cai quando o de baixo falha ✅ Concluída
 
 **Estado: concluída em 02/08/2026.** Sem o teto de memória, que fica para a 3c —

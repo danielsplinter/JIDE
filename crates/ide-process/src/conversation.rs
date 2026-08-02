@@ -32,6 +32,28 @@ pub trait ProcessConversation: Send + Sync {
     /// e quem chama trata dele degradando, e não esperando para sempre.
     async fn receive(&self) -> Result<Option<String>, ProcessError>;
 
+    /// Lê exatamente `bytes` da saída.
+    ///
+    /// Serve a quem enquadra a mensagem pelo tamanho, e não pela quebra de
+    /// linha. É o que o LSP faz, e o que o `tsserver` faz: um cabeçalho
+    /// `Content-Length`, uma linha em branco, e o corpo com o tamanho anunciado.
+    ///
+    /// Ler o corpo com `receive` funcionaria **por acidente**, enquanto nenhum
+    /// JSON trouxesse quebra de linha dentro de uma string. Uma resposta de
+    /// completação que carregue trecho de código traz, e aí a mensagem seria
+    /// partida ao meio sem erro nenhum a apontar.
+    ///
+    /// Descoberto sondando o `tsserver` de verdade, e não lendo documentação:
+    /// a fase 3a nasceu supondo que processo longevo conversa por linha, e a
+    /// suposição passou sem prova. Ver a fase 3c da `23`.
+    ///
+    /// `None` é o fim da saída, inclusive quando ele chega no meio de uma
+    /// mensagem: metade de mensagem é morte, e não conteúdo.
+    async fn receive_exact(&self, bytes: usize) -> Result<Option<Vec<u8>>, ProcessError> {
+        let _ = bytes;
+        Err(ProcessError::ConversationUnsupported)
+    }
+
     /// Encerra o processo e libera o que ele segurava.
     ///
     /// É o instrumento cego: fecha a entrada e mata. Um encerramento educado —
@@ -119,6 +141,21 @@ impl ProcessConversation for NativeConversation {
             linha.pop();
         }
         Ok(Some(linha))
+    }
+
+    async fn receive_exact(&self, bytes: usize) -> Result<Option<Vec<u8>>, ProcessError> {
+        let mut guarda = self.stdout.lock().await;
+        let Some(stdout) = guarda.as_mut() else {
+            return Err(ProcessError::ConversationClosed);
+        };
+        let mut corpo = vec![0_u8; bytes];
+        match tokio::io::AsyncReadExt::read_exact(stdout, &mut corpo).await {
+            Ok(_) => Ok(Some(corpo)),
+            // Fim da saída no meio da mensagem: o processo morreu enquanto
+            // escrevia, e meia mensagem não é resposta.
+            Err(erro) if erro.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(erro) => Err(ProcessError::Io(erro)),
+        }
     }
 
     async fn shutdown(&self) -> Result<(), ProcessError> {
