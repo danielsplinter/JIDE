@@ -213,6 +213,7 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
                 "ide-ui",
                 "ide-workspace",
                 "language-java",
+                "language-typescript",
             ]),
         ),
         ("ide-domain", BTreeSet::new()),
@@ -256,6 +257,12 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
         // O que o compilador garantia e agora não garante — o analisador não
         // alcançar `ide-process` nem `ide-project` — passou a ser a guarda
         // `the_java_analyzer_cannot_reach_process_or_project`.
+        // A segunda linguagem custou **uma** crate, que é o que a fase 8 da `12`
+        // veio comprar. No formato antigo teria custado até seis.
+        (
+            "language-typescript",
+            BTreeSet::from(["ide-domain", "ide-language-api"]),
+        ),
         (
             "language-java",
             BTreeSet::from([
@@ -893,17 +900,17 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         .filter(|dependencies| dependencies.contains("ide-domain"))
         .count();
 
-    // 14 desde a fase 8 da `12`: uma crate por linguagem. As cinco crates de
-    // Java viraram módulos de `language-java`, e a linguagem seguinte custa uma
-    // crate, e não seis.
-    assert_eq!(crates.len(), 14, "a refatoração não deve pulverizar crates");
+    // 15 desde a fase 1 da `23`: 14 depois da fase 8 da `12`, mais uma para a
+    // segunda linguagem. É a conta que a consolidação prometeu — uma linguagem,
+    // uma crate — cobrada pela primeira vez.
+    assert_eq!(crates.len(), 15, "a refatoração não deve pulverizar crates");
     assert!(
-        edge_count <= 40,
-        "o grafo interno ultrapassou a linha final de 40 arestas: {edge_count}"
+        edge_count <= 43,
+        "o grafo interno ultrapassou a linha final de 43 arestas: {edge_count}"
     );
     assert!(
-        app_fan_out <= 13,
-        "ide-app ultrapassou o fan-out final de 13: {app_fan_out}"
+        app_fan_out <= 14,
+        "ide-app ultrapassou o fan-out final de 14: {app_fan_out}"
     );
     // Era `>= 13`, absoluto, e a fase 8 mostrou que a forma estava errada: o
     // número caiu para 11 sozinho quando cinco crates viraram módulos, sem que
@@ -916,7 +923,9 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     );
 
     let line_limits = [
-        ("crates/ide-app/src/main.rs", 15),
+        // 16 desde a fase 1 da `23`: a segunda linguagem é mais uma linha de
+        // `mod` na raiz de composição, e é exatamente o que ela deve custar.
+        ("crates/ide-app/src/main.rs", 16),
         // 31 desde a fase 2 da decomposição do shell: o módulo `text` reúne
         // funções que viviam duplicadas no shell e no editor. O teto existe para
         // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.

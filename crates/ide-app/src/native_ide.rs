@@ -14,7 +14,7 @@ use crate::controllers::{
     WorkspaceController,
 };
 use crate::ui_bridge::{UiAction, UiBridge};
-use crate::{debug, java_contribution, run};
+use crate::{debug, java_contribution, run, typescript_contribution};
 use ide_application::{
     ApplicationCommand, DebugRequest, IdeEvent, NavigationRequest, NewItemRequest,
     OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, SearchScope,
@@ -131,6 +131,17 @@ impl NativeIde {
         self.languages
             .contributions
             .register(java)
+            .map_err(|error| error.to_string())?;
+        // A segunda linguagem. Ela entra pelo mesmo caminho da primeira, e é
+        // isso que a fase 1 da `23` vem provar: registrar uma linguagem nova não
+        // exige tocar em nada acima daqui.
+        let typescript = typescript_contribution::contribution();
+        language_host
+            .register(typescript.provider.clone())
+            .map_err(|error| error.to_string())?;
+        self.languages
+            .contributions
+            .register(typescript)
             .map_err(|error| error.to_string())?;
         self.languages.host = Some(language_host);
         let tree = self

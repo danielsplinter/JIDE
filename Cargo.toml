@@ -10,6 +10,7 @@ members = [
     "crates/ide-language-host",
     "crates/ide-project",
     "crates/language-java",
+    "crates/language-typescript",
     "crates/ide-process",
     "crates/ide-terminal",
     "crates/ide-toolchain-api",
@@ -35,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tree-sitter = "0.24"
 tree-sitter-java = "0.23.5"
+tree-sitter-typescript = "0.23.2"
 zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 pollster = "0.4"
 portable-pty = "=0.8.1"
