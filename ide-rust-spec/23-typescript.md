@@ -782,7 +782,9 @@ grep por `set_selection`. O método existe e se chama **`configure_selection`**.
 conclusão estava certa por acidente — ninguém o chamava mesmo, fora dos testes —,
 mas a evidência era outra.
 
-#### Fase 3c — O `tsserver`
+#### Fase 3c — O `tsserver` ✅ Concluída
+
+**Estado: concluída em 02/08/2026.**
 
 Aí sim: o provider `typescript.service` sobre o `tsserver` **do projeto**, com o
 nativo como fallback. Completação, diagnóstico e definição com tipo.
@@ -810,6 +812,49 @@ Matar o processo do analisador na mão degrada para o nativo e a IDE continua
 respondendo. O consumo de memória do conjunto está medido — os dois números —, e
 o teto derruba antes de a máquina sofrer. E as duas listas de arquivos batem, ou
 a diferença está registrada com nome.
+
+##### Feita, e os três defeitos que só apareceram rodando
+
+Nenhum apareceria em teste de unidade. Todos apareceram na **primeira execução
+contra o processo de verdade**, e é essa a lição da fase.
+
+**O runtime de quem hospeda não serve.** O worker do host sobe um runtime de
+thread única; um `tokio::spawn` ali só progride enquanto alguém está dentro de um
+`block_on` — e a resposta que o laço de leitura precisa ler chega justamente
+quando ninguém está. Pior: os canais de um processo filho ficam presos ao reator
+do runtime que os criou, então nem mudar de thread resolveria. A conversa passou
+a **ser dona da própria thread e do próprio runtime**, e quem chama fala por
+canal, que não precisa de reator.
+
+**Ler e escrever na mesma fila trava.** Uma leitura que espera resposta bloqueia
+a escrita enfileirada atrás dela — e a escrita bloqueada é o pedido que
+produziria a resposta esperada. Dois canais, dois laços em paralelo. O impasse
+dependia de quem chegasse primeiro, o que o tornava pior de diagnosticar.
+
+**O `
+` depois do corpo.** O analisador fecha a mensagem com uma quebra de
+linha, e a leitura a tomava por início da mensagem seguinte: bloco sem
+`Content-Length`, interpretado como morte. **O analisador era dado por morto na
+primeira resposta**, e o provider caía para o nativo sem motivo — a degradação
+funcionando perfeitamente pelo motivo errado, que é o pior jeito de um defeito se
+esconder. Este foi encontrado instrumentando a leitura, e não raciocinando.
+
+##### O que ficou de fora, e por quê
+
+**A memória não foi medida.** O teto está imposto — o processo sobe com limite de
+heap declarado, e ultrapassá-lo o derruba, que é a queda da fase 3b. Mas os
+**dois números** do orçamento da `08` não existem: `MemoryBudget` continua sem
+código, e não há nada que some o processo externo ao heap da IDE e mostre isso.
+O critério pede medição, e o que há é enforcement.
+
+**O projeto em TypeScript 4.1 não foi exercido.** O teste roda contra o 5.x. Que
+um adapter só atenda as duas pontas é a aposta da ADR-028, e ela continua **não
+verificada** — o que existe é o argumento de que o protocolo é estável.
+
+**`change_document` reabre o arquivo inteiro.** O protocolo tem mudança por
+intervalo, e ela é o caminho rápido. Reabrir é lento e é certo: a conversão de
+linha e coluna erra por um, e errar ali reescreve no lugar errado sem erro nenhum
+a apontar. Trocar por incremental é trabalho com medição, e não palpite.
 
 #### E a navegação de TypeScript entra aqui
 

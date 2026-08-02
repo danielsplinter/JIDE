@@ -22,7 +22,7 @@ use ide_project::build::BuildSystemRegistry;
 use ide_toolchain_api::ToolchainProvider;
 use language_typescript::{
     NodeToolchainProvider, NpmAdapter, TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID,
-    TypeScriptLanguageProvider,
+    TYPESCRIPT_SERVICE_PROVIDER_ID, TypeScriptLanguageProvider, TypeScriptServiceProvider,
 };
 
 /// Prefixo dos identificadores de tarefa desta linguagem.
@@ -161,17 +161,30 @@ pub fn register_build_systems(
     registry.register(Arc::new(NpmAdapter::new(processes)));
 }
 
+/// O analisador externo, que responde com tipo.
+///
+/// Ele não vem na contribuição: a contribuição carrega **um** provider, e o dela
+/// é o nativo — o que está sempre lá. Este é registrado ao lado, no host, e a
+/// ordem entre os dois é declarada em [`selection`].
+#[must_use]
+pub fn service_provider(processes: Arc<dyn ProcessSupervisor>) -> Arc<dyn LanguageProvider> {
+    Arc::new(TypeScriptServiceProvider::new(processes))
+}
+
 /// Em que ordem os providers de TypeScript são consultados.
 ///
-/// Hoje há um só, e declarar a ordem parece vazio — não é. Sem declaração, a
-/// escolha sai da **ordenação alfabética dos identificadores**, e
-/// `typescript.service` viria antes de `typescript.syntax` por acaso, e não por
-/// decisão. Quando o analisador externo chegar na fase 3c, ele entra como
-/// principal aqui, numa linha, e o nativo passa a ser o que fica embaixo.
+/// O externo primeiro, o nativo embaixo. Sem declaração a escolha sairia da
+/// **ordenação alfabética dos identificadores**, e `typescript.service` viria
+/// antes de `typescript.syntax` por acaso — a resposta certa pelo motivo errado,
+/// que quebraria no dia em que um dos dois fosse renomeado.
+///
+/// O nativo não é reserva de emergência: é o chão. Sem Node, sem o pacote
+/// `typescript` no projeto, ou com o processo morto, é ele que responde, e a
+/// IDE continua útil. Ver a ADR-025.
 #[must_use]
 pub fn selection() -> ProviderSelection {
     ProviderSelection {
-        primary: ProviderId(TYPESCRIPT_PROVIDER_ID.to_owned()),
-        fallbacks: Vec::new(),
+        primary: ProviderId(TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned()),
+        fallbacks: vec![ProviderId(TYPESCRIPT_PROVIDER_ID.to_owned())],
     }
 }

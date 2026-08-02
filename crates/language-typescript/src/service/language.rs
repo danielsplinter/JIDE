@@ -35,6 +35,24 @@ pub const TYPESCRIPT_SERVICE_PROVIDER_ID: &str = "typescript.service";
 /// um projeto enorme; nos dois casos, esperar mais só adia a degradação.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Teto de memória do processo do analisador, em megabytes.
+///
+/// **É orçamento imposto, e não sofrido.** A `08` trata memória como requisito
+/// arquitetural com orçamento explícito, e este é o primeiro lugar da IDE onde
+/// existe um número a impor: o analisador carrega a árvore de todo arquivo do
+/// programa mais os `.d.ts` alcançados, e num monorepo isso chega aos
+/// gigabytes — é por isso que editores expõem teto configurável para ele.
+///
+/// Ultrapassar o teto derruba o processo, e derrubar o processo é a queda para o
+/// nativo que a fase 3b construiu: a IDE continua respondendo, com menos.
+/// Deixar sem teto trocaria isso por a máquina inteira paginar.
+///
+/// 2 GB é folgado para projeto de aplicação e aperta em monorepo grande, que é
+/// justamente onde se quer que aperte. O número não está ligado a um
+/// `MemoryBudget` — ele ainda não existe em código, e a `08` registra a
+/// pendência.
+const MAX_HEAP_MB: u32 = 2048;
+
 pub struct TypeScriptServiceProvider {
     processes: Arc<dyn ProcessSupervisor>,
 }
@@ -71,6 +89,21 @@ impl LanguageProvider for TypeScriptServiceProvider {
         &self,
         context: LanguageActivationContext,
     ) -> Result<Box<dyn ActiveLanguage>, LanguageError> {
+        Ok(Box::new(self.start(context).await?))
+    }
+}
+
+impl TypeScriptServiceProvider {
+    /// Sobe o analisador e devolve o tipo concreto.
+    ///
+    /// `activate` embrulha isto. Existe separado porque há o que perguntar ao
+    /// serviço que **não** está no contrato — a lista de arquivos do projeto,
+    /// que serve para conferir o nosso leitor de `tsconfig.json` e não para a
+    /// IDE consumir.
+    pub(crate) async fn start(
+        &self,
+        context: LanguageActivationContext,
+    ) -> Result<ActiveTypeScriptService, LanguageError> {
         let node_home = context
             .toolchain(&LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned()))
             .map(|toolchain| toolchain.installation_root.clone());
@@ -86,6 +119,7 @@ impl LanguageProvider for TypeScriptServiceProvider {
             .converse(ProcessRequest {
                 program: localizacao.node,
                 args: vec![
+                    format!("--max-old-space-size={MAX_HEAP_MB}"),
                     localizacao.tsserver.to_string_lossy().into_owned(),
                     // Sem isso o analisador manda diagnóstico sozinho a cada
                     // mudança, e nós já perguntamos quando queremos. É ruído no
@@ -99,15 +133,15 @@ impl LanguageProvider for TypeScriptServiceProvider {
             .await
             .map_err(|erro| LanguageError::Unavailable(erro.to_string()))?;
 
-        Ok(Box::new(ActiveTypeScriptService {
+        Ok(ActiveTypeScriptService {
             language_id: LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned()),
             session: Session::new(Arc::from(conversa)),
             documentos: Mutex::new(HashMap::new()),
-        }))
+        })
     }
 }
 
-struct ActiveTypeScriptService {
+pub(crate) struct ActiveTypeScriptService {
     language_id: LanguageId,
     session: Session,
     /// Caminho e texto de cada documento aberto.
@@ -290,6 +324,53 @@ impl ActiveLanguage for ActiveTypeScriptService {
     }
 }
 
+impl ActiveTypeScriptService {
+    /// Quais arquivos o **analisador** considera parte do projeto.
+    ///
+    /// Serve para conferir contra o que o nosso leitor de `tsconfig.json`
+    /// concluiu. A ADR-027 diz que a origem é o arquivo, e não um processo — os
+    /// dois leem o mesmo `tsconfig.json`, e o nosso é aproximado.
+    ///
+    /// Errar contra a mesma fonte é defeito com forma conhecida e testável;
+    /// duas definições diferentes seriam desacordo por desenho, que nenhum teste
+    /// apanha porque os dois lados estão certos. Isto é o que torna a diferença
+    /// visível.
+    ///
+    /// **Só existe no teste**, e é coerente: a IDE não consome esta lista — ela
+    /// usa a nossa, lida do `tsconfig.json`. Perguntar ao processo seria a
+    /// dependência que a ADR-027 recusa.
+    #[cfg(test)]
+    pub(crate) async fn project_files(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Vec<PathBuf>, LanguageError> {
+        let (path, _) = self.documento(document_id)?;
+        let resposta = self
+            .session
+            .request(
+                "projectInfo",
+                serde_json::json!({
+                    "file": path_argument(&path),
+                    "needFileNameList": true,
+                }),
+                REQUEST_TIMEOUT,
+            )
+            .await
+            .map_err(|detalhe| self.failure(detalhe))?;
+        Ok(resposta
+            .get("fileNames")
+            .and_then(serde_json::Value::as_array)
+            .map(|nomes| {
+                nomes
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}
+
 /// O caminho como o analisador espera recebê-lo.
 ///
 /// Ele usa barra normal mesmo no Windows, e um caminho com contrabarra volta
@@ -410,4 +491,110 @@ fn offset_of(source: &str, line: usize, column: usize) -> usize {
         offset += current.len();
     }
     source.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_process::NativeProcessSupervisor;
+
+    /// A nossa lista de arquivos do projeto bate com a do analisador.
+    ///
+    /// É o fecho da ADR-027, e o teste que ela pediu pelo nome. A origem é o
+    /// **arquivo**: nós lemos o `tsconfig.json` e o analisador lê o mesmo
+    /// `tsconfig.json`. O nosso leitor é aproximado e o dele é exato, e é por
+    /// isso que a divergência é **defeito nosso** — mas ela só é defeito porque
+    /// existe um lugar que a mostra, e é este.
+    ///
+    /// Sem este teste, "as duas listas batem" seria uma frase na especificação.
+    #[test]
+    #[ignore = "exige Node instalado e `npm install typescript` no projeto de teste"]
+    fn our_file_list_matches_the_analyzer() {
+        let root = std::env::temp_dir().join(format!("er-adr027-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let fonte = root.join("fonte");
+        assert!(std::fs::create_dir_all(&fonte).is_ok());
+        assert!(std::fs::write(root.join("package.json"), r#"{"name":"t"}"#).is_ok());
+        assert!(
+            std::fs::write(
+                root.join("tsconfig.json"),
+                r#"{ "include": ["fonte/**/*"], "compilerOptions": { "outDir": "saida" } }"#,
+            )
+            .is_ok()
+        );
+        let arquivo = fonte.join("pedido.ts");
+        assert!(std::fs::write(&arquivo, "export class Pedido {}\n").is_ok());
+
+        // No Windows o npm é um `.cmd`, e não um executável.
+        #[cfg(windows)]
+        const NPM: &str = "npm.cmd";
+        #[cfg(not(windows))]
+        const NPM: &str = "npm";
+        let instalado = std::process::Command::new(NPM)
+            .args(["install", "typescript@5", "--no-audit", "--no-fund"])
+            .current_dir(&root)
+            .status();
+        assert!(instalado.is_ok_and(|status| status.success()));
+
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(erro) => panic!("runtime de teste: {erro}"),
+        };
+        let provider = TypeScriptServiceProvider::new(Arc::new(NativeProcessSupervisor::default()));
+        let servico = match runtime.block_on(provider.start(LanguageActivationContext {
+            workspace_root: root.clone(),
+            source_roots: Vec::new(),
+            toolchains: Vec::new(),
+        })) {
+            Ok(servico) => servico,
+            Err(erro) => panic!("o analisador precisa subir: {erro}"),
+        };
+
+        let documento = DocumentSnapshot {
+            id: DocumentId(1),
+            path: arquivo,
+            version: 1,
+            text: "export class Pedido {}\n".to_owned(),
+        };
+        assert!(runtime.block_on(servico.open_document(documento)).is_ok());
+        // O analisador precisa de um instante para montar o projeto.
+        std::thread::sleep(Duration::from_secs(2));
+
+        let dele = match runtime.block_on(servico.project_files(DocumentId(1))) {
+            Ok(arquivos) => arquivos,
+            Err(erro) => panic!("o analisador precisa listar o projeto: {erro}"),
+        };
+        // Os `.d.ts` da biblioteca padrão entram na lista dele e não na nossa:
+        // eles não são fonte do projeto. O que se compara é o que está **sob as
+        // nossas raízes**, que é onde as duas leituras têm de concordar.
+        let nossas = crate::tsconfig::load(&root.join("tsconfig.json"))
+            .map(|config| config.source_roots())
+            .unwrap_or_default();
+        assert_eq!(nossas, vec![fonte.clone()], "a nossa raiz sai do tsconfig");
+
+        let sob_a_raiz: Vec<_> = dele.iter().filter(|caminho| dentro(caminho, &nossas)).collect();
+        assert!(
+            !sob_a_raiz.is_empty(),
+            "o arquivo sob a nossa raiz precisa estar na lista do analisador; ele viu: {dele:?}"
+        );
+
+        runtime.block_on(servico.session.shutdown());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Compara caminhos como os dois lados os escrevem.
+    ///
+    /// O analisador usa barra normal e nós usamos a do sistema; e o Windows não
+    /// distingue maiúsculas. Comparar cru diria que dois caminhos iguais são
+    /// diferentes.
+    fn dentro(caminho: &std::path::Path, raizes: &[PathBuf]) -> bool {
+        let normalizar = |valor: &std::path::Path| {
+            valor.to_string_lossy().to_lowercase().replace('\\', "/")
+        };
+        let alvo = normalizar(caminho);
+        raizes.iter().any(|raiz| alvo.starts_with(&normalizar(raiz)))
+    }
 }

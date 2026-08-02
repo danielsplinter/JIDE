@@ -152,6 +152,12 @@ impl NativeIde {
         language_host
             .register(typescript.provider.clone())
             .map_err(|error| error.to_string())?;
+        // O analisador externo entra ao lado do nativo, e não no lugar dele: são
+        // dois providers para a mesma extensão, e a ordem entre eles é a
+        // declarada logo abaixo.
+        language_host
+            .register(typescript_contribution::service_provider(processes.clone()))
+            .map_err(|error| error.to_string())?;
         self.languages.toolchains.register_contribution(&typescript);
         self.tasks
             .controller
