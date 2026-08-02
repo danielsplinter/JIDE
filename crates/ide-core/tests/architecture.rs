@@ -260,9 +260,10 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
         // A segunda linguagem custou **uma** crate, que é o que a fase 8 da `12`
         // veio comprar. No formato antigo teria custado até seis.
         //
-        // `ide-process` e `ide-project` entraram na fase 2 da `23`, com o
-        // sistema de build de npm — e é por isso que o analisador dela passou a
-        // precisar da mesma cerca que o de Java tem.
+        // `ide-process`, `ide-project` e `ide-toolchain-api` entraram na fase 2
+        // da `23`, com o sistema de build de npm e a instalação de Node — e é
+        // por isso que o analisador dela passou a precisar da mesma cerca que o
+        // de Java tem.
         (
             "language-typescript",
             BTreeSet::from([
@@ -270,6 +271,7 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
                 "ide-language-api",
                 "ide-process",
                 "ide-project",
+                "ide-toolchain-api",
             ]),
         ),
         (

@@ -6,6 +6,8 @@
 
 mod analyzer;
 mod project;
+mod toolchain;
 
 pub use analyzer::{TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID, TypeScriptLanguageProvider};
 pub use project::{NPM_BUILD_SYSTEM_ID, NpmAdapter, TsConfig, TsConfigError, npm::scripts, tsconfig};
+pub use toolchain::{NODE_TOOLCHAIN_ID, NodeToolchainProvider, node_executable};

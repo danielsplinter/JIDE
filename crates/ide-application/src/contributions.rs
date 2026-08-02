@@ -179,6 +179,16 @@ impl ContributionRegistry {
         self.contributions.is_empty()
     }
 
+    /// Troca as tarefas que a contribuição de uma linguagem publica na tela.
+    ///
+    /// O catálogo é remontado a partir das contribuições, então a lista da tela
+    /// acompanha sem que ninguém acima saiba de onde as tarefas vieram.
+    pub fn replace_language_tasks(&mut self, language_id: &LanguageId, tasks: Vec<TaskDescriptor>) {
+        if let Some(contribution) = self.contributions.get_mut(language_id) {
+            contribution.tasks = tasks;
+        }
+    }
+
     /// Qual linguagem declarou esta seção de configurações.
     ///
     /// A janela devolve o identificador da seção que recebeu o clique, e é aqui
@@ -427,6 +437,11 @@ impl TaskController {
         Ok(())
     }
 
+    /// Repassa à lista de tarefas o que o projeto aberto declarou.
+    pub fn replace_language_tasks(&mut self, language_id: &LanguageId, tasks: Vec<TaskDescriptor>) {
+        self.tasks.replace_language_tasks(language_id, tasks);
+    }
+
     #[must_use]
     pub fn task(&self, id: &TaskId) -> Option<(LanguageId, TaskDescriptor)> {
         self.tasks
@@ -481,6 +496,21 @@ impl TaskRegistry {
             );
         }
         Ok(())
+    }
+
+    /// Troca as tarefas de uma linguagem pelas que o projeto aberto declarou.
+    ///
+    /// Nem toda tarefa é conhecida na partida. As de Java são — compilar,
+    /// executar, testar existem antes de haver projeto. As de npm não: são os
+    /// `scripts` do `package.json`, e mudam de projeto para projeto. Declarar
+    /// um conjunto fixo aqui seria adivinhar nomes, que é a tabela de
+    /// compatibilidade que a `23` proíbe com outro nome.
+    pub fn replace_language_tasks(&mut self, language_id: &LanguageId, tasks: Vec<TaskDescriptor>) {
+        self.tasks.retain(|_, (owner, _)| owner != language_id);
+        for task in tasks {
+            self.tasks
+                .insert(task.id.clone(), (language_id.clone(), task));
+        }
     }
 
     #[must_use]

@@ -135,9 +135,14 @@ impl NativeIde {
         // A segunda linguagem. Ela entra pelo mesmo caminho da primeira, e é
         // isso que a fase 1 da `23` vem provar: registrar uma linguagem nova não
         // exige tocar em nada acima daqui.
-        let typescript = typescript_contribution::contribution();
+        let typescript = typescript_contribution::contribution(processes.clone());
         language_host
             .register(typescript.provider.clone())
+            .map_err(|error| error.to_string())?;
+        self.languages.toolchains.register_contribution(&typescript);
+        self.tasks
+            .controller
+            .register_contribution(&typescript)
             .map_err(|error| error.to_string())?;
         self.languages
             .contributions
@@ -1286,8 +1291,29 @@ impl NativeIde {
     /// A importação é nativa: nenhum processo externo é iniciado aqui, apenas os
     /// manifestos do projeto são lidos. O Maven ou o Gradle só executam quando o
     /// usuário pede um build.
+    /// Publica as tarefas que o projeto aberto declara.
+    ///
+    /// Nem toda tarefa é conhecida na partida: as de npm são os `scripts` do
+    /// `package.json`, e mudam de projeto para projeto. Declarar um conjunto
+    /// fixo na contribuição seria adivinhar nomes — a tabela de compatibilidade
+    /// que a `23` proíbe, com outro nome.
+    fn refresh_project_tasks(&mut self, root: &Path) {
+        let language = typescript_contribution::language_id();
+        let tasks = typescript_contribution::project_tasks(root);
+        self.tasks
+            .controller
+            .replace_language_tasks(&language, tasks.clone());
+        self.languages
+            .contributions
+            .replace_language_tasks(&language, tasks);
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_ui_catalog(self.languages.contributions.ui_catalog());
+        }
+    }
+
     fn import_project(&mut self, root: &Path) {
         let previous = self.project.reset_import();
+        self.refresh_project_tasks(root);
         if let Some(shell) = self.ui.shell.as_mut() {
             shell.set_project_summary(None);
         }

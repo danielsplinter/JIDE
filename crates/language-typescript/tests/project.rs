@@ -257,3 +257,33 @@ fn a_directory_without_a_manifest_is_not_a_project() {
     assert!(scripts(&root).is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Um `package.json` sem `scripts` não inventa tarefa nenhuma.
+///
+/// Oferecer um `build` que não existe seria pior do que não oferecer nada: quem
+/// clica recebe erro de script inexistente, e a IDE parece quebrada.
+#[test]
+fn a_project_without_scripts_offers_no_task() {
+    let root = temporary("sem-scripts");
+    write(&root.join("package.json"), r#"{ "name": "vazio" }"#);
+    assert!(scripts(&root).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Os scripts saem na ordem do arquivo, e são exatamente os que estão lá.
+#[test]
+fn the_scripts_are_the_ones_written_in_the_manifest() {
+    let root = temporary("scripts");
+    write(
+        &root.join("package.json"),
+        r#"{ "scripts": { "start": "ng serve", "build": "ng build", "lint": "eslint ." } }"#,
+    );
+    let encontrados = scripts(&root);
+    let mut nomes: Vec<_> = encontrados.keys().map(String::as_str).collect();
+    nomes.sort_unstable();
+    assert_eq!(nomes, vec!["build", "lint", "start"]);
+    // `ng serve` está aqui porque está escrito no arquivo, e não porque alguém
+    // no nosso código saiba o que `ng` é.
+    assert_eq!(encontrados.get("start").map(String::as_str), Some("ng serve"));
+    let _ = std::fs::remove_dir_all(&root);
+}

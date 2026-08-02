@@ -1232,6 +1232,7 @@ dependencies = [
  "ide-language-api",
  "ide-process",
  "ide-project",
+ "ide-toolchain-api",
  "pollster",
  "serde",
  "serde_json",
