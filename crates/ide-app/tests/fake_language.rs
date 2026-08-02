@@ -48,7 +48,12 @@ impl LanguageProvider for FakeProvider {
     }
 
     fn capabilities(&self) -> LanguageCapabilities {
-        LanguageCapabilities::SYNTAX
+        // `COMPLETION` junto com o gatilho declarado acima: um provider que diz
+        // "o `:` pede completação" e não declara que completa é incoerente
+        // consigo mesmo. A incoerência não aparecia enquanto o gatilho vinha de
+        // quem pegasse o documento; com a composição de capacidades, ele passa a
+        // vir de **quem completa**, e a falta ficou visível.
+        LanguageCapabilities::SYNTAX | LanguageCapabilities::COMPLETION
     }
 
     async fn activate(

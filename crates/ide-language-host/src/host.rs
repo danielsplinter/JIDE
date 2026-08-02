@@ -303,6 +303,15 @@ impl LanguageHost {
         let extension = document_extension(&document.path);
         let candidates = self.candidate_ids(&extension, LanguageCapabilities::empty())?;
         let mut last_error = None;
+        let mut aceito = None;
+        // O documento é aberto em **todos** os candidatos que o aceitarem, e não
+        // no primeiro. Dois providers da mesma linguagem podem ter capacidades
+        // complementares, e um deles sozinho não responde a tudo.
+        //
+        // Quem não subir — o analisador externo sem Node, por exemplo — apenas
+        // fica de fora, e o que ele saberia responder passa a não ter resposta.
+        // É a degradação da ADR-025 acontecendo por capacidade, e não por
+        // documento inteiro.
         for provider_id in candidates {
             match self.ensure_active(&provider_id) {
                 Ok(worker) => match worker
@@ -314,19 +323,21 @@ impl LanguageHost {
                             .lock()
                             .map_err(|_| LanguageHostError::WorkerStopped)?
                             .route(document.id, provider_id.clone());
-                        return Ok(provider_id);
+                        // O primeiro que aceita é o que se devolve: é o
+                        // principal da ordem declarada.
+                        aceito.get_or_insert(provider_id);
                     }
                     Err(error) => last_error = Some(error),
                 },
                 Err(error) => last_error = Some(error),
             }
         }
-        Err(
+        aceito.ok_or_else(|| {
             last_error.unwrap_or(LanguageHostError::ProviderUnavailable {
                 extension,
                 capabilities: LanguageCapabilities::empty(),
-            }),
-        )
+            })
+        })
     }
 
     /// Espera as linguagens ativas terminarem seus índices.
@@ -383,8 +394,33 @@ impl LanguageHost {
         context: LanguageRequestContext,
         change: DocumentChange,
     ) -> Result<(), LanguageHostError> {
-        let worker = self.worker_for_document(change.document_id, LanguageCapabilities::empty())?;
-        self.note_result(worker.provider_id(), worker.change_document(context, change).await)
+        // A mudança vai a **todos** os que têm o documento: cada um mantém a
+        // própria cópia do texto, e um que não a receba passaria a responder
+        // sobre o arquivo de antes — a resposta velha com cara de certa.
+        let mut ultimo = Ok(());
+        for provider_id in self.providers_for_document(change.document_id)? {
+            let Ok(worker) = self.ensure_active(&provider_id) else {
+                continue;
+            };
+            let resultado = self.note_result(
+                worker.provider_id(),
+                worker.change_document(context.clone(), change.clone()).await,
+            );
+            if resultado.is_err() {
+                ultimo = resultado;
+            }
+        }
+        ultimo
+    }
+
+    fn providers_for_document(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Vec<ProviderId>, LanguageHostError> {
+        self.registry
+            .lock()
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+            .providers_for_document(document_id)
     }
 
     /// Enfileira a mudança sem esperar a resposta.
@@ -398,8 +434,18 @@ impl LanguageHost {
         context: LanguageRequestContext,
         change: DocumentChange,
     ) -> Result<oneshot::Receiver<Result<(), LanguageHostError>>, LanguageHostError> {
-        let worker = self.worker_for_document(change.document_id, LanguageCapabilities::empty())?;
-        worker.post_change(context, change)
+        // Todos recebem, e quem chamou fica com o receptor do primeiro: é o que
+        // decide se a mudança entrou na fila, e a contrapressão de um vale para
+        // a sincronização inteira (ADR-017).
+        let mut primeiro = None;
+        for provider_id in self.providers_for_document(change.document_id)? {
+            let Ok(worker) = self.ensure_active(&provider_id) else {
+                continue;
+            };
+            let receptor = worker.post_change(context.clone(), change.clone())?;
+            primeiro.get_or_insert(receptor);
+        }
+        primeiro.ok_or(LanguageHostError::DocumentNotRouted(change.document_id))
     }
 
     /// Pede o realce sem esperar. Ver [`Self::post_change_document`].
@@ -418,15 +464,24 @@ impl LanguageHost {
         context: LanguageRequestContext,
         document_id: DocumentId,
     ) -> Result<(), LanguageHostError> {
-        let worker = self.worker_for_document(document_id, LanguageCapabilities::empty())?;
-        let result = worker.close_document(context, document_id).await;
-        if result.is_ok() {
-            self.registry
-                .lock()
-                .map_err(|_| LanguageHostError::WorkerStopped)?
-                .unroute(document_id);
+        // Fecha em todos os que o tinham aberto. Deixar um de fora manteria o
+        // arquivo carregado num provider que ninguém mais consulta — e num
+        // analisador externo isso é memória retida sem dono.
+        let mut resultado = Ok(());
+        for provider_id in self.providers_for_document(document_id)? {
+            let Ok(worker) = self.ensure_active(&provider_id) else {
+                continue;
+            };
+            let fechado = worker.close_document(context.clone(), document_id).await;
+            if fechado.is_err() {
+                resultado = fechado;
+            }
         }
-        result
+        self.registry
+            .lock()
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+            .unroute(document_id);
+        resultado
     }
 
     pub async fn diagnostics(
@@ -627,7 +682,7 @@ impl LanguageHost {
                 .lock()
                 .map_err(|_| LanguageHostError::WorkerStopped)?;
             let com_documento: std::collections::HashSet<ProviderId> =
-                registry.document_routes.values().cloned().collect();
+                registry.document_routes.values().flatten().cloned().collect();
             registry
                 .providers
                 .iter_mut()
@@ -814,29 +869,15 @@ impl LanguageHost {
         document_id: DocumentId,
         required: LanguageCapabilities,
     ) -> Result<Arc<ProviderWorker>, LanguageHostError> {
+        // Quem responde é quem **sabe** responder, e não quem pegou o documento
+        // primeiro. Ver a composição de capacidades da `04`.
         let provider_id = {
             let registry = self
                 .registry
                 .lock()
                 .map_err(|_| LanguageHostError::WorkerStopped)?;
-            registry.provider_for_document(document_id)?
+            registry.provider_for_capability(document_id, required)?
         };
-        {
-            let registry = self
-                .registry
-                .lock()
-                .map_err(|_| LanguageHostError::WorkerStopped)?;
-            let entry = registry
-                .providers
-                .get(&provider_id)
-                .ok_or_else(|| LanguageHostError::ProviderNotFound(provider_id.clone()))?;
-            if !entry.capabilities.contains(required) {
-                return Err(LanguageHostError::CapabilityUnavailable {
-                    provider: provider_id,
-                    required,
-                });
-            }
-        }
         self.ensure_active(&provider_id)
     }
 }
@@ -1134,21 +1175,53 @@ mod tests {
             "a morte precisa ser dita, e não confundida com falha de pedido: {depois:?}"
         );
 
-        // A rota foi desfeita: o documento não pertence mais a ninguém.
-        let orfao = pollster::block_on(host.syntax(host.request_context(), DocumentId(1)));
+        // O de baixo já tinha o documento aberto: a queda é **imediata**, e não
+        // custa uma reabertura. Foi a composição de capacidades que deu isto de
+        // graça — antes dela, o documento pertencia a um provider só e precisava
+        // ser reaberto no seguinte.
         assert!(
-            matches!(orfao, Err(LanguageHostError::DocumentNotRouted(_))),
-            "o documento precisa ficar sem rota para poder ser reaberto: {orfao:?}"
+            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
+            "depois da queda, quem responde é o de baixo, sem reabrir"
         );
 
-        // A aplicação reabre, e agora quem atende é o chão.
+        // E reabrir continua funcionando, que é o caminho de quando **nenhum**
+        // dos que restam tem o documento.
         let renovado = success(pollster::block_on(
             host.open_document(host.request_context(), documento),
         ));
         assert_eq!(renovado, ProviderId("ts.syntax".to_owned()));
+    }
+
+    /// Quando o único provider morre, o documento fica sem rota.
+    ///
+    /// É o caminho que a aplicação trata reabrindo — e ele só aparece quando não
+    /// há mais ninguém com o arquivo, porque com dois a queda é imediata.
+    #[test]
+    fn a_document_with_no_provider_left_loses_its_route() {
+        let host = LanguageHost::new(".");
+        let unico = Arc::new(TestProvider::new(
+            "java.native",
+            LanguageCapabilities::SYNTAX,
+        ));
+        success(host.register(unico.clone()));
+        success(pollster::block_on(host.open_document(
+            host.request_context(),
+            DocumentSnapshot {
+                id: DocumentId(1),
+                path: PathBuf::from("/w/Pedido.java"),
+                version: 1,
+                text: "class Pedido {}".to_owned(),
+            },
+        )));
+
+        unico.gone.store(true, Ordering::Relaxed);
+        let morte = pollster::block_on(host.syntax(host.request_context(), DocumentId(1)));
+        assert!(matches!(morte, Err(LanguageHostError::ProviderGone(_))));
+
+        let orfao = pollster::block_on(host.syntax(host.request_context(), DocumentId(1)));
         assert!(
-            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
-            "depois da queda, a IDE continua respondendo"
+            matches!(orfao, Err(LanguageHostError::DocumentNotRouted(_))),
+            "sem ninguém com o arquivo, o documento fica sem rota: {orfao:?}"
         );
     }
 

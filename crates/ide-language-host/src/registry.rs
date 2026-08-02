@@ -30,7 +30,16 @@ pub(super) struct ProviderEntry {
 pub(super) struct Registry {
     pub(super) providers: HashMap<ProviderId, ProviderEntry>,
     pub(super) selections: Selections,
-    pub(super) document_routes: HashMap<DocumentId, ProviderId>,
+    /// Em quais providers cada documento está aberto.
+    ///
+    /// São **vários**, e não um: dois providers da mesma linguagem podem ter
+    /// capacidades complementares — em TypeScript, o externo sabe tipo e o
+    /// nativo sabe realce, e nenhum faz tudo. Prender o documento ao primeiro
+    /// que o aceitou fazia o realce sumir quando o analisador externo subia.
+    ///
+    /// A `04` chama isso de composição de capacidades; o que existia era só
+    /// alternativa. Ver a fase 3c da `23`.
+    pub(super) document_routes: HashMap<DocumentId, Vec<ProviderId>>,
 }
 
 impl Registry {
@@ -148,35 +157,70 @@ impl Registry {
         Ok(ordered)
     }
 
+    /// Os gatilhos de completação de quem responde por completação.
+    ///
+    /// Vem de quem **completa**, e não do primeiro que pegou o documento: em
+    /// TypeScript o nativo não declara gatilho nenhum — sem tipos não há o que
+    /// oferecer depois do ponto — e o externo declara o ponto.
     pub(super) fn trigger_characters(&self, document_id: DocumentId) -> Vec<char> {
-        self.document_routes
-            .get(&document_id)
-            .and_then(|provider_id| self.providers.get(provider_id))
+        self.provider_for_capability(document_id, LanguageCapabilities::COMPLETION)
+            .ok()
+            .and_then(|provider_id| self.providers.get(&provider_id))
             .map(|entry| entry.metadata.trigger_characters.clone())
             .unwrap_or_default()
     }
 
     pub(super) fn route(&mut self, document_id: DocumentId, provider_id: ProviderId) {
-        self.document_routes.insert(document_id, provider_id);
+        let abertos = self.document_routes.entry(document_id).or_default();
+        if !abertos.contains(&provider_id) {
+            abertos.push(provider_id);
+        }
     }
 
-    pub(super) fn unroute(&mut self, document_id: DocumentId) -> Option<ProviderId> {
-        self.document_routes.remove(&document_id)
+    pub(super) fn unroute(&mut self, document_id: DocumentId) -> Vec<ProviderId> {
+        self.document_routes.remove(&document_id).unwrap_or_default()
     }
 
-    pub(super) fn provider_for_document(
+    pub(super) fn providers_for_document(
         &self,
         document_id: DocumentId,
-    ) -> Result<ProviderId, LanguageHostError> {
+    ) -> Result<Vec<ProviderId>, LanguageHostError> {
         self.document_routes
             .get(&document_id)
+            .filter(|abertos| !abertos.is_empty())
             .cloned()
             .ok_or(LanguageHostError::DocumentNotRouted(document_id))
     }
 
+    /// Quem, entre os que têm o documento, sabe responder a esta capacidade.
+    ///
+    /// É aqui que a composição acontece: `syntax` procura quem tem `SYNTAX`, e
+    /// não quem pegou o arquivo primeiro.
+    pub(super) fn provider_for_capability(
+        &self,
+        document_id: DocumentId,
+        required: LanguageCapabilities,
+    ) -> Result<ProviderId, LanguageHostError> {
+        let abertos = self.providers_for_document(document_id)?;
+        abertos
+            .iter()
+            .find(|id| {
+                self.providers
+                    .get(*id)
+                    .is_some_and(|entry| entry.capabilities.contains(required))
+            })
+            .cloned()
+            .ok_or(LanguageHostError::CapabilityUnavailable {
+                provider: abertos[0].clone(),
+                required,
+            })
+    }
+
     pub(super) fn remove_provider_routes(&mut self, provider_id: &ProviderId) {
-        self.document_routes
-            .retain(|_, routed_provider| routed_provider != provider_id);
+        self.document_routes.retain(|_, abertos| {
+            abertos.retain(|routed| routed != provider_id);
+            !abertos.is_empty()
+        });
     }
 }
 
