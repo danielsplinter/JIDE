@@ -111,3 +111,47 @@ fn an_unknown_extension_reaches_nobody() {
         "um `.md` não pode cair no provider de outra linguagem"
     );
 }
+
+/// Com os dois providers de TypeScript registrados, o realce ainda responde?
+///
+/// O nativo tem SYNTAX; o externo tem COMPLETION, DEFINITION e DIAGNOSTICS. Se o
+/// documento fica preso a um provider só, o realce depende de qual deles pegou o
+/// arquivo — e a ordem declarada põe o externo na frente.
+#[test]
+fn syntax_still_answers_with_both_typescript_providers() {
+    let host = LanguageHost::new("/w");
+    let nativo: Arc<dyn LanguageProvider> =
+        Arc::new(language_typescript::TypeScriptLanguageProvider::new());
+    let externo: Arc<dyn LanguageProvider> =
+        Arc::new(language_typescript::TypeScriptServiceProvider::new(Arc::new(
+            ide_process::NativeProcessSupervisor::default(),
+        )));
+    success(host.register(nativo));
+    success(host.register(externo));
+    success(host.configure_selection(
+        ide_domain::LanguageId("typescript".to_owned()),
+        ide_language_host::ProviderSelection {
+            primary: ide_domain::ProviderId(
+                language_typescript::TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned(),
+            ),
+            fallbacks: vec![ide_domain::ProviderId(
+                language_typescript::TYPESCRIPT_PROVIDER_ID.to_owned(),
+            )],
+        },
+    ));
+
+    let documento = DocumentSnapshot {
+        id: DocumentId(9),
+        path: PathBuf::from("/w/pedido.ts"),
+        version: 1,
+        text: "export class Pedido {}".to_owned(),
+    };
+    success(pollster::block_on(
+        host.open_document(context(9), documento),
+    ));
+    let realce = pollster::block_on(host.syntax(context(10), DocumentId(9)));
+    assert!(
+        realce.is_ok(),
+        "com os dois registrados, o realce precisa continuar respondendo: {realce:?}"
+    );
+}

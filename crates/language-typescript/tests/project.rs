@@ -287,3 +287,72 @@ fn the_scripts_are_the_ones_written_in_the_manifest() {
     assert_eq!(encontrados.get("start").map(String::as_str), Some("ng serve"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// O `tsconfig.json` de solução: sem arquivos próprios, só referências.
+///
+/// É o formato padrão do Angular, e foi encontrado num projeto de verdade — não
+/// num construído para passar. A raiz guarda as opções compartilhadas, e o
+/// conteúdo está no `tsconfig.app.json`, que ela referencia.
+///
+/// Sem seguir a referência, a leitura cai no padrão do compilador — "sem
+/// `include`, o projeto é o diretório" — e devolve a raiz inteira. Isso põe
+/// `node_modules` dentro do que a IDE considera código-fonte, e num projeto
+/// Angular são dezenas de milhares de arquivos.
+#[test]
+fn a_solution_config_takes_its_roots_from_what_it_references() {
+    let root = temporary("solucao");
+    write(
+        &root.join("tsconfig.json"),
+        r#"{
+  "compilerOptions": { "strict": true },
+  "files": [],
+  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.spec.json" }]
+}"#,
+    );
+    write(
+        &root.join("tsconfig.app.json"),
+        r#"{ "extends": "./tsconfig.json", "include": ["src/**/*.ts"], "exclude": ["src/**/*.spec.ts"] }"#,
+    );
+    write(
+        &root.join("tsconfig.spec.json"),
+        r#"{ "extends": "./tsconfig.json", "include": ["src/**/*.spec.ts"] }"#,
+    );
+
+    let Ok(config) = tsconfig::load(&root.join("tsconfig.json")) else {
+        panic!("um tsconfig de solução precisa ser lido");
+    };
+    assert_eq!(
+        config.source_roots(),
+        vec![root.join("src")],
+        "a raiz vem do que a solução referencia, e não do diretório dela"
+    );
+    assert!(
+        !config.source_roots().contains(&root),
+        "a raiz do projeto inteiro poria node_modules dentro do código-fonte"
+    );
+}
+
+/// Uma referência que aponta para pasta, e não para arquivo.
+///
+/// As duas formas são válidas; o Angular usa a primeira, um monorepo costuma
+/// usar a segunda.
+#[test]
+fn a_reference_may_point_at_a_directory() {
+    let root = temporary("referencia-pasta");
+    write(
+        &root.join("tsconfig.json"),
+        r#"{ "files": [], "references": [{ "path": "./pacotes/loja" }] }"#,
+    );
+    write(
+        &root.join("pacotes").join("loja").join("tsconfig.json"),
+        r#"{ "include": ["fonte/**/*.ts"] }"#,
+    );
+
+    let Ok(config) = tsconfig::load(&root.join("tsconfig.json")) else {
+        panic!("a referência por pasta precisa ser seguida");
+    };
+    assert_eq!(
+        config.source_roots(),
+        vec![root.join("pacotes").join("loja").join("fonte")]
+    );
+}

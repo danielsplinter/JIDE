@@ -28,8 +28,21 @@ pub struct TsConfig {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub files: Vec<PathBuf>,
-    /// Outros `tsconfig` que este projeto referencia, em monorepo.
+    /// Outros `tsconfig` que este projeto referencia.
     pub references: Vec<PathBuf>,
+    /// Raízes que vieram dos arquivos referenciados, já resolvidas.
+    ///
+    /// Um `tsconfig.json` de **solução** não tem arquivos próprios: ele declara
+    /// `"files": []` e aponta para os projetos de verdade em `references`. É o
+    /// formato padrão do Angular — o da raiz guarda as opções compartilhadas, o
+    /// `tsconfig.app.json` tem o `include` da aplicação e o `tsconfig.spec.json`
+    /// o dos testes, porque os dois compilam com opções diferentes.
+    ///
+    /// Sem seguir as referências, a leitura cai no padrão do compilador — "sem
+    /// `include`, o projeto é o diretório" — e devolve a raiz inteira, pondo
+    /// `node_modules` dentro do que a IDE considera código-fonte. Num projeto
+    /// Angular isso é dezenas de milhares de arquivos.
+    referenced_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -66,8 +79,12 @@ impl TsConfig {
                 roots.insert(parent.to_path_buf());
             }
         }
+        // O que os projetos referenciados declaram é código-fonte deste projeto
+        // tanto quanto o que ele declara por si.
+        roots.extend(self.referenced_roots.iter().cloned());
         if roots.is_empty() {
-            // Sem `include` nem `files`, o compilador toma o diretório inteiro.
+            // Sem `include`, `files` nem referência, o compilador toma o
+            // diretório inteiro.
             roots.insert(self.directory.clone());
         }
         let mut roots: Vec<_> = roots.into_iter().collect();
@@ -183,6 +200,21 @@ fn load_with(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<TsConfig, T
                 .collect()
         })
         .unwrap_or_default();
+
+    // As referências são seguidas **na leitura**, e não ao perguntar pelas
+    // raízes: assim `source_roots` continua sem tocar em disco, e o custo é pago
+    // uma vez. O mesmo conjunto de visitados protege contra ciclo.
+    let referencias = config.references.clone();
+    for referencia in referencias {
+        let caminho = resolve_reference(&config.directory, &referencia);
+        let Ok(referenciado) = load_with(&caminho, visited) else {
+            tracing::warn!(caminho = %caminho.display(), "projeto referenciado não pôde ser lido");
+            continue;
+        };
+        config.referenced_roots.extend(referenciado.source_roots());
+    }
+    config.referenced_roots.sort();
+    config.referenced_roots.dedup();
     Ok(config)
 }
 
@@ -201,6 +233,19 @@ fn resolve_extends(directory: &Path, base: &str) -> PathBuf {
         candidate
     } else {
         candidate.join("tsconfig.json")
+    }
+}
+
+/// Onde mora um projeto referenciado.
+///
+/// O caminho pode apontar para o arquivo ou para a pasta que o contém — as duas
+/// formas são válidas, e o Angular usa a primeira.
+fn resolve_reference(directory: &Path, referencia: &Path) -> PathBuf {
+    let candidato = directory.join(referencia);
+    if candidato.extension().is_some() {
+        candidato
+    } else {
+        candidato.join("tsconfig.json")
     }
 }
 

@@ -1242,6 +1242,49 @@ mod tests {
         );
     }
 
+    /// Dois providers da mesma linguagem, com capacidades **complementares**.
+    ///
+    /// É o caso real de TypeScript: o externo responde com tipo — completação,
+    /// diagnóstico, definição — e o nativo responde por realce. Nenhum dos dois
+    /// faz tudo, e a `04` chama isso de composição de capacidades.
+    ///
+    /// O que se cobra aqui é se o host compõe ou se ele apenas escolhe.
+    #[test]
+    fn two_providers_with_complementary_capabilities() {
+        let host = LanguageHost::new(".");
+        success(host.register(Arc::new(TestProvider::new(
+            "ts.service",
+            LanguageCapabilities::COMPLETION,
+        ))));
+        success(host.register(Arc::new(TestProvider::new(
+            "ts.syntax",
+            LanguageCapabilities::SYNTAX,
+        ))));
+        success(host.configure_selection(
+            LanguageId("java".to_owned()),
+            ProviderSelection {
+                primary: ProviderId("ts.service".to_owned()),
+                fallbacks: vec![ProviderId("ts.syntax".to_owned())],
+            },
+        ));
+
+        success(pollster::block_on(host.open_document(
+            host.request_context(),
+            DocumentSnapshot {
+                id: DocumentId(1),
+                path: PathBuf::from("/w/pedido.java"),
+                version: 1,
+                text: "class Pedido {}".to_owned(),
+            },
+        )));
+
+        let realce = pollster::block_on(host.syntax(host.request_context(), DocumentId(1)));
+        assert!(
+            realce.is_ok(),
+            "o realce precisa vir de quem sabe realçar, e não do provider que              pegou o documento primeiro: {realce:?}"
+        );
+    }
+
     /// A ordem entre providers é a declarada, e não a alfabética.
     ///
     /// Sem seleção declarada, `ts.service` viria antes de `ts.syntax` por sair
