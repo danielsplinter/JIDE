@@ -2801,8 +2801,11 @@ mod tests {
 
         let language_host = LanguageHost::new(&root);
         let java = java_contribution::contribution(Arc::new(NativeProcessSupervisor::default()));
-        assert!(language_host.register(java.provider).is_ok());
+        assert!(language_host.register(java.provider.clone()).is_ok());
         let mut ide = NativeIde::default();
+        // A contribuição, e não só o provider: é dela que sai a lista de
+        // extensões que a sincronização consulta. Ver a fase 1b da `23`.
+        assert!(ide.languages.contributions.register(java).is_ok());
         ide.languages.host = Some(language_host);
         ide.ui.shell = Some(test_shell(&root));
         let document_id = match ide.ui.shell.as_mut() {
@@ -2882,8 +2885,11 @@ mod tests {
 
         let language_host = LanguageHost::new(&root);
         let java = java_contribution::contribution(Arc::new(NativeProcessSupervisor::default()));
-        assert!(language_host.register(java.provider).is_ok());
+        assert!(language_host.register(java.provider.clone()).is_ok());
         let mut ide = NativeIde::default();
+        // A contribuição, e não só o provider: é dela que sai a lista de
+        // extensões que a sincronização consulta. Ver a fase 1b da `23`.
+        assert!(ide.languages.contributions.register(java).is_ok());
         ide.languages.host = Some(language_host);
         ide.ui.shell = Some(test_shell(&root));
         if let Some(shell) = ide.ui.shell.as_mut() {
@@ -2943,9 +2949,13 @@ mod tests {
 
         let language_host = LanguageHost::new(&root);
         let java = java_contribution::contribution(Arc::new(NativeProcessSupervisor::default()));
-        assert!(language_host.register(java.provider).is_ok());
+        assert!(language_host.register(java.provider.clone()).is_ok());
 
         let mut ide = NativeIde::default();
+        // A contribuição precisa estar registrada, e não só o provider: é dela
+        // que sai a lista de extensões que a sincronização de documentos
+        // consulta. Ver a fase 1b da `23`.
+        assert!(ide.languages.contributions.register(java).is_ok());
         ide.languages.host = Some(language_host);
         ide.ui.shell = Some(test_shell(&root));
         if let Some(shell) = ide.ui.shell.as_mut() {
@@ -2981,6 +2991,65 @@ mod tests {
         assert!(
             keyword_colored(&mut ide),
             "depois de pedir o realce, o código aparece colorido"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Um `.ts` aberto na IDE aparece colorido, como um `.java`.
+    ///
+    /// É o critério da fase 1 da `23` cobrado onde ele vale: no caminho da
+    /// **aplicação**. O teste que deu a fase por cumprida montava um
+    /// `LanguageHost` e falava com ele — e o host roteava certo o tempo todo. O
+    /// que descartava o `.ts` era a sincronização de documentos, um nível acima,
+    /// que perguntava se a extensão era `java` com a palavra escrita à mão.
+    ///
+    /// Testar a camada que se acabou de mexer e concluir sobre a de cima é o
+    /// defeito que este teste existe para não deixar voltar. Ver a fase 1b.
+    #[test]
+    fn a_typescript_file_is_highlighted_through_the_application() {
+        let root = std::env::temp_dir().join(format!("er-ide-ts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(std::fs::create_dir_all(&root).is_ok());
+        let file = root.join("pedido.ts");
+        assert!(std::fs::write(&file, "export class Pedido {}").is_ok());
+
+        let language_host = LanguageHost::new(&root);
+        let typescript = typescript_contribution::contribution(Arc::new(
+            NativeProcessSupervisor::default(),
+        ));
+        assert!(language_host.register(typescript.provider.clone()).is_ok());
+
+        let mut ide = NativeIde::default();
+        assert!(ide.languages.contributions.register(typescript).is_ok());
+        ide.languages.host = Some(language_host);
+        ide.ui.shell = Some(test_shell(&root));
+        if let Some(shell) = ide.ui.shell.as_mut() {
+            open_test_document(shell, &file);
+        }
+
+        let keyword_colored = |ide: &mut NativeIde| {
+            let colors = ui_core::Theme::default().colors;
+            ide.ui
+                .shell
+                .as_mut()
+                .map(|shell| shell.paint(Size::new(1_280.0, 800.0)))
+                .unwrap_or_default()
+                .iter()
+                .any(|command| {
+                    matches!(
+                        command,
+                        ui_render_api::PaintCommand::DrawText(text)
+                            if text.text == "export" && text.color == colors.syntax_keyword
+                    )
+                })
+        };
+
+        ide.sync_languages();
+        ide.settle_syntax();
+        assert!(
+            keyword_colored(&mut ide),
+            "um `.ts` precisa chegar ao provider e voltar colorido"
         );
 
         let _ = std::fs::remove_dir_all(&root);

@@ -189,6 +189,32 @@ impl LanguageController {
         prontos
     }
 
+    /// Se alguma contribuição declara a extensão deste arquivo.
+    ///
+    /// Este teste dizia `java` à mão, e por isso um `.ts` era descartado **antes**
+    /// de chegar ao host: o provider estava registrado, o roteamento por extensão
+    /// funcionava, e nada disso importava. Na tela, um `.ts` abria sem realce
+    /// nenhum.
+    ///
+    /// O defeito sobreviveu à fase 1 da `23` porque o teste que a deu por
+    /// cumprida montava um `LanguageHost` e falava com ele — a camada que eu
+    /// acabara de mexer —, e concluía sobre a camada de cima. Ver a fase 1b.
+    ///
+    /// Perguntar às contribuições é o que faz uma linguagem nova ser vista sem
+    /// que este arquivo mude.
+    fn has_provider(&self, path: &std::path::Path) -> bool {
+        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+            return false;
+        };
+        self.contributions.iter().any(|contribution| {
+            contribution
+                .descriptor
+                .extensions
+                .iter()
+                .any(|declarada| declarada.eq_ignore_ascii_case(extension))
+        })
+    }
+
     /// Quantos realces ainda estão sendo esperados.
     ///
     /// Só os testes precisam disso: é como se afirma que a tecla deixou a
@@ -223,12 +249,7 @@ impl LanguageController {
 
         let mut syntax = Vec::new();
         for snapshot in snapshots {
-            if !snapshot
-                .path
-                .extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("java"))
-            {
+            if !self.has_provider(&snapshot.path) {
                 continue;
             }
             let changed = documents

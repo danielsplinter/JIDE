@@ -493,6 +493,38 @@ navegaria para o arquivo errado num projeto com dois `Pedido`.
 Entra com o analisador externo, que sabe de módulos. Até lá, `.ts` não oferece
 navegação, e não oferecer é melhor do que oferecer errado.
 
+### Fase 1b — O `.ts` chega ao provider ✅ Concluída
+
+**Estado: concluída em 02/08/2026.** Não estava no plano: saiu do levantamento
+da fase 3b.
+
+`LanguageController::synchronize_documents` descartava, antes de falar com o
+host, todo documento cuja extensão não fosse `java` — com a palavra escrita à
+mão. O provider de TypeScript estava registrado, o roteamento por extensão
+funcionava, e nada disso importava: **na tela, um `.ts` abria sem realce
+nenhum.**
+
+O teste passa a perguntar às contribuições quais extensões têm provider. Uma
+linguagem nova é vista sem que esse arquivo mude.
+
+#### Por que a fase 1 passou por cima disso
+
+O teste que deu a fase por cumprida monta um `LanguageHost`, registra os dois
+providers e fala com ele. Ele está correto no que afirma — o host roteia certo, e
+sempre roteou. Só que o critério da fase é *"abrir um projeto com `.java` e `.ts`
+lado a lado dá realce nos dois"*, e isso é o caminho da **aplicação**.
+
+**Testar a camada que se acabou de mexer e concluir sobre a de cima** é o defeito,
+e ele não estava no código: estava em como a fase foi dada por pronta. Fica
+registrado porque a forma de errar é mais reaproveitável que o erro.
+
+O teste que faltava existe agora, no caminho da aplicação, e foi verificado que
+ele **reprova** com o filtro antigo de volta.
+
+Junto vieram três testes que registravam o provider no host e não a contribuição
+no registro — passavam porque o filtro dizia `java` sozinho. Agora registram as
+duas coisas, que é o que a IDE faz de verdade.
+
 ### Fase 2 — O projeto, lido de onde ele está escrito ✅ Concluída
 
 **Estado: concluída em 02/08/2026.**
