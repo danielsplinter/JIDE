@@ -104,7 +104,14 @@ impl Registry {
             .providers
             .iter()
             .filter(|(_, entry)| {
-                entry.state != ProviderState::Disabled
+                // `Failed` sai da lista junto com `Disabled`. Um provider que
+                // disse ter deixado de existir não pode ser escolhido de novo na
+                // reabertura seguinte — senão o documento voltaria para o morto,
+                // e a queda da fase 3b não teria acontecido.
+                //
+                // Voltar é por `enable`, que já existe: um provider falho é
+                // reabilitado de propósito, e não por acaso.
+                !matches!(entry.state, ProviderState::Disabled | ProviderState::Failed)
                     && entry.metadata.extensions.contains(&extension)
                     && entry.capabilities.contains(required)
             })
@@ -157,7 +164,7 @@ impl Registry {
         self.document_routes
             .get(&document_id)
             .cloned()
-            .ok_or_else(|| LanguageHostError::Provider("document is not open in a provider".into()))
+            .ok_or(LanguageHostError::DocumentNotRouted(document_id))
     }
 
     pub(super) fn remove_provider_routes(&mut self, provider_id: &ProviderId) {

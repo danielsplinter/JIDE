@@ -1,4 +1,5 @@
 use ide_domain::{
+    ProviderId,
     AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
     DocumentChange, DocumentId, DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot,
     SemanticSymbol, SyntaxSnapshot, TextPosition,
@@ -111,8 +112,20 @@ pub(super) enum WorkerRequest {
 }
 
 pub(super) struct ProviderWorker {
+    /// Quem este worker atende.
+    ///
+    /// Ele passou a saber o próprio nome na fase 3b da `23`: quando uma resposta
+    /// diz que o provider deixou de existir, é preciso saber **qual** demitir, e
+    /// espalhar essa pergunta por cada chamada seria repeti-la catorze vezes.
+    provider_id: ProviderId,
     sender: SyncSender<WorkerRequest>,
     thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ProviderWorker {
+    pub(super) const fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
 }
 
 impl ProviderWorker {
@@ -122,6 +135,7 @@ impl ProviderWorker {
         context: LanguageActivationContext,
         queue_capacity: usize,
     ) -> Result<Self, LanguageHostError> {
+        let metadata_id = metadata.provider_id.clone();
         let (sender, receiver) = sync_channel(queue_capacity);
         let (initialized_tx, initialized_rx) = sync_channel(1);
         let thread_name = format!("language-{}", metadata.provider_id.0);
@@ -162,6 +176,7 @@ impl ProviderWorker {
             .recv()
             .map_err(|_| LanguageHostError::WorkerStopped)??;
         Ok(Self {
+            provider_id: metadata_id,
             sender,
             thread: Mutex::new(Some(handle)),
         })

@@ -87,6 +87,19 @@ pub enum LanguageHostError {
     WorkerStopped,
     #[error("provider failed: {0}")]
     Provider(String),
+    /// O provider deixou de poder responder, e o documento perdeu a rota.
+    ///
+    /// Quem chama trata reabrindo o documento: a próxima abertura escolhe o
+    /// candidato seguinte, que é o provider nativo. Ver a fase 3b da `23`.
+    #[error("provider is no longer available: {0}")]
+    ProviderGone(String),
+    /// O documento não está aberto em provider nenhum.
+    ///
+    /// Variante própria, e não texto dentro de `Provider`, porque quem chama
+    /// **age diferente**: aqui ele reabre; num erro de pedido, ele tenta de
+    /// novo do mesmo ponto.
+    #[error("document {0:?} is not open in any provider")]
+    DocumentNotRouted(DocumentId),
 }
 
 impl From<LanguageError> for LanguageHostError {
@@ -98,6 +111,7 @@ impl From<LanguageError> for LanguageHostError {
                 Self::Provider(format!("unsupported operation: {operation}"))
             }
             LanguageError::Provider(message) => Self::Provider(message),
+            LanguageError::Unavailable(message) => Self::ProviderGone(message),
         }
     }
 }
@@ -370,7 +384,7 @@ impl LanguageHost {
         change: DocumentChange,
     ) -> Result<(), LanguageHostError> {
         let worker = self.worker_for_document(change.document_id, LanguageCapabilities::empty())?;
-        worker.change_document(context, change).await
+        self.note_result(worker.provider_id(), worker.change_document(context, change).await)
     }
 
     /// Enfileira a mudança sem esperar a resposta.
@@ -421,7 +435,7 @@ impl LanguageHost {
         document_id: DocumentId,
     ) -> Result<Vec<Diagnostic>, LanguageHostError> {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::DIAGNOSTICS)?;
-        worker.diagnostics(context, document_id).await
+        self.note_result(worker.provider_id(), worker.diagnostics(context, document_id).await)
     }
 
     pub async fn syntax(
@@ -430,7 +444,7 @@ impl LanguageHost {
         document_id: DocumentId,
     ) -> Result<SyntaxSnapshot, LanguageHostError> {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::SYNTAX)?;
-        worker.syntax(context, document_id).await
+        self.note_result(worker.provider_id(), worker.syntax(context, document_id).await)
     }
 
     pub async fn semantic(
@@ -439,7 +453,7 @@ impl LanguageHost {
         document_id: DocumentId,
     ) -> Result<SemanticSnapshot, LanguageHostError> {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::SEMANTICS)?;
-        worker.semantic(context, document_id).await
+        self.note_result(worker.provider_id(), worker.semantic(context, document_id).await)
     }
 
     pub async fn completion(
@@ -449,7 +463,7 @@ impl LanguageHost {
     ) -> Result<Vec<CompletionItem>, LanguageHostError> {
         let worker =
             self.worker_for_document(request.document_id, LanguageCapabilities::COMPLETION)?;
-        worker.completion(context, request).await
+        self.note_result(worker.provider_id(), worker.completion(context, request).await)
     }
 
     pub async fn member_access(
@@ -460,7 +474,7 @@ impl LanguageHost {
         offset: usize,
     ) -> Result<Option<MemberAccess>, LanguageHostError> {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
-        worker.member_access(context, text, offset).await
+        self.note_result(worker.provider_id(), worker.member_access(context, text, offset).await)
     }
 
     /// Membros de um tipo, para telas que não têm documento.
@@ -476,7 +490,7 @@ impl LanguageHost {
         prefix: String,
     ) -> Result<Vec<CompletionItem>, LanguageHostError> {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
-        worker.type_members(context, type_name, prefix).await
+        self.note_result(worker.provider_id(), worker.type_members(context, type_name, prefix).await)
     }
 
     /// Acessores que faltam ao tipo sob a posição.
@@ -506,7 +520,7 @@ impl LanguageHost {
         let provider_id =
             self.provider_for_extension(extension, LanguageCapabilities::REFERENCES)?;
         let worker = self.ensure_active(&provider_id)?;
-        worker.references_to_name(context, name).await
+        self.note_result(worker.provider_id(), worker.references_to_name(context, name).await)
     }
 
     /// Construtor do tipo na posição, com os campos escolhidos.
@@ -534,7 +548,7 @@ impl LanguageHost {
         let provider_id =
             self.provider_for_extension(extension, LanguageCapabilities::COMPLETION)?;
         let worker = self.ensure_active(&provider_id)?;
-        worker.workspace_types(context, query, limit).await
+        self.note_result(worker.provider_id(), worker.workspace_types(context, query, limit).await)
     }
 
     pub async fn definition(
@@ -544,7 +558,7 @@ impl LanguageHost {
     ) -> Result<Vec<Location>, LanguageHostError> {
         let worker =
             self.worker_for_document(request.document_id, LanguageCapabilities::DEFINITION)?;
-        worker.definition(context, request).await
+        self.note_result(worker.provider_id(), worker.definition(context, request).await)
     }
 
     pub async fn references(
@@ -554,7 +568,7 @@ impl LanguageHost {
     ) -> Result<Vec<Location>, LanguageHostError> {
         let worker =
             self.worker_for_document(request.document_id, LanguageCapabilities::REFERENCES)?;
-        worker.references(context, request).await
+        self.note_result(worker.provider_id(), worker.references(context, request).await)
     }
 
     pub async fn disable(&self, provider_id: &ProviderId) -> Result<(), LanguageHostError> {
@@ -715,6 +729,32 @@ impl LanguageHost {
         }
     }
 
+    /// Demite o provider que disse ter deixado de existir.
+    ///
+    /// Marca-o como falho e **desfaz as rotas** dos documentos que ele atendia.
+    /// Não reabre nada: quem tem o texto é a aplicação, não o host. A próxima
+    /// sincronização encontra o documento sem rota e o abre no candidato
+    /// seguinte — que é o provider nativo, pela ordem declarada.
+    ///
+    /// O host guardar o texto para reabrir sozinho seria a alternativa, e
+    /// duplicaria em memória o que o editor já tem. Ver a fase 3b da `23`.
+    fn note_result<T>(
+        &self,
+        provider_id: &ProviderId,
+        result: Result<T, LanguageHostError>,
+    ) -> Result<T, LanguageHostError> {
+        if matches!(result, Err(LanguageHostError::ProviderGone(_)))
+            && let Ok(mut registry) = self.registry.lock()
+        {
+            if let Some(entry) = registry.providers.get_mut(provider_id) {
+                entry.state = ProviderState::Failed;
+                entry.worker = None;
+            }
+            registry.remove_provider_routes(provider_id);
+        }
+        result
+    }
+
     fn worker_for_document(
         &self,
         document_id: DocumentId,
@@ -793,6 +833,11 @@ mod tests {
         shutdowns: Arc<AtomicUsize>,
         worker_thread: Arc<Mutex<Option<ThreadId>>>,
         fail_activation: bool,
+        /// Ligado, o provider passa a responder que deixou de existir.
+        ///
+        /// É como se simula o processo do analisador morrendo no meio da
+        /// sessão, sem precisar de processo nenhum.
+        gone: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl TestProvider {
@@ -806,6 +851,7 @@ mod tests {
                 shutdowns: Arc::new(AtomicUsize::new(0)),
                 worker_thread: Arc::new(Mutex::new(None)),
                 fail_activation: false,
+                gone: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
 
@@ -861,6 +907,7 @@ mod tests {
             Ok(Box::new(TestActiveLanguage {
                 language_id: self.language_id.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
+                gone: Arc::clone(&self.gone),
             }))
         }
     }
@@ -894,6 +941,7 @@ mod tests {
     struct TestActiveLanguage {
         language_id: LanguageId,
         shutdowns: Arc<AtomicUsize>,
+        gone: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait]
@@ -932,6 +980,20 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn syntax(&self, document_id: DocumentId) -> Result<ide_domain::SyntaxSnapshot, LanguageError> {
+            if self.gone.load(Ordering::Relaxed) {
+                return Err(LanguageError::Unavailable("o processo morreu".to_owned()));
+            }
+            Ok(ide_domain::SyntaxSnapshot {
+                document_id,
+                version: 1,
+                outline: Vec::new(),
+                highlights: Vec::new(),
+                imports: Vec::new(),
+                diagnostics: Vec::new(),
+            })
+        }
+
         async fn shutdown(&self) -> Result<(), LanguageError> {
             self.shutdowns.fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -963,6 +1025,107 @@ mod tests {
             host.register(provider),
             Err(LanguageHostError::DuplicateProvider(_))
         ));
+    }
+
+    /// O documento migra para o provider de baixo quando o de cima morre.
+    ///
+    /// É o que dá dente à ADR-025: sem isto, "o nativo é o chão" seria uma
+    /// frase, e o documento ficaria preso ao provider morto.
+    ///
+    /// O host **não** reabre sozinho, e é decisão: quem tem o texto é a
+    /// aplicação. Ele desfaz a rota, e a próxima abertura escolhe o candidato
+    /// seguinte. Guardar o texto aqui duplicaria o que o editor já tem.
+    #[test]
+    fn a_document_moves_to_the_provider_below_when_the_one_above_dies() {
+        let host = LanguageHost::new(".");
+        let principal = Arc::new(TestProvider::new(
+            "ts.service",
+            LanguageCapabilities::SYNTAX,
+        ));
+        let chao = Arc::new(TestProvider::new("ts.syntax", LanguageCapabilities::SYNTAX));
+        success(host.register(principal.clone()));
+        success(host.register(chao.clone()));
+        success(host.configure_selection(
+            LanguageId("java".to_owned()),
+            ProviderSelection {
+                primary: ProviderId("ts.service".to_owned()),
+                fallbacks: vec![ProviderId("ts.syntax".to_owned())],
+            },
+        ));
+
+        let documento = DocumentSnapshot {
+            id: DocumentId(1),
+            path: PathBuf::from("/w/pedido.java"),
+            version: 1,
+            text: "class Pedido {}".to_owned(),
+        };
+        let aceito = success(pollster::block_on(
+            host.open_document(host.request_context(), documento.clone()),
+        ));
+        assert_eq!(
+            aceito,
+            ProviderId("ts.service".to_owned()),
+            "a ordem declarada é que decide, e não a alfabética"
+        );
+        assert!(
+            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
+            "de pé, o principal responde"
+        );
+
+        // O processo do analisador morre no meio da sessão.
+        principal.gone.store(true, Ordering::Relaxed);
+        let depois = pollster::block_on(host.syntax(host.request_context(), DocumentId(1)));
+        assert!(
+            matches!(depois, Err(LanguageHostError::ProviderGone(_))),
+            "a morte precisa ser dita, e não confundida com falha de pedido: {depois:?}"
+        );
+
+        // A rota foi desfeita: o documento não pertence mais a ninguém.
+        let orfao = pollster::block_on(host.syntax(host.request_context(), DocumentId(1)));
+        assert!(
+            matches!(orfao, Err(LanguageHostError::DocumentNotRouted(_))),
+            "o documento precisa ficar sem rota para poder ser reaberto: {orfao:?}"
+        );
+
+        // A aplicação reabre, e agora quem atende é o chão.
+        let renovado = success(pollster::block_on(
+            host.open_document(host.request_context(), documento),
+        ));
+        assert_eq!(renovado, ProviderId("ts.syntax".to_owned()));
+        assert!(
+            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
+            "depois da queda, a IDE continua respondendo"
+        );
+    }
+
+    /// A ordem entre providers é a declarada, e não a alfabética.
+    ///
+    /// Sem seleção declarada, `ts.service` viria antes de `ts.syntax` por sair
+    /// antes no alfabeto — e um teste que não trocasse os nomes de lugar
+    /// passaria pelo motivo errado.
+    #[test]
+    fn the_declared_order_wins_over_the_alphabet() {
+        let host = LanguageHost::new(".");
+        success(host.register(Arc::new(TestProvider::new(
+            "aaa.primeiro",
+            LanguageCapabilities::SYNTAX,
+        ))));
+        success(host.register(Arc::new(TestProvider::new(
+            "zzz.ultimo",
+            LanguageCapabilities::SYNTAX,
+        ))));
+        success(host.configure_selection(
+            LanguageId("java".to_owned()),
+            ProviderSelection {
+                primary: ProviderId("zzz.ultimo".to_owned()),
+                fallbacks: vec![ProviderId("aaa.primeiro".to_owned())],
+            },
+        ));
+        let escolhido = success(host.provider_for_extension(
+            "java",
+            LanguageCapabilities::SYNTAX,
+        ));
+        assert_eq!(escolhido, ProviderId("zzz.ultimo".to_owned()));
     }
 
     #[test]

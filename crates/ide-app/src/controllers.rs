@@ -271,11 +271,27 @@ impl LanguageController {
                 Some(_) => Ok(()),
             };
             if let Err(error) = result {
-                // A fila cheia deixa o documento como estava do lado do provider,
-                // e é por isso que o registro **não** avança: a próxima
-                // sincronização calcula a diferença do mesmo ponto e tenta de
-                // novo, com um pedaço maior.
-                tracing::warn!(%error, document_id = snapshot.id.0, "syntax update failed");
+                // Duas falhas, e o tratamento é oposto.
+                //
+                // O provider morreu e o documento perdeu a rota: **esquecer** o
+                // registro é o que faz a próxima sincronização reabri-lo, e a
+                // reabertura escolhe o candidato seguinte — o provider nativo.
+                // É a outra metade da queda da fase 3b da `23`; o host desfaz a
+                // rota, e quem tem o texto para reabrir é esta camada.
+                //
+                // A fila cheia é o contrário: o documento continua como estava
+                // do lado do provider, e por isso o registro **não** avança. A
+                // próxima sincronização calcula a diferença do mesmo ponto e
+                // tenta de novo, com um pedaço maior (ADR-017).
+                if matches!(
+                    error,
+                    LanguageHostError::ProviderGone(_) | LanguageHostError::DocumentNotRouted(_)
+                ) {
+                    tracing::warn!(%error, document_id = snapshot.id.0, "documento sem provider, será reaberto");
+                    documents.language.remove(&snapshot.id);
+                } else {
+                    tracing::warn!(%error, document_id = snapshot.id.0, "syntax update failed");
+                }
                 continue;
             }
             documents.language.insert(snapshot.id, snapshot.clone());

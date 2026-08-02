@@ -243,8 +243,21 @@ pub enum LanguageError {
     Cancelled,
     #[error("operation is not supported: {0}")]
     Unsupported(String),
+    /// Este pedido falhou, e o provider continua de pé.
     #[error("provider failed: {0}")]
     Provider(String),
+    /// O provider deixou de poder responder: o processo morreu, o canal fechou.
+    ///
+    /// É diferente de `Provider`, e a diferença decide o que o host faz. Falhar
+    /// num pedido é falhar num pedido; deixar de existir é outra coisa, e é o
+    /// que faz o documento ser reencaminhado ao próximo candidato — o provider
+    /// nativo, no caso de TypeScript.
+    ///
+    /// Sem esta distinção, "o nativo é o chão" da ADR-025 seria uma frase: o
+    /// documento ficaria preso ao provider morto, e quem espera resposta
+    /// esperaria para sempre. Ver a fase 3b da `23`.
+    #[error("provider is no longer available: {0}")]
+    Unavailable(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -144,6 +144,14 @@ impl NativeIde {
             .controller
             .register_contribution(&typescript)
             .map_err(|error| error.to_string())?;
+        // A ordem entre providers é **declarada**, e não herdada da ordenação
+        // alfabética dos identificadores. Ver a fase 3b da `23`.
+        language_host
+            .configure_selection(
+                typescript_contribution::language_id(),
+                typescript_contribution::selection(),
+            )
+            .map_err(|error| error.to_string())?;
         self.languages
             .contributions
             .register(typescript)

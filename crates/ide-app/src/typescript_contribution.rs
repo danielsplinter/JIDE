@@ -14,13 +14,15 @@ use ide_application::{
     LanguageContribution, LanguageDescriptor, SettingsSection, TaskDescriptor,
     TaskExecutionContext, TaskExecutionError, TaskExecutionResult, TaskExecutor, TaskId,
 };
-use ide_domain::LanguageId;
+use ide_domain::{LanguageId, ProviderId};
 use ide_language_api::LanguageProvider;
+use ide_language_host::ProviderSelection;
 use ide_process::{ProcessRequest, ProcessSupervisor, find_in_path};
 use ide_project::build::BuildSystemRegistry;
 use ide_toolchain_api::ToolchainProvider;
 use language_typescript::{
-    NodeToolchainProvider, NpmAdapter, TYPESCRIPT_LANGUAGE_ID, TypeScriptLanguageProvider,
+    NodeToolchainProvider, NpmAdapter, TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID,
+    TypeScriptLanguageProvider,
 };
 
 /// Prefixo dos identificadores de tarefa desta linguagem.
@@ -157,4 +159,19 @@ pub fn register_build_systems(
     processes: Arc<dyn ProcessSupervisor>,
 ) {
     registry.register(Arc::new(NpmAdapter::new(processes)));
+}
+
+/// Em que ordem os providers de TypeScript são consultados.
+///
+/// Hoje há um só, e declarar a ordem parece vazio — não é. Sem declaração, a
+/// escolha sai da **ordenação alfabética dos identificadores**, e
+/// `typescript.service` viria antes de `typescript.syntax` por acaso, e não por
+/// decisão. Quando o analisador externo chegar na fase 3c, ele entra como
+/// principal aqui, numa linha, e o nativo passa a ser o que fica embaixo.
+#[must_use]
+pub fn selection() -> ProviderSelection {
+    ProviderSelection {
+        primary: ProviderId(TYPESCRIPT_PROVIDER_ID.to_owned()),
+        fallbacks: Vec::new(),
+    }
 }
