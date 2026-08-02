@@ -72,7 +72,7 @@ Este é um requisito arquitetural obrigatório.
 - [20 — Índice no disco, memória como cache](20-index-on-disk.md) — **completa**: abrir caiu de 251 s para 3,7 s, a memória de 178 para 103 MB, uma tecla lê 2 mil registros em vez de 340 mil e um fonte alterado custa 3,5 ms
 - [21 — O que muda fora da IDE](21-file-watcher.md) — **completa**: o que muda no disco chega ao índice em ~700 ms sem ação do usuário, e a conferência da abertura caiu de 4,66 s para 0,70 s
 - [22 — Git](22-git-integration.md) — **não iniciada**: a crate `ide-git`, uma só, com as capacidades em módulos e a implementação atrás de traits
-- [23 — TypeScript](23-typescript.md) — **não iniciada**: a segunda linguagem, que é o primeiro teste de que a IDE é mesmo multilíngue; a fase 0 tira Java de dentro do núcleo
+- [23 — TypeScript](23-typescript.md) — fases 0 a 2 feitas: Java saiu do núcleo, a segunda linguagem existe e o projeto é lido do `tsconfig.json`; a **3 é a próxima**, com o analisador externo
 - [24 — Angular](24-angular.md) — **não iniciada**: um framework não é uma linguagem, e entra pelas portas que a `23` já abriu; depende da fase 3 dela
 
 ## Escopo inicial, e o que dele já existe

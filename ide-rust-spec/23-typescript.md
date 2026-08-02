@@ -331,7 +331,9 @@ e a sessão se conecta depois.
 
 ## Fases
 
-### Fase 0 — A IDE deixa de saber Java
+### Fase 0 — A IDE deixa de saber Java ✅ Concluída
+
+**Estado: concluída em 02/08/2026.**
 
 Nenhuma linha de TypeScript. Esta fase corrige o levantamento da segunda seção, e
 é a única cujo resultado se mede sem uma segunda linguagem existir.
@@ -393,7 +395,47 @@ respectivo projeto. A tela diz, para cada campo, se o valor veio do projeto, do
 padrão ou da detecção. E nenhum comportamento visível mudou para quem tem um
 projeto só.
 
-### Fase 1 — A segunda linguagem existe
+#### Feita, e o que ela revelou
+
+**A guarda foi corrigida primeiro, para ser vista falhar.** Com `ide-core` na
+lista e o exame de campo de struct, ela apontou os seis vazamentos antes de
+qualquer correção: `jdk_home`, `maven_home`, `remember_jdk`, `remember_maven`,
+`resolved_jdk_home`, `resolved_maven_home`. Guarda que ninguém viu reprovar não
+protege nada.
+
+**O termo `node` reprovou `FileNode`.** Ao acrescentar os termos de TypeScript à
+lista, `node` casou com o tipo da árvore de arquivos, em `ide-workspace` e
+`ide-ui` — vocabulário legítimo. Ficou `node_`, que pega `node_home` e
+`node_modules` sem pegar o falso positivo.
+
+**A guarda empurrou a migração para o lugar certo.** Traduzir `jdk_home` para
+Java/principal é conhecimento de linguagem, e `ide-core` não pode tê-lo. O núcleo
+passou a apenas **recolher** as chaves antigas cruas, e quem traduz é a raiz de
+composição. Era para ser uma concessão à regra e ficou melhor do que o desenho
+original.
+
+**`ToolRole` existia em três lugares.** Ao fazer os comandos carregarem o papel,
+apareceu que a mesma ideia estava em `ide-core` como `ToolRole`, em `ide-ui` como
+`ToolSlot`, e em lugar nenhum em `ide-application` — que era justamente por que o
+comando não podia carregá-la. Subiu para `ide-domain`, como o `CancellationToken`
+antes dela.
+
+**A janela já sabia a resposta.** O diálogo de configurações mantém
+`SettingsPage::Contribution(index)` desde sempre; ele só não dizia isso no
+resultado. O caminho ficou: a janela devolve o índice, o shell o troca pelo
+**identificador** da seção que recebeu no catálogo — sem saber o que significa —,
+e `ContributionRegistry::language_for_section` o transforma de volta em linguagem
+já na aplicação.
+
+**E `classpath_entries` virou `library_paths`**, com a razão escrita no contrato:
+cada linguagem chama isso de um jeito — *classpath*, referências, `sys.path` — e o
+contrato descreve a coisa, não o nome que uma delas lhe dá. O termo entrou na
+guarda para não voltar.
+
+### Fase 1 — A segunda linguagem existe ✅ Concluída
+
+**Estado: concluída em 02/08/2026**, com o realce e a estrutura. O índice de
+símbolos e a navegação por nome **não** entraram — ver "O que ficou de fora".
 
 `language-typescript` com tree-sitter: realce, estrutura, diagnóstico de sintaxe,
 índice de símbolos, definição e referências por nome. Sem tipos. Registrada como
@@ -408,7 +450,52 @@ navegação nos dois, sem que um interfira no outro. Trocar de aba entre um e ou
 não confunde provider, e o tempo de resposta ao digitar é medido nas duas
 linguagens.
 
-### Fase 2 — O projeto, lido de onde ele está escrito
+#### Feita, e o que ela revelou
+
+**A conta da fase 8 da `12` foi cobrada e bateu.** A segunda linguagem custou
+**uma** crate e uma linha de `mod` na raiz de composição — o teto do `main.rs`
+subiu de 15 para 16. No formato antigo teria custado até seis crates.
+
+**E a guarda generalizada naquela fase passou sozinha.**
+`concrete_language_crates_stay_behind_the_composition_root` fala de `language-*`,
+e aceitou a crate nova sem ser tocada. As duas que falharam foram as que enumeram
+crates à mão, e falharam pelo motivo certo.
+
+**Três decisões de escopo, todas por recusar o palpite:**
+
+- **sem caractere de gatilho.** Sem tipos não há o que oferecer depois do ponto, e
+  prometer completação que adivinha é pior do que não prometer. O gatilho volta
+  com o analisador externo;
+- **`imports` fica vazio no snapshot.** O `ImportItem` do domínio foi desenhado
+  sobre `import a.b.C` de Java: tem `path`, `is_static` e `wildcard`. Um
+  `import { X } from "y"` não cabe nele sem mentir, e a mentira apareceria como
+  navegação errada;
+- **`source_root_names` vazio na contribuição.** A raiz vem do `tsconfig.json`
+  (ADR-027); um nome de convenção aqui seria uma segunda origem para a mesma
+  pergunta.
+
+**Uma dívida ficou anotada no código.** `OutlineKind` é o vocabulário de Java e
+não cobre TypeScript: `type` e `function` solta não têm correspondente. Foram
+mapeados para o mais próximo honesto — `Class` para o que declara tipo nomeado,
+`Method` para o que declara código chamável — em vez de alargar o contrato por
+uma linguagem. Fica para o dia em que a terceira chegar, que é quando se saberá
+se o problema é geral ou desta.
+
+#### O que ficou de fora
+
+**O índice de símbolos e a navegação por nome não foram construídos.** O texto da
+fase os prometia, e o que existe é realce, estrutura e erro de sintaxe. A razão é
+que a `04` os desenhou sobre o nome simples — `references_to_name` pergunta por um
+nome, sem posição —, e em TypeScript quem decide o que um nome alcança é o
+`import`, não o nome. Um índice por nome responderia a mais do que devia e
+navegaria para o arquivo errado num projeto com dois `Pedido`.
+
+Entra com o analisador externo, que sabe de módulos. Até lá, `.ts` não oferece
+navegação, e não oferecer é melhor do que oferecer errado.
+
+### Fase 2 — O projeto, lido de onde ele está escrito ✅ Concluída
+
+**Estado: concluída em 02/08/2026.**
 
 `ToolchainProvider` para Node, `BuildSystemAdapter` para npm lendo `package.json`
 e `tsconfig.json`, e os scripts do `package.json` oferecidos como tarefas.
@@ -423,6 +510,61 @@ declaradas no `tsconfig.json`, inclusive quando ele estende outro, e lista os
 scripts como tarefas. Um projeto com dois `tsconfig` não mistura os dois
 conjuntos. Sem Node configurado, o projeto abre e as tarefas explicam o que falta
 em vez de falhar em silêncio.
+
+#### Feita, e o que ela revelou
+
+**O leitor de `tsconfig.json` foi o trabalho, como previsto.** Treze testes, e os
+que mais custaram não foram os óbvios: comentários e vírgula sobrando (o arquivo
+que a própria CLI gera vem cheio deles — um leitor estrito recusaria o padrão da
+ferramenta), `extends` resolvendo caminhos relativos ao arquivo onde foram
+escritos, e o filho **substituindo** o `include` da base em vez de somar.
+
+**A crate precisou da mesma cerca que Java tem.** Ao ganhar `ide-process` e
+`ide-project` para o adapter de npm, o analisador de TypeScript passou a poder
+alcançá-los — e `pub(crate)` não separa isso. A crate foi reestruturada para
+`analyzer/`, como a de Java, e entrou na guarda. Verificado que ela reprova:
+um `use ide_project::…` em `analyzer/parser.rs` a quebra apontando o arquivo.
+
+Isso tornou o formato "uma crate por linguagem" consistente de verdade entre as
+duas, e não só no nome.
+
+**As tarefas exigiram uma capacidade nova.** As de Java são conhecidas na partida
+— compilar, executar e testar existem antes de haver projeto. As de npm não: são
+os `scripts` do `package.json`, e mudam de projeto para projeto. Entrou
+`replace_language_tasks` no registro de contribuições e no de tarefas. Declarar um
+conjunto fixo teria sido adivinhar nomes, que é a tabela de compatibilidade
+proibida com outro nome.
+
+**E a detecção de ferramenta era chamada só para Java.** Com uma linguagem só
+ninguém percebia. Virou `detect_all_toolchains`, que percorre as contribuições que
+declaram uma toolchain — uma linguagem nova entra sem que o laço mude.
+
+**Ao mexer nisso apareceu um defeito antigo:** a escolha de ferramenta era gravada
+e **nunca restaurada**. `tool_home(…, Primary)` não era lido em lugar nenhum, e a
+detecção sobrescrevia a escolha do usuário a cada abertura — a ordem em que a
+máquina responde decidia por ele. É exatamente o que o comentário do teste em
+`ide-core` já dizia ter sido resolvido, e o lado de gravar existia sozinho. Agora
+a ordem da fase 0 é aplicada de verdade.
+
+**E cinco textos diziam "JDK" no caminho genérico.** `"Selecionar pasta do JDK"`,
+`"JDK a salvar"`, `"No JDK selected"`, `"Selected JDK"` e a mensagem de pasta
+inválida — todos no código que agora atende as duas linguagens. Escolher Node
+abriria uma janela pedindo um JDK. O rótulo passou a vir do `field_caption` que a
+contribuição declara.
+
+**Uma nota sobre a guarda que os protege.** Ela nasceu como varredura por nome de
+ferramenta em todo o `native_ide.rs`, e reprovou duas coisas legítimas: o
+comentário que explicava a própria regra, e o `choose_maven_home`, que esta
+especificação deixou Java-específico **de propósito**. Virou uma lista dos textos
+exatos, com a razão ao lado. Uma guarda que reprova o que se decidiu fazer não
+protege nada — ela ensina a desligá-la.
+
+#### O que ficou pendente
+
+**A detecção usa o `PATH` do processo da IDE.** Quem troca de versão de Node com
+um gerenciador num terminal não muda o que a IDE já resolveu na partida — é o
+motivo de a escolha por projeto existir, e ela cobre o caso. Mas a IDE não avisa
+que a versão detectada pode não ser a que o terminal usaria, e devia.
 
 ### Fase 3 — O analisador externo
 
