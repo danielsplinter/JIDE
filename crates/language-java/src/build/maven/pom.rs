@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::xml::{self, XmlElement};
+use crate::build::maven::xml::{self, XmlElement};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RawDependency {

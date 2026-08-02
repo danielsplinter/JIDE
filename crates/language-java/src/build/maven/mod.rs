@@ -27,7 +27,7 @@ use ide_project::{
     },
 };
 
-use crate::pom::EffectivePom;
+use crate::build::maven::pom::EffectivePom;
 
 pub const MAVEN_BUILD_SYSTEM_ID: &str = "maven";
 const MANIFEST: &str = "pom.xml";

@@ -7,13 +7,13 @@ use std::{
     time::Duration,
 };
 
-use crate::completion::{finish_member_list, member_name};
-use crate::documents::{Documents, ParsedDocument};
-use crate::index::{Dados, Simbolo, WorkspaceIndex};
-use crate::observador::Observador;
-use crate::navigation::{member_access, token_at_position, within};
-use crate::semantics::receiver_type;
-use crate::symbols::simple_class_name;
+use crate::analyzer::completion::{finish_member_list, member_name};
+use crate::analyzer::documents::{Documents, ParsedDocument};
+use crate::analyzer::index::{Dados, Simbolo, WorkspaceIndex};
+use crate::analyzer::observador::Observador;
+use crate::analyzer::navigation::{member_access, token_at_position, within};
+use crate::analyzer::semantics::receiver_type;
+use crate::analyzer::symbols::simple_class_name;
 use async_trait::async_trait;
 use ide_domain::{
     AccessorCandidate, AccessorKind, AccessorPlan, CompletionItem, CompletionKind,
@@ -954,7 +954,7 @@ fn method_signature(descriptor: &str) -> (Vec<String>, String) {
 
 /// Membro público de uma classe compilada vira item do menu.
 fn completion_for_class_member(
-    member: &java_classfile::ClassMember,
+    member: &crate::analyzer::classfile::ClassMember,
     method: bool,
 ) -> CompletionItem {
     if method {
@@ -1084,7 +1084,7 @@ fn private_members(tree: &Tree, text: &str) -> HashSet<String> {
     names
 }
 
-fn is_visible_member(member: &java_classfile::ClassMember) -> bool {
+fn is_visible_member(member: &crate::analyzer::classfile::ClassMember) -> bool {
     member.access_flags & ACC_PUBLIC != 0
         && member.access_flags & (ACC_SYNTHETIC | ACC_BRIDGE) == 0
         // Construtor e inicializador estático não são alcançáveis por ponto.
@@ -1922,7 +1922,7 @@ int x;";
 {corpo}}}
 "
         ));
-        let (Ok(parser), snapshot) = (crate::parser::JavaParser::new(), snapshot) else {
+        let (Ok(parser), snapshot) = (crate::analyzer::parser::JavaParser::new(), snapshot) else {
             panic!("parser Java indisponível");
         };
         let Ok(tree) = parser.parse(&snapshot.text, None) else {
@@ -1950,7 +1950,7 @@ int x;";
 }
 ";
         let snapshot = snapshot(fonte);
-        let (Ok(parser), snapshot) = (crate::parser::JavaParser::new(), snapshot) else {
+        let (Ok(parser), snapshot) = (crate::analyzer::parser::JavaParser::new(), snapshot) else {
             panic!("parser Java indisponível");
         };
         let Ok(tree) = parser.parse(&snapshot.text, None) else {
@@ -2185,7 +2185,7 @@ int x;";
         let fontes = vec![raiz.join("src")];
         for aceito in ["src/Pedido.java", "src/pacote/Servico.java"] {
             assert!(
-                crate::observador::aceita(&raiz.join(aceito), &fontes),
+                crate::analyzer::observador::aceita(&raiz.join(aceito), &fontes),
                 "{aceito} deveria interessar"
             );
         }
@@ -2197,14 +2197,14 @@ int x;";
             "src/node_modules/pacote/Coisa.java",
         ] {
             assert!(
-                !crate::observador::aceita(&raiz.join(recusado), &fontes),
+                !crate::analyzer::observador::aceita(&raiz.join(recusado), &fontes),
                 "{recusado} nao deveria interessar"
             );
         }
         // E a poda de pasta é a mesma que a varredura aplica.
-        assert!(crate::observador::ignorado(&raiz.join("target/classes/A.java")));
-        assert!(crate::observador::ignorado(&raiz.join(".git/objects/x")));
-        assert!(!crate::observador::ignorado(&raiz.join("src/A.java")));
+        assert!(crate::analyzer::observador::ignorado(&raiz.join("target/classes/A.java")));
+        assert!(crate::analyzer::observador::ignorado(&raiz.join(".git/objects/x")));
+        assert!(!crate::analyzer::observador::ignorado(&raiz.join("src/A.java")));
     }
 
     /// Ativar devolve sem esperar o índice.
@@ -2371,7 +2371,7 @@ int x;";
         // A fase 4: um fonte alterado custa um fonte, e nao o projeto.
         let alvo = mudaram.first().cloned().unwrap_or_else(|| {
             let mut caminhos = Vec::new();
-            crate::index::collect_workspace_paths(&root, &mut caminhos);
+            crate::analyzer::index::collect_workspace_paths(&root, &mut caminhos);
             caminhos
                 .into_iter()
                 .find(|caminho| {
@@ -2715,7 +2715,7 @@ int x;";
             "}\n",
         );
         let snapshot = snapshot(fonte);
-        let (Ok(parser), snapshot) = (crate::parser::JavaParser::new(), snapshot) else {
+        let (Ok(parser), snapshot) = (crate::analyzer::parser::JavaParser::new(), snapshot) else {
             panic!("parser Java indisponível");
         };
         let Ok(tree) = parser.parse(&snapshot.text, None) else {

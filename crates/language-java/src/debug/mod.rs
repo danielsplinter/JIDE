@@ -1,7 +1,7 @@
 #![doc = "Adapter de depuração para processos Java em execução."]
 #![doc = ""]
 #![doc = "Conecta-se pela porta de depuração da JVM, seja qual for o servidor,"]
-#![doc = "container ou ferramenta que a exponha. É o único crate que conhece o"]
+#![doc = "container ou ferramenta que a exponha. É o único módulo que conhece o"]
 #![doc = "protocolo; tudo acima dele trabalha com os contratos de `ide-debug-api`."]
 
 mod connection;
@@ -20,7 +20,7 @@ use ide_debug_api::{
 };
 use ide_domain::LanguageId;
 
-use crate::{connection::Connection, session::Session};
+use crate::debug::{connection::Connection, session::Session};
 
 pub const JAVA_DEBUG_ADAPTER_ID: &str = "java-jdwp";
 

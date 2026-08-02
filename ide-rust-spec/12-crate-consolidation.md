@@ -57,15 +57,17 @@ crates/
   ide-ui
 
   language-java
-  java-toolchain
-  java-maven-adapter
-  java-gradle-adapter
-  java-debug-adapter
 ```
 
-`java-classfile` poderá permanecer independente se passar a ser consumida por
-mais de um adapter. Enquanto tiver somente o provider Java como consumidor, sua
-incorporação em `language-java::classfile` será avaliada na fase correspondente.
+**Uma crate por linguagem.** Tudo o que é exclusivo de uma linguagem — analisador,
+toolchain, build e depuração — mora numa crate só, com módulos dentro. `language-java`
+absorve `java-classfile`, `java-toolchain`, `java-maven-adapter`,
+`java-gradle-adapter` e `java-debug-adapter` na fase 8, e `language-typescript`,
+`language-angular` e qualquer C# ou C++ que venham nascem já assim.
+
+**A avaliação do `java-classfile` foi feita, e a resposta é incorporar.** Este
+documento dizia que ele "poderá permanecer independente se passar a ser consumido
+por mais de um adapter"; o levantamento de 02/08/2026 mostra um consumidor só.
 
 ## Fronteiras que devem permanecer como crates
 
@@ -78,15 +80,30 @@ incorporação em `language-java::classfile` será avaliada na fase corresponden
 - `ide-terminal`: PTY e processos interativos com ciclo de vida próprio;
 - `ide-ui`: fronteira de apresentação com a ERLibUi;
 - `ide-app`: executável e composition root;
-- adapters Maven, Gradle e depuração Java: integrações externas independentes.
+- **uma crate por linguagem**, e a fronteira é entre linguagens, não dentro de
+  cada uma. `language-java` não pode fundir-se com `language-typescript`, nem
+  qualquer das duas com uma crate neutra.
+
+> **Revisão de 02/08/2026.** Esta lista dizia "adapters Maven, Gradle e depuração
+> Java: integrações externas independentes", e tratava cada adapter como fronteira
+> própria. A fase 8 desfaz isso. "Independentes" descrevia a relação deles com a
+> **IDE**, não entre si — e essa independência quem entrega é o
+> `BuildSystemAdapter`, não a fronteira de crate. O critério que passa a valer é o
+> da **linguagem**, porque é ele que não explode quando a quarta linguagem entrar.
 
 Não são permitidas as seguintes fusões:
 
-- contrato de linguagem com `language-java`;
-- contrato de toolchain com `java-toolchain`;
-- contrato de depuração com `java-debug-adapter`;
+- qualquer contrato com a implementação que o realiza — o de linguagem com
+  `language-java`, o de toolchain com o JDK, o de depuração com o JDWP;
+- duas linguagens na mesma crate;
 - domínio com UI, filesystem ou adapters;
-- `ide-ui` com `ide-app`.
+- `ide-ui` com `ide-app`;
+- os contratos entre si. `ide-language-api`, `ide-toolchain-api` e `ide-debug-api`
+  somam 710 linhas e a tentação de uni-los é óbvia — mas uma linguagem que só
+  depure, sem analisar, carregaria as três portas. Tamanho pequeno não é motivo
+  para unir;
+- `ide-process` com `ide-domain`, que colocaria criação de processo dentro do
+  domínio.
 
 ## Plano incremental
 
@@ -282,6 +299,166 @@ nova não exige alteração em `ide-app` nem `ide-ui`.
 Validação da fase: testes arquiteturais e do provider falso,
 `cargo test --workspace`, Clippy estrito sem warnings e build release de
 `ide-app`.
+
+### Fase 8 — Uma crate por linguagem, e Java se ajusta ao padrão ✅ Concluída
+
+**Estado: concluída em 02/08/2026.** Levantamento sobre 19 crates; o workspace
+terminou com 14.
+
+#### Por que o critério muda
+
+As fases 1 a 7 consolidaram por **camada**. Esta consolida por **linguagem**, e a
+razão é que o critério antigo não sobrevive à terceira linguagem.
+
+Java está espalhado em seis crates. Isso não foi decisão arquitetural — é resíduo
+de ter sido a primeira, construída por partes. Extrapolado, o formato é insustentável:
+
+```text
+hoje, extrapolado:   6 crates × 4 linguagens = 24
+uma por linguagem:   1 crate  × 4 linguagens =  4
+```
+
+E o que multiplica é só a **implementação**. Os contratos não: `ide-language-api`,
+`ide-toolchain-api` e `ide-debug-api` continuam sendo três, com dez linguagens ou
+com uma. A confusão que se evita está exatamente onde é evitável.
+
+O argumento decisivo, porém, não é a aritmética: **o formato de uma crate por
+assunto já está decidido para tudo o que vem depois.** `language-typescript` é uma
+(`23`), `language-angular` é uma (`24`), `ide-git` é uma (ADR-024). Java ser seis
+faz do padrão do projeto uma exceção — e a exceção é a parte mais antiga e maior,
+que é a pior combinação para quem chega.
+
+#### O estado de partida
+
+| crate | linhas | dependências próprias | consumidores |
+|---|---|---|---|
+| `language-java` | 6.437 | tree-sitter, notify, java-classfile | `ide-app` |
+| `java-debug-adapter` | 3.128 | tokio (com `net`), tracing | `ide-app` |
+| `java-maven-adapter` | 1.503 | ide-process, ide-project | `ide-app` |
+| `java-toolchain` | 850 | ide-process, ide-toolchain-api | `ide-app` |
+| `java-gradle-adapter` | 778 | ide-process, ide-project | `ide-app` |
+| `java-classfile` | 354 | zip | `language-java` |
+
+Cinco das seis têm **um consumidor só**, e ele é a raiz de composição.
+
+#### O formato
+
+```text
+language-java/src/
+├── lib.rs
+├── analyzer/          tree-sitter, índice, símbolos, completação
+│   └── classfile/     leitura de `.class` e de `.jar`
+├── toolchain/         detecção de JDK, seleção, classpath
+├── build/             javac, maven, gradle
+└── debug/             JDWP
+```
+
+E o mesmo desenho para toda linguagem que vier. A raiz de composição continua
+montando a `LanguageContribution`, como a fase 4 deixou: os adapters concretos
+aparecem só lá, guardados como `Arc<dyn CompilerAdapter>` e companhia.
+
+#### O que se perde, e como se recupera
+
+**Hoje o compilador garante que o analisador não dispara processo.**
+`language-java` depende apenas de `ide-domain`, `ide-language-api` e
+`java-classfile` — ele não alcança `ide-process` nem `ide-project`, e portanto não
+pode executar um comando nem ler o modelo de projeto. Recebe as raízes de fonte
+pelo `LanguageActivationContext`, e nada mais.
+
+Numa crate única isso some. `pub(crate)` protege o lado de fora do lado de dentro,
+e **não particiona o lado de dentro**: o índice passaria a poder chamar o Maven, e
+nada avisaria.
+
+A garantia é recuperada por guarda, e não por tipo:
+
+> nenhum arquivo em `language-java/src/analyzer/` menciona `ide_process` ou
+> `ide_project`.
+
+É mais fraca — texto contra compilador —, e vale dizer isso sem enfeite. Mas o
+projeto já confia em guardas de texto para invariantes que considera importantes:
+a que proíbe `Command::new("git")` fora do `ide-git`, a que proíbe decidir por
+nome de arquivo na `24`, a que conta os campos do `IdeShell`. Uma a mais é
+coerente, e ela falha no mesmo commit em que alguém escrever a linha.
+
+**Vinte crates evitadas por uma guarda de texto** é a troca, e ela está sendo
+feita de olhos abertos.
+
+#### Duas objeções examinadas
+
+**A largura de dependências.** A crate resultante depende de tree-sitter, notify,
+zip, tokio com rede, tracing, `ide-process`, `ide-project`, `ide-toolchain-api`,
+`ide-debug-api`, `ide-language-api` e `ide-domain`. Parece caro e não é: `tokio`
+já está no workspace, e a unificação de features do Cargo já entrega `net` e
+`io-util` ao build inteiro por causa dele. **Nenhuma dependência nova entra no
+grafo** — o que muda é a superfície dentro de uma crate, que é o que a guarda
+acima trata.
+
+**A compilação.** Uma crate de ~13 mil linhas recompila inteira a cada mudança,
+contra seis que recompilam em paralelo. **Não foi medido.** Linguagem madura muda
+pouco, e não se deixaria isso decidir — mas se o ciclo de edição piorar, é aqui
+que estará a causa, e o caminho de volta é extrair de novo o módulo que doer.
+
+#### O que fazer
+
+- [x] mover `java-classfile` para `language-java::analyzer::classfile`;
+- [x] mover `java-toolchain` para `language-java::toolchain`;
+- [x] mover Maven e Gradle para `language-java::build`;
+- [x] mover `java-debug-adapter` para `language-java::debug`;
+- [x] reduzir a superfície pública ao que `ide-app` de fato usa;
+- [x] remover as cinco crates absorvidas;
+- [x] escrever a guarda do `analyzer/`, e **verificar que ela falha** ao se
+      acrescentar de propósito uma menção a `ide_process`;
+- [x] substituir `concrete_java_crates_stay_behind_the_composition_root` por uma
+      guarda que fale de linguagens, e não de Java;
+- [x] conferir que `ide-app` continua guardando os adapters pelos contratos.
+
+De 19 crates para 14, e a quarta linguagem passa a custar **uma**.
+
+#### Feita, e o que ela revelou
+
+**A previsão de que só falhariam testes que nomeiam crates se confirmou.** Das
+suítes inteiras, quatro guardas de arquitetura falharam e nenhum outro teste — os
+179 de `language-java`, os 82 de `ide-ui` e o resto passaram sem uma linha
+alterada.
+
+**Os testes de integração precisam de mudança de endereço, e quase se perderam.**
+As cinco crates absorvidas tinham `src/`, e duas delas também `tests/` — o que
+some junto quando se remove o diretório da crate. Os sete testes do adapter de
+depuração foram para `language-java/tests/`, com prefixo `debug_` para dizerem de
+qual módulo falam. É a armadilha óbvia desta fase em retrospecto, e não estava na
+lista de tarefas.
+
+**A união encontrou código morto que a fronteira de crate escondia.**
+`JavaToolchainSelection`, com 125 linhas e dois testes próprios, não era usado por
+ninguém — mas era `pub` numa crate, e "público" e "usado" não se distinguem de
+fora. Ao encolher a superfície para o que `ide-app` de fato consome, ele apareceu
+como o que era. Foi removido; está no histórico se voltar a ser necessário.
+
+Vale como argumento retroativo a favor da fase: **crate demais esconde sobra**.
+
+**Uma guarda tinha a forma errada, e só a consolidação mostrou.**
+`phase_eight_preserves_the_final_architecture_metrics` afirmava
+`domain_fan_in >= 13` — quantas crates convergem para `ide-domain`. É um limite
+**inferior absoluto**, e ele caiu para 11 sozinho quando cinco crates viraram
+módulos, sem que nada tivesse deixado de convergir. Na verdade a proporção
+*melhorou*: de 13 em 19 para 11 em 14.
+
+As outras métricas do mesmo teste são limites superiores, que sobrevivem a
+consolidação; esta era a única invertida, e ninguém tinha reparado porque o
+workspace nunca havia encolhido. Virou proporcional — a maioria das crates fala o
+vocabulário do domínio — e agora não precisa ser tocada quando o número de crates
+mudar de novo.
+
+**Os tetos que se moveram**, todos com a razão escrita ao lado no próprio teste:
+crates de 19 para 14, arestas do grafo interno de 49 para 40, fan-out do `ide-app`
+de 17 para 13, e a fachada de `language-java` de 13 para 18 linhas — ela agora
+declara quatro módulos e reexporta o que a raiz consome de cada um, e continua
+sendo só `mod` e `pub use`.
+
+Validação: `cargo test --workspace` sem falhas, `cargo clippy --workspace
+--all-targets -- -D warnings` limpo, `cargo build --release -p ide-app` concluído.
+E a guarda do analisador foi vista **falhar**: acrescentar `use ide_process::…` em
+`analyzer/parser.rs` a quebra, e removê-lo a devolve ao verde.
 
 ## Critérios de conclusão de cada fase
 

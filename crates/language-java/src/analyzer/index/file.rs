@@ -31,7 +31,7 @@ const MAGIC: [u8; 8] = *b"ERIDEIDX";
 const VERSION: u32 = 3;
 
 #[cfg(test)]
-pub(in crate::index) const VERSION_PARA_TESTE: u32 = VERSION;
+pub(in crate::analyzer::index) const VERSION_PARA_TESTE: u32 = VERSION;
 
 /// Ausência de tipo, para o campo que guarda o descritor.
 const SEM_TIPO: u32 = u32::MAX;
@@ -109,7 +109,7 @@ struct Cabecalho {
 const CABECALHO: usize = 8 + 4 + 4 + (8 + 8) + 8 * (8 + 4 + 4);
 
 #[cfg(test)]
-pub(in crate::index) const CABECALHO_PARA_TESTE: usize = CABECALHO;
+pub(in crate::analyzer::index) const CABECALHO_PARA_TESTE: usize = CABECALHO;
 
 /// Acumula os textos e devolve o número de cada um, sem repetir.
 #[derive(Default)]
@@ -143,7 +143,7 @@ impl Textos {
 /// Grava num arquivo temporário e renomeia: um desligamento no meio da escrita
 /// deixaria um arquivo pela metade, e ler índice truncado é pior que não ter
 /// índice.
-pub(in crate::index) fn write(index: &Dados, path: &Path) -> io::Result<()> {
+pub(in crate::analyzer::index) fn write(index: &Dados, path: &Path) -> io::Result<()> {
     let mut textos = Textos::default();
 
     // Os arquivos primeiro: símbolos e ocorrências os alcançam por número, e a
@@ -382,7 +382,7 @@ fn escrever_faixa(saida: &mut Vec<u8>, faixa: TextRange) {
 // ele existe, está coberto por teste e não é usado — ler sem checar o que mudou
 // serviria um índice vencido, que é o defeito que a `19` combateu.
 #[allow(dead_code, reason = "o leitor entra em uso na fase 4 da 20")]
-pub(in crate::index) fn read(path: &Path) -> Option<Dados> {
+pub(in crate::analyzer::index) fn read(path: &Path) -> Option<Dados> {
     let bytes = fs::read(path).ok()?;
     if bytes.len() < CABECALHO || bytes.get(..8)? != MAGIC || ler_u32(&bytes, 8)? != VERSION {
         return None;
@@ -539,7 +539,7 @@ fn ler_faixa(bytes: &[u8], em: usize) -> Option<TextRange> {
 /// responder pelas classes do outro.
 /// A base segue o mesmo caminho de ambiente que a configuração da IDE usa: não
 /// há por que inventar outro, nem trazer dependência para descobri-lo.
-pub(in crate::index) fn caminho_do_indice(root: &Path, toolchain: Option<&Path>) -> Option<PathBuf> {
+pub(in crate::analyzer::index) fn caminho_do_indice(root: &Path, toolchain: Option<&Path>) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
@@ -575,7 +575,7 @@ pub(in crate::index) fn caminho_do_indice(root: &Path, toolchain: Option<&Path>)
 /// essa decisão mudar, porque tudo abaixo trabalha sobre `&[u8]` e não sobre o
 /// que os produziu. O que se perde enquanto isso é a **elasticidade**: estes
 /// bytes são memória nossa, e o sistema operacional não os recupera sozinho.
-pub(in crate::index) struct Carregado {
+pub(in crate::analyzer::index) struct Carregado {
     mapa: Vec<u8>,
     textos: (usize, usize),
     /// `(início, quantos)` de cada área, na ordem em que o cabeçalho as lista.
@@ -615,7 +615,7 @@ impl Carregado {
     /// caia fora do arquivo. O que não dá para conferir aqui — um número de
     /// texto inválido lá dentro — é conferido ao ler cada registro, que responde
     /// vazio em vez de estourar.
-    pub(in crate::index) fn open(path: &Path) -> Option<Self> {
+    pub(in crate::analyzer::index) fn open(path: &Path) -> Option<Self> {
         let mapa = fs::read(path).ok()?;
         if mapa.len() < CABECALHO || mapa.get(..8)? != MAGIC || ler_u32(&mapa, 8)? != VERSION {
             return None;
@@ -670,20 +670,20 @@ impl Carregado {
     }
 
     /// O caminho de um arquivo, pelo número.
-    pub(in crate::index) fn arquivo(&self, id: u32) -> Option<&str> {
+    pub(in crate::analyzer::index) fn arquivo(&self, id: u32) -> Option<&str> {
         let registro = self.registro(area::ARQUIVOS, tamanho::ARQUIVO, id as usize)?;
         self.texto(ler_u32(registro, 0)?)
     }
 
     /// Quantos arquivos o índice conhece.
-    pub(in crate::index) fn arquivos(&self) -> usize {
+    pub(in crate::analyzer::index) fn arquivos(&self) -> usize {
         self.areas[area::ARQUIVOS].1
     }
 
     /// Caminho, data de modificação e tamanho de um arquivo indexado.
     ///
     /// É o que a fase 4 compara para saber o que mudou desde a gravação.
-    pub(in crate::index) fn arquivo_gravado(&self, indice: usize) -> Option<(&str, u64, u64)> {
+    pub(in crate::analyzer::index) fn arquivo_gravado(&self, indice: usize) -> Option<(&str, u64, u64)> {
         let registro = self.registro(area::ARQUIVOS, tamanho::ARQUIVO, indice)?;
         Some((
             self.texto(ler_u32(registro, 0)?)?,
@@ -702,7 +702,7 @@ impl Carregado {
     ///
     /// Serve a quem precisa reconstruir o índice inteiro — a regravação da fase
     /// 4 — e não ao caminho de consulta, que vai direto ao nome procurado.
-    pub(in crate::index) fn nomes_gravados(&self) -> impl Iterator<Item = &str> {
+    pub(in crate::analyzer::index) fn nomes_gravados(&self) -> impl Iterator<Item = &str> {
         (0..self.areas[area::NOMES].1).filter_map(|indice| self.nome(indice))
     }
 
@@ -710,7 +710,7 @@ impl Carregado {
     ///
     /// Busca binária sobre a tabela ordenada — é para isto que ela é ordenada, e
     /// é o que faz Ctrl+clique não tocar o resto do arquivo.
-    pub(in crate::index) fn ocorrencias_de(&self, nome: &str) -> impl Iterator<Item = Occurrence> {
+    pub(in crate::analyzer::index) fn ocorrencias_de(&self, nome: &str) -> impl Iterator<Item = Occurrence> {
         let faixa = self.procurar(area::NOMES, nome, |indice| self.nome(indice));
         let (inicio, quantas) = faixa
             .and_then(|indice| {
@@ -730,7 +730,7 @@ impl Carregado {
     }
 
     /// Todas as declarações do projeto.
-    pub(in crate::index) fn simbolos(&self) -> impl Iterator<Item = SimboloNoDisco<'_>> {
+    pub(in crate::analyzer::index) fn simbolos(&self) -> impl Iterator<Item = SimboloNoDisco<'_>> {
         (0..self.areas[area::SIMBOLOS].1).filter_map(|indice| {
             Some(SimboloNoDisco {
                 mapeado: self,
@@ -748,7 +748,7 @@ impl Carregado {
     ///
     /// Prefixo vazio devolve tudo — quem pede tudo recebe tudo, e é o único caso
     /// em que percorrer tudo é a resposta certa.
-    pub(in crate::index) fn simbolos_com_prefixo(
+    pub(in crate::analyzer::index) fn simbolos_com_prefixo(
         &self,
         prefixo: &str,
     ) -> impl Iterator<Item = SimboloNoDisco<'_>> {
@@ -795,12 +795,12 @@ impl Carregado {
 
     /// Quantas declarações — serve à medição.
     #[cfg(test)]
-    pub(in crate::index) fn simbolos_conta(&self) -> usize {
+    pub(in crate::analyzer::index) fn simbolos_conta(&self) -> usize {
         self.areas[area::SIMBOLOS].1
     }
 
     /// O arquivo que declara um tipo, pelo nome simples.
-    pub(in crate::index) fn declaracao(&self, nome: &str) -> Option<&str> {
+    pub(in crate::analyzer::index) fn declaracao(&self, nome: &str) -> Option<&str> {
         let indice = self.procurar(area::DECLARACOES, nome, |indice| {
             let registro = self.registro(area::DECLARACOES, tamanho::DECLARACAO, indice)?;
             self.texto(ler_u32(registro, 0)?)
@@ -811,12 +811,12 @@ impl Carregado {
 
     /// Quantos tipos declarados — serve à medição.
     #[cfg(test)]
-    pub(in crate::index) fn declaracoes_conta(&self) -> usize {
+    pub(in crate::analyzer::index) fn declaracoes_conta(&self) -> usize {
         self.areas[area::DECLARACOES].1
     }
 
     /// As classes do JDK e dos jars.
-    pub(in crate::index) fn externas(&self) -> impl Iterator<Item = ExternaNoDisco<'_>> {
+    pub(in crate::analyzer::index) fn externas(&self) -> impl Iterator<Item = ExternaNoDisco<'_>> {
         (0..self.areas[area::EXTERNAS].1).filter_map(|indice| {
             Some(ExternaNoDisco {
                 mapeado: self,
@@ -846,13 +846,13 @@ impl Carregado {
 }
 
 impl SimboloNoDisco<'_> {
-    pub(in crate::index) fn name(&self) -> &str {
+    pub(in crate::analyzer::index) fn name(&self) -> &str {
         ler_u32(self.registro, 0)
             .and_then(|id| self.mapeado.texto(id))
             .unwrap_or_default()
     }
 
-    pub(in crate::index) fn kind(&self) -> SymbolKind {
+    pub(in crate::analyzer::index) fn kind(&self) -> SymbolKind {
         self.registro
             .get(4)
             .copied()
@@ -862,7 +862,7 @@ impl SimboloNoDisco<'_> {
 
     /// Só o nome do tipo: é o que a completação mostra, e assim ela não paga
     /// montagem de descritor por símbolo.
-    pub(in crate::index) fn type_name(&self) -> Option<&str> {
+    pub(in crate::analyzer::index) fn type_name(&self) -> Option<&str> {
         let tipo = ler_u32(self.registro, 32)?;
         if tipo == SEM_TIPO {
             return None;
@@ -871,7 +871,7 @@ impl SimboloNoDisco<'_> {
     }
 
     /// O descritor inteiro, para quem devolve `SemanticSymbol`.
-    pub(in crate::index) fn type_descriptor(&self) -> Option<TypeDescriptor> {
+    pub(in crate::analyzer::index) fn type_descriptor(&self) -> Option<TypeDescriptor> {
         let tipo = ler_u32(self.registro, 32)?;
         if tipo == SEM_TIPO {
             return None;
@@ -893,33 +893,33 @@ impl SimboloNoDisco<'_> {
         })
     }
 
-    pub(in crate::index) fn range(&self) -> TextRange {
+    pub(in crate::analyzer::index) fn range(&self) -> TextRange {
         ler_faixa(self.registro, 8).unwrap_or_default()
     }
 
-    pub(in crate::index) fn scope_depth(&self) -> u32 {
+    pub(in crate::analyzer::index) fn scope_depth(&self) -> u32 {
         ler_u32(self.registro, 24).unwrap_or(0)
     }
 
-    pub(in crate::index) fn file(&self) -> u32 {
+    pub(in crate::analyzer::index) fn file(&self) -> u32 {
         ler_u32(self.registro, 28).unwrap_or(u32::MAX)
     }
 }
 
 impl ExternaNoDisco<'_> {
-    pub(in crate::index) fn simple(&self) -> &str {
+    pub(in crate::analyzer::index) fn simple(&self) -> &str {
         ler_u32(self.registro, 0)
             .and_then(|id| self.mapeado.texto(id))
             .unwrap_or_default()
     }
 
-    pub(in crate::index) fn binary(&self) -> &str {
+    pub(in crate::analyzer::index) fn binary(&self) -> &str {
         ler_u32(self.registro, 4)
             .and_then(|id| self.mapeado.texto(id))
             .unwrap_or_default()
     }
 
-    pub(in crate::index) fn origin(&self) -> &str {
+    pub(in crate::analyzer::index) fn origin(&self) -> &str {
         ler_u32(self.registro, 8)
             .and_then(|id| self.mapeado.texto(id))
             .unwrap_or_default()

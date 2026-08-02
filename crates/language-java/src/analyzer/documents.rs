@@ -11,7 +11,7 @@ use ide_domain::{
 use ide_language_api::LanguageError;
 use tree_sitter::{InputEdit, Parser, Tree};
 
-use crate::{
+use crate::analyzer::{
     language::{
         analyze, analyze_semantics, offset_for_position, point_after_text, point_for_offset,
     },

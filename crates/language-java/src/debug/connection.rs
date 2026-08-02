@@ -23,7 +23,7 @@ use tokio::{
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
 };
 
-use crate::wire::{
+use crate::debug::wire::{
     Decoder, Encoder, HANDSHAKE, HEADER_LEN, IdSizes, command, command_set, decode_header,
     encode_command,
 };

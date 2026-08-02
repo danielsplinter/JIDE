@@ -22,7 +22,7 @@ use ide_debug_api::{
     DebugAdapter, DebugEvent, DebugEventSink, DebugSessionRequest, DebugTarget, SourceBreakpoint,
     StepKind, StopReason,
 };
-use java_debug_adapter::JavaDebugAdapter;
+use language_java::JavaDebugAdapter;
 use tokio::{net::TcpListener, sync::Notify};
 
 const PROGRAM: &str = r#"package com.example;

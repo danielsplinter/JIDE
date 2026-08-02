@@ -35,9 +35,9 @@ use ide_ui::{
 };
 use ide_workspace::FileNode;
 #[cfg(test)]
-use java_gradle_adapter::GRADLE_BUILD_SYSTEM_ID;
+use language_java::GRADLE_BUILD_SYSTEM_ID;
 #[cfg(test)]
-use java_maven_adapter::MAVEN_BUILD_SYSTEM_ID;
+use language_java::MAVEN_BUILD_SYSTEM_ID;
 use language_java::JAVA_PROVIDER_ID;
 use ui_core::{Modifiers, Point, Size, WindowId};
 use ui_render_api::{FrameInfo, UiRenderer};
@@ -838,10 +838,10 @@ impl NativeIde {
     /// do usuário vale mais do que a ordem em que a máquina responde. Um caminho
     /// que deixou de existir é ignorado, e a IDE volta ao primeiro encontrado.
     fn detect_maven(&mut self) {
-        self.project.maven.installations = java_maven_adapter::detect_installations();
+        self.project.maven.installations = language_java::detect_maven_installations();
         let gravado = self.runtime.config.toolchains.resolved_maven_home();
         self.project.maven.selected = match gravado {
-            Some(home) => match java_maven_adapter::installation_from_home(&home) {
+            Some(home) => match language_java::maven_installation_from_home(&home) {
                 Some(instalacao) => Some(self.project.maven.adopt(instalacao)),
                 None => (!self.project.maven.installations.is_empty()).then_some(0),
             },
@@ -863,7 +863,7 @@ impl NativeIde {
         else {
             return;
         };
-        let Some(instalacao) = java_maven_adapter::installation_from_home(&home) else {
+        let Some(instalacao) = language_java::maven_installation_from_home(&home) else {
             if let Some(shell) = self.ui.shell.as_mut() {
                 shell.set_status_message(format!(
                     "{} não tem bin/mvn: não é uma instalação do Maven",

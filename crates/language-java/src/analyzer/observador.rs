@@ -15,7 +15,7 @@ use std::{
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::{
+use crate::analyzer::{
     documents::Documents,
     index::{WorkspaceIndex, fonte_java},
 };
@@ -157,5 +157,5 @@ pub(super) fn aceita(caminho: &Path, fontes: &[PathBuf]) -> bool {
 /// Se o caminho está numa pasta que a indexação ignora.
 #[cfg(test)]
 pub(super) fn ignorado(caminho: &Path) -> bool {
-    crate::index::caminho_ignorado(caminho)
+    crate::analyzer::index::caminho_ignorado(caminho)
 }

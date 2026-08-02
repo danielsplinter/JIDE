@@ -882,10 +882,6 @@ dependencies = [
  "ide-toolchain-api",
  "ide-ui",
  "ide-workspace",
- "java-debug-adapter",
- "java-gradle-adapter",
- "java-maven-adapter",
- "java-toolchain",
  "language-java",
  "pollster",
  "rfd",
@@ -1070,58 +1066,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "java-classfile"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.19",
- "zip",
-]
-
-[[package]]
-name = "java-debug-adapter"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ide-debug-api",
- "ide-domain",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "java-gradle-adapter"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ide-domain",
- "ide-process",
- "ide-project",
- "tokio",
-]
-
-[[package]]
-name = "java-maven-adapter"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ide-domain",
- "ide-process",
- "ide-project",
- "tokio",
-]
-
-[[package]]
-name = "java-toolchain"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ide-domain",
- "ide-process",
- "ide-toolchain-api",
- "tokio",
-]
-
-[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1255,14 +1199,21 @@ name = "language-java"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ide-debug-api",
  "ide-domain",
  "ide-language-api",
  "ide-language-host",
- "java-classfile",
+ "ide-process",
+ "ide-project",
+ "ide-toolchain-api",
  "notify",
  "pollster",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
  "tree-sitter",
  "tree-sitter-java",
+ "zip",
 ]
 
 [[package]]

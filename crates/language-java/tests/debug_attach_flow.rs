@@ -19,7 +19,7 @@ use ide_debug_api::{
     DebugAdapter, DebugEvent, DebugEventSink, DebugSessionRequest, DebugTarget, FrameId,
     SourceBreakpoint, StepKind, StopReason, ThreadId,
 };
-use java_debug_adapter::JavaDebugAdapter;
+use language_java::JavaDebugAdapter;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},

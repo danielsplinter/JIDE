@@ -2,7 +2,7 @@
 
 use std::{fs, sync::Arc, time::Duration};
 
-use crate::jdk_executable;
+use crate::toolchain::detection::jdk_executable;
 use async_trait::async_trait;
 use ide_domain::LanguageId;
 use ide_process::{ProcessRequest, ProcessSupervisor};

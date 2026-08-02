@@ -15,7 +15,7 @@ use ide_debug_api::{
 use ide_domain::{Location, TextPosition, TextRange};
 use tokio::sync::Mutex;
 
-use crate::{
+use crate::debug::{
     connection::Connection,
     resolve::{self, LineEntry},
     values::{self, type_name},

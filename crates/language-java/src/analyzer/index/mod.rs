@@ -12,7 +12,7 @@ use ide_domain::{
 };
 use tree_sitter::Parser;
 
-use crate::{language::analyze_semantics, symbols::simple_class_name};
+use crate::analyzer::{language::analyze_semantics, symbols::simple_class_name};
 
 mod file;
 
@@ -295,7 +295,7 @@ impl Externa<'_> {
     }
 
     /// Os metadados da classe, lidos do jar na hora.
-    pub(super) fn descriptor(&self) -> Option<java_classfile::ClassDescriptor> {
+    pub(super) fn descriptor(&self) -> Option<crate::analyzer::classfile::ClassDescriptor> {
         match self {
             Self::Memoria(classe) => classe.descriptor(),
             Self::Disco(classe) => ExternalClass {
@@ -914,7 +914,7 @@ impl Dados {
             );
         }
         for archive in archives {
-            let Ok(names) = java_classfile::list_classes(&archive, usize::MAX) else {
+            let Ok(names) = crate::analyzer::classfile::list_classes(&archive, usize::MAX) else {
                 continue;
             };
             self.external_classes
@@ -933,17 +933,17 @@ impl ExternalClass {
     /// A leitura é sob demanda: guardar os membros de todas as classes de todos
     /// os jars indexados custaria memória proporcional ao classpath inteiro,
     /// para responder sobre um tipo de cada vez.
-    pub(super) fn descriptor(&self) -> Option<java_classfile::ClassDescriptor> {
+    pub(super) fn descriptor(&self) -> Option<crate::analyzer::classfile::ClassDescriptor> {
         if self.origin.extension().is_some_and(|extension| {
             extension.eq_ignore_ascii_case("jar")
                 || extension.eq_ignore_ascii_case("zip")
                 || extension.eq_ignore_ascii_case("jmod")
         }) {
-            java_classfile::read_class_in_archive(&self.origin, &self.binary).ok()
+            crate::analyzer::classfile::read_class_in_archive(&self.origin, &self.binary).ok()
         } else {
             fs::read(&self.origin)
                 .ok()
-                .and_then(|bytes| java_classfile::read_class(&bytes).ok())
+                .and_then(|bytes| crate::analyzer::classfile::read_class(&bytes).ok())
         }
     }
 }
@@ -976,7 +976,7 @@ impl Dados {
                 }
                 Some(extension) if extension.eq_ignore_ascii_case("class") => {
                     if let Ok(bytes) = fs::read(&path)
-                        && let Ok(class) = java_classfile::read_class(&bytes)
+                        && let Ok(class) = crate::analyzer::classfile::read_class(&bytes)
                     {
                         index.external_classes.push(ExternalClass {
                             simple: simple_class_name(&class.binary_name),
@@ -986,7 +986,7 @@ impl Dados {
                     }
                 }
                 Some(extension) if extension.eq_ignore_ascii_case("jar") => {
-                    if let Ok(classes) = java_classfile::index_jar(&path, usize::MAX) {
+                    if let Ok(classes) = crate::analyzer::classfile::index_jar(&path, usize::MAX) {
                         index
                             .external_classes
                             .extend(classes.into_iter().map(|class| ExternalClass {
@@ -1007,7 +1007,7 @@ impl Dados {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::Documents;
+    use crate::analyzer::documents::Documents;
     use file::{CABECALHO_PARA_TESTE, VERSION_PARA_TESTE};
 
     /// Um projeto pequeno, com o bastante para exercitar cada área do arquivo.

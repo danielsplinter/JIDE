@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use ide_core::{AppConfig, init_logging};
 use ide_project::model::{ProjectDescriptor, ProjectModel};
 use ide_ui::NewItemRequest;
-use java_gradle_adapter::GRADLE_BUILD_SYSTEM_ID;
-use java_maven_adapter::MAVEN_BUILD_SYSTEM_ID;
+use language_java::GRADLE_BUILD_SYSTEM_ID;
+use language_java::MAVEN_BUILD_SYSTEM_ID;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use super::NativeIde;

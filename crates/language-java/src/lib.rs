@@ -1,13 +1,18 @@
-#![doc = "Provider Java nativo: gramática, parsing incremental e análise semântica."]
+#![doc = "Tudo o que é exclusivo de Java: análise, toolchain, build e depuração."]
+#![doc = ""]
+#![doc = "Uma crate por linguagem, com as capacidades em módulos — fase 8 da `12`."]
+#![doc = "Esta fachada é a superfície inteira: o que não está aqui não é alcançável"]
+#![doc = "de fora, e a raiz de composição é a única consumidora."]
 
-mod completion;
-mod documents;
-mod index;
-mod language;
-mod navigation;
-mod observador;
-mod parser;
-mod semantics;
-mod symbols;
+mod analyzer;
+mod build;
+mod debug;
+mod toolchain;
 
-pub use language::{JAVA_LANGUAGE_ID, JAVA_PROVIDER_ID, JavaLanguageProvider};
+pub use analyzer::{JAVA_LANGUAGE_ID, JAVA_PROVIDER_ID, JavaLanguageProvider};
+pub use build::{
+    GRADLE_BUILD_SYSTEM_ID, GradleAdapter, MAVEN_BUILD_SYSTEM_ID, MavenAdapter, MavenInstallation,
+    detect_maven_installations, maven_installation_from_home,
+};
+pub use debug::JavaDebugAdapter;
+pub use toolchain::{ClasspathBuilder, JavaToolchainAdapter, JavaToolchainProvider};

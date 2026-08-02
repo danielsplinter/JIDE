@@ -212,10 +212,6 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
                 "ide-toolchain-api",
                 "ide-ui",
                 "ide-workspace",
-                "java-debug-adapter",
-                "java-gradle-adapter",
-                "java-maven-adapter",
-                "java-toolchain",
                 "language-java",
             ]),
         ),
@@ -253,26 +249,23 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
                 "ide-workspace",
             ]),
         ),
-        ("java-classfile", BTreeSet::new()),
-        (
-            "java-debug-adapter",
-            BTreeSet::from(["ide-debug-api", "ide-domain"]),
-        ),
-        (
-            "java-gradle-adapter",
-            BTreeSet::from(["ide-process", "ide-project"]),
-        ),
-        (
-            "java-maven-adapter",
-            BTreeSet::from(["ide-process", "ide-project"]),
-        ),
-        (
-            "java-toolchain",
-            BTreeSet::from(["ide-domain", "ide-process", "ide-toolchain-api"]),
-        ),
+        // Uma crate por linguagem, desde a fase 8 da `12`: análise, toolchain,
+        // build e depuração de Java moram juntas, e por isso a lista é a união
+        // do que cada uma das cinco crates absorvidas exigia.
+        //
+        // O que o compilador garantia e agora não garante — o analisador não
+        // alcançar `ide-process` nem `ide-project` — passou a ser a guarda
+        // `the_java_analyzer_cannot_reach_process_or_project`.
         (
             "language-java",
-            BTreeSet::from(["ide-domain", "ide-language-api", "java-classfile"]),
+            BTreeSet::from([
+                "ide-debug-api",
+                "ide-domain",
+                "ide-language-api",
+                "ide-process",
+                "ide-project",
+                "ide-toolchain-api",
+            ]),
         ),
     ]);
     assert_eq!(
@@ -298,43 +291,80 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
     }
 }
 
+/// Toda linguagem concreta é ligada só na raiz de composição.
+///
+/// A guarda fala de `language-*`, e não de Java, porque o critério é o da
+/// linguagem desde a fase 8 da `12` — é o único que não precisa ser reescrito
+/// quando a terceira e a quarta entrarem.
 #[test]
-fn concrete_java_crates_stay_behind_the_composition_root() {
+fn concrete_language_crates_stay_behind_the_composition_root() {
     let root_manifest = manifest(&workspace_root().join("Cargo.toml"));
     let crates = workspace_crates(&root_manifest);
-    let concrete_java_crates = BTreeSet::from([
-        "java-classfile",
-        "java-debug-adapter",
-        "java-gradle-adapter",
-        "java-maven-adapter",
-        "java-toolchain",
-        "language-java",
-    ]);
-    let expected_consumers = BTreeMap::from([
-        ("java-classfile", BTreeSet::from(["language-java"])),
-        ("java-debug-adapter", BTreeSet::from(["ide-app"])),
-        ("java-gradle-adapter", BTreeSet::from(["ide-app"])),
-        ("java-maven-adapter", BTreeSet::from(["ide-app"])),
-        ("java-toolchain", BTreeSet::from(["ide-app"])),
-        ("language-java", BTreeSet::from(["ide-app"])),
-    ]);
-
-    let mut actual_consumers = concrete_java_crates
+    let language_crates = crates
         .iter()
-        .map(|name| (*name, BTreeSet::new()))
-        .collect::<BTreeMap<_, _>>();
-    for workspace_crate in &crates {
-        for dependency in dependency_names(&workspace_crate.manifest, false) {
-            if let Some(consumers) = actual_consumers.get_mut(dependency.as_str()) {
-                consumers.insert(workspace_crate.name.as_str());
+        .map(|workspace_crate| workspace_crate.name.as_str())
+        .filter(|name| name.starts_with("language-"))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !language_crates.is_empty(),
+        "o workspace precisa ter ao menos uma crate de linguagem"
+    );
+
+    for language in language_crates {
+        let consumers = crates
+            .iter()
+            .filter(|workspace_crate| {
+                dependency_names(&workspace_crate.manifest, false).contains(language)
+            })
+            .map(|workspace_crate| workspace_crate.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            consumers,
+            BTreeSet::from(["ide-app"]),
+            "{language} só pode ser consumida pela raiz de composição"
+        );
+    }
+}
+
+/// O analisador não dispara processo e não lê o modelo de projeto.
+///
+/// Até a fase 8 da `12` quem garantia isto era o compilador: `language-java`
+/// era uma crate que não dependia de `ide-process` nem de `ide-project`. Numa
+/// crate por linguagem a dependência existe — o `build` precisa dela —, e
+/// `pub(crate)` não ajuda, porque ele protege o lado de fora do lado de dentro e
+/// **não particiona o lado de dentro**.
+///
+/// Esta guarda é o que sobrou, e é mais fraca de propósito: texto, não tipo. A
+/// troca — vinte crates evitadas por uma guarda de texto — está registrada na
+/// `12`.
+#[test]
+fn the_analyzer_of_a_language_cannot_reach_process_or_project() {
+    let root = workspace_root();
+    let forbidden = ["ide_process", "ide_project"];
+    let mut debt = BTreeSet::new();
+
+    for language in ["language-java"] {
+        let analyzer = root.join("crates").join(language).join("src/analyzer");
+        assert!(
+            analyzer.is_dir(),
+            "{language} precisa manter a análise em src/analyzer"
+        );
+        for path in rust_sources(&analyzer) {
+            let relative = path.strip_prefix(&root).unwrap_or(&path);
+            let source = fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!("não foi possível ler {}: {error}", relative.display())
+            });
+            for term in forbidden {
+                if source.contains(term) {
+                    debt.insert(format!("{}:{term}", relative.display()));
+                }
             }
         }
     }
 
-    assert_eq!(
-        actual_consumers, expected_consumers,
-        "implementações Java concretas só podem ser ligadas no composition root; \
-         java-classfile é detalhe interno do provider Java"
+    assert!(
+        debt.is_empty(),
+        "o analisador não pode alcançar processo nem modelo de projeto: {debt:?}"
     );
 }
 
@@ -735,13 +765,17 @@ fn phase_seven_keeps_language_state_in_its_owning_modules() {
         );
     }
 
-    let language = fs::read_to_string(java_root.join("language.rs"))
+    // Os módulos da análise passaram para `analyzer/` na fase 8 da `12`, quando
+    // toolchain, build e depuração entraram na mesma crate e a análise precisou
+    // de um lugar próprio para a guarda poder falar dela.
+    let analyzer_root = java_root.join("analyzer");
+    let language = fs::read_to_string(analyzer_root.join("language.rs"))
         .unwrap_or_else(|error| panic!("não foi possível ler language.rs: {error}"));
-    let documents = fs::read_to_string(java_root.join("documents.rs"))
+    let documents = fs::read_to_string(analyzer_root.join("documents.rs"))
         .unwrap_or_else(|error| panic!("não foi possível ler documents.rs: {error}"));
     // O índice virou diretório quando ganhou o formato em disco (fase 1 da 20):
     // `mod.rs` continua sendo quem possui a construção e a consulta.
-    let index = fs::read_to_string(java_root.join("index/mod.rs"))
+    let index = fs::read_to_string(analyzer_root.join("index/mod.rs"))
         .unwrap_or_else(|error| panic!("não foi possível ler index/mod.rs: {error}"));
     assert!(
         documents.contains("struct Documents")
@@ -830,18 +864,26 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         .filter(|dependencies| dependencies.contains("ide-domain"))
         .count();
 
-    assert_eq!(crates.len(), 19, "a refatoração não deve pulverizar crates");
+    // 14 desde a fase 8 da `12`: uma crate por linguagem. As cinco crates de
+    // Java viraram módulos de `language-java`, e a linguagem seguinte custa uma
+    // crate, e não seis.
+    assert_eq!(crates.len(), 14, "a refatoração não deve pulverizar crates");
     assert!(
-        edge_count <= 49,
-        "o grafo interno ultrapassou a linha final de 49 arestas: {edge_count}"
+        edge_count <= 40,
+        "o grafo interno ultrapassou a linha final de 40 arestas: {edge_count}"
     );
     assert!(
-        app_fan_out <= 17,
-        "ide-app ultrapassou o fan-out final de 17: {app_fan_out}"
+        app_fan_out <= 13,
+        "ide-app ultrapassou o fan-out final de 13: {app_fan_out}"
     );
+    // Era `>= 13`, absoluto, e a fase 8 mostrou que a forma estava errada: o
+    // número caiu para 11 sozinho quando cinco crates viraram módulos, sem que
+    // nada tivesse deixado de convergir. Limite inferior absoluto não sobrevive
+    // a consolidação — o que se quer afirmar é a **proporção**.
     assert!(
-        domain_fan_in >= 13,
-        "contratos deixaram de convergir para ide-domain: fan-in {domain_fan_in}"
+        domain_fan_in * 2 > crates.len(),
+        "contratos deixaram de convergir para ide-domain: {domain_fan_in} de {}",
+        crates.len()
     );
 
     let line_limits = [
@@ -850,9 +892,11 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // funções que viviam duplicadas no shell e no editor. O teto existe para
         // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.
         ("crates/ide-ui/src/lib.rs", 31),
-        // 13 desde a fase 1 da `21`: o observador de arquivos é mais um
-        // módulo, e uma linha de `mod` é o que a fachada deve ter.
-        ("crates/language-java/src/lib.rs", 13),
+        // 18 desde a fase 8 da `12`: a fachada passou a declarar `analyzer`,
+        // `build`, `debug` e `toolchain`, e a reexportar o que a raiz de
+        // composição consome de cada um. Continua sendo só `mod` e `pub use` —
+        // o teto existe para que nenhuma lógica se instale aqui.
+        ("crates/language-java/src/lib.rs", 18),
         ("crates/ide-language-host/src/lib.rs", 10),
     ];
     for (relative, limit) in line_limits {

@@ -17,10 +17,10 @@ use ide_toolchain_api::{
     CompilationRequest, CompilerAdapter, ExecutionRequest, RuntimeAdapter, TestAdapter,
     TestRequest, ToolchainProvider,
 };
-use java_debug_adapter::JavaDebugAdapter;
-use java_gradle_adapter::GradleAdapter;
-use java_maven_adapter::MavenAdapter;
-use java_toolchain::{ClasspathBuilder, JavaToolchainAdapter, JavaToolchainProvider};
+use language_java::JavaDebugAdapter;
+use language_java::GradleAdapter;
+use language_java::MavenAdapter;
+use language_java::{ClasspathBuilder, JavaToolchainAdapter, JavaToolchainProvider};
 use language_java::JavaLanguageProvider;
 
 pub const JAVA_LANGUAGE_ID: &str = "java";

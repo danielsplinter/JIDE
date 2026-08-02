@@ -286,7 +286,7 @@ pub(super) struct ImportedProject {
 /// executar passam pelo mesmo executável.
 #[derive(Default)]
 pub(super) struct MavenController {
-    pub(super) installations: Vec<java_maven_adapter::MavenInstallation>,
+    pub(super) installations: Vec<language_java::MavenInstallation>,
     pub(super) selected: Option<usize>,
 }
 
@@ -302,12 +302,12 @@ impl MavenController {
     pub(super) fn labels(&self) -> Vec<String> {
         self.installations
             .iter()
-            .map(java_maven_adapter::MavenInstallation::label)
+            .map(language_java::MavenInstallation::label)
             .collect()
     }
 
     /// Põe uma instalação na lista, sem repetir, e a deixa escolhida.
-    pub(super) fn adopt(&mut self, instalacao: java_maven_adapter::MavenInstallation) -> usize {
+    pub(super) fn adopt(&mut self, instalacao: language_java::MavenInstallation) -> usize {
         let indice = self
             .installations
             .iter()

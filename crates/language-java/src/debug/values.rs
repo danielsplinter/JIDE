@@ -1,6 +1,6 @@
 //! Apresentação de valores e leitura de expressões de inspeção.
 
-use crate::wire::Value;
+use crate::debug::wire::Value;
 
 /// Nome legível de um tipo a partir da assinatura JNI.
 #[must_use]
