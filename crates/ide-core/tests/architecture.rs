@@ -371,15 +371,33 @@ fn the_analyzer_of_a_language_cannot_reach_process_or_project() {
 #[test]
 fn neutral_crates_expose_no_language_specific_public_api() {
     let root = workspace_root();
+    // `ide-core` entrou na fase 0 da `23`, e faltava desde sempre: é onde a
+    // configuração persistida vive, e ela conhecia JDK e Maven pelo nome. A
+    // guarda tinha um furo exatamente onde estava o vazamento.
     let sources = [
         "crates/ide-application/src",
+        "crates/ide-core/src",
         "crates/ide-ui/src",
         "crates/ide-workspace/src",
     ]
     .into_iter()
     .flat_map(|relative| rust_sources(&root.join(relative)))
     .collect::<Vec<_>>();
-    let language_terms = ["java", "jdk", "jvm", "maven", "gradle"];
+    // `node_` e não `node`: o segundo casaria com `FileNode`, que é vocabulário
+    // de árvore e não de linguagem. O que se quer barrar é `node_home` e
+    // `node_modules`.
+    let language_terms = [
+        "java",
+        "jdk",
+        "jvm",
+        "maven",
+        "gradle",
+        "typescript",
+        "node_",
+        "npm",
+        "tsconfig",
+        "angular",
+    ];
     let mut actual_debt = BTreeSet::new();
 
     for path in sources {
@@ -397,6 +415,13 @@ fn neutral_crates_expose_no_language_specific_public_api() {
                 .or_else(|| line.strip_prefix("pub static "))
                 .or_else(|| line.strip_prefix("pub mod "))
                 .or_else(|| line.strip_prefix("pub use "))
+                // Campo de struct também é API pública, e não era examinado:
+                // `pub jdk_home: Option<PathBuf>` não começa por nenhum dos
+                // prefixos acima e passava mesmo com a crate na lista.
+                .or_else(|| {
+                    line.strip_prefix("pub ")
+                        .filter(|rest| rest.contains(':') && !rest.starts_with("fn "))
+                })
                 .and_then(|rest| {
                     rest.split(|character: char| {
                         !(character.is_ascii_alphanumeric() || character == '_')

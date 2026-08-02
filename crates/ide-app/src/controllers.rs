@@ -463,6 +463,12 @@ pub(super) struct RuntimeState {
     pub(super) startup_error: Option<String>,
     pub(super) config: ide_core::AppConfig,
     pub(super) config_path: Option<PathBuf>,
+    /// Raiz do projeto aberto, para resolver a ferramenta em vigor.
+    ///
+    /// A escolha de ferramenta passou a ser por projeto na fase 0 da `23`, e sem
+    /// saber qual projeto está aberto não há o que resolver. Ausente antes da
+    /// primeira abertura, quando só o padrão global vale.
+    pub(super) workspace_root: Option<PathBuf>,
     /// A primeira sincronização de linguagens ainda não aconteceu.
     ///
     /// Ela ativa o provider, que indexa o JDK e os fontes do projeto — mais de

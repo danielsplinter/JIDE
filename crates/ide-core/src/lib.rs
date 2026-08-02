@@ -1,6 +1,7 @@
 #![doc = "Configuração, logging e ciclo de vida do núcleo da IDE."]
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -35,37 +36,160 @@ impl Default for AppConfig {
     }
 }
 
+/// Qual das duas escolhas de uma seção de configurações.
+///
+/// A contribuição declara os rótulos em `SettingsSection`; o núcleo só sabe que
+/// há uma principal e, às vezes, uma segunda ao lado.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ToolRole {
+    Primary,
+    Secondary,
+}
+
+impl ToolRole {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Secondary => "secondary",
+        }
+    }
+}
+
+/// De onde veio o valor em vigor.
+///
+/// A tela mostra isto. Um campo preenchido pelo padrão, por sobreposição de
+/// projeto ou por detecção parece igual, e agir sobre a origem errada é a
+/// família de defeito que a `21` nomeou: quem lê não distingue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolOrigin {
+    Project,
+    Default,
+}
+
+/// Ferramenta em vigor, com a origem junto.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedTool {
+    pub home: PathBuf,
+    pub origin: ToolOrigin,
+}
+
 /// Ferramentas escolhidas à mão, que valem por cima da detecção automática.
 ///
-/// A IDE sabe encontrar JDK e Maven sozinha, mas a máquina de quem desenvolve
-/// costuma ter mais de um de cada, e a escolha precisa sobreviver ao fechamento
-/// da janela. Um caminho que deixou de existir é ignorado na leitura: a IDE
-/// volta a detectar em vez de recusar-se a abrir.
+/// A IDE sabe detectar sozinha, mas a máquina de quem desenvolve costuma ter
+/// mais de uma de cada, e a escolha precisa sobreviver ao fechamento da janela.
+/// Um caminho que deixou de existir é ignorado na leitura: a IDE volta a
+/// detectar em vez de recusar-se a abrir.
+///
+/// **Nada aqui nomeia linguagem ou ferramenta.** As chaves são o `LanguageId`
+/// que a contribuição declarou e o papel que a seção de configurações define.
+/// O formato antigo tinha um campo por ferramenta, e crescia com o número de
+/// linguagens — ver a fase 0 da `23` e a ADR-026.
+///
+/// A escolha é **por projeto, com um padrão por trás**: dois projetos da mesma
+/// linguagem podem exigir instalações diferentes, e isso não é novidade trazida
+/// por nenhuma linguagem nova — sempre valeu para versões diferentes da mesma.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ToolchainConfig {
-    /// Raiz do JDK escolhido.
+    /// Padrão global, por linguagem e papel.
     #[serde(default)]
-    pub jdk_home: Option<PathBuf>,
-    /// Raiz do Maven escolhido.
+    defaults: BTreeMap<String, BTreeMap<String, PathBuf>>,
+    /// Sobreposição por raiz de workspace, por linguagem e papel.
+    ///
+    /// Mora aqui, e não dentro do projeto: um caminho de instalação é específico
+    /// da máquina, e gravá-lo no repositório o tornaria inútil para outra pessoa
+    /// além de criar arquivo a ser comitado sem ninguém pedir.
     #[serde(default)]
-    pub maven_home: Option<PathBuf>,
+    projects: BTreeMap<String, BTreeMap<String, BTreeMap<String, PathBuf>>>,
+    /// Escolhas do formato antigo, que tinha um campo por ferramenta.
+    ///
+    /// São recolhidas cruas e **não** interpretadas aqui: saber que uma delas
+    /// era o JDK é conhecimento de linguagem, e ele mora na raiz de composição.
+    /// Quem migra chama [`ToolchainConfig::take_legacy`] na partida.
+    ///
+    /// Sem isto, o arquivo de quem já usa a IDE carregaria com as escolhas
+    /// silenciosamente vazias — a pior forma de falhar, e a que a fase 0 da `23`
+    /// listou como risco.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    legacy: BTreeMap<String, PathBuf>,
 }
 
 impl ToolchainConfig {
-    /// JDK escolhido, apenas quando o diretório ainda existe.
+    /// Ferramenta em vigor, com a origem, ou `None` quando resta detectar.
+    ///
+    /// A ordem é sobreposição do projeto, depois padrão global. Quem chama trata
+    /// a ausência caindo na detecção automática.
     #[must_use]
-    pub fn resolved_jdk_home(&self) -> Option<PathBuf> {
-        self.jdk_home.as_ref().filter(|home| home.is_dir()).cloned()
+    pub fn resolved(
+        &self,
+        workspace_root: Option<&Path>,
+        language: &str,
+        role: ToolRole,
+    ) -> Option<ResolvedTool> {
+        let from_project = workspace_root
+            .and_then(|root| self.projects.get(&project_key(root)))
+            .and_then(|languages| languages.get(language))
+            .and_then(|roles| roles.get(role.key()));
+        if let Some(home) = from_project.filter(|home| home.is_dir()) {
+            return Some(ResolvedTool {
+                home: home.clone(),
+                origin: ToolOrigin::Project,
+            });
+        }
+        self.defaults
+            .get(language)
+            .and_then(|roles| roles.get(role.key()))
+            .filter(|home| home.is_dir())
+            .map(|home| ResolvedTool {
+                home: home.clone(),
+                origin: ToolOrigin::Default,
+            })
     }
 
-    /// Maven escolhido, apenas quando o diretório ainda existe.
-    #[must_use]
-    pub fn resolved_maven_home(&self) -> Option<PathBuf> {
-        self.maven_home
-            .as_ref()
-            .filter(|home| home.is_dir())
-            .cloned()
+    /// Retira as escolhas do formato antigo, para quem souber traduzi-las.
+    ///
+    /// Devolve vazio depois da primeira chamada, e o que sobrar não é regravado.
+    pub fn take_legacy(&mut self) -> BTreeMap<String, PathBuf> {
+        std::mem::take(&mut self.legacy)
     }
+
+    /// Grava a escolha. `workspace_root` ausente define o padrão global.
+    pub fn choose(
+        &mut self,
+        workspace_root: Option<&Path>,
+        language: &str,
+        role: ToolRole,
+        home: Option<&Path>,
+    ) {
+        let roles = match workspace_root {
+            Some(root) => self
+                .projects
+                .entry(project_key(root))
+                .or_default()
+                .entry(language.to_owned())
+                .or_default(),
+            None => self.defaults.entry(language.to_owned()).or_default(),
+        };
+        match home {
+            Some(home) => {
+                roles.insert(role.key().to_owned(), home.to_path_buf());
+            }
+            None => {
+                roles.remove(role.key());
+            }
+        }
+    }
+}
+
+/// Chave de um projeto: o caminho canônico, quando existir.
+///
+/// Canonicalizar faz `C:\proj` e `C:\Proj\..\proj` responderem pela mesma
+/// entrada. Se o caminho não existir mais, guarda-se o que veio — perder a
+/// escolha é pior do que guardar uma chave que talvez não volte a casar.
+fn project_key(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Como a aplicação do projeto é executada.
@@ -186,15 +310,18 @@ impl AppConfig {
         self.save(path)
     }
 
-    /// Registra o JDK escolhido e grava a configuração.
-    pub fn remember_jdk(&mut self, home: Option<&Path>, path: &Path) -> Result<(), ConfigError> {
-        self.toolchains.jdk_home = home.map(Path::to_path_buf);
-        self.save(path)
-    }
-
-    /// Registra o Maven escolhido e grava a configuração.
-    pub fn remember_maven(&mut self, home: Option<&Path>, path: &Path) -> Result<(), ConfigError> {
-        self.toolchains.maven_home = home.map(Path::to_path_buf);
+    /// Registra a ferramenta escolhida para uma seção e grava a configuração.
+    ///
+    /// `workspace_root` ausente grava o padrão global.
+    pub fn remember_tool(
+        &mut self,
+        workspace_root: Option<&Path>,
+        language: &str,
+        role: ToolRole,
+        home: Option<&Path>,
+        path: &Path,
+    ) -> Result<(), ConfigError> {
+        self.toolchains.choose(workspace_root, language, role, home);
         self.save(path)
     }
 
@@ -309,35 +436,127 @@ pub struct LoggingError(String);
 mod tests {
     use super::*;
 
-    /// JDK e Maven escolhidos sobrevivem ao fechamento da janela.
+    /// As ferramentas escolhidas sobrevivem ao fechamento da janela.
     ///
-    /// Antes disso o JDK era redetectado a cada início, e a escolha do usuário
-    /// se perdia — a ordem em que a máquina responde decidia por ele.
+    /// Antes disso a principal era redetectada a cada início, e a escolha do
+    /// usuário se perdia — a ordem em que a máquina responde decidia por ele.
     #[test]
-    fn chosen_toolchains_survive_a_restart() {
+    fn chosen_tools_survive_a_restart() {
         let raiz = std::env::temp_dir().join(format!("er-config-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&raiz);
         let arquivo = raiz.join("config.toml");
-        let jdk = raiz.join("jdk-21");
-        let maven = raiz.join("maven-3.9");
-        assert!(std::fs::create_dir_all(&jdk).is_ok());
-        assert!(std::fs::create_dir_all(&maven).is_ok());
+        let principal = raiz.join("principal");
+        let secundaria = raiz.join("secundaria");
+        assert!(std::fs::create_dir_all(&principal).is_ok());
+        assert!(std::fs::create_dir_all(&secundaria).is_ok());
 
         let mut config = AppConfig::default();
-        assert!(config.remember_jdk(Some(&jdk), &arquivo).is_ok());
-        assert!(config.remember_maven(Some(&maven), &arquivo).is_ok());
+        assert!(
+            config
+                .remember_tool(None, "l", ToolRole::Primary, Some(&principal), &arquivo)
+                .is_ok()
+        );
+        assert!(
+            config
+                .remember_tool(None, "l", ToolRole::Secondary, Some(&secundaria), &arquivo)
+                .is_ok()
+        );
 
         // O que se lê de volta é o que foi escolhido, no mesmo arquivo.
         let Ok(relido) = AppConfig::load(&arquivo) else {
             panic!("configuração precisa ser relida");
         };
-        assert_eq!(relido.toolchains.resolved_jdk_home(), Some(jdk));
-        assert_eq!(relido.toolchains.resolved_maven_home(), Some(maven.clone()));
+        assert_eq!(
+            relido.toolchains.resolved(None, "l", ToolRole::Primary),
+            Some(ResolvedTool {
+                home: principal,
+                origin: ToolOrigin::Default
+            })
+        );
 
         // Um caminho que deixou de existir é ignorado: a IDE volta a detectar
         // em vez de recusar-se a abrir.
-        assert!(std::fs::remove_dir_all(&maven).is_ok());
-        assert_eq!(relido.toolchains.resolved_maven_home(), None);
+        assert!(std::fs::remove_dir_all(&secundaria).is_ok());
+        assert_eq!(
+            relido.toolchains.resolved(None, "l", ToolRole::Secondary),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
+    /// Dois projetos da mesma linguagem guardam ferramentas diferentes.
+    ///
+    /// É o critério da fase 0 da `23`: um projeto em Angular 11 e outro em 15
+    /// pedem Node de faixas diferentes, e antes disso a escolha era global.
+    #[test]
+    fn each_project_keeps_its_own_tool_over_the_default() {
+        let raiz = std::env::temp_dir().join(format!("er-projetos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raiz);
+        let padrao = raiz.join("padrao");
+        let do_projeto = raiz.join("do-projeto");
+        let um = raiz.join("um");
+        let outro = raiz.join("outro");
+        for pasta in [&padrao, &do_projeto, &um, &outro] {
+            assert!(std::fs::create_dir_all(pasta).is_ok());
+        }
+
+        let mut config = ToolchainConfig::default();
+        config.choose(None, "l", ToolRole::Primary, Some(&padrao));
+        config.choose(Some(&um), "l", ToolRole::Primary, Some(&do_projeto));
+
+        // O projeto com sobreposição usa a dele, e diz que veio do projeto.
+        let no_um = config.resolved(Some(&um), "l", ToolRole::Primary);
+        assert_eq!(no_um.as_ref().map(|tool| tool.origin), Some(ToolOrigin::Project));
+
+        // O outro cai no padrão, e diz que caiu.
+        let no_outro = config.resolved(Some(&outro), "l", ToolRole::Primary);
+        assert_eq!(no_outro.as_ref().map(|tool| tool.origin), Some(ToolOrigin::Default));
+
+        // Retirar a sobreposição devolve o projeto ao padrão.
+        config.choose(Some(&um), "l", ToolRole::Primary, None);
+        assert_eq!(
+            config
+                .resolved(Some(&um), "l", ToolRole::Primary)
+                .map(|tool| tool.origin),
+            Some(ToolOrigin::Default)
+        );
+
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
+    /// O formato antigo é recolhido cru, para a raiz de composição traduzir.
+    ///
+    /// Sem isto, o arquivo de quem já usa a IDE carregaria com as escolhas
+    /// silenciosamente vazias.
+    #[test]
+    fn the_old_format_is_collected_instead_of_discarded() {
+        let raiz = std::env::temp_dir().join(format!("er-legado-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raiz);
+        assert!(std::fs::create_dir_all(&raiz).is_ok());
+        let arquivo = raiz.join("config.toml");
+        assert!(
+            fs::write(
+                &arquivo,
+                "[toolchains]\njdk_home = \"/opt/jdk-21\"\nmaven_home = \"/opt/maven\"\n",
+            )
+            .is_ok()
+        );
+
+        let Ok(mut config) = AppConfig::load(&arquivo) else {
+            panic!("configuração antiga precisa ser lida");
+        };
+        let legado = config.toolchains.take_legacy();
+        assert_eq!(legado.len(), 2);
+        assert_eq!(legado.get("jdk_home").map(PathBuf::as_path), Some(Path::new("/opt/jdk-21")));
+
+        // Retirado uma vez, não volta, e não é regravado.
+        assert!(config.toolchains.take_legacy().is_empty());
+        assert!(config.save(&arquivo).is_ok());
+        let Ok(gravado) = fs::read_to_string(&arquivo) else {
+            panic!("configuração precisa ser relida");
+        };
+        assert!(!gravado.contains("jdk_home"));
 
         let _ = std::fs::remove_dir_all(&raiz);
     }

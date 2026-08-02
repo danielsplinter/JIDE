@@ -20,7 +20,7 @@ use ide_application::{
     OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, SearchScope,
     TaskExecutionContext, TaskId,
 };
-use ide_core::{AppConfig, config_path};
+use ide_core::{AppConfig, ToolRole, config_path};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
     DefinitionRequest, DocumentId, DocumentSnapshot, LanguageId, ProviderId, SymbolKind,
@@ -104,6 +104,15 @@ impl NativeIde {
                 }
             }
         }
+        // O formato de ferramentas mudou na fase 0 da `23`. Sem esta tradução,
+        // quem já usa a IDE abriria com as escolhas silenciosamente vazias — e
+        // regravar sem migrar apagaria o arquivo antigo de vez.
+        if crate::bootstrap::migrate_legacy_toolchains(&mut self.runtime.config)
+            && let Some(path) = self.runtime.config_path.as_ref()
+            && let Err(error) = self.runtime.config.save(path)
+        {
+            tracing::warn!(%error, "escolhas de ferramenta migradas não puderam ser gravadas");
+        }
         self.ui
             .replace_event_bus(self.runtime.config.event_capacity.max(1));
         let root = startup_root(&self.runtime.config, std::env::current_dir().ok())
@@ -161,10 +170,14 @@ impl NativeIde {
         self.documents.remembered = shell.open_document_paths();
         self.ui.shell = Some(shell);
         self.publish_event(IdeEvent::WorkspaceOpened { root: root.clone() });
+        // A raiz precisa estar registrada **antes** de resolver ferramenta:
+        // é ela que decide se vale a sobreposição do projeto ou o padrão.
+        self.runtime.workspace_root = Some(root.clone());
+        let secondary = self.tool_home(&java_contribution::language_id(), ToolRole::Secondary);
         java_contribution::register_build_systems(
             &mut self.project.build_systems,
             processes,
-            self.runtime.config.toolchains.resolved_maven_home(),
+            secondary,
         );
         let (tool_sender, tool_events) = mpsc::channel();
         self.tasks.sender = Some(tool_sender);
@@ -839,7 +852,7 @@ impl NativeIde {
     /// que deixou de existir é ignorado, e a IDE volta ao primeiro encontrado.
     fn detect_maven(&mut self) {
         self.project.maven.installations = language_java::detect_maven_installations();
-        let gravado = self.runtime.config.toolchains.resolved_maven_home();
+        let gravado = self.tool_home(&java_contribution::language_id(), ToolRole::Secondary);
         self.project.maven.selected = match gravado {
             Some(home) => match language_java::maven_installation_from_home(&home) {
                 Some(instalacao) => Some(self.project.maven.adopt(instalacao)),
@@ -897,17 +910,46 @@ impl NativeIde {
         }
     }
 
-    /// Grava JDK e Maven escolhidos no arquivo de configuração do usuário.
+    /// Ferramenta em vigor para uma seção, resolvida no projeto aberto.
     ///
-    /// Os dois juntos, no mesmo arquivo: são a mesma decisão — com que
-    /// ferramentas este usuário compila — e separá-los faria uma sobreviver ao
+    /// A ordem — sobreposição do projeto, padrão global, nada — está em
+    /// `ide-core`. Aqui só se diz de qual projeto se fala.
+    fn tool_home(&self, language: &LanguageId, role: ToolRole) -> Option<PathBuf> {
+        self.runtime
+            .config
+            .toolchains
+            .resolved(self.runtime.workspace_root.as_deref(), &language.0, role)
+            .map(|tool| tool.home)
+    }
+
+    /// Grava as ferramentas escolhidas no arquivo de configuração do usuário.
+    ///
+    /// As duas juntas, no mesmo arquivo: são a mesma decisão — com que
+    /// ferramentas este usuário compila — e separá-las faria uma sobreviver ao
     /// reinício e a outra não.
+    ///
+    /// A escrita vai para a **sobreposição do projeto aberto**, porque foi ali
+    /// que a escolha foi feita. Sem projeto aberto, vira padrão global.
     fn remember_toolchains(&mut self) {
         let Some(path) = self.runtime.config_path.clone() else {
             return;
         };
-        self.runtime.config.toolchains.jdk_home = self.selected_jdk_home();
-        self.runtime.config.toolchains.maven_home = self.project.maven.home();
+        let root = self.runtime.workspace_root.clone();
+        let language = java_contribution::language_id();
+        let primary = self.selected_jdk_home();
+        let secondary = self.project.maven.home();
+        self.runtime.config.toolchains.choose(
+            root.as_deref(),
+            &language.0,
+            ToolRole::Primary,
+            primary.as_deref(),
+        );
+        self.runtime.config.toolchains.choose(
+            root.as_deref(),
+            &language.0,
+            ToolRole::Secondary,
+            secondary.as_deref(),
+        );
         if let Err(error) = self.runtime.config.save(&path) {
             tracing::warn!(%error, "configuração de ferramentas não pôde ser gravada");
         }
@@ -2793,6 +2835,78 @@ mod tests {
         }
         assert_eq!(restored.open_document_paths(), vec![first, second.clone()]);
         assert_eq!(restored.active_document_path(), Some(second));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// O JDK e o Maven gravados no formato antigo sobrevivem à mudança.
+    ///
+    /// É o risco principal da fase 0 da `23`: mexer em configuração persistida.
+    /// Uma migração malfeita apaga a escolha em silêncio, que é o pior jeito de
+    /// falhar — quem abre a IDE não distingue "nunca escolhi" de "perdi".
+    ///
+    /// A tradução mora na raiz de composição porque saber que `jdk_home` era a
+    /// ferramenta principal de Java é conhecimento de linguagem, e o núcleo não
+    /// pode tê-lo.
+    #[test]
+    fn tools_chosen_in_the_old_format_survive_the_migration() {
+        let root = std::env::temp_dir().join(format!("er-migracao-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jdk = root.join("jdk-21");
+        let maven = root.join("maven-3.9");
+        assert!(std::fs::create_dir_all(&jdk).is_ok());
+        assert!(std::fs::create_dir_all(&maven).is_ok());
+        let config_file = root.join("config.toml");
+        assert!(
+            std::fs::write(
+                &config_file,
+                format!(
+                    "[toolchains]\njdk_home = {:?}\nmaven_home = {:?}\n",
+                    jdk.to_string_lossy(),
+                    maven.to_string_lossy()
+                ),
+            )
+            .is_ok()
+        );
+
+        let Ok(mut config) = AppConfig::load(&config_file) else {
+            panic!("configuração antiga precisa ser lida");
+        };
+        assert!(
+            crate::bootstrap::migrate_legacy_toolchains(&mut config),
+            "havia escolhas antigas a migrar"
+        );
+
+        let language = java_contribution::JAVA_LANGUAGE_ID;
+        assert_eq!(
+            config
+                .toolchains
+                .resolved(None, language, ToolRole::Primary)
+                .map(|tool| tool.home),
+            Some(jdk),
+            "o JDK escolhido não pode se perder na mudança de formato"
+        );
+        assert_eq!(
+            config
+                .toolchains
+                .resolved(None, language, ToolRole::Secondary)
+                .map(|tool| tool.home),
+            Some(maven)
+        );
+
+        // Migrar é uma vez só: gravado no formato novo, não há mais o que traduzir.
+        assert!(config.save(&config_file).is_ok());
+        let Ok(mut relido) = AppConfig::load(&config_file) else {
+            panic!("configuração migrada precisa ser relida");
+        };
+        assert!(!crate::bootstrap::migrate_legacy_toolchains(&mut relido));
+        assert!(
+            relido
+                .toolchains
+                .resolved(None, language, ToolRole::Primary)
+                .is_some(),
+            "a escolha migrada continua valendo depois de regravada"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
