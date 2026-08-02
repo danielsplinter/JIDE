@@ -489,12 +489,38 @@ fn native_ide_has_no_language_specific_fields_or_constructors() {
         "JavaDebugAdapter::new",
         "MavenAdapter::new",
         "GradleAdapter::new",
+        "TypeScriptLanguageProvider::new",
+        "NodeToolchainProvider::new",
+        "NpmAdapter::new",
     ] {
         assert!(
             !native.contains(constructor),
-            "{constructor} precisa permanecer no módulo de composição Java"
+            "{constructor} precisa permanecer no módulo de composição da linguagem"
         );
     }
+
+    // O caminho da ferramenta **principal** é neutro: o que a tela mostra é o
+    // rótulo que a contribuição declarou — "JDK" em Java, "Node" em TypeScript.
+    // Estes textos existiam escritos à mão, e com uma linguagem só ninguém
+    // percebia; com duas, a janela de uma pediria a ferramenta da outra.
+    //
+    // A guarda é uma lista, e não uma varredura por nome: o caminho da segunda
+    // ferramenta **ainda** nomeia o Maven, de propósito, porque generalizá-lo
+    // depende de haver uma segunda linguagem com segunda ferramenta. Ver a
+    // fase 0 da `23`.
+    for texto in [
+        "Selecionar pasta do JDK",
+        "JDK a salvar",
+        "No JDK selected",
+        "Selected JDK",
+        "selecione um JDK",
+    ] {
+        assert!(
+            !native.contains(texto),
+            "o caminho da ferramenta principal não pode nomear a de uma linguagem: {texto}"
+        );
+    }
+
     let composition = fs::read_to_string(root.join("crates/ide-app/src/java_contribution.rs"))
         .unwrap_or_else(|error| panic!("não foi possível ler java_contribution.rs: {error}"));
     assert!(

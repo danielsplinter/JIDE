@@ -199,7 +199,7 @@ impl NativeIde {
         let (tool_sender, tool_events) = mpsc::channel();
         self.tasks.sender = Some(tool_sender);
         self.tasks.events = Some(tool_events);
-        self.detect_toolchains(&java_contribution::language_id(), &root);
+        self.detect_all_toolchains(&root);
         self.detect_maven();
         self.import_project(&root);
         if let Some(shell) = self.ui.shell.as_mut() {
@@ -411,7 +411,7 @@ impl NativeIde {
                     root: folder.clone(),
                 });
                 self.remember_project(&folder);
-                self.detect_toolchains(&java_contribution::language_id(), &folder);
+                self.detect_all_toolchains(&folder);
                 self.import_project(&folder);
                 self.sync_languages();
                 if let Some(window) = self.window.window.as_ref() {
@@ -1025,7 +1025,7 @@ impl NativeIde {
         }
     }
 
-    /// Casa do JDK em uso, para gravar junto do Maven.
+    /// Casa da ferramenta principal de Java em uso, para gravar junto da segunda.
     fn selected_jdk_home(&self) -> Option<PathBuf> {
         self.languages
             .toolchains
@@ -1034,7 +1034,40 @@ impl NativeIde {
             .map(|installation| installation.home.clone())
     }
 
-    fn detect_toolchains(&mut self, language_id: &LanguageId, workspace_root: &Path) {
+    /// Detecta a ferramenta de **todas** as linguagens que declaram uma.
+    ///
+    /// Era chamada só para Java, e com uma linguagem só ninguém percebia. A
+    /// lista sai das contribuições: uma linguagem nova entra sem que este laço
+    /// mude, que é o que a fase 1 da `23` veio provar.
+    fn detect_all_toolchains(&mut self, workspace_root: &Path) {
+        let linguagens: Vec<LanguageId> = self
+            .languages
+            .contributions
+            .iter()
+            .filter(|contribution| contribution.toolchain.is_some())
+            .map(|contribution| contribution.descriptor.language_id.clone())
+            .collect();
+        let mut resumo = Vec::new();
+        for language_id in linguagens {
+            if let Some(linha) = self.detect_toolchains(&language_id, workspace_root) {
+                resumo.push(linha);
+            }
+        }
+        if let Some(shell) = self.ui.shell.as_mut()
+            && !resumo.is_empty()
+        {
+            // Uma mensagem só, com todas: uma por linguagem faria a última
+            // apagar as outras, e quem abre veria a de quem chegou por último.
+            shell.set_status_message(resumo.join("  ·  "));
+        }
+    }
+
+    /// Detecta e devolve o que dizer na barra de estado, se houver o que dizer.
+    fn detect_toolchains(
+        &mut self,
+        language_id: &LanguageId,
+        workspace_root: &Path,
+    ) -> Option<String> {
         let display_name = self
             .languages
             .contributions
@@ -1047,31 +1080,93 @@ impl NativeIde {
                 workspace_root: Some(workspace_root.to_path_buf()),
             },
         ));
-        match detected {
-            Ok(selection) => {
-                let selected = selection.selected().map(|installation| {
-                    installation
-                        .version
-                        .clone()
-                        .unwrap_or_else(|| installation.home.to_string_lossy().into_owned())
-                });
-                if let Some(shell) = self.ui.shell.as_mut() {
-                    if let Some(selected) = selected {
-                        shell.set_status_message(format!("{display_name}: {selected}"));
-                    } else {
-                        shell.set_status_message(format!(
-                            "Nenhuma toolchain encontrada para {display_name}"
-                        ));
-                    }
+        let resumo = match detected {
+            Ok(_) => {
+                // A escolha do usuário vence a detecção. Sem isto, ela era
+                // gravada e ignorada na abertura seguinte — a ordem em que a
+                // máquina responde decidia por ele.
+                self.restore_chosen_toolchain(language_id);
+                let selected = self
+                    .languages
+                    .toolchains
+                    .selection(language_id)
+                    .and_then(ide_application::ToolchainSelection::selected)
+                    .map(|installation| {
+                        installation
+                            .version
+                            .clone()
+                            .unwrap_or_else(|| installation.home.to_string_lossy().into_owned())
+                    });
+                selected.map(|selected| format!("{display_name}: {selected}"))
+            }
+            Err(_) => {
+                // Nenhuma instalação encontrada não é erro na abertura: o
+                // projeto abre e é editável, e quem reclama é a tarefa na hora
+                // de executar. Ver a fase 2 da `23`.
+                self.restore_chosen_toolchain(language_id);
+                None
+            }
+        };
+        self.apply_selected_toolchain(language_id.clone());
+        resumo
+    }
+
+    /// Repõe a instalação que o usuário escolheu para este projeto.
+    ///
+    /// A ordem — sobreposição do projeto, padrão global, detecção — está em
+    /// `ide-core`. Aqui só se aplica o que ela responder.
+    fn restore_chosen_toolchain(&mut self, language_id: &LanguageId) {
+        let Some(home) = self.tool_home(language_id, ToolRole::Primary) else {
+            return;
+        };
+        match pollster::block_on(
+            self.languages
+                .toolchains
+                .add_from_home(language_id, home.clone()),
+        ) {
+            Ok(_) => {
+                let escolhida = self
+                    .languages
+                    .toolchains
+                    .selection(language_id)
+                    .and_then(|selection| {
+                        selection
+                            .installations()
+                            .iter()
+                            .find(|installation| installation.home == home)
+                            .map(|installation| installation.id.clone())
+                    });
+                if let Some(id) = escolhida
+                    && let Some(selection) = self.languages.toolchains.selection_mut(language_id)
+                    && selection.select(&id).is_err()
+                {
+                    tracing::warn!(language = language_id.0, "escolha gravada não pôde ser aplicada");
                 }
             }
-            Err(error) => {
-                if let Some(shell) = self.ui.shell.as_mut() {
-                    shell.set_status_message(error.to_string());
-                }
+            Err(_) => {
+                // O caminho gravado deixou de existir: a IDE volta a detectar,
+                // em vez de recusar-se a abrir.
+                tracing::warn!(
+                    language = language_id.0,
+                    home = %home.display(),
+                    "instalação escolhida não existe mais"
+                );
             }
         }
-        self.apply_selected_toolchain(language_id.clone());
+    }
+
+    /// Como a contribuição chama a ferramenta principal desta linguagem.
+    ///
+    /// Vem da seção de configurações que ela declarou. A aplicação não sabe o
+    /// que a ferramenta é — ela repete o rótulo que recebeu, como já faz com os
+    /// nomes de tarefa e os modelos de arquivo.
+    fn tool_caption(&self, language_id: &LanguageId) -> String {
+        self.languages
+            .contributions
+            .get(language_id)
+            .and_then(|contribution| contribution.settings_sections.first())
+            .map(|section| section.field_caption.clone())
+            .unwrap_or_else(|| "ferramenta".to_owned())
     }
 
     fn toolchain_labels(&self, language_id: &LanguageId) -> Vec<String> {
@@ -1120,14 +1215,18 @@ impl NativeIde {
     }
 
     fn choose_toolchain_home(&mut self, language_id: &LanguageId) {
+        // O rótulo é o que a **contribuição** declarou na seção — "JDK" em Java,
+        // "Node" em TypeScript. Escrevê-lo aqui faria a janela de uma linguagem
+        // pedir a ferramenta de outra.
+        let rotulo = self.tool_caption(language_id);
         let initial_directory = self
             .languages
             .toolchains
             .selection(language_id)
             .and_then(ide_application::ToolchainSelection::selected)
-            .map_or_else(|| Path::new(".").to_path_buf(), |jdk| jdk.home.clone());
+            .map_or_else(|| Path::new(".").to_path_buf(), |atual| atual.home.clone());
         let Some(folder) = rfd::FileDialog::new()
-            .set_title("Selecionar pasta do JDK")
+            .set_title(format!("Selecionar pasta: {rotulo}"))
             .set_directory(initial_directory)
             .pick_folder()
         else {
@@ -1141,14 +1240,14 @@ impl NativeIde {
                 let labels = self.toolchain_labels(language_id);
                 if let Some(shell) = self.ui.shell.as_mut() {
                     shell.set_toolchain_options(labels, index);
-                    shell.set_status_message(format!("JDK a salvar: {}", home.display()));
+                    shell.set_status_message(format!("{rotulo} a salvar: {}", home.display()));
                 }
             }
             Err(_) => {
                 if let Some(shell) = self.ui.shell.as_mut() {
-                    shell.set_settings_message(
-                        "Pasta inválida: selecione um JDK com bin/java, bin/javac e bin/jar.",
-                    );
+                    shell.set_settings_message(format!(
+                        "Pasta inválida: ela não contém uma instalação de {rotulo}."
+                    ));
                 }
             }
         }
@@ -1214,10 +1313,11 @@ impl NativeIde {
         self.sync_languages();
     }
 
-    /// Informa ao host de linguagens qual JDK está escolhido.
+    /// Informa ao host de linguagens qual instalação está escolhida.
     ///
     /// A biblioteca padrão que a completação conhece vem dessa instalação, então
-    /// trocar de JDK derruba os providers ativos: eles indexaram o JDK anterior.
+    /// trocar de instalação derruba os providers ativos: eles indexaram a
+    /// biblioteca padrão da anterior.
     /// Os documentos abertos são esquecidos de propósito — o provider novo nasce
     /// sem nenhum, e a próxima sincronização os reabre.
     fn apply_selected_toolchain(&mut self, language_id: LanguageId) {
@@ -1241,7 +1341,9 @@ impl NativeIde {
                 }
             }
             Ok(false) => {}
-            Err(error) => tracing::warn!(%error, "não foi possível registrar o JDK escolhido"),
+            Err(error) => {
+                tracing::warn!(%error, "não foi possível registrar a instalação escolhida");
+            }
         }
     }
 
@@ -1279,8 +1381,9 @@ impl NativeIde {
             }
             return;
         }
+        let rotulo = self.tool_caption(language_id);
         if let Some(shell) = self.ui.shell.as_mut() {
-            shell.set_status_message(format!("Selected JDK: {}", installation.home.display()));
+            shell.set_status_message(format!("{rotulo}: {}", installation.home.display()));
         }
         self.apply_selected_toolchain(language_id.clone());
         self.remember_toolchains();
@@ -1888,8 +1991,9 @@ impl NativeIde {
             .and_then(ide_application::ToolchainSelection::selected)
             .cloned()
         else {
+            let rotulo = self.tool_caption(&language_id);
             if let Some(shell) = self.ui.shell.as_mut() {
-                shell.set_status_message("No JDK selected");
+                shell.set_status_message(format!("Nenhuma instalação de {rotulo} escolhida"));
             }
             return;
         };
