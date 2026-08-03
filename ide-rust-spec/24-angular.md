@@ -228,7 +228,77 @@ falasse de nós de gramática teria de escolher **qual** gramática.
 
 ## Fases
 
-### Fase 1 — O template responde
+### Fase 1 — O template responde ⚠️ bloqueada pela sondagem
+
+**A premissa desta fase não se confirmou, e é preciso dizer isso antes do plano.**
+
+Ela dizia: carregar o `@angular/language-service` como plugin no `tsserver` da
+fase 3 da `23`, e rotear os `.html` para lá. A sondagem contra o projeto de
+referência mostrou que **isso não basta**.
+
+#### O que se mediu
+
+O plugin existe e **carrega**. Subindo o `tsserver` do projeto com
+`--globalPlugins @angular/language-service --pluginProbeLocations <raiz>`, o
+comando `configurePlugin` para esse nome responde **sucesso** — ele está lá,
+registrado, e atende pelo nome.
+
+E ele **cobra caro**: o projeto de referência, que carrega em 30 s sem o plugin,
+levou de 46 s a 70 s com ele. Aproximadamente o dobro.
+
+Mas nenhuma pergunta sobre um `.html` foi respondida. `completionInfo` e
+`semanticDiagnosticsSync` sobre um template devolvem **`No content available`** e
+zero itens, em quatro variações:
+
+| variação | resultado |
+| --- | --- |
+| template aberto antes de o projeto montar | 0 itens |
+| aberto depois de `projectLoadingFinish` | `No content available` |
+| aberto com `fileContent` junto | `No content available` |
+| aberto com `scriptKindName: "TS"` | `No content available` |
+| com `configurePlugin` antes de tudo | `No content available` |
+
+A explicação que os dados sustentam: um `.html` não é código para o `tsserver`.
+Ele não cria informação de script para o arquivo, então a pergunta não chega ao
+plugin — que está carregado, mas nunca é consultado sobre aquele caminho.
+
+#### O que isso quer dizer para o desenho
+
+O `@angular/language-service` é a **máquina**, e não a porta. Quem abre a porta,
+nas ferramentas que funcionam, é o `@angular/language-server` — um servidor LSP
+que embrulha o `tsserver` mais o plugin e trata os `.html` ele mesmo, mapeando
+posição de template para dentro do componente. Ele **não está no projeto**: vem
+com a extensão do editor, e não em `node_modules`. Nenhum dos dois projetos de
+referência o tem.
+
+Sobram dois caminhos, e nenhum é o que esta fase supunha:
+
+- **Falar LSP com o `@angular/language-server`.** Ele resolve o problema inteiro
+  e é a via que as outras ferramentas usam. Custa: um cliente LSP na IDE, que não
+  existe, e decidir de onde esse servidor vem — se não está no projeto, alguém
+  tem de instalá-lo, e aí a versão deixa de ser "a do projeto", que é a regra
+  desta especificação e da ADR-028.
+- **Fazer aqui o que ele faz**: achar o componente do template, montar a posição
+  equivalente dentro da classe e perguntar ao `tsserver` sobre o `.ts`. Isso é
+  conhecimento de Angular no nosso código — a expressão do template não é
+  TypeScript, e mapear uma na outra é reimplementar parte do compilador. É o que
+  a seção "Uma crate, e nada de Angular fora dela" existe para evitar, e o que a
+  regra de não envelhecer proíbe.
+
+**Nenhum dos dois é uma fase; cada um é uma decisão.** Escolher exige responder de
+onde vem o servidor, e a resposta muda o que a IDE promete sobre versões.
+
+#### O que continua valendo desta fase
+
+A parte que não dependia da premissa: **a camada nativa de `.html` é HTML puro**.
+Sem nada de Angular, um template abre com realce de HTML, e `@if`, `@for` e
+`@defer` são texto comum — não destacados, e **não marcados como erro**. Isso
+continua sendo o comportamento certo, e é o que a IDE faz hoje.
+
+E o custo medido do plugin — o dobro do tempo de carga — é razão a mais para ele
+não subir por padrão quando chegar a hora.
+
+### Fase 1 (planejada) — O template responde
 
 O plugin `@angular/language-service` carregado no `tsserver` da fase 3 da `23`, e
 um provider `template.angular` para os `.html` de projeto Angular: diagnóstico e

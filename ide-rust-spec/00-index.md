@@ -73,7 +73,7 @@ Este é um requisito arquitetural obrigatório.
 - [21 — O que muda fora da IDE](21-file-watcher.md) — **completa**: o que muda no disco chega ao índice em ~700 ms sem ação do usuário, e a conferência da abertura caiu de 4,66 s para 0,70 s
 - [22 — Git](22-git-integration.md) — **não iniciada**: a crate `ide-git`, uma só, com as capacidades em módulos e a implementação atrás de traits
 - [23 — TypeScript](23-typescript.md) — **completa**: Java saiu do núcleo, a segunda linguagem existe, o projeto é lido do `tsconfig.json` e o `tsserver` responde com tipo; depurar ficou **fora de escopo** — quem depura é o navegador
-- [24 — Angular](24-angular.md) — **não iniciada**: um framework não é uma linguagem, e entra pelas portas que a `23` já abriu; depende da fase 3 dela
+- [24 — Angular](24-angular.md) — **fase 1 bloqueada pela sondagem**: o plugin do Angular carrega no `tsserver` e **não** responde por `.html`; um framework não é uma linguagem, e entra pelas portas que a `23` já abriu; depende da fase 3 dela
 - [25 — Índice próprio de TypeScript](25-typescript-index.md) — **fases 0 a 5 feitas**, menos referências: o analisador externo só sobe quando o índice diz que não alcança; o `.` declarado responde 14% a 17% dos pontos de um projeto real e diz "não sei" no resto; a busca por tipo responde em 4 ms contra os 30 s do analisador externo, com +4 MB e sem `node_modules`; o analisador externo custa 1,9 GB e 30 s porque guarda o programa inteiro; um índice responde busca, navegação e o `.` **declarado** em dezenas de MB — e diz que não soube no resto, em vez de mentir
 
 ## Escopo inicial, e o que dele já existe
