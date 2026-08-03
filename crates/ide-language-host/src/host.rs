@@ -647,6 +647,16 @@ impl LanguageHost {
         self.note_result(worker.provider_id(), worker.references(context, request).await)
     }
 
+    /// Tira um provider de serviço, sem removê-lo do registro.
+    ///
+    /// Ele continua listado — e é isso que permite a IDE dizer que **está
+    /// desligado**, em vez de a pergunta simplesmente não achar nada. A diferença
+    /// entre "não existe" e "existe e está fora" é o que separa uma resposta de um
+    /// silêncio.
+    ///
+    /// Se ele estava ativo, o worker é encerrado: desligar sem parar o processo
+    /// seria desligar só no papel, e o analisador externo continuaria com a
+    /// memória dele.
     pub async fn disable(&self, provider_id: &ProviderId) -> Result<(), LanguageHostError> {
         let worker = {
             let mut registry = self

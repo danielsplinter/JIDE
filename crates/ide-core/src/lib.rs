@@ -1,7 +1,7 @@
 #![doc = "Configuração, logging e ciclo de vida do núcleo da IDE."]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -18,6 +18,28 @@ use tracing_subscriber::EnvFilter;
 pub struct AppConfig {
     #[serde(default = "default_event_capacity")]
     pub event_capacity: usize,
+    /// Providers de linguagem que não devem entrar em serviço.
+    ///
+    /// # Por que é uma lista de identificadores, e não uma opção por linguagem
+    ///
+    /// A IDE não sabe o que nenhum deles é. `typescript.service` é uma cadeia
+    /// vinda do arquivo de configuração, do mesmo jeito que os nomes de
+    /// ferramenta em `ToolchainConfig` — nada aqui menciona TypeScript, Java ou
+    /// analisador externo, e é o que permite a mesma chave servir a qualquer
+    /// linguagem que venha depois.
+    ///
+    /// # Para que serve
+    ///
+    /// Desligar um provider é o que permite **medir** o que os outros respondem
+    /// sozinhos. Com dois providers da mesma linguagem em serviço, não há como
+    /// saber qual respondeu — e concluir sobre o errado é a família de defeito
+    /// que esta IDE já encontrou várias vezes. Ver a fase 0 da `25`.
+    ///
+    /// Fica **antes** dos campos de tabela de propósito: em TOML, um valor
+    /// escrito depois de uma tabela pertenceria a ela, e a serialização falha.
+    /// O teste de ida e volta é o que pega isso.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_providers: BTreeSet<String>,
     #[serde(default)]
     pub workspace: WorkspaceConfig,
     #[serde(default)]
@@ -36,6 +58,7 @@ impl Default for AppConfig {
             run: RunConfig::default(),
             debug: DebugConfig::default(),
             toolchains: ToolchainConfig::default(),
+            disabled_providers: BTreeSet::new(),
         }
     }
 }
@@ -419,6 +442,48 @@ pub struct LoggingError(String);
 
 #[cfg(test)]
 mod tests {
+
+    /// Providers desligados atravessam o arquivo de configuração.
+    ///
+    /// A lista é de identificadores, e o `ide-core` não sabe o que nenhum deles
+    /// significa — é o que permite a mesma chave servir a qualquer linguagem.
+    #[test]
+    fn disabled_providers_survive_a_round_trip() {
+        let mut config = AppConfig::default();
+        assert!(
+            config.disabled_providers.is_empty(),
+            "por padrão nada está desligado"
+        );
+        config
+            .disabled_providers
+            .insert("alguma.coisa".to_owned());
+        let texto = match toml::to_string_pretty(&config) {
+            Ok(texto) => texto,
+            Err(erro) => panic!("a configuração precisa serializar: {erro}"),
+        };
+        assert!(texto.contains("alguma.coisa"));
+        let de_volta: AppConfig = match toml::from_str(&texto) {
+            Ok(config) => config,
+            Err(erro) => panic!("a configuração precisa voltar: {erro}"),
+        };
+        assert!(de_volta.disabled_providers.contains("alguma.coisa"));
+    }
+
+    /// Configuração antiga, sem a chave, continua carregando.
+    ///
+    /// Quem já tem um arquivo gravado não pode ficar sem abrir a IDE por causa de
+    /// um campo novo.
+    #[test]
+    fn a_config_without_the_key_still_loads() {
+        let antigo = "event_capacity = 64
+";
+        let config: AppConfig = match toml::from_str(antigo) {
+            Ok(config) => config,
+            Err(erro) => panic!("configuração antiga precisa carregar: {erro}"),
+        };
+        assert_eq!(config.event_capacity, 64);
+        assert!(config.disabled_providers.is_empty());
+    }
     use super::*;
 
     /// As ferramentas escolhidas sobrevivem ao fechamento da janela.

@@ -316,3 +316,70 @@ impl ide_language_api::ActiveLanguage for PreparingLanguage {
         Ok(())
     }
 }
+
+/// Desligar o provider de uma linguagem não toca na outra.
+///
+/// **É a garantia que a fase 0 da `25` precisa dar antes de qualquer outra
+/// coisa.** Ela existe para permitir medir o que o provider nativo responde
+/// sozinho, e uma medição que quebrasse Java no caminho não teria valor nenhum.
+///
+/// Java aqui não é exemplo escolhido por conveniência: é a linguagem que já
+/// funciona, com índice, completação e navegação, e é ela que não pode regredir.
+#[test]
+fn disabling_one_language_does_not_touch_the_other() {
+    let host = host_with_both();
+    let typescript = ide_domain::ProviderId(language_typescript::TYPESCRIPT_PROVIDER_ID.to_owned());
+
+    // Antes: cada extensão acha o seu.
+    success(host.provider_for_extension("java", LanguageCapabilities::SYNTAX));
+    success(host.provider_for_extension("ts", LanguageCapabilities::SYNTAX));
+
+    success(pollster::block_on(host.disable(&typescript)));
+
+    // Java continua inteiro.
+    let para_java = success(host.provider_for_extension("java", LanguageCapabilities::SYNTAX));
+    assert_eq!(
+        para_java.0,
+        language_java::JAVA_PROVIDER_ID,
+        "desligar TypeScript não pode mexer no provider de Java"
+    );
+    assert!(
+        pollster::block_on(host.open_document(
+            context(1),
+            DocumentSnapshot {
+                id: DocumentId(1),
+                path: PathBuf::from("/w/Pedido.java"),
+                version: 1,
+                text: "class Pedido {}".to_owned(),
+            },
+        ))
+        .is_ok(),
+        "um .java precisa continuar abrindo"
+    );
+
+    // E o desligado **continua listado**, com o estado dizendo por quê. É o que
+    // permite a IDE falar "está desligado" em vez de só não achar nada.
+    let snapshots = success(host.providers());
+    let desligado = snapshots
+        .iter()
+        .find(|snapshot| snapshot.metadata.provider_id == typescript);
+    assert!(
+        desligado.is_some_and(|snapshot| snapshot.state
+            == ide_language_api::ProviderState::Disabled),
+        "o provider desligado precisa continuar listado, e dizer que está fora"
+    );
+}
+
+/// O que foi desligado não atende mais, e a extensão dele fica sem provider.
+#[test]
+fn a_disabled_provider_stops_being_a_candidate() {
+    let host = host_with_both();
+    let typescript = ide_domain::ProviderId(language_typescript::TYPESCRIPT_PROVIDER_ID.to_owned());
+    success(pollster::block_on(host.disable(&typescript)));
+
+    assert!(
+        host.provider_for_extension("ts", LanguageCapabilities::SYNTAX)
+            .is_err(),
+        "desligado é desligado: a extensão dele deixa de ter quem responda"
+    );
+}

@@ -193,6 +193,26 @@ impl NativeIde {
             .contributions
             .register(estilo)
             .map_err(|error| error.to_string())?;
+        // Desligar o que a configuração pede vem **depois** de registrar tudo:
+        // um provider precisa existir para poder ser tirado de serviço, e é por
+        // continuar listado que a IDE consegue dizer que ele está desligado em
+        // vez de a pergunta apenas não achar nada.
+        for provider_id in &self.runtime.config.disabled_providers {
+            let provider_id = ProviderId(provider_id.clone());
+            match pollster::block_on(language_host.disable(&provider_id)) {
+                Ok(()) => tracing::info!(
+                    provider = provider_id.0,
+                    "provider desligado pela configuração"
+                ),
+                // Identificador que não existe não é erro fatal: a configuração é
+                // escrita à mão, e um nome errado não pode impedir a IDE de abrir.
+                Err(error) => tracing::warn!(
+                    provider = provider_id.0,
+                    %error,
+                    "a configuração pede desligar um provider que não está registrado"
+                ),
+            }
+        }
         self.languages.host = Some(Arc::new(language_host));
         let tree = self
             .workspace
@@ -3182,9 +3202,13 @@ fn analisador_ausente(
         return None;
     }
     providers.into_iter().find_map(|snapshot| {
-        if snapshot.state != ide_language_api::ProviderState::Failed {
-            return None;
-        }
+        let fora = match snapshot.state {
+            ide_language_api::ProviderState::Failed => "indisponível",
+            // Desligado não é falha, e dizer "indisponível" faria procurar
+            // defeito onde houve escolha.
+            ide_language_api::ProviderState::Disabled => "desligado na configuração",
+            _ => return None,
+        };
         let cuida = snapshot.metadata.extensions.iter().any(|extensao| {
             relevantes
                 .iter()
@@ -3194,11 +3218,9 @@ fn analisador_ausente(
             return None;
         }
         let nome = snapshot.metadata.display_name;
-        let motivo = snapshot
-            .last_error
-            .unwrap_or_else(|| "sem detalhe".to_owned());
+        let motivo = snapshot.last_error.map_or_else(String::new, |detalhe| format!(": {detalhe}"));
         Some(format!(
-            "{nome} indisponível, e a análise nativa não tem índice: {motivo}"
+            "{nome} {fora}, e a análise nativa não tem índice{motivo}"
         ))
     })
 }
@@ -3925,6 +3947,32 @@ mod tests {
 
         // Sem arquivo aberto, calar é a resposta conservadora.
         assert_eq!(analisador_ausente(providers, &[]), None);
+    }
+
+    /// Desligado e caído não se dizem com a mesma palavra.
+    ///
+    /// Dizer "indisponível" para quem desligou o provider faria procurar defeito
+    /// onde houve escolha — e é a mesma família de confusão que esta IDE já
+    /// enfrentou: a mensagem certa para a situação errada.
+    #[test]
+    fn a_disabled_analyzer_does_not_report_itself_as_broken() {
+        let desligado = vec![snapshot_falho(
+            "typescript",
+            "TypeScript",
+            &["ts"],
+            ide_language_api::ProviderState::Disabled,
+        )];
+        let queixa = analisador_ausente(desligado, &["ts".to_owned()]);
+        assert!(
+            queixa
+                .as_deref()
+                .is_some_and(|texto| texto.contains("desligado")),
+            "quem desligou precisa ler que desligou: {queixa:?}"
+        );
+        assert!(
+            queixa.is_some_and(|texto| !texto.contains("indisponível")),
+            "desligado não é indisponível"
+        );
     }
 
     /// Uma linguagem sem analisador externo nenhum nunca produz queixa.

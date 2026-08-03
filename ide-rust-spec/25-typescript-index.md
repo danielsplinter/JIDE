@@ -256,20 +256,56 @@ sistema de tipos menor. Fica **registrado e fora de escopo**.
 
 ## Fases
 
-### Fase 0 — Poder desligar o analisador ⬜
-
-Hoje não há como. Existe `enable`, não existe `disable`, e o analisador entra na
-composição em `typescript_contribution::selection()`.
+### Fase 0 — Poder desligar o analisador ✅
 
 Sem isto, nenhuma fase seguinte pode ser medida: com o analisador de pé, não há
-como saber o que o índice responde sozinho.
+como saber o que o índice responde sozinho. É a mesma armadilha que já deu três
+defeitos nesta especificação e na `23` — testar uma camada e concluir sobre outra.
 
-- um ajuste que tire o provider externo da seleção, sem recompilar;
-- o aviso de degradação já existente cobre o resto: com ele desligado, o que só
-  ele responde passa a dizer que não soube.
+#### O que já existia, e eu tinha dito que não
 
-**Critério:** com o analisador desligado, um `.ts` abre com realce e estrutura, e
-`Ctrl+L` diz que não há índice — em vez de dizer que não achou nada.
+`LanguageHost::disable` **já estava escrito**, e afirmei o contrário na primeira
+versão desta especificação porque procurei por `pub fn disable` num método que é
+`pub async fn`. Ele já encerra o worker, tira as rotas e deixa o provider
+**listado** como `Disabled` — que é o que permite dizer "está desligado" em vez de
+a pergunta apenas não achar nada.
+
+Faltava ligá-lo a alguma coisa.
+
+#### O que se fez
+
+Uma chave em `AppConfig`, e ela é neutra: **uma lista de identificadores de
+provider**, sem nenhuma menção a TypeScript, Java ou analisador externo. A IDE não
+sabe o que `typescript.service` é — é uma cadeia vinda do arquivo, do mesmo jeito
+que os nomes de ferramenta em `ToolchainConfig`.
+
+```toml
+disabled_providers = ["typescript.service"]
+```
+
+Ela é aplicada **depois** do registro de todas as contribuições: um provider
+precisa existir para poder sair de serviço. Identificador que não existe vira
+aviso no log, e não impede a IDE de abrir — a configuração é escrita à mão.
+
+E a queixa passou a distinguir **desligado** de **caído**. Dizer "indisponível"
+para quem desligou faria procurar defeito onde houve escolha.
+
+#### O que a serialização quase quebrou
+
+O campo nasceu no fim da estrutura, depois das tabelas. Em TOML, um valor escrito
+depois de uma tabela pertence a ela, e `to_string_pretty` falha. O teste de ida e
+volta pegou; ele existe por isso, e não por formalidade.
+
+#### Java não foi tocado, e há teste dizendo isso
+
+Era a condição desta fase. `disabling_one_language_does_not_touch_the_other`
+desliga o provider de TypeScript e cobra que Java continue achando o provider
+dele, abrindo `.java`, e que o desligado continue **listado** com o estado certo.
+
+**Critério, atendido:** com o analisador desligado, um `.ts` abre com realce e
+estrutura — o provider nativo continua em serviço —, e `Ctrl+L` diz que o
+analisador está desligado e que a análise nativa não tem índice, em vez de dizer
+que não achou nada.
 
 ### Fase 1 — O índice, e a busca por tipo ⬜
 
