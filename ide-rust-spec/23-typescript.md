@@ -1163,6 +1163,40 @@ Um projeto de teste criado na hora carrega em menos de um segundo, e a corrida
 projeto real, e foi conferido por sabotagem: com o prazo curto de volta, ele
 reprova em 5,04 s com exatamente a mensagem que aparecia na tela.
 
+#### E a espera de trinta segundos passou a aparecer
+
+Responder em 30 s conserta a busca e não conserta o mal-entendido: **enquanto o
+projeto é preparado, tudo o que a IDE responde é incompleto** — a busca não acha,
+a completação não sabe os tipos —, e sem sinal nenhum quem usa atribui isso à IDE
+em vez de à espera. Agora gira no meio da tela enquanto dura, e some quando
+termina. Não bloqueia nada: dá para editar e navegar.
+
+##### O contrato ganhou um conceito, e ele é neutro
+
+`ReadinessSignal`, em `ide-language-api`. A IDE não pergunta "o `tsserver`
+terminou?"; ela pergunta se **alguma linguagem** ainda prepara o projeto. Um
+analisador externo montando o programa e um índice sendo construído viram a mesma
+frase, e a IDE continua sem saber o que qualquer um dos dois está fazendo.
+
+**É um sinal, e não uma pergunta**, e a diferença é o que o faz funcionar. O
+worker da linguagem atende **um pedido por vez**: perguntar "você já terminou?"
+poria a pergunta na fila atrás justamente do trabalho sobre o qual se pergunta, e
+a resposta chegaria junto com o fim — quando ela deixa de importar. O sinal é
+entregue uma vez, na ativação, e lido de fora quantas vezes for preciso sem tocar
+na thread que trabalha.
+
+Linguagem que não tem o que preparar devolve `None` e nunca aparece como
+preparando, que é o caso de todo provider nativo hoje.
+
+##### A porcentagem que não existe
+
+O pedido original era uma barra com porcentagem, sumindo aos 80%. **Não há
+porcentagem para mostrar**: o analisador emite `projectLoadingStart` e
+`projectLoadingFinish`, e nada entre os dois. Qualquer número seria inventado a
+partir do relógio, e um número inventado numa barra de progresso é pior do que
+nenhum — ele promete um fim que ninguém sabe calcular. O giro diz o que se sabe:
+está trabalhando, e ainda não terminou.
+
 #### O que isto confirma sobre o método
 
 Três dos defeitos desta especificação vieram de testar a camada de baixo e

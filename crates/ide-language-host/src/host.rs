@@ -252,6 +252,27 @@ impl LanguageHost {
         registry.configure_selection(language_id, selection)
     }
 
+    /// Se alguma linguagem ativa ainda está preparando o projeto.
+    ///
+    /// **A IDE não sabe o que está sendo preparado, e não precisa saber.** Uma
+    /// entende que um analisador monta o projeto antes de responder; outra
+    /// constrói um índice. Aqui as duas viram a mesma frase: ainda não dá para
+    /// contar com a resposta completa.
+    ///
+    /// Ler isto não fala com a fila do worker — ele atende um pedido por vez, e a
+    /// pergunta ficaria atrás justamente do trabalho sobre o qual se pergunta.
+    /// Ver `ReadinessSignal`.
+    #[must_use]
+    pub fn preparing(&self) -> bool {
+        self.registry.lock().is_ok_and(|registry| {
+            registry
+                .providers
+                .values()
+                .filter_map(|entry| entry.worker.as_ref())
+                .any(|worker| worker.is_preparing())
+        })
+    }
+
     pub fn providers(&self) -> Result<Vec<ProviderSnapshot>, LanguageHostError> {
         let registry = self
             .registry

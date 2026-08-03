@@ -246,6 +246,12 @@ impl ActiveLanguage for ActiveTypeScriptService {
         &self.language_id
     }
 
+    /// Este analisador tem, sim, o que preparar: ele monta o projeto inteiro
+    /// antes de responder qualquer coisa. Ver `LOADING_TIMEOUT`.
+    fn readiness(&self) -> Option<ide_language_api::ReadinessSignal> {
+        Some(self.session.readiness())
+    }
+
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {
         self.abrir(&document.path, &document.text).await?;
         self.documentos

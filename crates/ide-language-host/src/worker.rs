@@ -6,7 +6,7 @@ use ide_domain::{
 };
 use ide_language_api::{
     ActiveLanguage, LanguageActivationContext, LanguageMetadata, LanguageProvider,
-    LanguageRequestContext, MemberAccess,
+    LanguageRequestContext, MemberAccess, ReadinessSignal,
 };
 use tokio::sync::oneshot;
 
@@ -120,11 +120,24 @@ pub(super) struct ProviderWorker {
     provider_id: ProviderId,
     sender: SyncSender<WorkerRequest>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// O sinal que a linguagem entregou na ativacao, se ela tem o que preparar.
+    ///
+    /// Guardado aqui porque ler o sinal **nao pode** passar pela fila: ela atende
+    /// um pedido por vez, e a pergunta ficaria atras justamente do trabalho sobre
+    /// o qual se esta perguntando.
+    readiness: Option<ReadinessSignal>,
 }
 
 impl ProviderWorker {
     pub(super) const fn provider_id(&self) -> &ProviderId {
         &self.provider_id
+    }
+
+    /// Se esta linguagem ainda está preparando o projeto.
+    pub(super) fn is_preparing(&self) -> bool {
+        self.readiness
+            .as_ref()
+            .is_some_and(|sinal| !sinal.is_ready())
     }
 }
 
@@ -137,7 +150,8 @@ impl ProviderWorker {
     ) -> Result<Self, LanguageHostError> {
         let metadata_id = metadata.provider_id.clone();
         let (sender, receiver) = sync_channel(queue_capacity);
-        let (initialized_tx, initialized_rx) = sync_channel(1);
+        let (initialized_tx, initialized_rx) =
+            sync_channel::<Result<Option<ReadinessSignal>, LanguageHostError>>(1);
         let thread_name = format!("language-{}", metadata.provider_id.0);
         let handle = thread::Builder::new()
             .name(thread_name)
@@ -166,19 +180,20 @@ impl ProviderWorker {
                         return;
                     }
                 };
-                if initialized_tx.send(Ok(())).is_err() {
+                if initialized_tx.send(Ok(active.readiness())).is_err() {
                     return;
                 }
                 run_worker(&runtime, active, receiver);
             })
             .map_err(|error| LanguageHostError::Provider(error.to_string()))?;
-        initialized_rx
+        let readiness = initialized_rx
             .recv()
             .map_err(|_| LanguageHostError::WorkerStopped)??;
         Ok(Self {
             provider_id: metadata_id,
             sender,
             thread: Mutex::new(Some(handle)),
+            readiness,
         })
     }
 

@@ -125,7 +125,7 @@ pub(crate) struct Session {
     /// Medido contra um projeto Angular de 8 958 arquivos: `projectLoadingStart`
     /// aos 3,5 s, `projectLoadingFinish` aos **30 s**, e as oito perguntas
     /// enfileiradas respondidas nesse instante — nenhuma antes.
-    pronto: Arc<AtomicBool>,
+    pronto: ide_language_api::ReadinessSignal,
 }
 
 impl Session {
@@ -135,8 +135,8 @@ impl Session {
         let leitura_conversa = Arc::clone(&conversa);
         let entregar = Arc::clone(&pendentes);
         let avisar = Arc::clone(&morto);
-        let pronto = Arc::new(AtomicBool::new(false));
-        let anotar_pronto = Arc::clone(&pronto);
+        let pronto = ide_language_api::ReadinessSignal::new();
+        let anotar_pronto = pronto.clone();
 
         // O laço de leitura é próprio, e não pode ser o de quem pergunta:
         // eventos chegam sem pedido, e a resposta de uma pergunta pode vir
@@ -184,7 +184,12 @@ impl Session {
     /// via: a primeira busca depois de abrir a IDE não achava nada, e a mesma
     /// busca minutos depois achava.
     pub(crate) fn is_ready(&self) -> bool {
-        self.pronto.load(Ordering::Acquire)
+        self.pronto.is_ready()
+    }
+
+    /// O sinal, para quem precisa saber de fora sem falar com o worker.
+    pub(crate) fn readiness(&self) -> ide_language_api::ReadinessSignal {
+        self.pronto.clone()
     }
 
     pub(crate) fn is_alive(&self) -> bool {
@@ -261,7 +266,7 @@ async fn leitura(
     conversa: &Arc<dyn ProcessConversation>,
     entregar: &Pendentes,
     avisar: &AtomicBool,
-    pronto: &AtomicBool,
+    pronto: &ide_language_api::ReadinessSignal,
 ) {
     while let Some(valor) = read_message(conversa.as_ref()).await {
         match classify(&valor) {
@@ -288,7 +293,7 @@ async fn leitura(
                 // dar ao analisador o prazo de quem ainda está montando o
                 // projeto.
                 if name == "projectLoadingFinish" {
-                    pronto.store(true, Ordering::Release);
+                    pronto.mark_ready();
                 }
                 tracing::debug!(evento = name, "evento do analisador");
             }

@@ -106,9 +106,58 @@ pub trait LanguageProvider: Send + Sync {
     ) -> Result<Box<dyn ActiveLanguage>, LanguageError>;
 }
 
+/// Um sinal de que a linguagem ainda está preparando o projeto.
+///
+/// # Por que é um sinal compartilhado, e não uma pergunta
+///
+/// Perguntar exigiria falar com o worker da linguagem, e ele atende **um pedido
+/// por vez**. Quando um analisador leva trinta segundos montando o projeto, a
+/// pergunta "você já terminou?" ficaria na fila atrás justamente do trabalho
+/// sobre o qual se está perguntando — a resposta chegaria junto com o fim, que é
+/// quando ela deixa de importar.
+///
+/// O sinal é entregue **uma vez**, na ativação, e lido de fora quantas vezes for
+/// preciso sem tocar na thread que trabalha.
+///
+/// # Neutro de propósito
+///
+/// Nada aqui é de TypeScript. Uma linguagem que monte índice em segundo plano —
+/// Java, hoje — pode usar o mesmo sinal, e a IDE continua sem saber o que
+/// qualquer uma delas está fazendo: ela sabe só que ainda não dá para contar com
+/// a resposta completa.
+#[derive(Clone, Debug, Default)]
+pub struct ReadinessSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl ReadinessSignal {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Diz que a preparação terminou. Não há caminho de volta.
+    pub fn mark_ready(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 #[async_trait]
 pub trait ActiveLanguage: Send + Sync {
     fn language_id(&self) -> &LanguageId;
+
+    /// O sinal que diz quando esta linguagem terminou de preparar o projeto.
+    ///
+    /// `None` é "não há o que esperar": a linguagem responde por completo desde
+    /// a ativação, que é o caso de todo provider nativo. Quem devolve um sinal
+    /// promete marcá-lo — um sinal que nunca fica pronto deixaria a IDE dizendo
+    /// para sempre que está carregando.
+    fn readiness(&self) -> Option<ReadinessSignal> {
+        None
+    }
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError>;
     async fn change_document(&self, change: DocumentChange) -> Result<(), LanguageError>;
     async fn close_document(&self, document_id: DocumentId) -> Result<(), LanguageError>;

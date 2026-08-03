@@ -173,6 +173,8 @@ pub(super) struct LanguageController {
     /// Quando a memória foi medida pela última vez, e quanto deu.
     pub(super) last_memory_check: Option<Instant>,
     pub(super) memory: ide_core::MemoryReading,
+    /// Desde quando alguma linguagem prepara o projeto, para o giro ter relógio.
+    pub(super) preparing_since: Option<Instant>,
     /// A busca por tipo em curso, que fala com o analisador e não pode esperar.
     pub(super) type_search: SearchController<TypeSearchOutcome>,
     /// Quedas já anunciadas, para não repetir o aviso a cada verificação.

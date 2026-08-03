@@ -4,7 +4,7 @@
 //! cima, na ordem inversa do funil de eventos.
 
 use super::*;
-use ui_components::{Label, Panel, SurfaceTone, paint_icon};
+use ui_components::{Label, Panel, Spinner, SurfaceTone, paint_icon};
 
 impl IdeShell {
     /// Desenha um texto solto com a `Label` da biblioteca.
@@ -611,6 +611,27 @@ impl IdeShell {
             let mut menu_paint = self.paint_context();
             menu.paint(&mut menu_paint);
             commands.extend(menu_paint.into_commands());
+        }
+        // O giro do carregamento vem por último, e por cima de tudo: enquanto ele
+        // roda, o que está embaixo está incompleto. Ele não bloqueia nada — dá
+        // para editar e navegar —, só diz que o resto ainda vem.
+        if let Some(phase) = self.context.project_loading {
+            const DIAMETRO: f32 = 48.0;
+            let mut giro = Spinner::new(PROJECT_LOADING_ID, "Preparando o projeto")
+                .with_phase(phase)
+                .with_diameter(DIAMETRO);
+            giro.layout(
+                &self.layout_context(),
+                Rect::new(
+                    (size.width - DIAMETRO) / 2.0,
+                    (size.height - DIAMETRO) / 2.0,
+                    DIAMETRO,
+                    DIAMETRO,
+                ),
+            );
+            let mut giro_paint = self.paint_context();
+            giro.paint(&mut giro_paint);
+            commands.extend(giro_paint.into_commands());
         }
         commands
     }

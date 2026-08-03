@@ -176,6 +176,7 @@ impl IdeShell {
                 theme: Theme::default(),
                 status_message: "Ready".to_owned(),
                 memory_usage: None,
+                project_loading: None,
                 project_summary: None,
                 last_size: Size::new(1280.0, 800.0),
                 scrollbar_drag: None,

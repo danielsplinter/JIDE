@@ -631,6 +631,42 @@ impl NativeIde {
         });
     }
 
+    /// Adianta o giro do carregamento do projeto, e pede o quadro seguinte.
+    ///
+    /// **A IDE nao sabe o que esta sendo preparado.** Ela pergunta ao host se
+    /// alguma linguagem ainda prepara o projeto, e o host pergunta ao sinal que a
+    /// linguagem entregou na ativacao. Um analisador externo montando o projeto e
+    /// um indice sendo construido viram aqui a mesma frase.
+    ///
+    /// O relogio e daqui, como o do giro da busca: o componente nao tem relogio,
+    /// e a janela tambem nao.
+    fn advance_project_loading(&mut self) -> bool {
+        let preparando = self
+            .languages
+            .host
+            .as_ref()
+            .is_some_and(|host| host.preparing());
+        if preparando {
+            let inicio = *self
+                .languages
+                .preparing_since
+                .get_or_insert_with(std::time::Instant::now);
+            let fase = inicio.elapsed().as_secs_f32().fract();
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_project_loading(Some(fase));
+            }
+            return true;
+        }
+        // Terminou: apaga o giro e pede **um** quadro a mais, para a tela ficar
+        // sem ele. Sem esse ultimo quadro, o giro parado continuaria desenhado
+        // ate o proximo evento, e um giro parado parece a IDE travada.
+        let estava = self.languages.preparing_since.take().is_some();
+        if estava && let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_project_loading(None);
+        }
+        estava
+    }
+
     /// Adianta o giro da janela de busca, e pede o quadro seguinte.
     ///
     /// **Devolver `true` é o que mantém a animação viva.** O laço já acorda a
@@ -2378,6 +2414,7 @@ impl ApplicationHandler for NativeIde {
         let mut changed = self.collect_content_search();
         changed |= self.collect_type_search();
         changed |= self.advance_search_spinner();
+        changed |= self.advance_project_loading();
         self.suspend_idle_languages();
         self.measure_memory();
         // O realce vem da thread do provider e chega quando fica pronto: é aqui

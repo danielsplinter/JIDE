@@ -182,6 +182,8 @@ const DEBUG_FRAMES_ID: WidgetId = WidgetId(10_012);
 const DEBUG_STEP_BASE_ID: WidgetId = WidgetId(10_076);
 const DEBUG_VARIABLES_ID: WidgetId = WidgetId(10_013);
 const STATUS_BAR_ID: WidgetId = WidgetId(10_014);
+/// O giro que aparece enquanto uma linguagem prepara o projeto.
+const PROJECT_LOADING_ID: WidgetId = WidgetId(10_015);
 const EDITOR_TABS_ID: WidgetId = WidgetId(10_015);
 const TERMINAL_TABS_ID: WidgetId = WidgetId(10_016);
 const EDITOR_SCROLLBAR_ID: WidgetId = WidgetId(10_017);
@@ -228,6 +230,9 @@ struct ShellContext {
     theme: Theme,
     status_message: String,
     project_summary: Option<String>,
+    /// Onde o giro do carregamento está, quando alguma linguagem prepara o
+    /// projeto.
+    project_loading: Option<f32>,
     /// O que a IDE custa, já pronto para a barra de estado.
     ///
     /// Vem pronto de quem mede: a tela não soma nem formata número de memória —
@@ -577,6 +582,16 @@ impl IdeShell {
     ///
     /// Zero externo não aparece: quem só edita Java não precisa ver um campo
     /// vazio a vida toda.
+    /// Diz que o projeto está sendo preparado, e onde o giro está.
+    ///
+    /// **Aparece no meio da tela, e não num canto.** Enquanto isso dura, o que a
+    /// IDE responde é incompleto — a busca não acha, a completação não sabe os
+    /// tipos —, e atribuir isso à IDE em vez de à espera é o mal-entendido que
+    /// este giro existe para evitar. Ele some quando a preparação termina.
+    pub fn set_project_loading(&mut self, phase: Option<f32>) {
+        self.context.project_loading = phase;
+    }
+
     pub fn set_memory_usage(&mut self, own_mb: u64, external_mb: u64) {
         self.context.memory_usage = Some(if external_mb == 0 {
             format!("{own_mb} MB")

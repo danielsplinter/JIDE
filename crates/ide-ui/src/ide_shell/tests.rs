@@ -4386,6 +4386,64 @@ fn opening_the_search_dismisses_the_completion_list() {
     );
 }
 
+/// Enquanto o projeto e preparado, gira no meio da tela.
+///
+/// **Enquanto isso dura, o que a IDE responde e incompleto**: a busca nao acha, a
+/// completacao nao sabe os tipos. Sem sinal nenhum, quem usa atribui isso a IDE
+/// em vez de a espera -- foi o que aconteceu, e o giro existe para evitar isso.
+/// Ele nao bloqueia nada: da para editar e navegar enquanto roda.
+#[test]
+fn while_the_project_is_prepared_it_spins_in_the_middle_of_the_screen() {
+    let size = Size::new(1280.0, 800.0);
+    let mut shell = shell_with_package();
+
+    let parado = paint_circles(&mut shell, size).len();
+    shell.set_project_loading(Some(0.0));
+    let girando = paint_circles(&mut shell, size);
+    assert!(
+        girando.len() >= parado + 8,
+        "o anel inteiro precisa aparecer: {} contra {parado}",
+        girando.len()
+    );
+
+    // Preparado o projeto, ele some.
+    shell.set_project_loading(None);
+    assert_eq!(
+        paint_circles(&mut shell, size).len(),
+        parado,
+        "terminada a preparacao, o giro precisa sumir"
+    );
+}
+
+/// O giro do carregamento fica no centro, e nao num canto.
+///
+/// Ele e o ultimo a ser desenhado -- por cima de tudo, porque tudo o que esta
+/// embaixo esta incompleto enquanto ele roda --, e por isso os oito ultimos
+/// circulos do quadro sao os pontos dele. Tomar todos os circulos da tela
+/// misturaria icones de outros componentes e deslocaria a media.
+#[test]
+fn the_loading_spinner_sits_in_the_centre() {
+    let size = Size::new(1280.0, 800.0);
+    let mut shell = shell_with_package();
+    shell.set_project_loading(Some(0.0));
+    let mut centros: Vec<_> = shell
+        .paint(size)
+        .iter()
+        .filter_map(|command| match command {
+            PaintCommand::FillCircle(circle) => Some(circle.center),
+            _ => None,
+        })
+        .collect();
+    let anel = centros.split_off(centros.len().saturating_sub(8));
+    assert_eq!(anel.len(), 8, "o anel tem oito pontos");
+    let media_x = anel.iter().map(|p| p.x).sum::<f32>() / 8.0;
+    let media_y = anel.iter().map(|p| p.y).sum::<f32>() / 8.0;
+    assert!(
+        (media_x - size.width / 2.0).abs() < 2.0 && (media_y - size.height / 2.0).abs() < 2.0,
+        "o anel precisa estar centrado, e esta em ({media_x}, {media_y})"
+    );
+}
+
 /// Enquanto procura, a janela mostra o giro no lugar do resultado.
 ///
 /// **Uma lista vazia não distingue "procurando" de "não achei nada".** Antes, a
