@@ -211,6 +211,24 @@ depurar funcione com um clique nas execuções seguintes.
 > outro em V8, onde cada nó é objeto com cabeçalho e o coletor trabalha com folga
 > — visível na medição: o pico de 1 902 MB cai para 1 735 MB depois da coleta.
 
+> **O que o analisador guarda: as árvores, e não os tipos.** Depois da carga, pedir
+> verificação semântica de 200 arquivos somou **11 MB** a 1 920 MB. O verificador
+> de tipos é preguiçoso e barato; **a memória já está toda lá antes de qualquer
+> tipo ser calculado**.
+>
+> Ou seja: os 1,9 GB são *parse* e *bind* — a árvore completa e a tabela de
+> símbolos de 11 287 arquivos. Os 23 MB de código-fonte do projeto viram 1,9 GB
+> residentes, uma expansão de cerca de **80 vezes**.
+>
+> Isso fecha a conta com o índice de Java. Ele guarda o que o *bind* produz —
+> nomes, posições, tipos declarados — e **joga a árvore fora**; por isso 339 664
+> declarações cabem em 103 MB. O analisador precisa da árvore inteira porque é
+> dela que o verificador tira os tipos quando alguém pergunta.
+>
+> O analisador **não compila**: ele roda a frente do compilador — parse, bind e
+> verificação sob demanda — e não emite JavaScript. Quem emite é o `tsc`, no
+> build.
+
 > **Estado.** A **medição** existe em código: `MemoryMeter` e `MemoryReading` em
 > `ide-core`, com os dois números na barra de estado, e o aviso quando um
 > analisador externo cai. Ver "O medidor de memória" na `23`. O **teto** abaixo
