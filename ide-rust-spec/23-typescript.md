@@ -1197,6 +1197,32 @@ partir do relógio, e um número inventado numa barra de progresso é pior do qu
 nenhum — ele promete um fim que ninguém sabe calcular. O giro diz o que se sabe:
 está trabalhando, e ainda não terminou.
 
+#### O que dá para economizar, medido
+
+Com 411 MB da IDE e 1 900 MB do analisador, a pergunta "o que fazer para gastar
+menos" tem respostas de tamanhos muito diferentes.
+
+**Feito: o segundo processo Node.** O analisador subia um processo separado só
+para baixar `@types` de bibliotecas sem tipos — 63 MB, medidos, e nenhuma
+diferença no analisador em si. Desligado. Além da memória, buscar tipos na rede
+para um cache global fora do projeto contradiz a regra de que **o projeto manda**
+(ADR-028): dois desenvolvedores com caches diferentes veriam tipos diferentes do
+mesmo código.
+
+**A suspensão por ociosidade existe e não age neste caso.** Ela desliga o provider
+de verdade — `worker.shutdown()`, e o processo morre —, mas só o de quem **não tem
+documento aberto**. Com um `.ts` numa aba, o analisador nunca é suspenso, que é
+justamente a situação de quem está trabalhando. Suspender com documento aberto é
+possível e custa a reativação: neste projeto, 30 s de espera na volta.
+
+**O que o projeto carrega é decisão do projeto.** O `tsconfig.json` da raiz do
+`spartacus-develop` não tem `include`: ele toma tudo sob a raiz menos `dist` e o
+projeto de e2e, e por isso o analisador monta **um** programa de 9 418 arquivos.
+Dele, 1 852 são `.spec.ts` — **20% da memória é código de teste**. Uma configuração
+mais estreita reduziria proporcionalmente, e a ADR-027 diz por que a IDE não faz
+isso sozinha: quem decide quais arquivos são do projeto é o arquivo, e adivinhar
+diferente do `tsc` daria à IDE tipos que o build não tem.
+
 #### O que isto confirma sobre o método
 
 Três dos defeitos desta especificação vieram de testar a camada de baixo e

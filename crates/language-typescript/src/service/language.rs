@@ -142,6 +142,17 @@ impl TypeScriptServiceProvider {
                     // mudança, e nós já perguntamos quando queremos. É ruído no
                     // canal, e custa CPU do outro lado.
                     "--suppressDiagnosticEvents".to_owned(),
+                    // O analisador sobe um **segundo processo Node** só para
+                    // baixar `@types` de bibliotecas sem tipos. Medido no
+                    // `spartacus-develop`: 63 MB, e nenhuma diferença no
+                    // analisador em si.
+                    //
+                    // Quem fixa a versão do TypeScript no projeto — a ADR-028 —
+                    // também declara as dependencias de tipo nele. Buscar tipos
+                    // na rede, para um cache global fora do projeto, contradiz a
+                    // regra de que **o projeto manda**: dois desenvolvedores com
+                    // caches diferentes veriam tipos diferentes do mesmo código.
+                    "--disableAutomaticTypingAcquisition".to_owned(),
                 ],
                 working_directory: Some(context.workspace_root.clone()),
                 timeout: None,
