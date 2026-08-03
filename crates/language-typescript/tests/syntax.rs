@@ -60,9 +60,11 @@ fn the_provider_declares_typescript_and_answers_for_ts_files() {
         LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned())
     );
     assert_eq!(metadata.extensions, vec!["ts".to_owned()]);
-    // Sem tipos não há o que oferecer depois do ponto. Prometer completação que
-    // adivinha seria pior do que não prometer nada.
-    assert!(metadata.trigger_characters.is_empty());
+    // O ponto **passou** a valer, na fase 4 da `25`. Até ali não havia o que
+    // oferecer depois dele, e prometer completação que adivinha seria pior do
+    // que não prometer nada; agora há o que oferecer quando o receptor tem tipo
+    // declarado, e quando não tem, a resposta é dizer que não se sabe.
+    assert_eq!(metadata.trigger_characters, vec!['.']);
 }
 
 #[test]

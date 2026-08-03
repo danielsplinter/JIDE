@@ -11,6 +11,7 @@
 
 pub(crate) mod index;
 mod lines;
+pub(crate) mod members;
 pub(crate) mod parser;
 pub(crate) mod references;
 pub(crate) mod syntax;

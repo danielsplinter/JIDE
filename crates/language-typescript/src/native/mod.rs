@@ -21,8 +21,8 @@ use std::{
 
 use async_trait::async_trait;
 use ide_domain::{
-    DefinitionRequest, Diagnostic, DocumentChange, DocumentId, DocumentSnapshot, LanguageId,
-    Location, ProviderId, SemanticSymbol, SyntaxSnapshot,
+    CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
+    DocumentSnapshot, LanguageId, Location, ProviderId, SemanticSymbol, SyntaxSnapshot,
 };
 use ide_language_api::{
     ReadinessSignal,
@@ -31,6 +31,7 @@ use ide_language_api::{
 };
 
 use crate::analyzer::index::WorkspaceIndex;
+use crate::analyzer::members;
 use crate::analyzer::references;
 use crate::modules::{ModuleResolver, Reexportacao, declarante};
 use crate::analyzer::parser::TypeScriptParser;
@@ -63,10 +64,10 @@ impl LanguageProvider for TypeScriptLanguageProvider {
             display_name: "TypeScript nativo".to_owned(),
             extensions: vec!["ts".to_owned()],
             api_version: LANGUAGE_API_VERSION,
-            // Sem tipos não há o que oferecer depois do ponto, e oferecer o que
-            // se adivinha seria pior do que não oferecer. O gatilho volta com o
-            // analisador externo.
-            trigger_characters: Vec::new(),
+            // O ponto voltou a valer na fase 4 da `25`: há o que oferecer
+            // quando o receptor tem tipo **declarado**, e quando não tem, a
+            // resposta é dizer que não se sabe — e não uma lista adivinhada.
+            trigger_characters: vec!['.'],
         }
     }
 
@@ -78,6 +79,7 @@ impl LanguageProvider for TypeScriptLanguageProvider {
             | LanguageCapabilities::DIAGNOSTICS
             | LanguageCapabilities::WORKSPACE_SYMBOLS
             | LanguageCapabilities::DEFINITION
+            | LanguageCapabilities::COMPLETION
     }
 
     async fn activate(
@@ -172,6 +174,74 @@ impl ActiveTypeScript {
             readiness,
             resolver,
         })
+    }
+
+    /// Os membros de um tipo, seguindo herança e atravessando módulos.
+    ///
+    /// **A herança não é enfeite**: num componente Angular, metade do que
+    /// aparece depois de `this.` vem da classe de que ele herda. Uma lista sem
+    /// isso parece certa e está incompleta, que é pior do que parecer curta.
+    ///
+    /// Devolve `None` quando não se acha onde o tipo é declarado — vindo de
+    /// dependência instalada, por exemplo. Quem chama transforma isso na
+    /// terceira resposta.
+    fn membros_do_tipo(&self, caminho: &Path, texto: &str, tipo: &str) -> Option<Vec<CompletionItem>> {
+        let mut itens: Vec<CompletionItem> = Vec::new();
+        let mut vistos: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut fila = vec![(caminho.to_path_buf(), texto.to_owned(), tipo.to_owned(), 0usize)];
+        let mut achou = false;
+        // Herança em círculo não compila, mas um arquivo em edição pode tê-la; o
+        // teto é a rede que impede a IDE de girar num texto que ninguém compilou.
+        while let Some((arquivo, conteudo, nome, profundidade)) = fila.pop() {
+            if profundidade > 16 || !vistos.insert(format!("{}#{nome}", arquivo.display())) {
+                continue;
+            }
+            let Some(membros) = members::membros_de(&self.parser, &conteudo, &nome) else {
+                // O tipo não está neste arquivo: ele vem de outro módulo, e o
+                // caminho até lá é o mesmo da definição.
+                if let Some(destino) = self.arquivo_que_declara(&arquivo, &conteudo, &nome)
+                    && let Ok(outro) = std::fs::read_to_string(&destino)
+                {
+                    fila.push((destino, outro, nome, profundidade + 1));
+                }
+                continue;
+            };
+            achou = true;
+            for item in membros.itens {
+                if vistos.insert(format!("membro:{}", item.label)) {
+                    itens.push(item);
+                }
+            }
+            for herdado in membros.herda {
+                fila.push((arquivo.clone(), conteudo.clone(), herdado, profundidade + 1));
+            }
+        }
+        achou.then_some(itens)
+    }
+
+    /// Que arquivo declara um nome, visto de outro. É o caminho da fase 3.
+    fn arquivo_que_declara(&self, de: &Path, texto: &str, nome: &str) -> Option<PathBuf> {
+        let referencias = references::do_texto(&self.parser, texto);
+        let (la, especificador) = referencias.origem(nome)?;
+        let modulo = self.resolver.resolve(de, especificador)?;
+        let parser = &self.parser;
+        let exportacoes = |arquivo: &Path| {
+            references::de_arquivo(parser, arquivo)
+                .reexportados
+                .into_iter()
+                .map(|trazido| Reexportacao {
+                    nome: trazido.usado,
+                    origem: trazido.origem,
+                    de: trazido.de,
+                })
+                .collect()
+        };
+        let declara = |arquivo: &Path, nome: &str| {
+            references::de_arquivo(parser, arquivo)
+                .declaracao(nome)
+                .is_some()
+        };
+        declarante(&self.resolver, &modulo, &la, &exportacoes, &declara)
     }
 
     fn analyze(
@@ -393,6 +463,67 @@ impl ActiveLanguage for ActiveTypeScript {
             path: destino,
             range,
         }])
+    }
+
+    /// O que aparece depois do ponto, quando o receptor tem tipo declarado.
+    ///
+    /// # Três respostas, e não duas
+    ///
+    /// | situação | resposta |
+    /// | --- | --- |
+    /// | o tipo é conhecido | os membros dele |
+    /// | o tipo é conhecido e não tem membros | lista vazia, que **afirma** isso |
+    /// | o tipo não é conhecido | `Unavailable`, dizendo que não se sabe |
+    ///
+    /// A terceira é o ponto inteiro. `store.select(s).pipe(map(x => x.` exige
+    /// instanciar genéricos e fazer o tipo voltar da assinatura para dentro da
+    /// lambda — o verificador que a ADR-025 recusou. Responder lista vazia ali
+    /// seria dizer "este tipo não tem membros", que é uma afirmação falsa, e é a
+    /// família de defeito que esta IDE já encontrou várias vezes.
+    ///
+    /// Dizendo `Unavailable`, o host encaminha a pergunta a quem alcança mais —
+    /// o analisador externo, quando houver.
+    async fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Vec<CompletionItem>, LanguageError> {
+        let (caminho, texto) = {
+            let documentos = self
+                .documents
+                .lock()
+                .map_err(|_| LanguageError::Provider("registro de documentos travado".to_owned()))?;
+            let Some(parsed) = documentos.get(&request.document_id) else {
+                return Ok(Vec::new());
+            };
+            (parsed.path.clone(), parsed.text.clone())
+        };
+        let receptor = members::receptor_em(
+            &self.parser,
+            &texto,
+            request.position.line,
+            request.position.column,
+        );
+        let tipo = match receptor {
+            members::Receptor::Tipo(tipo) => tipo,
+            members::Receptor::Desconhecido => {
+                return Err(LanguageError::Unavailable(
+                    "não sei o tipo desta expressão".to_owned(),
+                ));
+            }
+            // Sem ponto, a completação é por nome — e ela não é desta fase.
+            members::Receptor::Nenhum => return Ok(Vec::new()),
+        };
+
+        let Some(itens) = self.membros_do_tipo(&caminho, &texto, &tipo) else {
+            return Err(LanguageError::Unavailable(format!(
+                "não sei onde `{tipo}` é declarado"
+            )));
+        };
+        let prefixo = request.prefix.to_lowercase();
+        Ok(itens
+            .into_iter()
+            .filter(|item| prefixo.is_empty() || item.label.to_lowercase().starts_with(&prefixo))
+            .collect())
     }
 
     async fn syntax(&self, document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {

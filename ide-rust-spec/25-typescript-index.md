@@ -584,17 +584,71 @@ e o uso está sob o cursor.
 Fica registrado como a metade que falta desta fase, e não como fase nova: quem
 tem o índice e o resolvedor tem as duas peças de que ela precisa.
 
-### Fase 4 — O `.` declarado ⬜### Fase 4 — O `.` declarado ⬜
+### Fase 4 — O `.` declarado ✅
 
-- tabela de membros por tipo, incluindo herança;
-- tipo do receptor para as quatro formas declaradas;
-- **e a terceira resposta**: tipo desconhecido é diferente de tipo sem membros.
+Completação depois do ponto, sem tipos inferidos e sem processo externo.
 
-**Critério:** num componente Angular real, `this.` e um parâmetro de construtor
-injetado completam com os membros certos, sem o analisador de pé. E `.pipe(map(x
-=> x.` responde **"não soube"**, e não uma lista vazia.
+#### As duas metades do critério, e a segunda é a que importa
 
-### Fase 5 — Subir o analisador sob demanda ⬜
+Num componente, `this.` e o serviço injetado completam com os membros certos —
+inclusive os **herdados**, que num código Angular são metade do que aparece
+depois de `this.`; uma lista sem eles parece certa e está incompleta.
+
+E `.pipe(map(x => x.` responde **"não sei o tipo desta expressão"**.
+
+São **três** respostas, e não duas:
+
+| situação | resposta |
+| --- | --- |
+| o tipo é conhecido | os membros dele |
+| o tipo é conhecido e não tem membros | lista vazia, que **afirma** isso |
+| o tipo não é conhecido | `Unavailable`, dizendo que não se sabe |
+
+A terceira é o assunto inteiro. Lista vazia é uma **afirmação** — "este tipo não
+tem membros" —, e dizê-la sem saber o tipo é a resposta errada com a mesma cara
+da certa, que é a família de defeito que esta IDE encontrou cinco vezes esta
+semana. Dizendo `Unavailable`, o host encaminha a pergunta a quem alcança mais.
+
+#### Quanto do ponto ele alcança, medido
+
+A `25` estimou 22% a 44%, contando construtores. Perguntando ao provider ponto a
+ponto, numa amostra espalhada pelos `.ts` do projeto:
+
+| projeto | pontos | respondidos | "não sei" |
+| --- | --- | --- | --- |
+| monorepo de biblioteca | 7 828 | **17%** | 6 428 |
+| aplicação | 402 | **14%** | 332 |
+
+**A estimativa estava alta.** Ela contava o receptor injetado como alcançável e
+esquecia que o segundo ponto de uma cadeia já não é — `this.svc` é alcançável,
+`this.svc.buscar` não. O número real é o que decide a fase 5, e ele diz que o
+analisador externo continua sendo pedido cedo.
+
+**Zero respostas disfarçadas.** Dos 6 428 pontos que o índice não alcança no
+projeto real, todos vieram como `Unavailable`; nenhum como lista vazia. A
+terceira resposta vale no código de verdade, e não só nos casos montados.
+
+#### As duas correções que a medição impôs, e as duas eram minhas
+
+**A asserção estava errada.** A primeira versão do teste cobrava zero listas
+vazias, tratando-as como defeito. Mas vazio é a resposta **certa** quando o tipo
+é conhecido e não tem membros — uma interface marcadora, uma classe só de
+construtor. O provider já separa os dois casos por construção; era o teste que
+os confundia.
+
+**A amostra estava enviesada.** Ela pegava os 400 primeiros `.ts` de uma
+varredura em profundidade, e caiu inteira em testes de Cypress, onde não há
+classe nenhuma: **1%** de cobertura, um número que falava da ordem das pastas e
+não do índice. Espalhada, 17%.
+
+#### O que fica de fora, e por quê
+
+`store.select(s).pipe(map(x => x.` exige instanciar genéricos, escolher entre
+sobrecargas e fazer o tipo voltar da assinatura para dentro da lambda. É o
+verificador de tipos, que a ADR-025 recusou — e a recusa continua valendo, com o
+exemplo agora medido em vez de argumentado.
+
+### Fase 5 — Subir o analisador sob demanda ⬜### Fase 5 — Subir o analisador sob demanda ⬜
 
 Abrir um `.ts` deixa de subir o analisador. Ele sobe na primeira pergunta que o
 índice devolveu como desconhecida.

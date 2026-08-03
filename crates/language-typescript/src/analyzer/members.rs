@@ -1,0 +1,428 @@
+//! Os membros de um tipo, e o tipo de um receptor.
+//!
+//! É a fase 4 da `25`: o que aparece depois do ponto quando o receptor tem tipo
+//! **declarado**. Tudo aqui sai do texto — que nome tem cada membro, e que tipo
+//! está escrito ao lado de cada nome. Para onde um nome de tipo aponta é
+//! conhecimento de projeto, e mora em `modules`.
+//!
+//! # O que este módulo não faz, e é metade do assunto
+//!
+//! Ele não infere. `store.select(sel).pipe(map(x => x.` exige instanciar
+//! genéricos, escolher entre sobrecargas e fazer o tipo voltar da assinatura
+//! para dentro da lambda — o verificador de tipos, que a ADR-025 recusou
+//! escrever.
+//!
+//! Por isso a resposta aqui tem **três** formas, e não duas: os membros, "este
+//! tipo não tem membros", e **"não sei o tipo"**. As duas últimas se pareceriam
+//! numa lista vazia, e confundi-las é a família de defeito que esta IDE já
+//! encontrou várias vezes.
+
+use ide_domain::{CompletionItem, CompletionKind};
+
+use super::parser::TypeScriptParser;
+
+/// O que se descobriu sobre o receptor de um ponto.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Receptor {
+    /// O receptor tem este tipo declarado.
+    Tipo(String),
+    /// Há um ponto, e **não se sabe** o tipo de quem está antes dele.
+    Desconhecido,
+    /// Não há ponto nenhum aqui: a pergunta não é de acesso a membro.
+    Nenhum,
+}
+
+/// O tipo do receptor do ponto imediatamente antes da posição.
+///
+/// # As formas que ele reconhece
+///
+/// | forma | de onde sai o tipo |
+/// | --- | --- |
+/// | `this.` | a classe que envolve a posição |
+/// | `svc.`, injetado no construtor | a anotação do parâmetro |
+/// | `svc.`, campo da classe | a anotação do campo |
+/// | `p.`, com `const p: Pedido` | a anotação da declaração |
+/// | `p.`, com `const p = new Pedido()` | o construtor chamado |
+///
+/// Qualquer outra coisa — resultado de chamada, elemento de vetor, receptor
+/// vindo de genérico — devolve `Desconhecido`, e **não** `Nenhum`.
+pub(crate) fn receptor_em(
+    parser: &TypeScriptParser,
+    texto: &str,
+    linha: u32,
+    coluna: u32,
+) -> Receptor {
+    let Some(recorte) = ate_a_posicao(texto, linha, coluna) else {
+        return Receptor::Nenhum;
+    };
+    let antes = recorte.trim_end();
+    let Some(sem_ponto) = antes.strip_suffix('.') else {
+        // Pode haver um prefixo já digitado: `this.tot|`.
+        let Some(inicio) = antes.rfind(['.', ' ', '(', ',', ';', '\n', '\t']) else {
+            return Receptor::Nenhum;
+        };
+        if antes.as_bytes().get(inicio) != Some(&b'.') {
+            return Receptor::Nenhum;
+        }
+        return receptor_do_texto(parser, texto, &antes[..inicio]);
+    };
+    receptor_do_texto(parser, texto, sem_ponto)
+}
+
+/// O texto do arquivo até a posição, em bytes.
+fn ate_a_posicao(texto: &str, linha: u32, coluna: u32) -> Option<&str> {
+    let mut inicio = 0usize;
+    for (numero, conteudo) in texto.split_inclusive('\n').enumerate() {
+        if numero == linha as usize {
+            let sem_quebra = conteudo.strip_suffix('\n').unwrap_or(conteudo);
+            let sem_quebra = sem_quebra.strip_suffix('\r').unwrap_or(sem_quebra);
+            let dentro = sem_quebra
+                .char_indices()
+                .nth(coluna as usize)
+                .map_or(sem_quebra.len(), |(byte, _)| byte);
+            return texto.get(..inicio + dentro);
+        }
+        inicio += conteudo.len();
+    }
+    None
+}
+
+/// O receptor, dado o texto que vem antes do ponto.
+fn receptor_do_texto(parser: &TypeScriptParser, texto: &str, antes: &str) -> Receptor {
+    let Some(nome) = ultimo_identificador(antes) else {
+        // Antes do ponto há alguma coisa que não é um nome simples — `)`, `]`,
+        // uma cadeia. **Não sabemos**, e dizer isso é a resposta.
+        return if antes.trim_end().is_empty() {
+            Receptor::Nenhum
+        } else {
+            Receptor::Desconhecido
+        };
+    };
+    // O receptor só é um nome simples se o que vem antes dele não for um ponto:
+    // em `a.b.`, o `b` é membro de `a`, e o tipo dele exige saber o de `a`.
+    if antes
+        .trim_end()
+        .strip_suffix(&nome)
+        .is_some_and(|resto| resto.trim_end().ends_with('.'))
+    {
+        return Receptor::Desconhecido;
+    }
+    if nome == "this" {
+        return match classe_que_envolve(parser, texto, antes.len()) {
+            Some(classe) => Receptor::Tipo(classe),
+            None => Receptor::Desconhecido,
+        };
+    }
+    match tipo_declarado(parser, texto, &nome) {
+        Some(tipo) => Receptor::Tipo(tipo),
+        None => Receptor::Desconhecido,
+    }
+}
+
+fn ultimo_identificador(texto: &str) -> Option<String> {
+    let fim = texto.trim_end();
+    let inicio = fim
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .last()
+        .map(|(byte, _)| byte)?;
+    let nome = fim.get(inicio..)?;
+    (!nome.is_empty() && !nome.starts_with(|c: char| c.is_numeric())).then(|| nome.to_owned())
+}
+
+/// O nome da classe que envolve um deslocamento.
+fn classe_que_envolve(parser: &TypeScriptParser, texto: &str, byte: usize) -> Option<String> {
+    let arvore = parser.parse(texto, None).ok()?;
+    let mut no = arvore
+        .root_node()
+        .descendant_for_byte_range(byte.saturating_sub(1), byte)?;
+    loop {
+        if matches!(no.kind(), "class_declaration" | "abstract_class_declaration")
+            && let Some(nome) = no.child_by_field_name("name")
+            && let Ok(texto_do_nome) = nome.utf8_text(texto.as_bytes())
+        {
+            return Some(texto_do_nome.to_owned());
+        }
+        no = no.parent()?;
+    }
+}
+
+/// O tipo declarado de um nome, procurado pelo arquivo.
+///
+/// Procura anotação de parâmetro de construtor, de campo e de declaração, e
+/// `new X()`. **Não** infere nada além disso.
+fn tipo_declarado(parser: &TypeScriptParser, texto: &str, nome: &str) -> Option<String> {
+    let arvore = parser.parse(texto, None).ok()?;
+    let bytes = texto.as_bytes();
+    let mut cursor = arvore.walk();
+    let mut pilha = vec![arvore.root_node()];
+    while let Some(no) = pilha.pop() {
+        let candidato = match no.kind() {
+            // `constructor(private svc: LoginService)` e `metodo(p: Pedido)`.
+            "required_parameter" | "optional_parameter" => no,
+            // `svc: LoginService;` dentro da classe.
+            "public_field_definition" | "property_signature" => no,
+            // `const p: Pedido = …` e `const p = new Pedido()`.
+            "variable_declarator" => no,
+            _ => {
+                pilha.extend(no.children(&mut cursor));
+                continue;
+            }
+        };
+        let mesmo = candidato
+            .child_by_field_name("pattern")
+            .or_else(|| candidato.child_by_field_name("name"))
+            .and_then(|no| no.utf8_text(bytes).ok())
+            .is_some_and(|escrito| escrito == nome);
+        if mesmo {
+            if let Some(tipo) = candidato
+                .child_by_field_name("type")
+                .and_then(|no| nome_do_tipo(no, bytes))
+            {
+                return Some(tipo);
+            }
+            if let Some(construido) = candidato
+                .child_by_field_name("value")
+                .and_then(|valor| construtor_chamado(valor, bytes))
+            {
+                return Some(construido);
+            }
+        }
+        pilha.extend(candidato.children(&mut cursor));
+    }
+    None
+}
+
+/// O nome escrito numa anotação de tipo, sem genéricos.
+///
+/// `Observable<Pedido>` devolve `Observable`, e é o bastante para dizer que o
+/// **receptor** é um `Observable`; o que os métodos dele devolvem é genérico, e
+/// isso o índice não sabe.
+fn nome_do_tipo(no: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
+    let mut cursor = no.walk();
+    let mut pilha = vec![no];
+    while let Some(atual) = pilha.pop() {
+        if matches!(atual.kind(), "type_identifier" | "identifier")
+            && let Ok(texto) = atual.utf8_text(bytes)
+        {
+            return Some(texto.to_owned());
+        }
+        pilha.extend(atual.children(&mut cursor));
+    }
+    None
+}
+
+fn construtor_chamado(no: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
+    if no.kind() != "new_expression" {
+        return None;
+    }
+    no.child_by_field_name("constructor")?
+        .utf8_text(bytes)
+        .ok()
+        .map(str::to_owned)
+}
+
+/// Os membros que um tipo declara, e de que tipo ele herda.
+#[derive(Debug, Default)]
+pub(crate) struct Membros {
+    pub(crate) itens: Vec<CompletionItem>,
+    /// Os tipos de que este herda, para a cadeia ser seguida por quem resolve.
+    pub(crate) herda: Vec<String>,
+}
+
+/// Os membros de um tipo declarado num texto.
+///
+/// Membro privado entra: quem completa dentro da própria classe os vê, e a
+/// alternativa — escondê-los sempre — tira do `this.` metade do que ele tem.
+pub(crate) fn membros_de(parser: &TypeScriptParser, texto: &str, tipo: &str) -> Option<Membros> {
+    let arvore = parser.parse(texto, None).ok()?;
+    let bytes = texto.as_bytes();
+    let mut cursor = arvore.walk();
+    let mut pilha = vec![arvore.root_node()];
+    while let Some(no) = pilha.pop() {
+        let corresponde = matches!(
+            no.kind(),
+            "class_declaration"
+                | "abstract_class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+        ) && no
+            .child_by_field_name("name")
+            .and_then(|nome| nome.utf8_text(bytes).ok())
+            .is_some_and(|nome| nome == tipo);
+        if corresponde {
+            return Some(colher_membros(no, bytes));
+        }
+        pilha.extend(no.children(&mut cursor));
+    }
+    None
+}
+
+fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8]) -> Membros {
+    let mut membros = Membros::default();
+    if let Some(corpo) = tipo.child_by_field_name("body") {
+        let mut cursor = corpo.walk();
+        for filho in corpo.named_children(&mut cursor) {
+            let kind = match filho.kind() {
+                "method_definition" | "method_signature" => CompletionKind::Method,
+                "public_field_definition" | "property_signature" | "enum_assignment" => {
+                    CompletionKind::Field
+                }
+                // Um item de enum sem valor é um identificador solto no corpo.
+                "property_identifier" => CompletionKind::Field,
+                _ => continue,
+            };
+            let nome = filho
+                .child_by_field_name("name")
+                .or(Some(filho))
+                .and_then(|no| no.utf8_text(bytes).ok());
+            let Some(nome) = nome else { continue };
+            // O construtor não é membro que se acesse por ponto.
+            if nome == "constructor" {
+                continue;
+            }
+            membros.itens.push(CompletionItem {
+                label: nome.to_owned(),
+                detail: filho
+                    .child_by_field_name("type")
+                    .and_then(|no| no.utf8_text(bytes).ok())
+                    .map(|texto| texto.trim_start_matches(':').trim().to_owned()),
+                kind,
+            });
+        }
+    }
+    // `extends` e `implements`: os membros herdados também aparecem depois do
+    // ponto, e não tê-los faria a lista parecer certa e incompleta.
+    let mut cursor = tipo.walk();
+    for filho in tipo.named_children(&mut cursor) {
+        if !matches!(filho.kind(), "class_heritage" | "extends_type_clause") {
+            continue;
+        }
+        let mut interno = filho.walk();
+        let mut pilha = vec![filho];
+        while let Some(atual) = pilha.pop() {
+            if matches!(atual.kind(), "type_identifier" | "identifier")
+                && let Ok(nome) = atual.utf8_text(bytes)
+            {
+                membros.herda.push(nome.to_owned());
+            }
+            pilha.extend(atual.children(&mut interno));
+        }
+    }
+    membros
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parser() -> TypeScriptParser {
+        match TypeScriptParser::new() {
+            Ok(parser) => parser,
+            Err(_) => panic!("a gramática precisa carregar"),
+        }
+    }
+
+    /// `this.` dentro da classe sabe de que classe se trata.
+    #[test]
+    fn this_knows_its_class() {
+        let texto = "export class Pedido {\n  total = 0;\n  somar() {\n    this.\n  }\n}\n";
+        assert_eq!(
+            receptor_em(&parser(), texto, 3, 9),
+            Receptor::Tipo("Pedido".to_owned())
+        );
+    }
+
+    /// Um parâmetro de construtor injetado tem o tipo escrito ao lado.
+    ///
+    /// É o padrão de injeção de dependência, e o receptor mais comum num código
+    /// Angular.
+    #[test]
+    fn an_injected_constructor_parameter_has_its_type_written_next_to_it() {
+        let texto = "class Pagina {\n  constructor(private svc: LoginService) {}\n  ir() {\n    svc.\n  }\n}\n";
+        assert_eq!(
+            receptor_em(&parser(), texto, 3, 8),
+            Receptor::Tipo("LoginService".to_owned())
+        );
+    }
+
+    /// `const p: Pedido` e `const p = new Pedido()` dizem o tipo.
+    #[test]
+    fn a_declared_local_says_its_type() {
+        let anotado = "const p: Pedido = null!;\np.\n";
+        assert_eq!(
+            receptor_em(&parser(), anotado, 1, 2),
+            Receptor::Tipo("Pedido".to_owned())
+        );
+        let construido = "const p = new Pedido();\np.\n";
+        assert_eq!(
+            receptor_em(&parser(), construido, 1, 2),
+            Receptor::Tipo("Pedido".to_owned())
+        );
+    }
+
+    /// **O resultado de uma chamada é desconhecido, e não vazio.**
+    ///
+    /// É a terceira resposta que a `25` exige. Devolver lista vazia diria "este
+    /// tipo não tem membros", que é uma afirmação — e uma falsa.
+    #[test]
+    fn the_result_of_a_call_is_unknown_and_not_empty() {
+        let texto = "const p = buscar();\nbuscar().\n";
+        assert_eq!(receptor_em(&parser(), texto, 1, 9), Receptor::Desconhecido);
+    }
+
+    /// Uma cadeia depois do primeiro ponto também é desconhecida.
+    ///
+    /// Em `this.svc.`, o tipo de `svc` viria dos membros de `this` — e isso é um
+    /// passo além do que esta fase entrega.
+    #[test]
+    fn a_chain_past_the_first_dot_is_unknown() {
+        let texto = "class P {\n  m() {\n    this.svc.\n  }\n}\n";
+        assert_eq!(receptor_em(&parser(), texto, 2, 13), Receptor::Desconhecido);
+    }
+
+    /// Sem ponto nenhum, a pergunta não é de acesso a membro.
+    #[test]
+    fn without_a_dot_there_is_no_question() {
+        let texto = "const p = 1;\n";
+        assert_eq!(receptor_em(&parser(), texto, 0, 8), Receptor::Nenhum);
+    }
+
+    /// Os membros de uma classe são os campos e os métodos.
+    #[test]
+    fn the_members_of_a_class_are_its_fields_and_methods() {
+        let texto = "export class Pedido {\n  total = 0;\n  cliente: string;\n  somar(v: number) {}\n  constructor() {}\n}\n";
+        let Some(membros) = membros_de(&parser(), texto, "Pedido") else {
+            panic!("a classe precisa ser achada");
+        };
+        let nomes: Vec<_> = membros.itens.iter().map(|item| item.label.as_str()).collect();
+        assert!(nomes.contains(&"total") && nomes.contains(&"cliente") && nomes.contains(&"somar"));
+        assert!(
+            !nomes.contains(&"constructor"),
+            "o construtor não se acessa por ponto"
+        );
+    }
+
+    /// O que a classe herda é dito, para quem resolve seguir a cadeia.
+    #[test]
+    fn what_the_class_inherits_is_reported() {
+        let texto = "class Especial extends Base implements Coisa {\n  proprio = 1;\n}\n";
+        let Some(membros) = membros_de(&parser(), texto, "Especial") else {
+            panic!("a classe precisa ser achada");
+        };
+        assert!(membros.herda.contains(&"Base".to_owned()));
+        assert!(membros.herda.contains(&"Coisa".to_owned()));
+    }
+
+    /// Interface também tem membros.
+    #[test]
+    fn an_interface_has_members_too() {
+        let texto = "export interface Resumo {\n  total: number;\n  descrever(): string;\n}\n";
+        let Some(membros) = membros_de(&parser(), texto, "Resumo") else {
+            panic!("a interface precisa ser achada");
+        };
+        let nomes: Vec<_> = membros.itens.iter().map(|item| item.label.as_str()).collect();
+        assert!(nomes.contains(&"total") && nomes.contains(&"descrever"));
+    }
+}

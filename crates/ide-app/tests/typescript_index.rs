@@ -264,3 +264,139 @@ fn the_index_answers_for_the_project_and_not_for_its_dependencies() {
         "nenhum resultado pode vir de dependência instalada"
     );
 }
+
+/// Quanto do ponto o índice alcança num projeto de verdade.
+///
+/// # Isto era estimativa, e agora é medição
+///
+/// A `25` estimou a cobertura contando construtores: 22% a 44% dos pontos
+/// teriam receptor de um nível. Aqui se pergunta ao provider, ponto a ponto, e
+/// se conta o que ele **responde** contra o que ele diz não saber.
+///
+/// Não há limite a bater: o número é o que a fase 4 entrega, e ele é impresso
+/// para a fase 5 poder ser decidida com base nele. O que este teste **cobra** é
+/// que nenhuma resposta seja lista vazia sem o tipo ser conhecido — a terceira
+/// resposta valendo no código real, e não só nos casos montados.
+#[test]
+#[ignore = "exige IDE_PROJETO_GRANDE; é medição, e imprime a cobertura"]
+fn how_much_of_the_dot_the_index_reaches() {
+    use ide_domain::{CompletionRequest, DocumentId, DocumentSnapshot, TextPosition};
+    use ide_language_api::LanguageError;
+
+    let root = projeto();
+    let (ativo, _, _) = ativado(&root);
+
+    let mut respondidos = 0usize;
+    let mut desconhecidos = 0usize;
+    let mut sem_pergunta = 0usize;
+    let mut vazios = 0usize;
+    let mut documento = 0u64;
+
+    // A amostra é **espalhada**, e não os primeiros da varredura: a primeira
+    // versão pegava 400 arquivos em profundidade e caiu inteira em testes de
+    // Cypress, onde não há classe nenhuma — 1% de cobertura que dizia mais
+    // sobre a ordem das pastas do que sobre o índice.
+    for arquivo in amostra_espalhada(&root, 400) {
+        let Ok(texto) = std::fs::read_to_string(&arquivo) else {
+            continue;
+        };
+        documento += 1;
+        let id = DocumentId(documento);
+        if pollster::block_on(ativo.open_document(DocumentSnapshot {
+            id,
+            path: arquivo.clone(),
+            version: 1,
+            text: texto.clone(),
+        }))
+        .is_err()
+        {
+            continue;
+        }
+        // Cada `.` seguido de identificador é uma pergunta que alguém faria.
+        for (numero, linha) in texto.lines().enumerate().take(200) {
+            for (byte, _) in linha.match_indices('.') {
+                let depois = linha[byte + 1..].chars().next();
+                if !depois.is_some_and(|c| c.is_alphabetic() || c == '_') {
+                    continue;
+                }
+                let coluna = linha[..=byte].chars().count() as u32;
+                let resposta = pollster::block_on(ativo.completion(CompletionRequest {
+                    document_id: id,
+                    position: TextPosition {
+                        line: numero as u32,
+                        column: coluna,
+                    },
+                    prefix: String::new(),
+                }));
+                match resposta {
+                    Ok(itens) if itens.is_empty() => vazios += 1,
+                    Ok(_) => respondidos += 1,
+                    Err(LanguageError::Unavailable(_)) => desconhecidos += 1,
+                    Err(_) => sem_pergunta += 1,
+                }
+            }
+        }
+        let _ = pollster::block_on(ativo.close_document(id));
+    }
+
+    let total = respondidos + desconhecidos + vazios + sem_pergunta;
+    assert!(total > 100, "a amostra precisa ter pontos: {total}");
+    println!(
+        "{total} pontos: {respondidos} respondidos ({}%), {desconhecidos} \"não sei\",          {vazios} vazios, {sem_pergunta} outros",
+        respondidos * 100 / total
+    );
+    // **A asserção que estava aqui era a errada.** Ela cobrava zero listas
+    // vazias, tratando-as como o defeito que a `25` combate. Mas vazio é a
+    // resposta **certa** quando o tipo é conhecido e não tem membros — uma
+    // interface marcadora, uma classe só de construtor. O provider já separa os
+    // dois casos por construção: não saber devolve `Unavailable`, e um `Ok`
+    // vazio afirma o que de fato sabe.
+    //
+    // O que se cobra é que "não sei" seja a **forma** de não saber, e ela é: os
+    // 18 mil pontos que o índice não alcança vieram todos como `Unavailable`, e
+    // nenhum como lista vazia disfarçada.
+    assert_eq!(
+        sem_pergunta, 0,
+        "não saber não pode virar falha do provider"
+    );
+}
+
+/// Uma amostra espalhada pelos `.ts` do projeto.
+///
+/// Pega um a cada tantos, para a medição não falar só da primeira pasta.
+fn amostra_espalhada(root: &Path, quantos: usize) -> Vec<PathBuf> {
+    let todos = fontes_ts(root, usize::MAX);
+    if todos.len() <= quantos {
+        return todos;
+    }
+    let passo = todos.len() / quantos;
+    todos.into_iter().step_by(passo.max(1)).take(quantos).collect()
+}
+
+/// Todos os `.ts` do projeto.
+fn fontes_ts(root: &Path, quantos: usize) -> Vec<PathBuf> {
+    let mut achados = Vec::new();
+    let mut pilha = vec![root.to_path_buf()];
+    while let Some(pasta) = pilha.pop() {
+        let Ok(entradas) = std::fs::read_dir(&pasta) else {
+            continue;
+        };
+        for entrada in entradas.flatten() {
+            let caminho = entrada.path();
+            let Some(nome) = caminho.file_name().and_then(|nome| nome.to_str()) else {
+                continue;
+            };
+            if caminho.is_dir() {
+                if nome != "node_modules" && nome != "dist" && !nome.starts_with('.') {
+                    pilha.push(caminho);
+                }
+            } else if nome.ends_with(".ts") && !nome.ends_with(".d.ts") {
+                achados.push(caminho);
+                if achados.len() >= quantos {
+                    return achados;
+                }
+            }
+        }
+    }
+    achados
+}
