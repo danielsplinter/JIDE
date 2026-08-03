@@ -933,6 +933,19 @@ impl LanguageHost {
             if let Some(worker) = &entry.worker {
                 return Ok(Arc::clone(worker));
             }
+            // **Já está subindo.** Sem esta guarda, cada pergunta feita enquanto
+            // um analisador monta o projeto mandava subir **outro**: trinta
+            // segundos de carga, 1,9 GB cada, e um clique a mais criava mais um.
+            // A máquina engasgava, e o sintoma era a IDE travada.
+            //
+            // Subir é demorado e ninguém está esperando aqui: quem perguntou já
+            // recebeu "não sei" e vai perguntar de novo.
+            if entry.state == ProviderState::Activating {
+                return Err(LanguageHostError::Unresolved(format!(
+                    "{} ainda está subindo",
+                    provider_id.0
+                )));
+            }
             if active_count >= self.config.max_active_providers {
                 return Err(LanguageHostError::ActiveProviderLimit(
                     self.config.max_active_providers,
@@ -1107,6 +1120,8 @@ impl LanguageHost {
                 entry.worker.is_none()
                     && entry.state != ProviderState::Disabled
                     && entry.state != ProviderState::Failed
+                    // Quem já está subindo não precisa ser mandado subir de novo.
+                    && entry.state != ProviderState::Activating
                     && entry.metadata.language_id == linguagem
                     && entry.capabilities.contains(required)
                     && !rotas.contains(id)
@@ -1815,6 +1830,49 @@ mod tests {
         assert!(
             pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
             "e ele continua respondendo o que sabe"
+        );
+    }
+
+    /// Quem já está subindo não é mandado subir de novo.
+    ///
+    /// # O defeito que este teste guarda
+    ///
+    /// Subir um analisador leva trinta segundos num projeto grande. Sem esta
+    /// guarda, **cada pergunta feita nesse intervalo mandava subir outro**: mais
+    /// um processo de 1,9 GB por clique, todos montando o mesmo projeto ao mesmo
+    /// tempo. A máquina engasgava, e o sintoma era a IDE travada.
+    #[test]
+    fn a_provider_already_coming_up_is_not_started_twice() {
+        let host = LanguageHost::new(".");
+        let devagar = Arc::new(TestProvider::new(
+            "ts.devagar",
+            LanguageCapabilities::SYNTAX,
+        ));
+        success(host.register(Arc::clone(&devagar) as Arc<dyn LanguageProvider>));
+
+        // Marcado como subindo, sem worker: é o estado no meio da ativação.
+        {
+            let Ok(mut registry) = host.registry.lock() else {
+                panic!("o registro precisa estar acessível");
+            };
+            let Some(entry) = registry
+                .providers
+                .get_mut(&ProviderId("ts.devagar".to_owned()))
+            else {
+                panic!("o provider precisa estar registrado");
+            };
+            entry.state = ProviderState::Activating;
+        }
+
+        let segunda = host.activate_provider(&ProviderId("ts.devagar".to_owned()));
+        assert!(
+            matches!(segunda, Err(LanguageHostError::Unresolved(_))),
+            "quem já está subindo não sobe de novo: {segunda:?}"
+        );
+        assert_eq!(
+            devagar.activations.load(Ordering::Relaxed),
+            0,
+            "nenhuma ativação nova pode ter começado"
         );
     }
 

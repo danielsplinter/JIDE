@@ -257,3 +257,53 @@ fn a_renamed_import_still_opens_the_declaration() {
     );
     let _ = std::fs::remove_dir_all(&raiz);
 }
+
+/// Um método do próprio arquivo não faz ninguém acordar.
+///
+/// # O defeito que este teste guarda
+///
+/// O índice registrava classe, interface, enum, apelido de tipo, função solta e
+/// `const` de módulo — e **não** método de classe. `Ctrl+clique` em
+/// `this.buscar()` caía sobre um nome declarado duas linhas acima, na mesma
+/// tela, e o índice dizia que não alcançava.
+///
+/// A consequência não era só não navegar: dizer "não sei" **acorda o analisador
+/// externo**, e a IDE subia um processo de 1,9 GB para responder o que estava
+/// visível no arquivo aberto.
+#[test]
+fn a_method_in_the_same_file_wakes_nobody() {
+    let raiz = projeto("metodo-local");
+    let arquivo = raiz.join("src/pagina.ts");
+    let texto = "export class Pagina {\n  buscar() {}\n  abrir() {\n    this.buscar();\n  }\n}\n";
+    escrever(&arquivo, texto);
+    let ativo = ativado(&raiz);
+
+    // A posição sai do próprio texto: contar coluna à mão já errou nesta suíte,
+    // e o erro se disfarça de defeito do código.
+    let (linha, coluna) = posicao_de(texto, "this.b");
+    let achados = definicao(ativo.as_ref(), &arquivo, linha, coluna);
+    assert_eq!(
+        achados.first().map(|local| local.path.clone()),
+        Some(arquivo.clone()),
+        "o método está no próprio arquivo, e a resposta não sai dele"
+    );
+    assert_eq!(
+        achados.first().map(|local| local.range.start.line),
+        Some(1),
+        "e aponta para a declaração dele"
+    );
+    let _ = std::fs::remove_dir_all(&raiz);
+}
+
+/// Linha e coluna logo depois de um trecho, achadas no texto.
+fn posicao_de(texto: &str, trecho: &str) -> (u32, u32) {
+    for (numero, linha) in texto.lines().enumerate() {
+        if let Some(byte) = linha.find(trecho) {
+            return (
+                numero as u32,
+                linha[..byte + trecho.len()].chars().count() as u32,
+            );
+        }
+    }
+    panic!("o trecho {trecho:?} precisa estar no texto");
+}

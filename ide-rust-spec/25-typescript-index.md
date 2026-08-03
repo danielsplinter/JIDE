@@ -773,6 +773,26 @@ rápido.
 A navegação foi para uma thread, com o resultado recolhido no quadro — o mesmo
 `SearchController` das duas buscas, pela terceira vez.
 
+#### E um analisador por clique
+
+Um `Ctrl+clique` sobre um método do **próprio arquivo** subia o Node, e a IDE
+travava. Dois defeitos, e um alimentava o outro.
+
+**O índice não registrava método de classe.** Ele guardava classe, interface,
+enum, apelido de tipo, função solta e `const` de módulo. `this.buscar()` cai
+sobre um nome declarado duas linhas acima, na mesma tela, e a resposta era "não
+alcanço" — que desde a fase 5 quer dizer **acorde o analisador**. A IDE subia um
+processo de 1,9 GB para responder o que estava visível.
+
+**E cada pergunta durante a subida mandava subir outro.** `ensure_active` não
+guardava o estado `Activating`: com o analisador levando trinta segundos para
+montar o projeto, cada clique nesse intervalo criava mais um processo, todos
+montando o mesmo projeto ao mesmo tempo. A máquina engasgava, e o sintoma era a
+IDE travada.
+
+O primeiro defeito é que produzia o segundo: sem ele, aquele clique nunca teria
+acordado ninguém.
+
 #### E quanto isso economiza, honestamente
 
 Com 14% a 17% dos pontos alcançados pelo índice, **o analisador continua sendo

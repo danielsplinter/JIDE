@@ -212,6 +212,11 @@ fn colher_declaracao(no: tree_sitter::Node, bytes: &[u8], para: &mut Referencias
         "enum_declaration" => SymbolKind::Enum,
         "type_alias_declaration" => SymbolKind::Class,
         "function_declaration" | "generator_function_declaration" => SymbolKind::Method,
+        // **Método de classe conta.** `Ctrl+clique` em `this.buscar()` cai sobre
+        // um nome que está declarado logo acima, no mesmo arquivo — e sem
+        // registrá-lo o índice dizia que não alcançava, e a pergunta ia acordar
+        // um analisador de 1,9 GB para responder o que estava na tela.
+        "method_definition" | "method_signature" => SymbolKind::Method,
         // `const x = …` e `let x = …` no nível do módulo: são o que um
         // `export const` expõe, e Angular os usa para configuração e rotas.
         "variable_declarator" if no_nivel_do_modulo(no) => SymbolKind::Field,
@@ -424,6 +429,22 @@ mod tests {
         };
         assert_eq!(range.start.line, 0);
         assert_eq!(range.start.column, "export class ".len() as u32);
+    }
+
+    /// Um método de classe é declaração como qualquer outra.
+    #[test]
+    fn a_class_method_is_a_declaration() {
+        let referencias = analisar("export class Pagina {
+  buscar() {}
+}
+");
+        let nomes: Vec<_> = referencias
+            .declarados
+            .iter()
+            .map(|(nome, _, _)| nome.as_str())
+            .collect();
+        assert!(nomes.contains(&"buscar"), "veio: {nomes:?}");
+        assert!(referencias.declaracao("buscar").is_some());
     }
 
     /// O identificador sob o cursor é o que se procura.
