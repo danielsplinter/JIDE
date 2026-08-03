@@ -313,8 +313,25 @@ código, com o mapa de posições nos dois sentidos. É exatamente o obstáculo 
 sondagem encontrou: um `.html` não é código para o `tsserver`, e alguém precisa
 fazê-lo ser.
 
-*Inferência, e não leitura de código:* das dependências se conclui que a JetBrains
-escreveu a ponte, e não que ela reimplementou a análise de Angular inteira.
+Mas o Volar é só a ponte para o motor de tipos. **A análise é deles.** O
+`plugin.xml` declara **dez linguagens próprias**, cada uma com `parserDefinition`
+e `fileType`, todas em `org.angular2.lang.html.*`:
+
+```
+Angular2Html   Angular17Html   Angular181Html   Angular20Html
+Angular2Svg    Angular17Svg    Angular181Svg    Angular20Svg
+Angular2       Angular20
+```
+
+As quatro primeiras são o template; as quatro seguintes, o mesmo em SVG; as duas
+últimas são **a linguagem de expressão** — o que vai dentro do `{{ }}`. Lexer e
+parser escritos à mão.
+
+E repare na numeração: `2`, `17`, `181`, `20`. **Quatro parsers, porque a sintaxe
+do template mudou quatro vezes** — os blocos `@if`/`@for` no 17, uma revisão no
+18.1, outra no 20 — e os antigos continuam lá, porque projetos antigos continuam
+existindo. É a objeção de "não envelhecer" com número em cima: não se escreve uma
+vez, escreve-se uma por revisão de sintaxe, para sempre.
 
 #### O terceiro caminho, que a sondagem revelou
 
@@ -334,6 +351,10 @@ As três opções diferem no que custam e no que quebram, e nenhuma é barata:
 | cliente LSP para o `ngserver` | tudo, feito por quem faz o Angular | um cliente LSP, e de onde vem o servidor |
 | plugin nosso sobre arquivo virtual | controle, e o mesmo mecanismo serve Vue amanhã | a ponte, e ela envelhece com a sintaxe do template |
 | mapear no nosso código, sem plugin | nada a instalar | o recorte da expressão **e** a resolução, em Rust |
+
+**Nenhuma das duas ferramentas foi pelo caminho do meio.** O VS Code foi pelo
+primeiro; o IntelliJ, pelo terceiro, com uma ponte de tipos no meio. O segundo
+existe como possibilidade, e não há que verificar quem o tenha escolhido.
 
 #### O que continua valendo desta fase
 
