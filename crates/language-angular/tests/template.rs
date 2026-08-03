@@ -61,7 +61,10 @@ fn algum_template(raiz: &Path) -> Option<(PathBuf, String, TextPosition)> {
                 }
                 continue;
             }
-            if !nome.ends_with(".component.html") || !caminho.with_extension("ts").is_file() {
+            // Qualquer `.html` com um `.ts` de mesmo nome. Não só
+            // `.component.html`: um projeto real usa `.page.html`, e a regra de
+            // companhia é sobre o irmão, e não sobre o sufixo.
+            if !nome.ends_with(".html") || !caminho.with_extension("ts").is_file() {
                 continue;
             }
             let Ok(texto) = std::fs::read_to_string(&caminho) else {

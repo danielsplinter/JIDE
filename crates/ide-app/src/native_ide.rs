@@ -165,7 +165,12 @@ impl NativeIde {
         // A segunda linguagem. Ela entra pelo mesmo caminho da primeira, e é
         // isso que a fase 1 da `23` vem provar: registrar uma linguagem nova não
         // exige tocar em nada acima daqui.
-        let typescript = typescript_contribution::contribution(processes.clone());
+        // Construído uma vez e usado nos dois lugares: o descritor precisa
+        // reclamar as extensões que o provider vai responder, senão elas não
+        // chegam ao host.
+        let plugins: Vec<Arc<dyn language_typescript::AnalyzerPluginSource>> =
+            vec![Arc::new(crate::angular_contribution::analyzer_plugin())];
+        let typescript = typescript_contribution::contribution(processes.clone(), &plugins);
         language_host
             .register(typescript.provider.clone())
             .map_err(|error| error.to_string())?;
@@ -175,7 +180,7 @@ impl NativeIde {
         language_host
             .register(typescript_contribution::service_provider(
                 processes.clone(),
-                vec![Arc::new(crate::angular_contribution::analyzer_plugin())],
+                plugins,
             ))
             .map_err(|error| error.to_string())?;
         self.languages.toolchains.register_contribution(&typescript);
@@ -3627,9 +3632,10 @@ mod tests {
         assert!(std::fs::write(&file, "export class Pedido {}").is_ok());
 
         let language_host = LanguageHost::new(&root);
-        let typescript = typescript_contribution::contribution(Arc::new(
-            NativeProcessSupervisor::default(),
-        ));
+        let typescript = typescript_contribution::contribution(
+            Arc::new(NativeProcessSupervisor::default()),
+            &[],
+        );
         assert!(language_host.register(typescript.provider.clone()).is_ok());
 
         let mut ide = NativeIde::default();

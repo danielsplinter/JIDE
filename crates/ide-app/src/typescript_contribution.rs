@@ -38,15 +38,38 @@ pub fn language_id() -> LanguageId {
     LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned())
 }
 
+/// A contribuição de TypeScript.
+///
+/// # Por que as extensões dos plugins entram aqui também
+///
+/// O descritor é o que decide se um arquivo **chega ao host**: a camada de
+/// documentos só oferece ao host o que alguma contribuição reclama. Um `.html`
+/// que o analisador sabe responder, mas que nenhum descritor reclama, não chega
+/// a ser oferecido — e o resultado é um template sem realce e sem navegação,
+/// com todo o resto funcionando.
+///
+/// Foi o defeito que a fase 1 da `24` produziu e que só um projeto real achou:
+/// o provider anunciava `html` nos metadados dele, e o portão de cima olhava
+/// para outro lugar.
 #[must_use]
-pub fn contribution(processes: Arc<dyn ProcessSupervisor>) -> LanguageContribution {
+pub fn contribution(
+    processes: Arc<dyn ProcessSupervisor>,
+    plugins: &[Arc<dyn AnalyzerPluginSource>],
+) -> LanguageContribution {
     let provider: Arc<dyn LanguageProvider> = Arc::new(TypeScriptLanguageProvider::new());
     let toolchain: Arc<dyn ToolchainProvider> = Arc::new(NodeToolchainProvider::new());
     let mut contribution = LanguageContribution::new(
         LanguageDescriptor {
             language_id: language_id(),
             display_name: "TypeScript".to_owned(),
-            extensions: vec!["ts".to_owned()],
+            extensions: std::iter::once("ts".to_owned())
+                .chain(
+                    plugins
+                        .iter()
+                        .flat_map(|plugin| plugin.companions())
+                        .map(|regra| regra.extension),
+                )
+                .collect(),
             // Vazio de propósito, e não por falta: a raiz de um projeto
             // TypeScript é declarada no `tsconfig.json`, e é de lá que o
             // `ProjectModel` a lê (ADR-027). Um nome de convenção aqui seria uma
@@ -209,5 +232,74 @@ pub fn selection() -> ProviderSelection {
     ProviderSelection {
         primary: ProviderId(TYPESCRIPT_PROVIDER_ID.to_owned()),
         fallbacks: vec![ProviderId(TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned())],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_process::NativeProcessSupervisor;
+    use language_typescript::{AnalyzerPlugin, CompanionRule};
+
+    /// Um contribuinte de plugin qualquer, com uma extensão inventada.
+    ///
+    /// Inventada de propósito: o que se afirma é sobre **qualquer** extensão
+    /// contribuída, e usar `html` deixaria o teste passar por acaso no dia em
+    /// que alguém fixasse `html` no descritor à mão.
+    struct Contribuinte;
+
+    impl language_typescript::AnalyzerPluginSource for Contribuinte {
+        fn plugin_for(&self, _workspace_root: &Path) -> Option<AnalyzerPlugin> {
+            None
+        }
+
+        fn companions(&self) -> Vec<CompanionRule> {
+            vec![CompanionRule {
+                extension: "marcacao".to_owned(),
+                anchor_extension: "ts".to_owned(),
+            }]
+        }
+    }
+
+    fn processos() -> Arc<dyn ProcessSupervisor> {
+        Arc::new(NativeProcessSupervisor::default())
+    }
+
+    /// **O descritor precisa reclamar tudo o que o provider responde.**
+    ///
+    /// Esta é a invariante que faltava, e a falta custou um defeito que só um
+    /// projeto real achou: o provider anunciava `html`, o descritor não, e a
+    /// camada de documentos — que consulta o descritor — nunca oferecia o
+    /// template ao host. O template abria sem realce e sem navegação, com tudo
+    /// o mais funcionando.
+    #[test]
+    fn o_descritor_reclama_tudo_o_que_o_provider_responde() {
+        let plugins: Vec<Arc<dyn language_typescript::AnalyzerPluginSource>> =
+            vec![Arc::new(Contribuinte)];
+        let declaradas = contribution(processos(), &plugins)
+            .descriptor
+            .extensions
+            .clone();
+        let respondidas = service_provider(processos(), plugins)
+            .metadata()
+            .extensions
+            .clone();
+
+        for extensao in &respondidas {
+            assert!(
+                declaradas.contains(extensao),
+                "o descritor não reclama `{extensao}`, que o provider responde: {declaradas:?}"
+            );
+        }
+    }
+
+    /// Sem contribuinte, nada muda: um projeto sem framework não paga por este
+    /// mecanismo existir.
+    #[test]
+    fn sem_plugin_o_descritor_e_o_de_sempre() {
+        assert_eq!(
+            contribution(processos(), &[]).descriptor.extensions,
+            vec!["ts".to_owned()]
+        );
     }
 }
