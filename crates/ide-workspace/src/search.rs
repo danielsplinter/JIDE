@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use ide_application::{SearchScope, WorkspacePort};
+use ide_domain::CancellationToken;
 
 use crate::FileNode;
 
@@ -20,12 +21,13 @@ pub(crate) fn search_content(
     scope: &SearchScope,
     query: &str,
     limit: usize,
+    cancel: &CancellationToken,
 ) -> Vec<SearchMatch> {
     if query.is_empty() || limit == 0 {
         return Vec::new();
     }
     let mut matches = Vec::new();
-    search_node(filesystem, root, scope, query, limit, &mut matches);
+    search_node(filesystem, root, scope, query, limit, cancel, &mut matches);
     matches
 }
 
@@ -35,9 +37,13 @@ fn search_node(
     scope: &SearchScope,
     query: &str,
     limit: usize,
+    cancel: &CancellationToken,
     output: &mut Vec<SearchMatch>,
 ) {
-    if output.len() >= limit {
+    // Desistir é o que separa "digitou outra coisa" de "esperou a anterior
+    // terminar". Num projeto de nove mil arquivos com o cache frio, a busca
+    // inteira leva mais de um minuto, e cada tecla enfileiraria outra.
+    if output.len() >= limit || cancel.is_cancelled() {
         return;
     }
     if node.is_directory {
@@ -46,8 +52,8 @@ fn search_node(
         // inteiro e não pelo que o usuário abriu no Explorer.
         let filhos = crate::tree::children_of(filesystem, &node.path).unwrap_or_default();
         for child in &filhos {
-            search_node(filesystem, child, scope, query, limit, output);
-            if output.len() >= limit {
+            search_node(filesystem, child, scope, query, limit, cancel, output);
+            if output.len() >= limit || cancel.is_cancelled() {
                 break;
             }
         }

@@ -586,12 +586,24 @@ impl NativeIde {
             }
         }
         encontrados.truncate(TYPE_SEARCH_LIMIT);
+        // Vazio pode ser "não existe" ou "ninguém sabia responder", e os dois se
+        // parecem na tela. Num projeto Angular sem `node_modules`, o analisador
+        // externo não sobe, o provider nativo assume — e ele **não tem índice**,
+        // então responde `Ok` com nada. Sem esta verificação, a busca por tipo
+        // dizia "nenhuma ocorrência" num projeto cheio de tipos, e a causa não
+        // aparecia em lugar nenhum. Foi o que aconteceu.
+        let indisponivel = encontrados.is_empty().then(|| self.analisador_ausente()).flatten();
         if let Some(shell) = self.ui.shell.as_mut() {
-            if encontrados.is_empty()
-                && let Some(error) = ultimo_erro
-            {
-                shell.set_status_message(error.to_string());
-                return;
+            if encontrados.is_empty() {
+                if let Some(motivo) = indisponivel {
+                    shell.set_status_message(motivo);
+                    return;
+                }
+                if let Some(error) = ultimo_erro {
+                    shell.set_status_message(error.to_string());
+                    return;
+                }
+                shell.set_status_message("Nenhum tipo encontrado".to_owned());
             }
             shell.set_type_search_results(
                 encontrados
@@ -608,10 +620,41 @@ impl NativeIde {
         }
     }
 
+    /// A queixa de um analisador que não subiu, se houver.
+    ///
+    /// É a mesma informação que o aviso de queda dá, dita **na hora em que a
+    /// pergunta falha** em vez de cinco segundos depois na barra. A degradação da
+    /// ADR-025 é para a IDE continuar servindo, e não para ela ficar
+    /// silenciosamente pior.
+    fn analisador_ausente(&self) -> Option<String> {
+        let host = self.languages.host.as_ref()?;
+        let providers = host.providers().ok()?;
+        providers.into_iter().find_map(|snapshot| {
+            (snapshot.state == ide_language_api::ProviderState::Failed).then(|| {
+                let nome = snapshot.metadata.display_name;
+                let motivo = snapshot
+                    .last_error
+                    .unwrap_or_else(|| "sem detalhe".to_owned());
+                format!("{nome} indisponível, e a análise nativa não tem índice: {motivo}")
+            })
+        })
+    }
+
     /// Responde à busca textual usando a árvore já carregada no Explorer.
     ///
     /// O serviço de workspace recebe raízes e extensões explícitas. Nenhuma
     /// convenção de linguagem fica embutida na busca.
+    /// Dispara a busca textual numa thread própria.
+    ///
+    /// **O que estava errado não era a busca, era o lugar dela.** Ela rodava
+    /// inline, e num projeto de 8 958 arquivos com o cache do sistema frio isso é
+    /// mais de um minuto sem a janela responder — que foi o travamento relatado
+    /// ao abrir um projeto Angular grande. O limite de resultados não salvava:
+    /// ele para quando a lista enche, e uma consulta que não acha nada percorre
+    /// tudo.
+    ///
+    /// O escopo continua explícito, e nenhuma convenção de linguagem fica
+    /// embutida aqui.
     fn answer_content_search(&mut self, query: &str) {
         let mut source_roots = self
             .project
@@ -632,14 +675,34 @@ impl NativeIde {
             .flat_map(|contribution| contribution.descriptor.extensions.iter().cloned())
             .collect();
         let scope = SearchScope::new(source_roots, extensions);
-        let found = self.ui.shell.as_ref().map_or_else(Vec::new, |shell| {
-            self.workspace.service.search_content(
-                shell.workspace_tree(),
-                &scope,
-                query,
-                TYPE_SEARCH_LIMIT,
-            )
+        let Some(tree) = self.ui.shell.as_ref().map(|shell| shell.workspace_tree().clone()) else {
+            return;
+        };
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = self.workspace.search.start(receiver);
+        let mensagem = format!("Procurando “{query}”…");
+        let query = query.to_owned();
+        // O serviço é criado na thread: ele não guarda estado do projeto, e
+        // mandá-lo para lá emprestado prenderia a IDE ao tempo da varredura.
+        std::thread::spawn(move || {
+            let achados = ide_workspace::WorkspaceService::native()
+                .search_content(&tree, &scope, &query, TYPE_SEARCH_LIMIT, &cancel);
+            // Erro de envio é a IDE ter fechado, ou outra busca ter tomado o
+            // lugar desta. Nos dois casos não há o que fazer com o resultado.
+            let _ = sender.send(achados);
         });
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(mensagem);
+        }
+    }
+
+    /// Recolhe o resultado da busca, se já chegou. Não espera por nada.
+    fn collect_content_search(&mut self) -> bool {
+        let Some(found) = self.workspace.search.collect() else {
+            return false;
+        };
+        let quantos = found.len();
         if let Some(shell) = self.ui.shell.as_mut() {
             shell.set_content_search_results(
                 found
@@ -662,7 +725,16 @@ impl NativeIde {
                     })
                     .collect(),
             );
+            // Nenhuma ocorrência precisa ser dito. Uma lista vazia e a mensagem
+            // \u201cProcurando\u2026\u201d parada na barra ficariam iguais a uma busca que
+            // nunca terminou.
+            shell.set_status_message(if quantos == 0 {
+                "Nenhuma ocorrência".to_owned()
+            } else {
+                format!("{quantos} ocorrências")
+            });
         }
+        true
     }
 
     /// Pede à linguagem o plano de acessores que a tela solicitou.
@@ -2258,7 +2330,7 @@ impl ApplicationHandler for NativeIde {
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             std::time::Instant::now() + std::time::Duration::from_millis(30),
         ));
-        let mut changed = false;
+        let mut changed = self.collect_content_search();
         self.suspend_idle_languages();
         self.measure_memory();
         // O realce vem da thread do provider e chega quando fica pronto: é aqui

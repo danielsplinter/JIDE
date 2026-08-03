@@ -147,14 +147,22 @@ impl WorkspaceService {
     }
 
     #[must_use]
+    /// Busca textual pelo projeto, interrompível.
+    ///
+    /// **Não chame isto na thread da interface.** Medido contra um projeto real
+    /// de 8 958 arquivos: 1,4 s com o cache do sistema quente e **106 s frio** —
+    /// que é o estado na primeira busca depois de abrir o projeto. O limite de
+    /// resultados não protege: ele para quando a lista enche, e uma consulta sem
+    /// ocorrência nenhuma vai até o último arquivo. Ver `tests/large_project.rs`.
     pub fn search_content(
         &self,
         root: &FileNode,
         scope: &SearchScope,
         query: &str,
         limit: usize,
+        cancel: &ide_domain::CancellationToken,
     ) -> Vec<SearchMatch> {
-        search::search_content(self.filesystem.as_ref(), root, scope, query, limit)
+        search::search_content(self.filesystem.as_ref(), root, scope, query, limit, cancel)
     }
 }
 
@@ -215,13 +223,14 @@ mod tests {
             vec![root.join("modulo/src/main/java")],
             vec!["java".to_owned()],
         );
-        let found = service.search_content(&tree, &scope, "CONTEUDO", 20);
+        let cancel = ide_domain::CancellationToken::new();
+        let found = service.search_content(&tree, &scope, "CONTEUDO", 20, &cancel);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].line, 2);
         let empty_scope = SearchScope::default();
         assert!(
             service
-                .search_content(&tree, &empty_scope, "CONTEUDO", 20)
+                .search_content(&tree, &empty_scope, "CONTEUDO", 20, &cancel)
                 .is_empty()
         );
         let _ = fs::remove_dir_all(root);

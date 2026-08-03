@@ -1005,6 +1005,75 @@ O **teto** — a outra metade do `MemoryBudget` — continua sem código. Impor 
 antes de haver medição registrada num projeto real seria escolher o número no
 palpite.
 
+### O primeiro projeto grande de verdade, e os dois defeitos que ele achou ✅
+
+Um projeto Angular de **8 958 arquivos** (`spartacus-develop`) foi aberto na IDE.
+Nenhum teste tinha achado o que ele achou em dois atalhos.
+
+#### `Ctrl+L` não achava nada, e não dizia por quê
+
+O projeto **não tem `node_modules`** — nunca teve `npm install` rodado. Sem ele
+não há `tsserver`, o analisador externo não sobe, e o provider nativo assume.
+Até aqui é a ADR-025 funcionando exatamente como projetada.
+
+**O defeito é o silêncio.** O provider nativo não tem índice: sem ele, só conhece
+o arquivo aberto. Perguntado por tipos do projeto, ele responde `Ok` com nada —
+uma resposta legítima, indistinguível na tela de "não existe nenhum tipo com esse
+nome". A busca dizia "nenhuma ocorrência" num projeto com milhares de tipos.
+
+O aviso de queda que a `21` pediu existia e não cobria este caso: ele fala quando
+um provider **cai**, cinco segundos depois, na barra. Aqui a informação precisa
+chegar **na hora em que a pergunta falha**, e é isso que passou a acontecer — a
+busca vazia diz qual analisador está indisponível e por quê.
+
+#### `Shift+Ctrl+L` travava a janela
+
+A busca textual rodava **na thread da interface**. Medida contra este projeto:
+
+| | tempo |
+| --- | --- |
+| cache do sistema quente | 1,4 s |
+| **cache frio** | **106 s** |
+
+Frio é o estado na primeira busca depois de abrir o projeto — que é exatamente
+quando ela é pedida. Não era lentidão, era a janela parada por um minuto e meio.
+
+**O limite de resultados não protegia.** Ele para a varredura quando a lista
+enche; uma consulta que não acha nada percorre o projeto até o último arquivo.
+
+##### A medição desmentiu a primeira hipótese, duas vezes
+
+Antes de olhar o relógio, o suspeito óbvio era o `to_lowercase` por linha. Medido
+em separado: ler os 8 958 arquivos custa **682 ms**, e vasculhar todas as linhas
+custa **82 ms**. Somados, um segundo e meio — setenta vezes menos do que o
+observado. A otimização óbvia teria sido trabalho jogado fora.
+
+O que faltava era o **cache do sistema**: a segunda execução do mesmo teste deu
+1,4 s. O número de 106 s não estava no código, estava no disco, e nenhuma leitura
+de código o teria encontrado.
+
+#### A correção, e por que ela não é "otimizar a busca"
+
+A busca saiu para uma thread própria e passou a ser **interrompível**; o quadro
+recolhe o resultado quando ele chega, como já faz com o realce. Uma busca nova
+cancela a anterior — sem isso, cada tecla numa caixa de busca deixaria mais uma
+varredura de um minuto rodando no fundo, todas disputando o mesmo disco.
+
+O guarda de arquitetura reprovou o primeiro desenho: um campo novo na raiz de
+composição. Ele estava certo — a busca é trabalho de workspace, e o lugar dela é
+dentro do controlador que já existe. O número de campos ficou onde estava.
+
+#### O que isto confirma sobre o método
+
+Três dos defeitos desta especificação vieram de testar a camada de baixo e
+concluir sobre a de cima. Estes dois vieram de outra coisa: **não havia camada de
+baixo com nove mil arquivos**. Todo teste rodava contra projetos de três arquivos
+criados na hora, onde 106 s viram microssegundos e um `node_modules` ausente é
+impossível porque o teste o instala.
+
+Levantar o que se tem não substitui sondar o que se vai integrar — e sondar num
+projeto de brinquedo não substitui abrir o projeto de verdade.
+
 ### Fase 4 — Depurar ⬜ Fora de escopo
 
 **A IDE não vai escrever um depurador de TypeScript. Quem depura é o navegador.**

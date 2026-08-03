@@ -57,6 +57,8 @@ pub(super) struct NativeWindowState {
 #[derive(Default)]
 pub(super) struct WorkspaceController {
     pub(super) service: WorkspaceService,
+    /// A busca textual em curso, que é trabalho de workspace como o resto daqui.
+    pub(super) search: SearchController,
 }
 
 impl WorkspaceController {
@@ -502,6 +504,58 @@ pub(super) struct DebugController {
     pub(super) thread: Option<ide_debug_api::ThreadId>,
 }
 
+/// A busca textual em curso, que roda fora da thread da interface.
+///
+/// **Ela não cabe num quadro e não tem como caber.** Medido contra um projeto
+/// real de 8 958 arquivos: 1,4 s com o cache do sistema quente e 106 s frio — e
+/// frio é o estado na primeira busca depois de abrir o projeto, que é justamente
+/// quando ela é pedida. Rodando inline, a janela parava de responder: foi o que
+/// aconteceu.
+///
+/// Uma busca nova cancela a anterior. Sem isso, cada tecla numa caixa de busca
+/// deixaria mais uma varredura de um minuto rodando no fundo, todas lendo o mesmo
+/// disco e disputando entre si.
+#[derive(Default)]
+pub(super) struct SearchController {
+    pub(super) pending: Option<Receiver<Vec<ide_workspace::SearchMatch>>>,
+    pub(super) cancel: Option<ide_domain::CancellationToken>,
+}
+
+impl SearchController {
+    /// Cancela o que estiver em curso e guarda o canal do novo pedido.
+    pub(super) fn start(
+        &mut self,
+        receiver: Receiver<Vec<ide_workspace::SearchMatch>>,
+    ) -> ide_domain::CancellationToken {
+        if let Some(anterior) = self.cancel.take() {
+            anterior.cancel();
+        }
+        let token = ide_domain::CancellationToken::new();
+        self.cancel = Some(token.clone());
+        self.pending = Some(receiver);
+        token
+    }
+
+    /// O resultado, se já chegou. Não espera por nada.
+    pub(super) fn collect(&mut self) -> Option<Vec<ide_workspace::SearchMatch>> {
+        let receiver = self.pending.as_ref()?;
+        match receiver.try_recv() {
+            Ok(achados) => {
+                self.pending = None;
+                self.cancel = None;
+                Some(achados)
+            }
+            // Vazio significa que a varredura ainda está rodando.
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending = None;
+                self.cancel = None;
+                None
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct RuntimeState {
     pub(super) startup_error: Option<String>,
@@ -536,6 +590,56 @@ mod tests {
             version,
             text: String::new(),
         }
+    }
+
+    /// Uma busca nova cancela a anterior.
+    ///
+    /// Sem isto, cada tecla numa caixa de busca deixaria mais uma varredura de um
+    /// minuto rodando no fundo, todas lendo o mesmo disco.
+    #[test]
+    fn a_new_search_cancels_the_previous_one() {
+        let mut controller = SearchController::default();
+        let (_primeiro_envio, primeiro) = std::sync::mpsc::channel();
+        let anterior = controller.start(primeiro);
+        assert!(!anterior.is_cancelled());
+
+        let (_segundo_envio, segundo) = std::sync::mpsc::channel();
+        let atual = controller.start(segundo);
+        assert!(
+            anterior.is_cancelled(),
+            "a busca anterior precisa ser desistida quando outra comeca"
+        );
+        assert!(!atual.is_cancelled());
+    }
+
+    /// Enquanto a varredura roda, colher nao espera por ela.
+    ///
+    /// E o ponto inteiro da correcao: o quadro segue desenhando.
+    #[test]
+    fn collecting_does_not_wait_for_the_search() {
+        let mut controller = SearchController::default();
+        let (envio, receptor) = std::sync::mpsc::channel();
+        let _token = controller.start(receptor);
+        assert!(controller.collect().is_none());
+
+        assert!(envio.send(Vec::new()).is_ok());
+        assert!(
+            controller.collect().is_some(),
+            "o resultado que chegou precisa ser entregue"
+        );
+        // E so uma vez: colher de novo nao pode repetir o resultado anterior.
+        assert!(controller.collect().is_none());
+    }
+
+    /// A thread que morreu sem responder nao deixa a busca pendurada.
+    #[test]
+    fn a_search_thread_that_dies_does_not_hang_the_controller() {
+        let mut controller = SearchController::default();
+        let (envio, receptor) = std::sync::mpsc::channel::<Vec<ide_workspace::SearchMatch>>();
+        let _token = controller.start(receptor);
+        drop(envio);
+        assert!(controller.collect().is_none());
+        assert!(controller.pending.is_none(), "o canal morto precisa ser largado");
     }
 
     #[test]
