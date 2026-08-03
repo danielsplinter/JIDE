@@ -228,94 +228,144 @@ falasse de nós de gramática teria de escolher **qual** gramática.
 
 ## Fases
 
-### Fase 1 — O template responde ⚠️ bloqueada pela sondagem
+### Fase 1 — O template responde ✅ desbloqueada
 
-**A premissa desta fase não se confirmou, e é preciso dizer isso antes do plano.**
+**A premissa desta fase estava certa. A sondagem que a declarou impossível é que
+estava errada, e o registro do erro fica aqui porque ele quase custou o desenho.**
 
-Ela dizia: carregar o `@angular/language-service` como plugin no `tsserver` da
-fase 3 da `23`, e rotear os `.html` para lá. A sondagem contra o projeto de
-referência mostrou que **isso não basta**.
+A fase dizia: carregar o `@angular/language-service` como plugin no `tsserver` da
+fase 3 da `23`, e rotear os `.html` para lá. É isso mesmo, e funciona.
 
-#### O que se mediu
+#### O erro, e como ele se sustentou
 
-O plugin existe e **carrega**. Subindo o `tsserver` do projeto com
-`--globalPlugins @angular/language-service --pluginProbeLocations <raiz>`, o
-comando `configurePlugin` para esse nome responde **sucesso** — ele está lá,
-registrado, e atende pelo nome.
+A primeira sondagem abriu o template de cinco maneiras e recebeu
+`No content available` em todas. A conclusão registrada foi: *"um `.html` não é
+código para o `tsserver`; a pergunta não chega ao plugin."*
 
-E ele **cobra caro**: o projeto de referência, que carrega em 30 s sem o plugin,
-levou de 46 s a 70 s com ele. Aproximadamente o dobro.
+A mensagem não quer dizer isso. Ela vem do `typescript.js`, e é o que o
+`tsserver` responde **quando o handler executou e devolveu `undefined`**:
 
-Mas nenhuma pergunta sobre um `.html` foi respondida. `completionInfo` e
-`semanticDiagnosticsSync` sobre um template devolvem **`No content available`** e
-zero itens, em quatro variações:
+```js
+} else if (responseRequired) {
+  this.doOutput(undefined, request.command, request.seq,
+                /*success*/ false, performanceData, "No content available.");
+}
+```
 
-| variação | resultado |
+Não é "o arquivo não tem conteúdo". É "ninguém teve o que responder". A pergunta
+chegava; a resposta é que vinha vazia — e isso é outro defeito, com outra causa.
+
+**A lição não é sobre TypeScript.** Foi conclusão tirada de uma mensagem de erro
+sem ler de onde ela vem, e ela bloqueou uma fase inteira. A `21` já tem a regra
+para o caso irmão — não confiar em resposta velha com cara de nova —; esta é a
+versão dela para diagnóstico: **não deduzir a causa do texto do erro.**
+
+#### A causa real
+
+Perguntando `projectInfo` sobre o template, ele aparece:
+
+```
+o .html pertence a: "/dev/null/inferredProject1*"
+```
+
+O `.html` cai num **projeto inferido**. O plugin está carregado e é consultado,
+mas sobre um template órfão — sem o componente por perto, sem o `tsconfig`, sem
+programa nenhum. Ele não tem o que responder, e devolve `undefined`.
+
+O `ngserver` sofre do mesmo, e trata: no `didOpen` dele há um remendo que abre o
+`.ts` irmão, fecha, e reabre o `.html`; e `getDefaultProjectForScriptInfo` traz o
+comentário que nomeia o problema — *"to ensure HTML files always belong to a
+configured project instead of the default behavior of being in an inferred
+project"*.
+
+#### A correção, e ela é um campo
+
+Sobre o protocolo, quem escolhe o projeto é o `tsserver` — mas os comandos de
+arquivo aceitam **`projectFileName`**. Nomeando na pergunta o `tsconfig` do
+componente irmão, o template responde:
+
+```
+completionInfo -> success=true  itens=20:
+  arrivalSlots, basePrice, cancellableQuantity, cancelledItemsPrice,
+  comments, configurationInfos, cpqDiscounts, deliveryMode, ...
+```
+
+São os membros reais do tipo da entrada do carrinho, resolvidos de dentro do
+`{{ cartEntry. }}` — os mesmos 20 que o `ngserver` devolve.
+
+**Só esse campo é necessário**, e isso foi isolado ligando e desligando cada peça:
+
+| receita | itens |
 | --- | --- |
-| template aberto antes de o projeto montar | 0 itens |
-| aberto depois de `projectLoadingFinish` | `No content available` |
-| aberto com `fileContent` junto | `No content available` |
-| aberto com `scriptKindName: "TS"` | `No content available` |
-| com `configurePlugin` antes de tudo | `No content available` |
+| só `projectFileName` | **20** ✅ |
+| `extraFileExtensions` + `projectFileName` | 20 ✅ |
+| `extraFileExtensions` + abrir/fechar o `.ts` irmão | 0 ❌ |
+| nada — a sondagem original | 0 ❌ |
 
-A explicação que os dados sustentam: um `.html` não é código para o `tsserver`.
-Ele não cria informação de script para o arquivo, então a pergunta não chega ao
-plugin — que está carregado, mas nunca é consultado sobre aquele caminho.
+Nem o `configure` com `extraFileExtensions`, nem a dança de abrir e fechar o
+componente. Ambos estão no `ngserver` e nenhum dos dois é o que faz funcionar
+aqui; registrá-los como necessários seria gravar superstição.
 
-#### O que isso quer dizer para o desenho
+#### O que a fase entrega, medido
 
-O `@angular/language-service` é a **máquina**, e não a porta. Quem abre a porta,
-nas ferramentas que funcionam, é o `@angular/language-server` — um servidor LSP
-que embrulha o `tsserver` mais o plugin e trata os `.html` ele mesmo, mapeando
-posição de template para dentro do componente. Ele **não está no projeto**: vem
-com a extensão do editor, e não em `node_modules`. Nenhum dos dois projetos de
-referência o tem.
+No `lei-do-esperto`, projeto pequeno, com o plugin vindo **de um diretório nosso**:
 
-Sobram dois caminhos, e nenhum é o que esta fase supunha:
+| pergunta no template | resposta |
+| --- | --- |
+| `completionInfo` | 13 membros: `avatarUrl`, `moedas`, `nivel`, `nome`, `vidas`, … |
+| `quickinfo` | `(variable) jogadorAtual: Jogador \| null` |
+| `definitionAndBoundSpan` | `success=true`, 1 destino |
 
-- **Falar LSP com o `@angular/language-server`.** Ele resolve o problema inteiro
-  e é a via que as outras ferramentas usam. Custa: um cliente LSP na IDE, que não
-  existe, e decidir de onde esse servidor vem — se não está no projeto, alguém
-  tem de instalá-lo, e aí a versão deixa de ser "a do projeto", que é a regra
-  desta especificação e da ADR-028.
-- **Fazer aqui o que ele faz**: achar o componente do template, montar a posição
-  equivalente dentro da classe e perguntar ao `tsserver` sobre o `.ts`. Isso é
-  conhecimento de Angular no nosso código — a expressão do template não é
-  TypeScript, e mapear uma na outra é reimplementar parte do compilador. É o que
-  a seção "Uma crate, e nada de Angular fora dela" existe para evitar, e o que a
-  regra de não envelhecer proíbe.
+Completude, tipo ao pousar e navegação, dentro do `.html`.
 
-**Nenhum dos dois é uma fase; cada um é uma decisão.** Escolher exige responder de
-onde vem o servidor, e a resposta muda o que a IDE promete sobre versões.
+#### E serve a qualquer projeto Angular
 
-#### Como as duas ferramentas de referência resolvem, verificado no disco
+O `@angular/language-service` está em **um** dos cinco projetos locais. Nos outros
+quatro ele veio de um diretório nosso, apontado por `--pluginProbeLocations`, e
+funcionou igual: o `lei-do-esperto` é Angular 21.2.6 e foi servido por um
+language-service 21.2.17. **O `tsserver` continua sendo o do projeto** — é ele
+quem decide se um tipo bate, e a regra da `23` fica de pé.
 
-**VS Code** — extensão `angular.ng-template` 22.0.1, instalada na máquina:
+São **14 MB** a embarcar, e nenhum processo a mais.
 
-- ela **embute** o pacote `@angular/language-server` 22.0.1, com um binário
-  `ngserver`. Esse pacote **não está em nenhum dos projetos de referência**;
-- o cliente o inicia passando `--ngProbeLocations` e `--tsProbeLocations`, que
-  apontam para o projeto. **O servidor vem da extensão; as versões do motor vêm
-  do projeto.**
+#### O custo em memória
 
-Ou seja: a regra "a versão é a do projeto" é mantida, mas **a ponte não**. Ela é
-da ferramenta, e acompanha a ferramenta.
+Medido no `spartacus-develop`, mesmo arquivo e mesma pergunta:
 
-**IntelliJ** — `angular-plugin` do IDEA 2026.1.4:
+| arranjo | pico | processos Node |
+| --- | --- | --- |
+| `tsserver` sozinho, hoje | 1906 MB | 1 |
+| `tsserver` + plugin, respondendo o template | ~2290 MB | **1** |
+| `tsserver` + `ngserver` — o arranjo do VS Code | ~4,1 GB | 2 |
 
-- ele traz um plugin de `tsserver` **próprio**, `ws-typescript-angular-plugin`;
-- as dependências dele são `typescript` 5.4.5 e **`@volar/typescript` 2.4.27**;
-- ele **não** traz o `@angular/language-service`.
+**+385 MB no processo que já existe**, contra +2,1 GB num segundo. É a diferença
+entre caber e não caber.
 
-O Volar é a máquina genérica de **arquivo virtual**: ela faz uma região embutida
-— um template dentro de um componente — aparecer para o TypeScript como se fosse
-código, com o mapa de posições nos dois sentidos. É exatamente o obstáculo que a
-sondagem encontrou: um `.html` não é código para o `tsserver`, e alguém precisa
-fazê-lo ser.
+O custo de carga medido antes — o dobro do tempo com o plugin — continua valendo,
+e continua sendo razão para o plugin não subir por padrão em projeto sem Angular.
 
-Mas o Volar é só a ponte para o motor de tipos. **A análise é deles.** O
-`plugin.xml` declara **dez linguagens próprias**, cada uma com `parserDefinition`
-e `fileType`, todas em `org.angular2.lang.html.*`:
+#### O que as duas ferramentas de referência fazem, verificado no disco
+
+Vale registrar, porque foi a comparação com elas que levou à correção.
+
+**VS Code** — a extensão `angular.ng-template` 22.0.1 embute o
+`@angular/language-server`: `server/index.js`, 13 MB, mais `node_modules` com
+`@angular/language-service` 22.0.1 e `typescript` **6.0.3** — 51 MB ao todo. As
+duas sondas do cliente apontam para a própria extensão, e não para o projeto:
+
+```js
+args.push("--ngProbeLocations", this.context.extensionPath);
+args.push("--tsProbeLocations", this.context.extensionPath);
+```
+
+O `--tsdk` é o único caminho para o TypeScript do projeto, e só é passado se
+quem usa configurar. **O padrão é analisar Angular com um TypeScript que não é o
+do projeto**, e num segundo processo Node, porque `angularOnly: true` está fixo
+no código do servidor — ele não responde por TypeScript comum, e portanto não
+substitui o `tsserver`.
+
+**IntelliJ** — o `angular-plugin` declara **dez linguagens próprias**, cada uma
+com `parserDefinition` e `fileType`, em `org.angular2.lang.html.*`:
 
 ```
 Angular2Html   Angular17Html   Angular181Html   Angular20Html
@@ -323,38 +373,16 @@ Angular2Svg    Angular17Svg    Angular181Svg    Angular20Svg
 Angular2       Angular20
 ```
 
-As quatro primeiras são o template; as quatro seguintes, o mesmo em SVG; as duas
-últimas são **a linguagem de expressão** — o que vai dentro do `{{ }}`. Lexer e
-parser escritos à mão.
+Quatro versões do parser de template, porque a sintaxe mudou quatro vezes, e as
+antigas ficam. O plugin de `tsserver` deles — `ws-typescript-angular-plugin`,
+**144 KB**, sem `createProjectService` — é só a ponte: sobre `@volar/typescript`,
+ele recebe um `transpiledTemplate` produzido do lado da JVM e o expõe ao
+TypeScript como arquivo virtual. **A análise é deles; o plugin só mapeia.**
 
-E repare na numeração: `2`, `17`, `181`, `20`. **Quatro parsers, porque a sintaxe
-do template mudou quatro vezes** — os blocos `@if`/`@for` no 17, uma revisão no
-18.1, outra no 20 — e os antigos continuam lá, porque projetos antigos continuam
-existindo. É a objeção de "não envelhecer" com número em cima: não se escreve uma
-vez, escreve-se uma por revisão de sintaxe, para sempre.
-
-#### O terceiro caminho, que a sondagem revelou
-
-Some-se aos dois anteriores um que não estava na mesa:
-
-- **Um plugin de `tsserver` nosso, sobre uma máquina de arquivo virtual.** É o
-  que a JetBrains fez. O mapeamento posição-a-posição é genérico — serve a Vue,
-  a Svelte, a qualquer linguagem dentro de linguagem, e é a mesma ideia que a
-  seção "Linguagem dentro de linguagem" já defende para o realce. O que **não**
-  é genérico é saber recortar a expressão de dentro do `{{ }}` e ligar o template
-  ao componente, e isso é Angular.
-
-As três opções diferem no que custam e no que quebram, e nenhuma é barata:
-
-| caminho | o que a IDE ganha | o que ela passa a manter |
-| --- | --- | --- |
-| cliente LSP para o `ngserver` | tudo, feito por quem faz o Angular | um cliente LSP, e de onde vem o servidor |
-| plugin nosso sobre arquivo virtual | controle, e o mesmo mecanismo serve Vue amanhã | a ponte, e ela envelhece com a sintaxe do template |
-| mapear no nosso código, sem plugin | nada a instalar | o recorte da expressão **e** a resolução, em Rust |
-
-**Nenhuma das duas ferramentas foi pelo caminho do meio.** O VS Code foi pelo
-primeiro; o IntelliJ, pelo terceiro, com uma ponte de tipos no meio. O segundo
-existe como possibilidade, e não há que verificar quem o tenha escolhido.
+**E o caminho desta fase não é nenhum dos dois.** Ele usa o
+`@angular/language-service` — que é do time do Angular, e envelhece com ele —
+dentro do `tsserver` que já sobe. Sem segundo processo, como no IntelliJ; sem
+parser nosso, como no VS Code.
 
 #### O que continua valendo desta fase
 
