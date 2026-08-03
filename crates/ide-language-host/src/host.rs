@@ -93,6 +93,12 @@ pub enum LanguageHostError {
     /// candidato seguinte, que é o provider nativo. Ver a fase 3b da `23`.
     #[error("provider is no longer available: {0}")]
     ProviderGone(String),
+    /// O provider está inteiro e não sabe responder **esta** pergunta.
+    ///
+    /// Diferente de `ProviderGone`, que demite quem a devolveu. Aqui a resposta
+    /// é procurar quem saiba. Ver a fase 5 da `25`.
+    #[error("no provider could answer: {0}")]
+    Unresolved(String),
     /// O documento não está aberto em provider nenhum.
     ///
     /// Variante própria, e não texto dentro de `Provider`, porque quem chama
@@ -111,6 +117,7 @@ impl From<LanguageError> for LanguageHostError {
                 Self::Provider(format!("unsupported operation: {operation}"))
             }
             LanguageError::Provider(message) => Self::Provider(message),
+            LanguageError::Unresolved(message) => Self::Unresolved(message),
             LanguageError::Unavailable(message) => Self::ProviderGone(message),
         }
     }
@@ -325,21 +332,69 @@ impl LanguageHost {
         let candidates = self.candidate_ids(&extension, LanguageCapabilities::empty())?;
         let mut last_error = None;
         let mut aceito = None;
-        // O documento é aberto em **todos** os candidatos que o aceitarem, e não
-        // no primeiro. Dois providers da mesma linguagem podem ter capacidades
-        // complementares, e um deles sozinho não responde a tudo.
+        // O documento é aberto em todos os candidatos que **já estão de pé**, e
+        // não em todos os registrados. Dois providers da mesma linguagem podem
+        // ter capacidades complementares, e um deles sozinho não responde a tudo
+        // — mas subir um analisador externo custa 1,9 GB e trinta segundos, e
+        // pagá-los ao abrir o primeiro `.ts` é pagá-los mesmo quando ninguém vai
+        // perguntar nada que exija tipos. Ver a fase 5 da `25`.
+        //
+        // Se nenhum estiver de pé, o primeiro candidato é ativado: o arquivo
+        // precisa de alguém que lhe dê realce agora.
         //
         // Quem não subir — o analisador externo sem Node, por exemplo — apenas
         // fica de fora, e o que ele saberia responder passa a não ter resposta.
         // É a degradação da ADR-025 acontecendo por capacidade, e não por
         // documento inteiro.
+        let (de_pe, capacidades): (
+            std::collections::HashSet<ProviderId>,
+            std::collections::HashMap<ProviderId, LanguageCapabilities>,
+        ) = {
+            let registry = self
+                .registry
+                .lock()
+                .map_err(|_| LanguageHostError::WorkerStopped)?;
+            (
+                registry
+                    .providers
+                    .iter()
+                    .filter(|(_, entry)| entry.worker.is_some())
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                registry
+                    .providers
+                    .iter()
+                    .map(|(id, entry)| (id.clone(), entry.capabilities))
+                    .collect(),
+            )
+        };
+        // O que os anteriores já cobrem. Um candidato entra se **acrescenta**
+        // alguma capacidade — é a composição da `04`, e sem ela um provider com
+        // capacidade exclusiva nunca seria ativado.
+        let mut cobertas = LanguageCapabilities::empty();
+        // `nenhum_subiu` vale até um deles **conseguir** subir, e não até o
+        // primeiro ser tentado: um principal que falha na ativação precisa
+        // deixar a vez para o seguinte, que é a degradação da ADR-025.
+        let mut nenhum_subiu = true;
         for provider_id in candidates {
+            let minhas = capacidades
+                .get(&provider_id)
+                .copied()
+                .unwrap_or_else(LanguageCapabilities::empty);
+            let acrescenta = !minhas.difference(cobertas).is_empty();
+            // De pé já, ou acrescenta o que ninguém cobre, ou ninguém subiu
+            // ainda e o arquivo precisa de alguém agora.
+            if !de_pe.contains(&provider_id) && !acrescenta && !nenhum_subiu {
+                continue;
+            }
             match self.ensure_active(&provider_id) {
                 Ok(worker) => match worker
                     .open_document(context.clone(), document.clone())
                     .await
                 {
                     Ok(()) => {
+                        nenhum_subiu = false;
+                        cobertas |= minhas;
                         self.registry
                             .lock()
                             .map_err(|_| LanguageHostError::WorkerStopped)?
@@ -532,14 +587,50 @@ impl LanguageHost {
         self.note_result(worker.provider_id(), worker.semantic(context, document_id).await)
     }
 
+    /// Completação, tentando os candidatos em ordem até alguém saber.
+    ///
+    /// # "Não sei" não é falha, e não demite ninguém
+    ///
+    /// O provider nativo de TypeScript sabe o tipo de um receptor declarado e
+    /// não sabe o de `.pipe(map(x => x.`. Antes desta distinção, admitir esse
+    /// limite o **derrubava**: `Unavailable` quer dizer "deixei de existir", e o
+    /// host tirava suas rotas — o arquivo perdia realce por causa de uma
+    /// completação que ninguém podia responder.
+    ///
+    /// Agora ele diz `Unresolved`, e a resposta do host é procurar quem saiba.
+    /// Ver a fase 5 da `25`.
     pub async fn completion(
         &self,
         context: LanguageRequestContext,
         request: CompletionRequest,
     ) -> Result<Vec<CompletionItem>, LanguageHostError> {
-        let worker =
-            self.worker_for_document(request.document_id, LanguageCapabilities::COMPLETION)?;
-        self.note_result(worker.provider_id(), worker.completion(context, request).await)
+        let candidatos =
+            self.workers_for_document(request.document_id, LanguageCapabilities::COMPLETION)?;
+        let mut ultimo = None;
+        for worker in candidatos {
+            let resposta = self.note_result(
+                worker.provider_id(),
+                worker.completion(context.clone(), request.clone()).await,
+            );
+            match resposta {
+                Err(LanguageHostError::Unresolved(motivo)) => ultimo = Some(motivo),
+                outro => return outro,
+            }
+        }
+        // Ninguém que estava de pé soube. **Agora** vale acordar quem falta:
+        // esta é a primeira pergunta da sessão que exige mais do que o índice
+        // alcança, e é o momento em que o analisador externo passa a valer o que
+        // custa.
+        //
+        // Ele sobe sem o texto de nada, e por isso esta pergunta ainda não é
+        // respondida por ele: a aplicação reabre os documentos no quadro
+        // seguinte. Num projeto grande o analisador leva trinta segundos para
+        // montar o projeto de qualquer forma — um quadro a mais não é o que se
+        // vai sentir.
+        self.acordar_proximo(request.document_id, LanguageCapabilities::COMPLETION);
+        Err(LanguageHostError::Unresolved(ultimo.unwrap_or_else(|| {
+            "nenhum provider soube responder".to_owned()
+        })))
     }
 
     pub async fn member_access(
@@ -629,14 +720,33 @@ impl LanguageHost {
         self.note_result(worker.provider_id(), worker.workspace_types(context, query, limit).await)
     }
 
+    /// A definição, tentando os candidatos em ordem até alguém saber.
+    ///
+    /// O índice sabe navegar pelo `import` dentro do projeto e não alcança
+    /// dependência instalada; quando ele diz que não sabe, a pergunta passa
+    /// adiante. Ver a fase 5 da `25`.
     pub async fn definition(
         &self,
         context: LanguageRequestContext,
         request: DefinitionRequest,
     ) -> Result<Vec<Location>, LanguageHostError> {
-        let worker =
-            self.worker_for_document(request.document_id, LanguageCapabilities::DEFINITION)?;
-        self.note_result(worker.provider_id(), worker.definition(context, request).await)
+        let candidatos =
+            self.workers_for_document(request.document_id, LanguageCapabilities::DEFINITION)?;
+        let mut ultimo = None;
+        for worker in candidatos {
+            let resposta = self.note_result(
+                worker.provider_id(),
+                worker.definition(context.clone(), request.clone()).await,
+            );
+            match resposta {
+                Err(LanguageHostError::Unresolved(motivo)) => ultimo = Some(motivo),
+                outro => return outro,
+            }
+        }
+        self.acordar_proximo(request.document_id, LanguageCapabilities::DEFINITION);
+        Err(LanguageHostError::Unresolved(ultimo.unwrap_or_else(|| {
+            "nenhum provider soube responder".to_owned()
+        })))
     }
 
     pub async fn references(
@@ -897,6 +1007,105 @@ impl LanguageHost {
         result
     }
 
+    /// Documentos que um provider já de pé ainda não recebeu.
+    ///
+    /// Um analisador que sobe **depois** da abertura não tem o texto de nada, e
+    /// quem o tem é o editor. Esta lista é o que a aplicação usa para reabrir o
+    /// que falta — o host não guarda texto, e guardá-lo duplicaria em memória o
+    /// que já existe uma vez. Ver a fase 3b da `23` e a fase 5 da `25`.
+    #[must_use]
+    pub fn documents_missing_providers(&self) -> Vec<DocumentId> {
+        let Ok(registry) = self.registry.lock() else {
+            return Vec::new();
+        };
+        let de_pe: Vec<&ProviderId> = registry
+            .providers
+            .iter()
+            .filter(|(_, entry)| entry.worker.is_some())
+            .map(|(id, _)| id)
+            .collect();
+        registry
+            .document_routes
+            .iter()
+            .filter(|(_, rotas)| {
+                de_pe.iter().any(|id| {
+                    // De pé, atende a mesma linguagem de quem já tem o
+                    // documento, e não está entre eles.
+                    !rotas.contains(id)
+                        && rotas.iter().any(|rota| {
+                            registry.providers.get(rota).map(|entry| &entry.metadata.language_id)
+                                == registry.providers.get(*id).map(|entry| &entry.metadata.language_id)
+                        })
+                })
+            })
+            .map(|(document_id, _)| *document_id)
+            .collect()
+    }
+
+    /// Todos os candidatos que podem responder, na ordem declarada.
+    ///
+    /// O primeiro é quem responde primeiro; os seguintes existem para quando ele
+    /// disser que não sabe. Só entram os que **já têm o documento**: um provider
+    /// que ainda não foi ativado não tem o texto, e perguntar a ele daria uma
+    /// resposta sobre um arquivo que ele nunca viu.
+    fn workers_for_document(
+        &self,
+        document_id: DocumentId,
+        required: LanguageCapabilities,
+    ) -> Result<Vec<Arc<ProviderWorker>>, LanguageHostError> {
+        let ids = {
+            let registry = self
+                .registry
+                .lock()
+                .map_err(|_| LanguageHostError::WorkerStopped)?;
+            registry.providers_for_capability(document_id, required)?
+        };
+        let workers: Vec<_> = ids
+            .iter()
+            .filter_map(|id| self.ensure_active(id).ok())
+            .collect();
+        if workers.is_empty() {
+            return Err(LanguageHostError::DocumentNotRouted(document_id));
+        }
+        Ok(workers)
+    }
+
+    /// Ativa o primeiro candidato ainda parado que tenha a capacidade.
+    ///
+    /// Chamado quando todos os que estavam de pé disseram que não sabem. É o que
+    /// faz o analisador externo subir **na pergunta**, e não na abertura.
+    fn acordar_proximo(&self, document_id: DocumentId, required: LanguageCapabilities) {
+        let Ok(registry) = self.registry.lock() else {
+            return;
+        };
+        let Some(rotas) = registry.document_routes.get(&document_id).cloned() else {
+            return;
+        };
+        let Some(linguagem) = rotas
+            .first()
+            .and_then(|id| registry.providers.get(id))
+            .map(|entry| entry.metadata.language_id.clone())
+        else {
+            return;
+        };
+        let parado = registry
+            .providers
+            .iter()
+            .find(|(id, entry)| {
+                entry.worker.is_none()
+                    && entry.state != ProviderState::Disabled
+                    && entry.state != ProviderState::Failed
+                    && entry.metadata.language_id == linguagem
+                    && entry.capabilities.contains(required)
+                    && !rotas.contains(id)
+            })
+            .map(|(id, _)| id.clone());
+        drop(registry);
+        if let Some(id) = parado {
+            let _ = self.ensure_active(&id);
+        }
+    }
+
     fn worker_for_document(
         &self,
         document_id: DocumentId,
@@ -966,6 +1175,11 @@ mod tests {
         /// É como se simula o processo do analisador morrendo no meio da
         /// sessão, sem precisar de processo nenhum.
         gone: Arc<std::sync::atomic::AtomicBool>,
+        /// Ligado, o provider responde que **não sabe** — e continua vivo.
+        ///
+        /// É o limite do provider nativo de TypeScript diante de um tipo que ele
+        /// não alcança, e o que a fase 5 da `25` precisa distinguir de morte.
+        nao_sabe: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl TestProvider {
@@ -980,6 +1194,7 @@ mod tests {
                 worker_thread: Arc::new(Mutex::new(None)),
                 fail_activation: false,
                 gone: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                nao_sabe: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
 
@@ -1033,6 +1248,8 @@ mod tests {
                 return Err(LanguageError::Provider("activation failed".to_owned()));
             }
             Ok(Box::new(TestActiveLanguage {
+                nao_sabe: Arc::clone(&self.nao_sabe),
+                provider_id: self.provider_id.clone(),
                 language_id: self.language_id.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
                 gone: Arc::clone(&self.gone),
@@ -1070,6 +1287,8 @@ mod tests {
         language_id: LanguageId,
         shutdowns: Arc<AtomicUsize>,
         gone: Arc<std::sync::atomic::AtomicBool>,
+        nao_sabe: Arc<std::sync::atomic::AtomicBool>,
+        provider_id: ProviderId,
     }
 
     #[async_trait]
@@ -1106,6 +1325,20 @@ mod tests {
             _document_id: DocumentId,
         ) -> Result<Vec<ide_domain::Diagnostic>, LanguageError> {
             Ok(Vec::new())
+        }
+
+        async fn completion(
+            &self,
+            _: ide_domain::CompletionRequest,
+        ) -> Result<Vec<ide_domain::CompletionItem>, LanguageError> {
+            if self.nao_sabe.load(Ordering::Relaxed) {
+                return Err(LanguageError::Unresolved("não sei o tipo".to_owned()));
+            }
+            Ok(vec![ide_domain::CompletionItem {
+                label: self.provider_id.0.clone(),
+                detail: None,
+                kind: ide_domain::CompletionKind::Field,
+            }])
         }
 
         async fn syntax(&self, document_id: DocumentId) -> Result<ide_domain::SyntaxSnapshot, LanguageError> {
@@ -1208,13 +1441,21 @@ mod tests {
             "a morte precisa ser dita, e não confundida com falha de pedido: {depois:?}"
         );
 
-        // O de baixo já tinha o documento aberto: a queda é **imediata**, e não
-        // custa uma reabertura. Foi a composição de capacidades que deu isto de
-        // graça — antes dela, o documento pertencia a um provider só e precisava
-        // ser reaberto no seguinte.
+        // **A fase 5 da `25` trocou a queda imediata por não subir o analisador
+        // à toa.** Antes, abrir ativava todos os candidatos, e o de baixo já
+        // tinha o documento: a queda não custava reabertura. Agora abrir ativa
+        // só quem já está de pé, porque subir um analisador externo custa 1,9 GB
+        // e trinta segundos — e pagá-los ao abrir o primeiro `.ts` é pagá-los
+        // mesmo quando ninguém vai perguntar nada que exija tipos.
+        //
+        // O que se perdeu vale pouco na prática: com o índice como principal,
+        // quem morre é o analisador, e o índice já está de pé respondendo. O
+        // caso deste teste — o principal morrendo — passou a custar a reabertura
+        // que a linha abaixo exercita, e quem a faz é a aplicação, que tem o
+        // texto.
         assert!(
-            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
-            "depois da queda, quem responde é o de baixo, sem reabrir"
+            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_err(),
+            "sem ter recebido o documento, o de baixo não tem o que responder"
         );
 
         // E reabrir continua funcionando, que é o caminho de quando **nenhum**
@@ -1419,6 +1660,116 @@ mod tests {
             LanguageCapabilities::SYNTAX,
         ));
         assert_eq!(escolhido, ProviderId("zzz.ultimo".to_owned()));
+    }
+
+    /// Dizer "não sei" faz o host procurar quem saiba, e não demite ninguém.
+    ///
+    /// # O defeito que este teste guarda
+    ///
+    /// A fase 4 da `25` deu ao provider nativo de TypeScript a resposta "não sei
+    /// o tipo desta expressão". Ela saía como `Unavailable`, que para o host
+    /// quer dizer **deixei de existir** — e o host reagia tirando as rotas dele.
+    ///
+    /// Na prática: o primeiro `.pipe(map(x => x.` de uma sessão derrubava o
+    /// provider que dá realce e estrutura, e o arquivo ficava sem cor por causa
+    /// de uma completação que ninguém podia responder.
+    ///
+    /// O limite de um provider não é a morte dele.
+    #[test]
+    fn saying_it_does_not_know_looks_for_someone_who_does() {
+        let host = LanguageHost::new(".");
+        let indice = Arc::new(TestProvider::new(
+            "ts.indice",
+            LanguageCapabilities::SYNTAX | LanguageCapabilities::COMPLETION,
+        ));
+        let externo = Arc::new(TestProvider::new(
+            "ts.externo",
+            LanguageCapabilities::COMPLETION,
+        ));
+        let nao_sabe = Arc::clone(&indice.nao_sabe);
+        success(host.register(Arc::clone(&indice) as Arc<dyn LanguageProvider>));
+        success(host.register(Arc::clone(&externo) as Arc<dyn LanguageProvider>));
+        success(host.configure_selection(
+            LanguageId("java".to_owned()),
+            ProviderSelection {
+                primary: ProviderId("ts.indice".to_owned()),
+                fallbacks: vec![ProviderId("ts.externo".to_owned())],
+            },
+        ));
+        success(pollster::block_on(host.open_document(
+            host.request_context(),
+            DocumentSnapshot {
+                id: DocumentId(1),
+                path: PathBuf::from("/w/a.java"),
+                version: 1,
+                text: String::new(),
+            },
+        )));
+
+        let pedir = || {
+            pollster::block_on(host.completion(
+                host.request_context(),
+                ide_domain::CompletionRequest {
+                    document_id: DocumentId(1),
+                    position: ide_domain::TextPosition { line: 0, column: 0 },
+                    prefix: String::new(),
+                },
+            ))
+        };
+
+        // Sabendo, o primeiro responde.
+        let itens = success(pedir());
+        assert_eq!(itens.first().map(|item| item.label.as_str()), Some("ts.indice"));
+
+        // Não sabendo, e sem mais ninguém com o documento, a resposta é
+        // `Unresolved` — **e o analisador é acordado agora**. É o momento em que
+        // ele passa a valer o que custa: a primeira pergunta da sessão que exige
+        // mais do que o índice alcança.
+        nao_sabe.store(true, Ordering::Relaxed);
+        assert!(
+            matches!(pedir(), Err(LanguageHostError::Unresolved(_))),
+            "sem ninguém que saiba e tenha o documento, a resposta é dizer isso"
+        );
+        assert_eq!(
+            externo.activations.load(Ordering::Relaxed),
+            1,
+            "a pergunta que ninguém soube é o que sobe o analisador"
+        );
+
+        // Ele subiu sem o texto de nada, e quem o tem é a aplicação: ela reabre.
+        assert!(
+            !host.documents_missing_providers().is_empty(),
+            "o host precisa dizer quais documentos faltam a quem subiu"
+        );
+        success(pollster::block_on(host.open_document(
+            host.request_context(),
+            DocumentSnapshot {
+                id: DocumentId(1),
+                path: PathBuf::from("/w/a.java"),
+                version: 2,
+                text: String::new(),
+            },
+        )));
+
+        let itens = success(pedir());
+        assert_eq!(
+            itens.first().map(|item| item.label.as_str()),
+            Some("ts.externo"),
+            "com o documento em mãos, quem sabe responde"
+        );
+
+        let estados = success(host.providers());
+        let indice = estados
+            .iter()
+            .find(|snapshot| snapshot.metadata.provider_id.0 == "ts.indice");
+        assert!(
+            indice.is_some_and(|snapshot| snapshot.state != ProviderState::Failed),
+            "admitir um limite não pode demitir quem o admitiu: {indice:?}"
+        );
+        assert!(
+            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
+            "e ele continua respondendo o que sabe"
+        );
     }
 
     #[test]

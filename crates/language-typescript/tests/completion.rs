@@ -154,7 +154,7 @@ fn what_it_does_not_know_it_says_it_does_not_know() {
 
     let resposta = completar(ativo.as_ref(), &raiz.join("src/pagina.ts"), "=> x.");
     match resposta {
-        Err(LanguageError::Unavailable(motivo)) => {
+        Err(LanguageError::Unresolved(motivo)) => {
             assert!(
                 motivo.contains("não sei"),
                 "a recusa precisa dizer o que não se sabe: {motivo}"
@@ -186,7 +186,7 @@ fn a_type_from_a_dependency_is_also_unknown() {
 
     let resposta = completar(ativo.as_ref(), &raiz.join("src/pagina.ts"), "http.");
     assert!(
-        matches!(resposta, Err(LanguageError::Unavailable(_))),
+        matches!(resposta, Err(LanguageError::Unresolved(_))),
         "o índice não alcança dependência, e diz isso: {resposta:?}"
     );
     let _ = std::fs::remove_dir_all(&raiz);

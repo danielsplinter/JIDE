@@ -430,10 +430,18 @@ impl ActiveLanguage for ActiveTypeScript {
             .map(|(nome, de)| (nome.clone(), de.as_str()))
             .or_else(|| aqui.origem(&nome))
         else {
-            return Ok(Vec::new());
+            // O nome não é declarado aqui nem importado: pode ser global, de uma
+            // dependência, ou de um `namespace`. **Não alcanço** é a resposta, e
+            // ela faz a pergunta passar ao analisador — lista vazia afirmaria
+            // que o nome não tem declaração nenhuma.
+            return Err(LanguageError::Unresolved(format!(
+                "não sei de onde vem `{nome}`"
+            )));
         };
         let Some(modulo) = self.resolver.resolve(&caminho, especificador) else {
-            return Ok(Vec::new());
+            return Err(LanguageError::Unresolved(format!(
+                "não alcanço o módulo `{especificador}`"
+            )));
         };
         let parser = &self.parser;
         let exportacoes = |arquivo: &Path| {
@@ -454,10 +462,14 @@ impl ActiveLanguage for ActiveTypeScript {
         };
         let Some(destino) = declarante(&self.resolver, &modulo, &la, &exportacoes, &declara)
         else {
-            return Ok(Vec::new());
+            return Err(LanguageError::Unresolved(format!(
+                "não achei onde `{la}` é declarado"
+            )));
         };
         let Some(range) = references::de_arquivo(parser, &destino).declaracao(&la) else {
-            return Ok(Vec::new());
+            return Err(LanguageError::Unresolved(format!(
+                "não achei a declaração de `{la}`"
+            )));
         };
         Ok(vec![Location {
             path: destino,
@@ -506,7 +518,11 @@ impl ActiveLanguage for ActiveTypeScript {
         let tipo = match receptor {
             members::Receptor::Tipo(tipo) => tipo,
             members::Receptor::Desconhecido => {
-                return Err(LanguageError::Unavailable(
+                // `Unresolved`, e não `Unavailable`: não saber o tipo de uma
+                // expressão é um limite deste provider, e não a morte dele.
+                // Dizendo `Unavailable`, ele se demitiria por admitir o que
+                // sempre foi verdade — e o arquivo perderia o realce junto.
+                return Err(LanguageError::Unresolved(
                     "não sei o tipo desta expressão".to_owned(),
                 ));
             }
@@ -515,7 +531,7 @@ impl ActiveLanguage for ActiveTypeScript {
         };
 
         let Some(itens) = self.membros_do_tipo(&caminho, &texto, &tipo) else {
-            return Err(LanguageError::Unavailable(format!(
+            return Err(LanguageError::Unresolved(format!(
                 "não sei onde `{tipo}` é declarado"
             )));
         };

@@ -303,6 +303,24 @@ pub enum LanguageError {
     /// Este pedido falhou, e o provider continua de pé.
     #[error("provider failed: {0}")]
     Provider(String),
+    /// Esta pergunta eu não sei responder, e continuo vivo.
+    ///
+    /// # Por que não é `Unavailable`
+    ///
+    /// `Unavailable` quer dizer "deixei de existir", e o host reage a ela
+    /// **demitindo** o provider: tira as rotas e o marca como falho. É o certo
+    /// para um processo que morreu.
+    ///
+    /// Mas um provider pode estar inteiro e não saber uma resposta. O índice de
+    /// TypeScript sabe o tipo de um receptor declarado e não sabe o de
+    /// `.pipe(map(x => x.` — e responder `Unavailable` ali o derrubaria por
+    /// admitir um limite que ele sempre teve.
+    ///
+    /// Com esta variante, o host faz a coisa certa: **tenta o próximo
+    /// candidato**, que é o analisador externo, e ninguém é demitido. É o que a
+    /// fase 5 da `25` precisa para subir o analisador só quando ele for pedido.
+    #[error("cannot answer: {0}")]
+    Unresolved(String),
     /// O provider deixou de poder responder: o processo morreu, o canal fechou.
     ///
     /// É diferente de `Provider`, e a diferença decide o que o host faz. Falhar

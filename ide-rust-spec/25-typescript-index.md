@@ -648,16 +648,83 @@ sobrecargas e fazer o tipo voltar da assinatura para dentro da lambda. É o
 verificador de tipos, que a ADR-025 recusou — e a recusa continua valendo, com o
 exemplo agora medido em vez de argumentado.
 
-### Fase 5 — Subir o analisador sob demanda ⬜### Fase 5 — Subir o analisador sob demanda ⬜
+### Fase 5 — Subir o analisador sob demanda ✅
 
-Abrir um `.ts` deixa de subir o analisador. Ele sobe na primeira pergunta que o
-índice devolveu como desconhecida.
+Abrir um `.ts` deixou de subir o analisador. Ele sobe na primeira pergunta que
+ninguém de pé soube responder.
 
-**Critério:** abrir um projeto e navegar por arquivos com tipos declarados mantém
-a memória externa em zero. Tocar num `Observable` sobe o analisador, e a barra de
-estado mostra os dois números mudando.
+#### O defeito que esta fase teve de consertar antes de existir
 
-## O que esta especificação não fará
+A fase 4 deu ao provider nativo a resposta "não sei o tipo desta expressão", e
+ela saía como `LanguageError::Unavailable`. Para o host, `Unavailable` quer dizer
+**deixei de existir**: ele tira as rotas de quem a devolveu e o marca como falho.
+
+Ou seja: **o primeiro `.pipe(map(x => x.` de uma sessão derrubava o provider que
+dá realce e estrutura.** O arquivo ficava sem cor por causa de uma completação
+que ninguém podia responder.
+
+Entrou `LanguageError::Unresolved` — "esta pergunta eu não sei responder, e
+continuo vivo". O host reage procurando quem saiba, e ninguém é demitido. O
+limite de um provider não é a morte dele.
+
+Conferido por sabotagem: com `Unresolved` mapeado de volta para `ProviderGone`, o
+teste reprova.
+
+#### A ordem inverteu, e é o que faz a fase funcionar
+
+Até aqui a seleção punha o analisador como principal e o nativo como alternativa,
+e com razão: o nativo não sabia tipo nenhum, e pôr o analisador depois dele seria
+nunca chegar nele.
+
+Agora o **índice vai na frente**. Ele responde busca, navegação e o ponto sobre
+receptor declarado em milissegundos e sem processo externo; o que não alcança,
+ele diz, e a pergunta passa adiante. Sem essa inversão não haveria sob demanda —
+o analisador seria sempre o primeiro a ser perguntado.
+
+Por isso `definition` também precisou parar de devolver lista vazia quando não
+alcança: como principal, essa lista vazia impediria o analisador de ser
+consultado, e `Ctrl+clique` num símbolo do Angular não abriria nada.
+
+#### Quem é ativado ao abrir
+
+Não é "só o primeiro", e não é "todos". É **quem acrescenta capacidade que
+ninguém antes cobre** — a composição da `04`. Como o índice cobre tudo o que o
+analisador cobre, ele fica parado; um provider com capacidade exclusiva continua
+sendo ativado, que é o que um teste antigo cobrava e esta fase quase quebrou.
+
+#### O critério, medido
+
+| | |
+| --- | --- |
+| abrir um `.ts` | **zero processos externos** |
+| primeira pergunta que ninguém soube | **um processo** |
+
+Verificado em dois projetos, com o supervisor de processos contando de verdade —
+e não pelo estado que o host reporta de si mesmo.
+
+#### O que se trocou, dito em voz alta
+
+**A queda deixou de ser imediata.** Antes, abrir ativava todos os candidatos, e o
+de baixo já tinha o documento: a morte do de cima não custava reabertura. Agora
+custa um quadro, e quem reabre é a aplicação, que tem o texto — o host não o
+guarda, e guardá-lo duplicaria em memória o que já existe uma vez.
+
+Vale pouco na prática: com o índice como principal, quem morre é o analisador, e
+o índice já está de pé respondendo.
+
+**E o analisador sobe sem o texto de nada.** Ele é acordado pela pergunta, mas
+responde a partir da seguinte: a aplicação reabre os documentos no quadro
+seguinte. Num projeto grande ele leva trinta segundos para montar o projeto de
+qualquer forma — um quadro a mais não é o que se vai sentir.
+
+#### E quanto isso economiza, honestamente
+
+Com 14% a 17% dos pontos alcançados pelo índice, **o analisador continua sendo
+pedido cedo** numa sessão que mexa em código com genéricos. O ganho não é "1,9 GB
+a menos"; é: quem só navega, busca e edita código com tipos declarados nunca paga
+por ele, e ninguém paga por ele **antes** de precisar.
+
+## O que esta especificação não fará## O que esta especificação não fará
 
 - **verificador de tipos**: ADR-025, e reafirmada aqui com o exemplo do `pipe`;
 - **tabela por biblioteca**: proibida pela `23`;

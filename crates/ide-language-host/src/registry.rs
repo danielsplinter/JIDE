@@ -196,6 +196,35 @@ impl Registry {
     ///
     /// É aqui que a composição acontece: `syntax` procura quem tem `SYNTAX`, e
     /// não quem pegou o arquivo primeiro.
+    /// Todos os que podem responder, na ordem em que o documento foi aberto.
+    ///
+    /// A ordem é a declarada pela seleção: o principal primeiro, os alternativos
+    /// depois. Quem chama tenta um por um até alguém saber — ver a fase 5 da
+    /// `25`.
+    pub(super) fn providers_for_capability(
+        &self,
+        document_id: DocumentId,
+        required: LanguageCapabilities,
+    ) -> Result<Vec<ProviderId>, LanguageHostError> {
+        let abertos = self.providers_for_document(document_id)?;
+        let podem: Vec<ProviderId> = abertos
+            .iter()
+            .filter(|id| {
+                self.providers
+                    .get(*id)
+                    .is_some_and(|entry| entry.capabilities.contains(required))
+            })
+            .cloned()
+            .collect();
+        if podem.is_empty() {
+            return Err(LanguageHostError::CapabilityUnavailable {
+                provider: abertos[0].clone(),
+                required,
+            });
+        }
+        Ok(podem)
+    }
+
     pub(super) fn provider_for_capability(
         &self,
         document_id: DocumentId,

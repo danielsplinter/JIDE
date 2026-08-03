@@ -189,24 +189,48 @@ fn an_alias_reaches_the_declaration() {
     let _ = std::fs::remove_dir_all(&raiz);
 }
 
-/// Um nome de dependência instalada não é resolvido, e isso não é erro.
+/// Um nome de dependência instalada faz a pergunta passar adiante.
 ///
-/// Lista vazia é o que faz o host encaminhar a pergunta a quem alcança mais.
-/// Um erro faria o provider parecer quebrado, e devolver a declaração errada
-/// seria pior do que as duas.
+/// # Isto mudou na fase 5, e a mudança é o assunto dela
+///
+/// Antes o índice devolvia lista vazia aqui, e lista vazia **afirma** que o nome
+/// não tem declaração nenhuma. Como o índice virou o principal, essa afirmação
+/// falsa impediria o analisador externo de ser consultado — `Ctrl+clique` num
+/// símbolo do Angular não abriria nada, e pareceria limite da IDE.
+///
+/// Dizendo que não alcança, o host procura quem alcance.
 #[test]
-fn a_name_from_a_dependency_is_left_to_someone_else() {
+fn a_name_from_a_dependency_passes_the_question_along() {
     let raiz = projeto("dependencia");
     escrever(
         &raiz.join("src/uso.ts"),
-        "import { Component } from '@angular/core';\n",
+        "import { Component } from '@angular/core';
+",
     );
     let ativo = ativado(&raiz);
 
-    let achados = definicao(ativo.as_ref(), &raiz.join("src/uso.ts"), 0, 10);
+    let Ok(texto) = std::fs::read_to_string(raiz.join("src/uso.ts")) else {
+        panic!("o arquivo do teste precisa existir");
+    };
     assert!(
-        achados.is_empty(),
-        "o índice responde pelo projeto, e diz que não alcança: {achados:?}"
+        pollster::block_on(ativo.open_document(DocumentSnapshot {
+            id: DocumentId(1),
+            path: raiz.join("src/uso.ts"),
+            version: 1,
+            text: texto,
+        }))
+        .is_ok()
+    );
+    let resposta = pollster::block_on(ativo.definition(DefinitionRequest {
+        document_id: DocumentId(1),
+        position: TextPosition { line: 0, column: 10 },
+    }));
+    assert!(
+        matches!(
+            resposta,
+            Err(ide_language_api::LanguageError::Unresolved(_))
+        ),
+        "o índice diz que não alcança, e não que não existe: {resposta:?}"
     );
     let _ = std::fs::remove_dir_all(&raiz);
 }

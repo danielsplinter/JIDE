@@ -183,8 +183,17 @@ pub fn service_provider(processes: Arc<dyn ProcessSupervisor>) -> Arc<dyn Langua
 /// IDE continua útil. Ver a ADR-025.
 #[must_use]
 pub fn selection() -> ProviderSelection {
+    // **O índice na frente, o analisador atrás.** Até a fase 4 da `25` a ordem
+    // era a oposta, e com razão: o nativo não sabia tipo nenhum, e pôr o
+    // analisador depois dele seria nunca chegar nele.
+    //
+    // Agora o índice responde busca, navegação e o ponto sobre receptor
+    // declarado — 14% a 17% dos pontos de um projeto real, medidos — em
+    // milissegundos e sem processo externo. O que ele não alcança ele **diz**
+    // que não alcança, e aí a pergunta passa adiante. É isso que faz o
+    // analisador subir só quando é pedido.
     ProviderSelection {
-        primary: ProviderId(TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned()),
-        fallbacks: vec![ProviderId(TYPESCRIPT_PROVIDER_ID.to_owned())],
+        primary: ProviderId(TYPESCRIPT_PROVIDER_ID.to_owned()),
+        fallbacks: vec![ProviderId(TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned())],
     }
 }

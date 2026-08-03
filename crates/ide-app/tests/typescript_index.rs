@@ -331,7 +331,7 @@ fn how_much_of_the_dot_the_index_reaches() {
                 match resposta {
                     Ok(itens) if itens.is_empty() => vazios += 1,
                     Ok(_) => respondidos += 1,
-                    Err(LanguageError::Unavailable(_)) => desconhecidos += 1,
+                    Err(LanguageError::Unresolved(_)) => desconhecidos += 1,
                     Err(_) => sem_pergunta += 1,
                 }
             }
