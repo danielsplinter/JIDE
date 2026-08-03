@@ -9,6 +9,7 @@
 //! fora do lado de dentro, e não particiona o lado de dentro. Quem garante é uma
 //! guarda de texto, em `ide-core/tests/architecture.rs`. Ver a fase 8 da `12`.
 
+mod index;
 mod language;
 mod lines;
 mod parser;

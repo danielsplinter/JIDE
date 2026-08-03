@@ -64,6 +64,7 @@ impl LanguageProvider for JavaLanguageProvider {
             | LanguageCapabilities::COMPLETION
             | LanguageCapabilities::DEFINITION
             | LanguageCapabilities::REFERENCES
+            | LanguageCapabilities::WORKSPACE_SYMBOLS
     }
 
     async fn activate(

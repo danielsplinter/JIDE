@@ -38,6 +38,14 @@ bitflags::bitflags! {
         const BUILD = 1 << 8;
         const RUN = 1 << 9;
         const DEBUG = 1 << 10;
+        /// Responder "quais tipos do projeto se chamam assim".
+        ///
+        /// Separada de `COMPLETION` porque as duas têm preços muito diferentes:
+        /// buscar por nome pede um índice de nomes, e completar depois de um
+        /// ponto pede saber o **tipo** de uma expressão. Um provider pode ter o
+        /// primeiro e não o segundo, e antes desta separação declarar a busca
+        /// obrigava a prometer o ponto junto.
+        const WORKSPACE_SYMBOLS = 1 << 11;
     }
 }
 

@@ -100,6 +100,7 @@ impl LanguageProvider for TypeScriptServiceProvider {
         LanguageCapabilities::DIAGNOSTICS
             | LanguageCapabilities::COMPLETION
             | LanguageCapabilities::DEFINITION
+            | LanguageCapabilities::WORKSPACE_SYMBOLS
     }
 
     async fn activate(

@@ -307,28 +307,89 @@ estrutura — o provider nativo continua em serviço —, e `Ctrl+L` diz que o
 analisador está desligado e que a análise nativa não tem índice, em vez de dizer
 que não achou nada.
 
-### Fase 1 — O índice, e a busca por tipo ⬜
+### Fase 1 — O índice, e a busca por tipo ✅
 
 O grupo 1 inteiro, sem resolução de módulos.
 
-- varredura do projeto pelas raízes que o `tsconfig.json` já entrega (ADR-027);
-- tabela de declarações no formato do índice Java: nome, tipo, posição, arquivo
-  por número;
-- **o índice nasce em disco**, e a consulta lê só os bytes de que precisa. Não há
-  fase em que ele viva em memória "por enquanto": construir residente e migrar
-  depois é o caminho que a `20` percorreu, e ela mediu 178 MB antes de chegar aos
-  103 MB;
-- `workspace_types` respondido do índice.
+#### O que se mediu no projeto real
 
-**Critério:** `Ctrl+L` num projeto **sem `node_modules`** encontra os tipos, em
-menos de 50 ms, com o processo da IDE crescendo **menos de 10 MB** em relação ao
-que ele ocupa sem índice nenhum — é o critério que separa "índice em disco" de
-"índice residente", e sem ele a fase pode ser dada por cumprida do jeito errado.
-O número de resultados bate com o que o analisador devolve no mesmo projeto
-**com** `node_modules`. A comparação com o analisador é o teste —
-o mesmo desenho da ADR-027, em que a divergência é defeito nosso.
+| | antes, pelo analisador externo | pelo índice |
+| --- | --- | --- |
+| primeira resposta depois de abrir | **30,4 s** | **4,2 ms** |
+| ativar o provider | — | **196 µs** |
+| memória do processo | +1 900 MB (externo) | **+4 MB** |
+| projeto sem `node_modules` | nada | responde igual |
 
-### Fase 2 — Resolução de módulos ⬜
+Quatro milissegundos contra trinta segundos. E os 4 MB são o critério que separa
+"índice em disco" de "índice residente" — sem ele, esta fase poderia ser dada por
+cumprida respondendo depressa **porque carregou tudo**, que é exatamente o que se
+está tentando evitar.
+
+#### A capacidade teve de ser separada
+
+`workspace_types` era roteado por `COMPLETION`. Declará-la no provider nativo
+faria ele prometer o **ponto**, que é a fase 4 — e prometer o que não se faz é
+como a busca vazia começou.
+
+Entrou `WORKSPACE_SYMBOLS` no contrato: "sei quais tipos existem" é outra coisa
+de "sei o tipo desta expressão", e os preços são de ordens diferentes. Quem já
+respondia busca — Java e o analisador externo — passou a declará-la, e o teste do
+host que a exercia foi ajustado junto.
+
+#### O formato, e o que ele faz diferente da `20`
+
+Registros de tamanho fixo, textos à parte, tabela de nomes ordenada — o desenho
+que a `20` provou. **A diferença é a leitura.**
+
+A `20` lê o arquivo inteiro para um vetor de bytes, e por isso os 103 MB do
+índice de Java são memória nossa. Aqui só a **tabela de nomes** entra em memória,
+porque toda busca por texto a percorre; os registros de símbolo ficam no disco e
+saem por deslocamento, quando um nome casa. É I/O comum: sem mapeamento, sem
+`unsafe`, sem cache escrito à mão — as três coisas em que a `20` esbarrou.
+
+#### A varredura não pode segurar a ativação
+
+Ela levava 7,8 s no projeto real, e **muito mais com o cache do sistema frio**.
+Ativar é o que dá realce ao arquivo recém-aberto; fazer o realce esperar pela
+varredura do projeto inteiro seria trocar um problema conhecido por outro.
+
+Ela foi para uma thread, e quem avisa que terminou é o **`ReadinessSignal`** que a
+`23` acabou de introduzir para o analisador externo. A IDE já sabe mostrá-lo:
+gira no meio da tela enquanto dura e some no fim, sem saber o que está sendo
+preparado. Ativar caiu de 7,8 s para **196 µs**.
+
+E durante a varredura a busca responde **"o projeto ainda está sendo indexado"** —
+não uma lista vazia. As duas se pareceriam na tela.
+
+#### O que a medição desmentiu, de novo
+
+A primeira construção levou **164 s**, e a explicação óbvia seria "a extração é
+lenta". Medido em separado: ler os 8 956 arquivos custa 621 ms, analisá-los
+4,1 s, percorrer as árvores 1,2 s — **seis segundos ao todo**. Os outros 158 eram
+cache do sistema frio e dois testes construindo o mesmo índice ao mesmo tempo,
+disputando o disco. Com o cache quente e um de cada vez: 7,8 s.
+
+É a terceira vez nesta IDE que o número grande estava no disco e não no código.
+
+Esse mesmo teste em duplicata revelou um defeito de verdade: os dois escreviam no
+**mesmo arquivo temporário**, e um renomeava o pedaço do outro. Acontece com duas
+IDEs abertas no mesmo projeto, e o temporário passou a levar o número do processo.
+
+#### O que ficou de fora
+
+**Reconstrói a cada ativação.** Saber o que mudou desde a última vez é a fase 4
+da `20` para Java, e trazê-la para cá antes de haver o que aproveitar seria
+escrever invalidação sem uso. Enquanto isso, o índice é sempre fresco — o custo é
+a varredura, que agora roda em segundo plano.
+
+**Só tipos.** `class`, `interface`, `enum` e `type X = …`. Função e variável de
+módulo não entram: a pergunta é "ir para o tipo", e enchê-la com o resto é o que
+a `23` já teve de desfazer no analisador externo.
+
+**`node_modules` fica fora.** O índice responde pelos tipos **do projeto**; os das
+dependências são o que o analisador externo traz.
+
+### Fase 2 — Resolução de módulos ⬜### Fase 2 — Resolução de módulos ⬜
 
 A parte cara, e a que decide se as fases 3 e 4 existem.
 

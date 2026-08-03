@@ -6,18 +6,23 @@
 //! pacote `typescript` no projeto, ou com o processo morto, é ele que responde.
 //! Ver a ADR-025.
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use ide_domain::{
     Diagnostic, DocumentChange, DocumentId, DocumentSnapshot, LanguageId, ProviderId,
-    SyntaxSnapshot,
+    SemanticSymbol, SyntaxSnapshot,
 };
 use ide_language_api::{
+    ReadinessSignal,
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
     LanguageError, LanguageMetadata, LanguageProvider,
 };
 
+use super::index::WorkspaceIndex;
 use super::parser::TypeScriptParser;
 use super::syntax;
 
@@ -56,14 +61,19 @@ impl LanguageProvider for TypeScriptLanguageProvider {
     }
 
     fn capabilities(&self) -> LanguageCapabilities {
-        LanguageCapabilities::SYNTAX | LanguageCapabilities::DIAGNOSTICS
+        // `WORKSPACE_SYMBOLS` e não `COMPLETION`: este provider sabe **quais
+        // tipos existem** e não sabe o tipo de uma expressão. Declarar as duas
+        // juntas seria prometer o ponto, que é a fase 4 da `25`.
+        LanguageCapabilities::SYNTAX
+            | LanguageCapabilities::DIAGNOSTICS
+            | LanguageCapabilities::WORKSPACE_SYMBOLS
     }
 
     async fn activate(
         &self,
-        _context: LanguageActivationContext,
+        context: LanguageActivationContext,
     ) -> Result<Box<dyn ActiveLanguage>, LanguageError> {
-        Ok(Box::new(ActiveTypeScript::new()?))
+        Ok(Box::new(ActiveTypeScript::new(context)?))
     }
 }
 
@@ -81,14 +91,55 @@ struct ActiveTypeScript {
     language_id: LanguageId,
     parser: TypeScriptParser,
     documents: Mutex<HashMap<DocumentId, ParsedDocument>>,
+    /// O índice do projeto, quando ficar pronto.
+    ///
+    /// **Aberto**, e não carregado: o que fica em memória é a tabela de nomes, e
+    /// os registros saem do disco quando um nome casa.
+    index: Arc<Mutex<Option<WorkspaceIndex>>>,
+    /// O sinal que diz quando a varredura terminou.
+    readiness: ReadinessSignal,
 }
 
 impl ActiveTypeScript {
-    fn new() -> Result<Self, LanguageError> {
+    fn new(context: LanguageActivationContext) -> Result<Self, LanguageError> {
+        let index: Arc<Mutex<Option<WorkspaceIndex>>> = Arc::new(Mutex::new(None));
+        let readiness = ReadinessSignal::new();
+
+        // **A varredura não pode segurar a ativação.** Medida contra um monorepo
+        // de 8 958 arquivos: 7,2 s com o cache do sistema quente, e muito mais
+        // frio — que é o estado ao abrir o projeto pela primeira vez. Ativar é o
+        // que dá realce ao arquivo que se acabou de abrir, e fazer o realce
+        // esperar pela varredura do projeto inteiro seria trocar um problema
+        // conhecido por outro.
+        //
+        // O sinal de prontidão é o mesmo que o analisador externo usa, e a IDE
+        // já sabe mostrá-lo: gira no meio da tela enquanto dura, e some no fim.
+        // Nada aqui é de TypeScript — é "esta linguagem ainda está preparando o
+        // projeto".
+        let raiz = context.workspace_root.clone();
+        let raizes = context.source_roots.clone();
+        let destino = Arc::clone(&index);
+        let avisar = readiness.clone();
+        std::thread::Builder::new()
+            .name("typescript-index".to_owned())
+            .spawn(move || {
+                let construido = WorkspaceIndex::build(&raiz, &raizes);
+                if let Ok(mut lugar) = destino.lock() {
+                    *lugar = construido;
+                }
+                // Marcado **depois** de guardar, e marcado mesmo se a construção
+                // falhar: um sinal que nunca fica pronto deixaria a IDE dizendo
+                // para sempre que está carregando.
+                avisar.mark_ready();
+            })
+            .map_err(|erro| LanguageError::Provider(erro.to_string()))?;
+
         Ok(Self {
             language_id: LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned()),
             parser: TypeScriptParser::new()?,
             documents: Mutex::new(HashMap::new()),
+            index,
+            readiness,
         })
     }
 
@@ -132,6 +183,11 @@ impl ActiveLanguage for ActiveTypeScript {
         &self.language_id
     }
 
+    /// Este provider tem o que preparar: a varredura do projeto.
+    fn readiness(&self) -> Option<ReadinessSignal> {
+        Some(self.readiness.clone())
+    }
+
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {
         let parsed = self.analyze(document.id, document.version, &document.text)?;
         self.store(document.id, parsed)
@@ -170,6 +226,40 @@ impl ActiveLanguage for ActiveTypeScript {
             .get(&document_id)
             .map(|parsed| parsed.snapshot.diagnostics.clone())
             .unwrap_or_default())
+    }
+
+    /// Os tipos do projeto cujo nome casa com o que foi digitado.
+    ///
+    /// **É a única pergunta de projeto que não depende de `import`**: um nome ou
+    /// casa ou não casa. Definição e referências precisam saber **qual** dos
+    /// `LoginService` é o certo, e isso é a fase 2 da `25`.
+    ///
+    /// Sem índice a resposta é um erro, e não uma lista vazia: "não indexei" e
+    /// "não existe tipo com esse nome" são coisas diferentes, e confundi-las é a
+    /// família de defeito que esta IDE já encontrou várias vezes.
+    async fn workspace_types(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticSymbol>, LanguageError> {
+        // Enquanto a varredura roda, a resposta é **"ainda não"**, e não uma
+        // lista vazia. As duas se pareceriam na tela, e confundi-las é a família
+        // de defeito que esta IDE já encontrou várias vezes.
+        if !self.readiness.is_ready() {
+            return Err(LanguageError::Unavailable(
+                "o projeto ainda está sendo indexado".to_owned(),
+            ));
+        }
+        let registro = self
+            .index
+            .lock()
+            .map_err(|_| LanguageError::Provider("índice indisponível".to_owned()))?;
+        let Some(index) = registro.as_ref() else {
+            return Err(LanguageError::Unavailable(
+                "não foi possível indexar o projeto".to_owned(),
+            ));
+        };
+        Ok(index.tipos(query, limit))
     }
 
     async fn syntax(&self, document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {

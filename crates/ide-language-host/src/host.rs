@@ -621,8 +621,10 @@ impl LanguageHost {
         query: String,
         limit: usize,
     ) -> Result<Vec<SemanticSymbol>, LanguageHostError> {
+        // Busca por nome é capacidade própria, e não um apêndice da completação:
+        // um provider pode ter índice de nomes sem saber tipar uma expressão.
         let provider_id =
-            self.provider_for_extension(extension, LanguageCapabilities::COMPLETION)?;
+            self.provider_for_extension(extension, LanguageCapabilities::WORKSPACE_SYMBOLS)?;
         let worker = self.ensure_active(&provider_id)?;
         self.note_result(worker.provider_id(), worker.workspace_types(context, query, limit).await)
     }
@@ -1422,9 +1424,11 @@ mod tests {
     #[test]
     fn workspace_types_activate_by_extension_without_an_open_document() {
         let host = LanguageHost::new(".");
+        // A busca é roteada por `WORKSPACE_SYMBOLS`, e não por `COMPLETION`: um
+        // provider pode ter índice de nomes sem saber tipar uma expressão.
         success(host.register(Arc::new(TestProvider::new(
             "java.types",
-            LanguageCapabilities::COMPLETION,
+            LanguageCapabilities::WORKSPACE_SYMBOLS,
         ))));
         let found = pollster::block_on(host.workspace_types(
             host.request_context(),
