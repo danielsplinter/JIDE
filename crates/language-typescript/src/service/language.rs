@@ -275,6 +275,28 @@ impl ActiveTypeScriptService {
         }
     }
 
+    /// A recusa que quer dizer "aqui eu não sei", e não "eu quebrei".
+    ///
+    /// # Por que esta distinção precisa existir
+    ///
+    /// `No content available.` é o que o analisador responde quando o handler
+    /// executou e devolveu nada — está no `typescript.js`, e não é sobre o
+    /// arquivo estar vazio. Num arquivo ancorado ela é **comum e correta**: uma
+    /// posição dentro de um contexto que o plugin não resolve — uma variável de
+    /// template vinda de uma diretiva, por exemplo — não tem resposta, e não tem
+    /// mesmo.
+    ///
+    /// Tratar isso como falha do provider faria o host reportar erro onde só
+    /// havia silêncio. `Unresolved` faz a pergunta descer para o próximo
+    /// candidato, que é o que a `04` desenhou e o que a fase 5 da `25`
+    /// construiu.
+    fn silencio_ou_falha(&self, document_id: DocumentId, detalhe: String) -> LanguageError {
+        if self.projeto(document_id).is_some() && detalhe.contains("No content available") {
+            return LanguageError::Unresolved(detalhe);
+        }
+        self.failure(detalhe)
+    }
+
     fn documento(&self, document_id: DocumentId) -> Result<(PathBuf, String), LanguageError> {
         self.documentos
             .lock()
@@ -388,6 +410,51 @@ impl ActiveTypeScriptService {
         (!configurado.contains("inferredProject")).then_some(configurado)
     }
 
+    /// Faz a primeira pergunta sobre um arquivo ancorado, e joga fora a
+    /// resposta.
+    ///
+    /// # Por que uma pergunta desperdiçada é a correção certa
+    ///
+    /// Medido no monorepo de referência: a **primeira** completude dentro de um
+    /// template custa 22,9 s, e todas as seguintes custam 0,01 s. O plugin monta
+    /// o programa de verificação do template na primeira pergunta, e depois só
+    /// consulta o que montou.
+    ///
+    /// Sem isto, quem paga é a primeira completude de quem digita — e ela tem
+    /// prazo de cinco segundos, de propósito, porque uma lista que aparecesse
+    /// vinte segundos depois seria pior do que nenhuma. O resultado era a
+    /// completude falhar por prazo justamente na primeira vez, que é quando ela
+    /// mais parece quebrada.
+    ///
+    /// Aqui o custo cai na **abertura**, que roda fora da thread da interface,
+    /// tem o prazo longo e já mostra o giro na tela. A posição perguntada é o
+    /// começo do arquivo: aquece igual, e não exige saber onde o cursor vai
+    /// estar. Verificado — aquecendo em `1:1`, a pergunta de verdade caiu para
+    /// 0,06 s.
+    ///
+    /// Falhar aqui não é erro: significa que a primeira pergunta de verdade vai
+    /// pagar o custo, que é exatamente o que acontecia antes.
+    async fn aquecer(&self, document_id: DocumentId) {
+        let Ok((path, _)) = self.documento(document_id) else {
+            return;
+        };
+        let _ = self
+            .session
+            .request(
+                "completionInfo",
+                self.com_projeto(
+                    document_id,
+                    serde_json::json!({
+                        "file": path_argument(&path),
+                        "line": 1,
+                        "offset": 1,
+                    }),
+                ),
+                LOADING_TIMEOUT,
+            )
+            .await;
+    }
+
     /// O `projectFileName` a mandar junto, quando há um.
     fn projeto(&self, document_id: DocumentId) -> Option<String> {
         self.projetos.lock().ok()?.get(&document_id).cloned()
@@ -451,10 +518,14 @@ impl ActiveLanguage for ActiveTypeScriptService {
             }
         }
         self.abrir(&document.path, &document.text).await?;
+        let ancorado = self.e_ancorado(&document.path);
         self.documentos
             .lock()
             .map_err(|_| LanguageError::Provider("registro de documentos travado".to_owned()))?
             .insert(document.id, (document.path, document.text));
+        if ancorado {
+            self.aquecer(document.id).await;
+        }
         Ok(())
     }
 
@@ -560,7 +631,7 @@ impl ActiveLanguage for ActiveTypeScriptService {
                 REQUEST_TIMEOUT,
             )
             .await
-            .map_err(|detalhe| self.failure(detalhe))?;
+            .map_err(|detalhe| self.silencio_ou_falha(request.document_id, detalhe))?;
         let entradas = resposta
             .get("entries")
             .and_then(serde_json::Value::as_array)
@@ -600,7 +671,7 @@ impl ActiveLanguage for ActiveTypeScriptService {
                 REQUEST_TIMEOUT,
             )
             .await
-            .map_err(|detalhe| self.failure(detalhe))?;
+            .map_err(|detalhe| self.silencio_ou_falha(request.document_id, detalhe))?;
         Ok(resposta
             .as_array()
             .map(|itens| {

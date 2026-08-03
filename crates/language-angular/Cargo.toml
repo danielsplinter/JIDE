@@ -11,5 +11,11 @@ rust-version.workspace = true
 language-typescript = { path = "../language-typescript" }
 serde_json.workspace = true
 
+[dev-dependencies]
+ide-domain = { path = "../ide-domain" }
+ide-language-api = { path = "../ide-language-api" }
+ide-process = { path = "../ide-process" }
+tokio = { workspace = true, features = ["rt", "time"] }
+
 [lints]
 workspace = true

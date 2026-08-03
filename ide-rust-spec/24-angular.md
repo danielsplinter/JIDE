@@ -344,6 +344,48 @@ entre caber e não caber.
 O custo de carga medido antes — o dobro do tempo com o plugin — continua valendo,
 e continua sendo razão para o plugin não subir por padrão em projeto sem Angular.
 
+#### O que os projetos reais acharam depois de pronto
+
+A fase passou nos dois projetos de referência com o mesmo binário, e cada um
+achou um defeito que nenhum teste de unidade teria achado.
+
+**A primeira completude num template custa 22,9 s, e todas as seguintes custam
+0,01 s.** O plugin monta o programa de verificação do template na primeira
+pergunta e depois só consulta o que montou. Com o prazo de cinco segundos da
+completude — curto de propósito, porque uma lista que aparecesse vinte segundos
+depois seria pior do que nenhuma — o resultado era a completude falhar por prazo
+**justamente na primeira vez**, que é quando ela mais parece quebrada.
+
+A correção não é afrouxar o prazo de quem digita: é fazer uma pergunta
+desperdiçada na **abertura**, que roda fora da thread da interface, tem prazo
+longo e já mostra o giro na tela. Aquecendo em `1:1`, a pergunta de verdade caiu
+para 0,06 s.
+
+**`No content available` num template é comum, e é correto.** A segunda execução
+caiu num `{{ model. }}` de um `ng-template` com `let-model`, cujo contexto vem de
+uma diretiva e que o serviço legitimamente não resolve. Tratar isso como falha do
+provider faria a IDE reportar erro onde só havia silêncio — e, pior, é o mesmo
+texto que quase custou esta fase inteira. Num arquivo ancorado ele passa a ser
+`Unresolved`, que faz a pergunta descer para o próximo candidato.
+
+**E o teste do critério mudou por causa disso.** Ele escolhia o primeiro template
+que encontrasse, e caiu naquele `let-model`. Aceitar a posição seria cobrar do
+plugin uma resposta que ele não deve dar; recusá-la sem critério seria escolher o
+caso que passa. O critério é o do enunciado — **membros da classe do
+componente** —, e ele é verificável: o nome antes do ponto está declarado no
+`.ts` irmão.
+
+O que ele achou no monorepo vale registrar, porque mostra que a resolução é de
+tipo e não de lista:
+
+```
+readonly FORM_CONTROL_NAME = { ORDER: 'order' } as const;
+
+{{ FORM_CONTROL_NAME. }}  ->  1 item: ORDER
+```
+
+Um membro só, e o certo, atravessando o `as const`.
+
 #### O que as duas ferramentas de referência fazem, verificado no disco
 
 Vale registrar, porque foi a comparação com elas que levou à correção.

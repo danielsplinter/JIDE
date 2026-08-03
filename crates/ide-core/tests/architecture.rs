@@ -980,13 +980,19 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // existia. É o desenho mais barato que a `24` encontrou, e a métrica
     // registra que ele foi barato de verdade.
     assert_eq!(crates.len(), 17, "a refatoração não deve pulverizar crates");
-    // 48: as 46 anteriores mais duas, que é o que Angular custou no grafo —
-    // `ide-app -> language-angular` e `language-angular -> language-typescript`.
-    // Duas arestas para uma linguagem inteira é o piso, e o número existe para
-    // que a próxima que custar dez seja notada.
+    // 51: as 46 anteriores mais cinco, que é o que Angular custou no grafo.
+    //
+    // **Duas de produção** — `ide-app -> language-angular` e
+    // `language-angular -> language-typescript` — e **três de teste**, porque o
+    // critério da fase 1 da `24` exige subir o analisador de verdade contra um
+    // projeto de verdade, e para isso o teste precisa dos tipos do domínio, do
+    // contrato de linguagem e de um supervisor de processo.
+    //
+    // A conta inclui `dev-dependencies` de propósito, desde sempre: teste que
+    // alcança meio mundo é acoplamento igual, só que sem aparecer no binário.
     assert!(
-        edge_count <= 48,
-        "o grafo interno ultrapassou a linha final de 48 arestas: {edge_count}"
+        edge_count <= 51,
+        "o grafo interno ultrapassou a linha final de 51 arestas: {edge_count}"
     );
     // O fan-out da raiz de composição **cresce com o número de linguagens**, e
     // é para isso que ela existe: é o único lugar que pode nomear todas. 16 é

@@ -1210,8 +1210,12 @@ dependencies = [
 name = "language-angular"
 version = "0.1.0"
 dependencies = [
+ "ide-domain",
+ "ide-language-api",
+ "ide-process",
  "language-typescript",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
