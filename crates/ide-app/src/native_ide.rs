@@ -579,6 +579,8 @@ impl NativeIde {
             .filter_map(|documento| documento.path.extension()?.to_str().map(str::to_owned))
             .collect();
 
+        let raiz = self.runtime.workspace_root.clone();
+
         let (sender, receiver) = std::sync::mpsc::channel();
         let cancel = self.languages.type_search.start(receiver);
         std::thread::spawn(move || {
@@ -605,6 +607,7 @@ impl NativeIde {
                     Err(error) => ultimo_erro = Some(error.to_string()),
                 }
             }
+            let mut encontrados = refine_type_hits(encontrados, &query, raiz.as_deref());
             encontrados.truncate(TYPE_SEARCH_LIMIT);
             // Vazio pode ser "não existe" ou "ninguém sabia responder", e os dois
             // se parecem na tela. Num projeto Angular sem `node_modules`, o
@@ -2993,6 +2996,109 @@ fn event_label(event: &WindowEvent) -> &'static str {
     }
 }
 
+/// Os pedaços de uma consulta, como quem digitou os pensou.
+///
+/// `federated-login-context` e `FederatedLoginContext` são a mesma pergunta feita
+/// de dois jeitos, e viram os mesmos três pedaços. Separam pedaço: qualquer coisa
+/// que não seja letra ou dígito, e a passagem de minúscula para maiúscula.
+fn query_segments(query: &str) -> Vec<String> {
+    let mut segmentos = Vec::new();
+    let mut atual = String::new();
+    let mut anterior_minuscula = false;
+    for caractere in query.chars() {
+        if !caractere.is_alphanumeric() {
+            if !atual.is_empty() {
+                segmentos.push(std::mem::take(&mut atual));
+            }
+            anterior_minuscula = false;
+            continue;
+        }
+        if caractere.is_uppercase() && anterior_minuscula && !atual.is_empty() {
+            segmentos.push(std::mem::take(&mut atual));
+        }
+        anterior_minuscula = caractere.is_lowercase() || caractere.is_numeric();
+        atual.extend(caractere.to_lowercase());
+    }
+    if !atual.is_empty() {
+        segmentos.push(atual);
+    }
+    segmentos
+}
+
+/// O nome reduzido ao que se compara: só letras e dígitos, em minúscula.
+fn normalized_name(name: &str) -> String {
+    name.chars()
+        .filter(|caractere| caractere.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Filtra e ordena o que as linguagens acharam, pelo que foi digitado.
+///
+/// # Por que isto precisa existir
+///
+/// O analisador de TypeScript responde a `federated-login-context` com **tudo o
+/// que casa com qualquer pedaço**: `context`, `login`, `contextmenu`,
+/// `AudioContext`, `CONTEXT_LOST_WEBGL` — metade vinda do `lib.dom.d.ts`, que não
+/// é do projeto. O casamento exato, `FederatedLoginContext`, vinha na décima
+/// segunda posição. Foi o que se viu na tela: procurando por um arquivo, vieram
+/// os que só tinham `login` no nome.
+///
+/// A recall generosa do analisador é boa e fica: o que faltava era **exigir todos
+/// os pedaços** e pôr na frente quem casa melhor.
+///
+/// # Language-neutral de propósito
+///
+/// Isto trabalha sobre nome e caminho, e não sabe de linguagem nenhuma. Uma
+/// consulta de um pedaço só — `Pedido`, que é como se busca em Java — passa por
+/// aqui sem perder nada: o filtro só morde quando há mais de um pedaço, que é
+/// exatamente o caso em que o analisador solta o OR.
+fn refine_type_hits(
+    found: Vec<ide_domain::SemanticSymbol>,
+    query: &str,
+    root: Option<&Path>,
+) -> Vec<ide_domain::SemanticSymbol> {
+    let segmentos = query_segments(query);
+    if segmentos.is_empty() {
+        return found;
+    }
+    let inteira: String = segmentos.concat();
+    let mut pontuados: Vec<_> = found
+        .into_iter()
+        .filter_map(|simbolo| {
+            let nome = normalized_name(&simbolo.name);
+            // **Todos** os pedaços, e não qualquer um. É a correção inteira.
+            if !segmentos.iter().all(|pedaco| nome.contains(pedaco.as_str())) {
+                return None;
+            }
+            let posicao = if nome == inteira {
+                0
+            } else if nome.starts_with(&inteira) {
+                1
+            } else if nome.contains(&inteira) {
+                2
+            } else {
+                3
+            };
+            // Empate desfeito pelo que é do projeto: um tipo de dependência não
+            // costuma ser o que se procurou.
+            let de_fora = usize::from(
+                !root.is_some_and(|raiz| simbolo.location.path.starts_with(raiz)),
+            );
+            Some((posicao, de_fora, nome.len(), simbolo))
+        })
+        .collect();
+    pontuados.sort_by(|esquerda, direita| {
+        (esquerda.0, esquerda.1, esquerda.2)
+            .cmp(&(direita.0, direita.1, direita.2))
+            .then_with(|| esquerda.3.name.cmp(&direita.3.name))
+    });
+    pontuados
+        .into_iter()
+        .map(|(_, _, _, simbolo)| simbolo)
+        .collect()
+}
+
 /// A queixa de um analisador que não subiu, **da linguagem que está em uso**.
 ///
 /// É a mesma informação que o aviso de queda dá, dita na hora em que a pergunta
@@ -3562,6 +3668,110 @@ mod tests {
             files,
             "um projeto sem fontes sob suas raízes não deve zerar a compilação"
         );
+    }
+
+    fn simbolo(nome: &str, caminho: &str) -> ide_domain::SemanticSymbol {
+        ide_domain::SemanticSymbol {
+            name: nome.to_owned(),
+            kind: SymbolKind::Class,
+            location: ide_domain::Location {
+                path: PathBuf::from(caminho),
+                range: TextRange::default(),
+            },
+            scope_depth: 0,
+            type_descriptor: None,
+        }
+    }
+
+    /// Uma consulta com hífen e uma em `CamelCase` são a mesma pergunta.
+    #[test]
+    fn a_hyphenated_query_and_a_camel_case_one_split_the_same() {
+        assert_eq!(
+            query_segments("federated-login-context"),
+            vec!["federated", "login", "context"]
+        );
+        assert_eq!(
+            query_segments("FederatedLoginContext"),
+            vec!["federated", "login", "context"]
+        );
+        assert_eq!(query_segments("login"), vec!["login"]);
+        assert_eq!(query_segments("  "), Vec::<String>::new());
+    }
+
+    /// Todos os pedaços precisam casar, e não qualquer um.
+    ///
+    /// **Estes são os nomes que o analisador devolveu de verdade** para
+    /// `federated-login-context` numa sondagem: ele separa no hífen e responde
+    /// com o que casa com qualquer pedaço, incluindo `contextmenu` e
+    /// `AudioContext`, que vêm do `lib.dom.d.ts` e não do projeto. O casamento
+    /// exato vinha na décima segunda posição — foi o que se viu na tela.
+    #[test]
+    fn every_segment_of_the_query_has_to_match() {
+        let raiz = PathBuf::from("/projeto");
+        let vindos = vec![
+            simbolo("context", "/projeto/src/a.ts"),
+            simbolo("login", "/projeto/src/a.ts"),
+            simbolo("contextmenu", "/lib/lib.dom.d.ts"),
+            simbolo("AudioContext", "/lib/lib.dom.d.ts"),
+            simbolo("ContextFederated", "/projeto/src/a.ts"),
+            simbolo("FederatedAuthContext", "/projeto/src/a.ts"),
+            simbolo("FederatedLoginContext", "/projeto/src/a.ts"),
+            simbolo("LoginService", "/projeto/src/a.ts"),
+        ];
+
+        let refinados = refine_type_hits(vindos, "federated-login-context", Some(&raiz));
+        let nomes: Vec<_> = refinados.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            nomes,
+            vec!["FederatedLoginContext"],
+            "só o que tem os três pedaços pode sobrar"
+        );
+    }
+
+    /// Uma consulta de um pedaço só continua trazendo tudo o que casa.
+    ///
+    /// **É como se busca em Java**, e é o que garante que a correção não estreitou
+    /// a busca das outras linguagens: com um pedaço só, exigir todos é exigir um.
+    #[test]
+    fn a_single_segment_query_keeps_everything_that_matches() {
+        let raiz = PathBuf::from("/projeto");
+        let vindos = vec![
+            simbolo("LoginService", "/projeto/src/a.ts"),
+            simbolo("FederatedLoginContext", "/projeto/src/a.ts"),
+            simbolo("UserLoginToken", "/projeto/src/a.ts"),
+            simbolo("PedidoDeCompra", "/projeto/src/a.ts"),
+        ];
+        let refinados = refine_type_hits(vindos, "login", Some(&raiz));
+        let nomes: Vec<_> = refinados.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(nomes.len(), 3, "os três com `login` no nome ficam: {nomes:?}");
+        assert!(!nomes.contains(&"PedidoDeCompra"));
+    }
+
+    /// O casamento melhor vem primeiro, e o de fora do projeto vem depois.
+    #[test]
+    fn the_best_match_comes_first_and_the_project_wins_ties() {
+        let raiz = PathBuf::from("/projeto");
+        let vindos = vec![
+            simbolo("UserLoginToken", "/projeto/src/a.ts"),
+            simbolo("NavigatorLogin", "/lib/lib.dom.d.ts"),
+            simbolo("Login", "/projeto/src/a.ts"),
+            simbolo("LoginService", "/projeto/src/a.ts"),
+        ];
+        let refinados = refine_type_hits(vindos, "login", Some(&raiz));
+        let nomes: Vec<_> = refinados.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(nomes[0], "Login", "o casamento exato vem primeiro: {nomes:?}");
+        assert_eq!(
+            nomes.last(),
+            Some(&"NavigatorLogin"),
+            "o que não é do projeto desempata por último: {nomes:?}"
+        );
+    }
+
+    /// Consulta vazia devolve tudo, que é o contrato da janela de busca.
+    #[test]
+    fn an_empty_query_keeps_everything() {
+        let vindos = vec![simbolo("Qualquer", "/projeto/src/a.ts")];
+        assert_eq!(refine_type_hits(vindos, "", None).len(), 1);
     }
 
     #[test]

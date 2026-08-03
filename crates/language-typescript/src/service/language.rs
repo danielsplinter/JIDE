@@ -394,7 +394,12 @@ impl ActiveLanguage for ActiveTypeScriptService {
     ) -> Result<Vec<SemanticSymbol>, LanguageError> {
         // Consulta vazia devolve tudo o que couber, para a janela ter o que
         // mostrar antes da primeira letra — é o que o contrato da `03` pede.
-        let busca = if query.is_empty() { "*" } else { query };
+        let identificador = search_value(query);
+        let busca = if identificador.is_empty() {
+            "*"
+        } else {
+            identificador.as_str()
+        };
         let resposta = self
             .session
             .request(
@@ -500,6 +505,34 @@ impl ActiveTypeScriptService {
             })
             .unwrap_or_default())
     }
+}
+
+/// A consulta como o `navto` quer recebê-la: um identificador, sem separadores.
+///
+/// # Isto foi medido, e o número é gritante
+///
+/// Contra um projeto Angular de verdade, procurando `federated-login-context`:
+///
+/// | consulta enviada | devolvidos | corretos |
+/// | --- | --- | --- |
+/// | `federated-login-context` | 100 | **0** |
+/// | `federated login context` | 100 | **0** |
+/// | `federatedlogincontext` | 6 | **6** |
+///
+/// **O `navto` trata o separador como quebra e responde com o que casa com
+/// qualquer pedaço.** Num projeto grande isso enche o limite inteiro com toda
+/// variável chamada `context` antes de chegar perto do que se procurou — e o que
+/// se via na tela eram arquivos com `login` no nome, que era o segundo pedaço.
+///
+/// Juntar os pedaços num identificador devolve a busca por subsequência em
+/// `CamelCase`, que é a que serve. `Pedido` continua `Pedido`: consulta de uma
+/// palavra só passa por aqui sem mudar.
+///
+/// Fica **aqui**, e não na aplicação, porque é quirk deste analisador. Impor a
+/// outras linguagens o formato que o `navto` prefere seria vazar TypeScript para
+/// dentro da IDE, que é o que a `23` existe para impedir.
+fn search_value(query: &str) -> String {
+    query.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
 /// O caminho como o analisador espera recebê-lo.
@@ -832,6 +865,20 @@ mod tests {
         assert_eq!(argumentos["endLine"], 2);
         assert_eq!(argumentos["endOffset"], 4);
         assert_eq!(argumentos["insertString"], " desconto = 0;");
+    }
+
+    /// A consulta vira identificador antes de ir ao analisador.
+    ///
+    /// Medido: com o separador, 100 resultados e nenhum certo; sem ele, 6 e todos
+    /// certos. Ver `search_value`.
+    #[test]
+    fn the_query_becomes_an_identifier_before_it_is_sent() {
+        assert_eq!(search_value("federated-login-context"), "federatedlogincontext");
+        assert_eq!(search_value("federated login context"), "federatedlogincontext");
+        assert_eq!(search_value("FederatedLoginContext"), "FederatedLoginContext");
+        // Uma palavra só atravessa sem mudar, que é o caso mais comum.
+        assert_eq!(search_value("Pedido"), "Pedido");
+        assert_eq!(search_value("---"), "");
     }
 
     /// A conversão de posição é a mesma que a completação usa.

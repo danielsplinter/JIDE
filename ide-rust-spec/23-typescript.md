@@ -1090,6 +1090,43 @@ arquivo aberto ela cala. Uma linguagem que só tem provider nativo — o realce 
 CSS hoje, a próxima que entrar amanhã — nunca produz queixa: para ela, "nada
 encontrado" é a resposta inteira, e inventar uma causa seria mentir.
 
+#### E a busca achava a coisa errada
+
+Procurando `federated-login-context`, vinham arquivos que só tinham `login` no
+nome. **Não era ranking ruim: era a consulta chegando quebrada ao analisador.**
+
+O `navto` trata o separador como quebra de palavra e responde com o que casa com
+**qualquer pedaço**. Medido contra o projeto real:
+
+| consulta enviada | devolvidos | corretos |
+| --- | --- | --- |
+| `federated-login-context` | 100 | **0** |
+| `federated login context` | 100 | **0** |
+| `federatedlogincontext` | 6 | **6** |
+| `FederatedLoginContext` | 6 | **6** |
+
+Com o separador, o limite inteiro se enche de toda variável chamada `context`
+antes de chegar perto do que se procurou. Pedir 500 em vez de 100 não muda nada —
+foi medido também, e continua zero.
+
+A correção é uma linha: a consulta vira um identificador antes de ir ao
+analisador. Ela mora **no adapter de TypeScript**, e não na aplicação: é quirk
+deste analisador, e impor às outras linguagens o formato que o `navto` prefere
+seria vazar TypeScript para dentro da IDE.
+
+##### A primeira correção teria piorado a busca
+
+O primeiro diagnóstico foi "o analisador é generoso demais, basta filtrar o que
+volta": exigir **todos** os pedaços em vez de qualquer um. Isso é certo e foi
+mantido, com desempate que põe o casamento exato e o que é do projeto na frente.
+
+Mas sozinho teria deixado a busca **vazia** no projeto real, que é pior do que o
+defeito relatado. A sondagem mostrou por quê: o filtro roda depois do corte, e
+nenhum dos 100 — nem dos 500 — resultados que o analisador devolvia casava com os
+três pedaços. Filtrar o lixo não adianta quando o que se procura nunca chega.
+
+Duas correções, e a que parecia suficiente era a menor das duas.
+
 #### O que isto confirma sobre o método
 
 Três dos defeitos desta especificação vieram de testar a camada de baixo e

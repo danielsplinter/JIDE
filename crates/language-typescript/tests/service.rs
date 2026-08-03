@@ -750,3 +750,82 @@ fn the_adapter_serves_a_typescript_4_1_project() {
     assert!(runtime.block_on(ativo.shutdown()).is_ok());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A busca por nome de arquivo, escrita com hífen, acha o tipo.
+///
+/// É o defeito visto num projeto Angular de verdade: procurando por
+/// `federated-login-context`, vinham arquivos que só tinham `login` no nome. O
+/// `navto` trata o separador como quebra e responde com o que casa com **qualquer
+/// pedaço**; num projeto grande isso enche o limite inteiro com toda variável
+/// chamada `context` antes de chegar perto do que se procurou.
+///
+/// Medido contra o projeto real: com o separador, 100 devolvidos e **nenhum**
+/// certo, mesmo pedindo 500. Sem ele, 6 devolvidos e os 6 certos.
+#[test]
+#[ignore = "exige Node instalado e `npm install typescript` no projeto de teste"]
+fn a_hyphenated_query_finds_the_type_it_names() {
+    let root = temporary("consulta-hifen");
+    assert!(std::fs::write(root.join("package.json"), r#"{"name":"t"}"#).is_ok());
+    assert!(
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{ "include": ["src/**/*.ts"] }"#,
+        )
+        .is_ok()
+    );
+    let fonte = root.join("src");
+    assert!(std::fs::create_dir_all(&fonte).is_ok());
+    #[cfg(windows)]
+    const NPM: &str = "npm.cmd";
+    #[cfg(not(windows))]
+    const NPM: &str = "npm";
+    let instalado = std::process::Command::new(NPM)
+        .args(["install", "typescript@5", "--no-audit", "--no-fund"])
+        .current_dir(&root)
+        .status();
+    assert!(instalado.is_ok_and(|status| status.success()));
+
+    let arquivo = fonte.join("a.ts");
+    let codigo = concat!(
+        "export class FederatedLoginContext {}\n",
+        "export class LoginService {}\n",
+        "export class UserLoginToken {}\n",
+        "export class FederatedAuthContext {}\n",
+    );
+    assert!(std::fs::write(&arquivo, codigo).is_ok());
+
+    let runtime = runtime();
+    let ativo = match runtime.block_on(provider().activate(context(&root))) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador precisa subir: {erro}"),
+    };
+    assert!(
+        runtime
+            .block_on(ativo.open_document(DocumentSnapshot {
+                id: DocumentId(1),
+                path: arquivo,
+                version: 1,
+                text: codigo.to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+
+    let achados = match runtime.block_on(ativo.workspace_types("federated-login-context", 100)) {
+        Ok(achados) => achados,
+        Err(erro) => panic!("a busca precisa responder: {erro}"),
+    };
+    let nomes: Vec<_> = achados.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        nomes.contains(&"FederatedLoginContext"),
+        "o tipo procurado precisa estar na resposta: {nomes:?}"
+    );
+    // E o que só tem um dos pedaços não pode ter entrado no lugar dele.
+    assert!(
+        !nomes.contains(&"LoginService") && !nomes.contains(&"FederatedAuthContext"),
+        "casar com um pedaço só nao basta, e foi o que enchia a lista: {nomes:?}"
+    );
+
+    assert!(runtime.block_on(ativo.shutdown()).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}
