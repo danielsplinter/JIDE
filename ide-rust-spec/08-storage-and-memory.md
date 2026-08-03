@@ -184,6 +184,33 @@ depurar funcione com um clique nas execuções seguintes.
 > medição confirma que aperta; se ela deve continuar apertando aí é decisão de
 > quem usa a IDE nesses projetos, e não dedução.
 
+> **Por que o Java custa 103 MB e o TypeScript 1,9 GB.** A pergunta natural diante
+> dos dois números é qual linguagem é mais pesada, e essa é a pergunta errada: o
+> que difere é **o que cada analisador guarda**.
+>
+> O nosso índice de Java guarda um **índice**. Ao processar um fonte, ele lê o
+> texto, monta a árvore, extrai declarações e ocorrências — e **descarta texto e
+> árvore ao sair da função**. O que sobrevive é `IndexedSymbol { name, kind,
+> range, type_descriptor, scope_depth, file: u32 }`, com o caminho guardado por
+> número, e só o que outro arquivo pode nomear: local e parâmetro não entram. Daí
+> 339 664 declarações caberem em 103 MB, e a maior parte disso viver no disco,
+> respondida direto dos bytes (`20`).
+>
+> O `tsserver` guarda o **programa**. Medido no `spartacus-develop`, ele carrega
+> 11 287 arquivos — 9 418 do projeto e 1 869 de `node_modules` —, com a árvore
+> completa de cada um e o estado do verificador de tipos, tudo residente. É o que
+> ele precisa ter para responder "qual é o tipo desta expressão", que é
+> exatamente a capacidade que o provider nativo não tem e que motivou a ADR-025.
+>
+> **A memória é o preço da pergunta que se pode fazer.** O índice Java não sabe
+> dizer o tipo de uma expressão em outro arquivo; o `tsserver` sabe. Trocar de
+> lado custaria a capacidade, e não só bytes — e é por isso que os dois números
+> não se comparam como "mais leve" e "mais pesado".
+>
+> Some-se a isso que um roda em Rust, com estruturas do tamanho que declaram, e o
+> outro em V8, onde cada nó é objeto com cabeçalho e o coletor trabalha com folga
+> — visível na medição: o pico de 1 902 MB cai para 1 735 MB depois da coleta.
+
 > **Estado.** A **medição** existe em código: `MemoryMeter` e `MemoryReading` em
 > `ide-core`, com os dois números na barra de estado, e o aviso quando um
 > analisador externo cai. Ver "O medidor de memória" na `23`. O **teto** abaixo
