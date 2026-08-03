@@ -1,0 +1,15 @@
+[package]
+name = "language-angular"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# A seta aponta para cá porque esta é a verdade: Angular é uma extensão do
+# ferramental de TypeScript, e não o contrário. Ver a `24`.
+language-typescript = { path = "../language-typescript" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

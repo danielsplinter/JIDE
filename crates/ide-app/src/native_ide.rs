@@ -173,7 +173,10 @@ impl NativeIde {
         // dois providers para a mesma extensão, e a ordem entre eles é a
         // declarada logo abaixo.
         language_host
-            .register(typescript_contribution::service_provider(processes.clone()))
+            .register(typescript_contribution::service_provider(
+                processes.clone(),
+                vec![Arc::new(crate::angular_contribution::analyzer_plugin())],
+            ))
             .map_err(|error| error.to_string())?;
         self.languages.toolchains.register_contribution(&typescript);
         self.tasks

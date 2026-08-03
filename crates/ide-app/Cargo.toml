@@ -15,6 +15,7 @@ ide-domain = { path = "../ide-domain" }
 ide-language-api = { path = "../ide-language-api" }
 ide-language-host = { path = "../ide-language-host" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }
+language-angular = { path = "../language-angular" }
 language-java = { path = "../language-java" }
 language-style = { path = "../language-style" }
 language-typescript = { path = "../language-typescript" }

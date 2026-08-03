@@ -9,7 +9,9 @@
 
 mod language;
 mod locate;
+mod plugin;
 mod protocol;
 
 pub use language::{TYPESCRIPT_SERVICE_PROVIDER_ID, TypeScriptServiceProvider};
 pub use locate::tsserver_in;
+pub use plugin::{AnalyzerPlugin, AnalyzerPluginSource, CompanionRule};

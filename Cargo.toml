@@ -9,6 +9,7 @@ members = [
     "crates/ide-language-api",
     "crates/ide-language-host",
     "crates/ide-project",
+    "crates/language-angular",
     "crates/language-java",
     "crates/language-style",
     "crates/language-typescript",

@@ -24,6 +24,9 @@ use ide_language_api::{
 use ide_process::{ProcessRequest, ProcessSupervisor};
 
 use super::locate::{Missing, locate};
+use super::plugin::{
+    AnalyzerPlugin, AnalyzerPluginSource, CompanionRule, configure_arguments, plugin_arguments,
+};
 use super::protocol::Session;
 use crate::analyzer::TYPESCRIPT_LANGUAGE_ID;
 
@@ -72,12 +75,46 @@ const MAX_HEAP_MB: u32 = 2048;
 
 pub struct TypeScriptServiceProvider {
     processes: Arc<dyn ProcessSupervisor>,
+    /// Quem pode acrescentar plugins ao analisador deste projeto.
+    ///
+    /// Vazio é o caso comum, e é o caso barato: sem contribuinte, nada muda no
+    /// processo que sobe.
+    plugins: Vec<Arc<dyn AnalyzerPluginSource>>,
 }
 
 impl TypeScriptServiceProvider {
     #[must_use]
     pub fn new(processes: Arc<dyn ProcessSupervisor>) -> Self {
-        Self { processes }
+        Self {
+            processes,
+            plugins: Vec::new(),
+        }
+    }
+
+    /// Acrescenta quem pode contribuir um plugin.
+    ///
+    /// A pergunta é feita na ativação, e por projeto — o mesmo binário abre um
+    /// projeto que precisa do plugin e outro que não.
+    #[must_use]
+    pub fn with_plugin_source(mut self, source: Arc<dyn AnalyzerPluginSource>) -> Self {
+        self.plugins.push(source);
+        self
+    }
+
+    /// As regras de arquivo ancorado, de todos os contribuintes.
+    fn companions(&self) -> Vec<CompanionRule> {
+        self.plugins
+            .iter()
+            .flat_map(|source| source.companions())
+            .collect()
+    }
+
+    /// Os plugins que servem a este projeto.
+    fn plugins_for(&self, workspace_root: &Path) -> Vec<AnalyzerPlugin> {
+        self.plugins
+            .iter()
+            .filter_map(|source| source.plugin_for(workspace_root))
+            .collect()
     }
 }
 
@@ -88,7 +125,17 @@ impl LanguageProvider for TypeScriptServiceProvider {
             language_id: LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned()),
             provider_id: ProviderId(TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned()),
             display_name: "TypeScript".to_owned(),
-            extensions: vec!["ts".to_owned()],
+            // `ts` sempre, mais o que os plugins fizerem este analisador
+            // responder. Esta crate não sabe o que são — sabe que alguém se
+            // ofereceu para respondê-los aqui dentro, e não num segundo
+            // processo, que é o que a ADR-029 comprou.
+            extensions: std::iter::once("ts".to_owned())
+                .chain(
+                    self.companions()
+                        .into_iter()
+                        .map(|regra| regra.extension.clone()),
+                )
+                .collect(),
             api_version: LANGUAGE_API_VERSION,
             // Com tipos, o ponto volta a valer: agora há o que oferecer depois
             // dele, e o que se oferece é o que existe.
@@ -132,6 +179,10 @@ impl TypeScriptServiceProvider {
         let localizacao = locate(&context.workspace_root, node_home.as_deref())
             .map_err(|falta: Missing| LanguageError::Unavailable(falta.to_string()))?;
 
+        // Perguntado **antes** de subir, porque os plugins entram na linha de
+        // comando: depois de subir, já é tarde.
+        let plugins = self.plugins_for(&context.workspace_root);
+
         let conversa = self
             .processes
             .converse(ProcessRequest {
@@ -154,7 +205,10 @@ impl TypeScriptServiceProvider {
                     // regra de que **o projeto manda**: dois desenvolvedores com
                     // caches diferentes veriam tipos diferentes do mesmo código.
                     "--disableAutomaticTypingAcquisition".to_owned(),
-                ],
+                ]
+                .into_iter()
+                .chain(plugin_arguments(&plugins))
+                .collect(),
                 working_directory: Some(context.workspace_root.clone()),
                 timeout: None,
                 environment: Vec::new(),
@@ -162,11 +216,30 @@ impl TypeScriptServiceProvider {
             .await
             .map_err(|erro| LanguageError::Unavailable(erro.to_string()))?;
 
-        Ok(ActiveTypeScriptService {
+        let servico = ActiveTypeScriptService {
             language_id: LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned()),
             session: Session::new(Arc::from(conversa)),
             documentos: Mutex::new(HashMap::new()),
-        })
+            companions: self.companions(),
+            projetos: Mutex::new(HashMap::new()),
+        };
+        // Carregar não basta: um plugin sobe inerte e passa a servir depois de
+        // configurado. Notificação, e não pedido, porque esperar aqui seria
+        // esperar o projeto inteiro montar antes de o provider existir.
+        for plugin in &plugins {
+            if let Err(erro) = servico
+                .session
+                .notify("configurePlugin", configure_arguments(plugin))
+                .await
+            {
+                tracing::warn!(
+                    plugin = plugin.module,
+                    %erro,
+                    "não foi possível configurar o plugin do analisador"
+                );
+            }
+        }
+        Ok(servico)
     }
 }
 
@@ -179,6 +252,13 @@ pub(crate) struct ActiveTypeScriptService {
     /// texto anterior para saber se o intervalo cabe nele, e para reabrir com o
     /// texto inteiro quando não cabe.
     documentos: Mutex<HashMap<DocumentId, (PathBuf, String)>>,
+    /// As regras de arquivo ancorado, copiadas do provider.
+    companions: Vec<CompanionRule>,
+    /// O projeto de cada documento ancorado.
+    ///
+    /// Só os ancorados entram: um `.ts` o analisador resolve sozinho, e mandar
+    /// `projectFileName` para ele seria dizer o que ele já sabe.
+    projetos: Mutex<HashMap<DocumentId, String>>,
 }
 
 impl ActiveTypeScriptService {
@@ -220,17 +300,109 @@ impl ActiveTypeScriptService {
     async fn abrir(&self, path: &Path, texto: &str) -> Result<(), LanguageError> {
         // `open` não tem resposta no protocolo, e esperar por uma travaria toda
         // abertura de arquivo.
+        let mut argumentos = serde_json::json!({
+            "file": path_argument(path),
+            "fileContent": texto,
+        });
+        // A espécie só é declarada para código. Declarar `TS` para um template
+        // faria o analisador tentar lê-lo como TypeScript; sem espécie, ele o
+        // trata como recurso, que é o que o plugin recolhe.
+        if !self.e_ancorado(path) {
+            argumentos["scriptKindName"] = serde_json::Value::String("TS".to_owned());
+        }
         self.session
-            .notify(
-                "open",
-                serde_json::json!({
-                    "file": path_argument(path),
-                    "fileContent": texto,
-                    "scriptKindName": "TS",
-                }),
-            )
+            .notify("open", argumentos)
             .await
             .map_err(|detalhe| self.failure(detalhe))
+    }
+
+    /// Este caminho é de um arquivo que precisa de irmão para ter projeto?
+    fn e_ancorado(&self, path: &Path) -> bool {
+        self.companions
+            .iter()
+            .any(|regra| regra.anchor_of(path).is_some())
+    }
+
+    /// Descobre a qual projeto um arquivo ancorado pertence.
+    ///
+    /// # Por que o irmão precisa passar pelo analisador
+    ///
+    /// Medido: `projectInfo` sobre um `.ts` que nunca foi aberto devolve
+    /// `undefined` — o projeto configurado só passa a existir quando algum
+    /// arquivo dele entra. Então o irmão entra, é perguntado, e sai.
+    ///
+    /// **E sair é seguro:** medido, a completude no template continua
+    /// respondendo depois de o irmão fechar. O projeto configurado sobrevive a
+    /// não ter arquivo aberto — o mesmo fato que faz a memória não voltar
+    /// quando se fecha tudo.
+    ///
+    /// Ele só sai se **nós** o abrimos. Se o editor já o tinha aberto, fechá-lo
+    /// tiraria do analisador o texto que está na tela, e as respostas passariam
+    /// a falar do disco.
+    async fn projeto_do_ancorado(&self, path: &Path) -> Option<String> {
+        let irmao = self
+            .companions
+            .iter()
+            .find_map(|regra| regra.anchor_of(path))?;
+        let ja_aberto = self
+            .documentos
+            .lock()
+            .is_ok_and(|registro| registro.values().any(|(aberto, _)| aberto == &irmao));
+
+        if !ja_aberto {
+            let _ = self
+                .session
+                .notify(
+                    "open",
+                    serde_json::json!({ "file": path_argument(&irmao) }),
+                )
+                .await;
+        }
+        let resposta = self
+            .session
+            .request(
+                "projectInfo",
+                serde_json::json!({
+                    "file": path_argument(&irmao),
+                    "needFileNameList": false,
+                }),
+                LOADING_TIMEOUT,
+            )
+            .await;
+        if !ja_aberto {
+            let _ = self
+                .session
+                .notify(
+                    "close",
+                    serde_json::json!({ "file": path_argument(&irmao) }),
+                )
+                .await;
+        }
+        let configurado = resposta
+            .ok()?
+            .get("configFileName")?
+            .as_str()?
+            .to_owned();
+        // Projeto inferido não é projeto: é o sintoma que esta função existe
+        // para evitar, e passá-lo adiante daria respostas vazias em silêncio.
+        (!configurado.contains("inferredProject")).then_some(configurado)
+    }
+
+    /// O `projectFileName` a mandar junto, quando há um.
+    fn projeto(&self, document_id: DocumentId) -> Option<String> {
+        self.projetos.lock().ok()?.get(&document_id).cloned()
+    }
+
+    /// Acrescenta o projeto ao pedido, quando o documento é ancorado.
+    fn com_projeto(
+        &self,
+        document_id: DocumentId,
+        mut argumentos: serde_json::Value,
+    ) -> serde_json::Value {
+        if let Some(projeto) = self.projeto(document_id) {
+            argumentos["projectFileName"] = serde_json::Value::String(projeto);
+        }
+        argumentos
     }
 
     /// Reescreve um intervalo do arquivo aberto no analisador.
@@ -265,6 +437,19 @@ impl ActiveLanguage for ActiveTypeScriptService {
     }
 
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {
+        // O projeto do irmão vem **antes** do próprio arquivo: assim, quando o
+        // template entra, o projeto configurado já existe e ele tem a quem
+        // pertencer. Na ordem inversa ele cairia no inferido primeiro.
+        if self.e_ancorado(&document.path) {
+            if let Some(projeto) = self.projeto_do_ancorado(&document.path).await {
+                self.projetos
+                    .lock()
+                    .map_err(|_| {
+                        LanguageError::Provider("registro de projetos travado".to_owned())
+                    })?
+                    .insert(document.id, projeto);
+            }
+        }
         self.abrir(&document.path, &document.text).await?;
         self.documentos
             .lock()
@@ -314,6 +499,9 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .lock()
             .map_err(|_| LanguageError::Provider("registro de documentos travado".to_owned()))?
             .remove(&document_id);
+        if let Ok(mut projetos) = self.projetos.lock() {
+            projetos.remove(&document_id);
+        }
         self.session
             .notify(
                 "close",
@@ -329,7 +517,13 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .session
             .request(
                 "semanticDiagnosticsSync",
-                serde_json::json!({ "file": path_argument(&path), "includeLinePosition": true }),
+                self.com_projeto(
+                    document_id,
+                    serde_json::json!({
+                        "file": path_argument(&path),
+                        "includeLinePosition": true,
+                    }),
+                ),
                 REQUEST_TIMEOUT,
             )
             .await
@@ -355,11 +549,14 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .session
             .request(
                 "completionInfo",
-                serde_json::json!({
-                    "file": path_argument(&path),
-                    "line": line,
-                    "offset": offset,
-                }),
+                self.com_projeto(
+                    request.document_id,
+                    serde_json::json!({
+                        "file": path_argument(&path),
+                        "line": line,
+                        "offset": offset,
+                    }),
+                ),
                 REQUEST_TIMEOUT,
             )
             .await
@@ -392,11 +589,14 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .session
             .request(
                 "definition",
-                serde_json::json!({
-                    "file": path_argument(&path),
-                    "line": line,
-                    "offset": offset,
-                }),
+                self.com_projeto(
+                    request.document_id,
+                    serde_json::json!({
+                        "file": path_argument(&path),
+                        "line": line,
+                        "offset": offset,
+                    }),
+                ),
                 REQUEST_TIMEOUT,
             )
             .await

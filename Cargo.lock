@@ -882,6 +882,7 @@ dependencies = [
  "ide-toolchain-api",
  "ide-ui",
  "ide-workspace",
+ "language-angular",
  "language-java",
  "language-style",
  "language-typescript",
@@ -1203,6 +1204,14 @@ checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
  "bitflags 2.13.1",
  "libc",
+]
+
+[[package]]
+name = "language-angular"
+version = "0.1.0"
+dependencies = [
+ "language-typescript",
+ "serde_json",
 ]
 
 [[package]]

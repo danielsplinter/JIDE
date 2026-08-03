@@ -14,7 +14,15 @@ mod toolchain;
 pub use analyzer::TYPESCRIPT_LANGUAGE_ID;
 pub use native::{TYPESCRIPT_PROVIDER_ID, TypeScriptLanguageProvider};
 pub use project::{NPM_BUILD_SYSTEM_ID, NpmAdapter, TsConfig, TsConfigError, npm::scripts, tsconfig};
-pub use service::{TYPESCRIPT_SERVICE_PROVIDER_ID, TypeScriptServiceProvider, tsserver_in};
+pub use service::{
+    TYPESCRIPT_SERVICE_PROVIDER_ID, TypeScriptServiceProvider, tsserver_in,
+};
+
+/// A entrada por onde outra crate acrescenta um plugin ao analisador.
+///
+/// Genérica de propósito: esta crate carrega o que lhe entregam e não sabe de
+/// que assunto é. Ver a `24`.
+pub use service::{AnalyzerPlugin, AnalyzerPluginSource, CompanionRule};
 pub use toolchain::{NODE_TOOLCHAIN_ID, NodeToolchainProvider, node_executable};
 
 /// O resolvedor de módulos e o que ele precisa, para quem confere de fora.

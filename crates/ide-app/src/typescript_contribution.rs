@@ -21,8 +21,9 @@ use ide_process::{ProcessRequest, ProcessSupervisor, find_in_path};
 use ide_project::build::BuildSystemRegistry;
 use ide_toolchain_api::ToolchainProvider;
 use language_typescript::{
-    NodeToolchainProvider, NpmAdapter, TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID,
-    TYPESCRIPT_SERVICE_PROVIDER_ID, TypeScriptLanguageProvider, TypeScriptServiceProvider,
+    AnalyzerPluginSource, NodeToolchainProvider, NpmAdapter, TYPESCRIPT_LANGUAGE_ID,
+    TYPESCRIPT_PROVIDER_ID, TYPESCRIPT_SERVICE_PROVIDER_ID, TypeScriptLanguageProvider,
+    TypeScriptServiceProvider,
 };
 
 /// Prefixo dos identificadores de tarefa desta linguagem.
@@ -166,9 +167,22 @@ pub fn register_build_systems(
 /// Ele não vem na contribuição: a contribuição carrega **um** provider, e o dela
 /// é o nativo — o que está sempre lá. Este é registrado ao lado, no host, e a
 /// ordem entre os dois é declarada em [`selection`].
+///
+/// # Por que os plugins entram aqui, e não dentro da crate de TypeScript
+///
+/// Ela não pode conhecê-los: seria a linguagem sabendo dos frameworks que rodam
+/// sobre ela. Quem nomeia as duas é esta raiz de composição, que é o único lugar
+/// da IDE que pode. Ver a `24`.
 #[must_use]
-pub fn service_provider(processes: Arc<dyn ProcessSupervisor>) -> Arc<dyn LanguageProvider> {
-    Arc::new(TypeScriptServiceProvider::new(processes))
+pub fn service_provider(
+    processes: Arc<dyn ProcessSupervisor>,
+    plugins: Vec<Arc<dyn AnalyzerPluginSource>>,
+) -> Arc<dyn LanguageProvider> {
+    let mut provider = TypeScriptServiceProvider::new(processes);
+    for plugin in plugins {
+        provider = provider.with_plugin_source(plugin);
+    }
+    Arc::new(provider)
 }
 
 /// Em que ordem os providers de TypeScript são consultados.

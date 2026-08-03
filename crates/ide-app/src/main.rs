@@ -1,3 +1,4 @@
+mod angular_contribution;
 mod bootstrap;
 mod bridges;
 mod controllers;
