@@ -696,65 +696,63 @@ o Angular estiver portado, entra o segundo adapter atrás da mesma porta, e o
 primeiro fica para quem ficou para trás. É a composição de capacidades da `04`,
 um nível abaixo de onde ela foi escrita.
 
-## ADR-029 — A ponte para o template viaja com a IDE; o motor continua sendo o do projeto
+## ADR-029 — O `ngserver` é um segundo processo de 2 GB, e a decisão é se isso se paga
 
-**Decisão:** o suporte a `.html` de Angular será feito falando **LSP** com o
-`@angular/language-server`, e o arquivo dele **vem embutido no executável da
-IDE** — `include_bytes!`, extraído num diretório de cache com o nome carimbado
-pelo hash do conteúdo, na primeira vez que um projeto Angular abrir. O Node
-continua vindo de fora. As versões do motor — `typescript` e
-`@angular/language-service` — continuam sendo sondadas **no projeto**, por
-`--tsProbeLocations` e `--ngProbeLocations`. Ver a `24`.
+**Decisão:** nenhuma ainda. Esta ADR existe para registrar o que a medição
+derrubou, porque duas premissas que pareciam firmes não são verdade, e a escolha
+muda com elas.
 
-**Motivo:** a sondagem da fase 1 da `24` mostrou que carregar o
-`@angular/language-service` como plugin do `tsserver` **não responde por um
-`.html`** — o plugin carrega, dobra o tempo de carga, e a pergunta nunca chega
-nele, porque um `.html` não é código para o `tsserver`. Quem abre essa porta é o
-`language-server`, que trata o template ele mesmo. E ele **não está em nenhum
-projeto**: nos cinco projetos Angular locais, zero o têm.
+**O que se supunha, e o que se mediu.**
 
-**Por que embutir, e não baixar:** baixar trocaria "13 MB no clone" por "o build
-precisa de rede", e a segunda é pior — quebra em avião, em rede corporativa e em
-máquina nova. Exigir do projeto está fora de questão: é dependência de
-ferramenta, e não de produto, e não se põe no `package.json` de quem usa.
+*Supunha-se que o `ngserver` pudesse entrar no lugar do `tsserver`.* Ele monta o
+próprio `ProjectService`, então parecia ser um `tsserver` de terno novo. **Não é.**
+O `server/index.js` tem `angularOnly: true` **fixo no código** — não é
+configuração, não é flag, não há como desligar. Ele não responde por TypeScript
+comum: uma completude após `this.` num `.ts` devolve **zero itens**, contra seis
+do `tsserver` na mesma posição.
 
-**É um arquivo só, e isso foi verificado.** O `server/index.js` do pacote tem
-13 MB com tudo empacotado dentro. Copiado sozinho — sem `package.json`, sem
-`bin/`, sem `node_modules` — ele sobe e responde ao `initialize`, declarando
-`definitionProvider`, `typeDefinitionProvider`, `referencesProvider`,
-`renameProvider`, `completionProvider`, `hoverProvider`, `signatureHelpProvider`,
-`documentSymbolProvider`, `codeActionProvider` e `inlayHintProvider`. **Referências
-e rename** estão aí, e são justamente o que falta à fase 3 da `25` e o que a `23`
-adiou.
+*Supunha-se que as versões do motor viessem do projeto,* por
+`--ngProbeLocations` e `--tsProbeLocations`. **Não vêm.** O cliente do VS Code
+aponta as duas sondas para `this.context.extensionPath` — a própria extensão —,
+e lá estão `@angular/language-service` 22.0.1 e **`typescript` 6.0.3**. Os cinco
+projetos Angular locais fixam TypeScript 5.9.3. O único caminho para o TS do
+projeto é `--tsdk`, e ele só é passado se quem usa configurar `typescript.tsdk`.
+**O padrão do VS Code é analisar Angular com um TypeScript que não é o do
+projeto.**
 
-**O hash no nome não é preciosismo.** Ele faz a troca de versão se resolver
-sozinha: binário novo, hash novo, arquivo novo, e o antigo vira lixo que a IDE
-apaga. Sem isso, um cache velho sobreviveria à atualização e responderia por uma
-versão que não está mais no binário — a resposta velha com cara de nova, que a
-`21` já nomeou.
+**A conta de memória, medida no `spartacus-develop`,** mesmo arquivo, mesma
+pergunta, mesmo `--max-old-space-size=2048`, amostrada de fora a cada segundo:
 
-**O que esta ADR admite, e a 028 proibia.** A 028 diz que o analisador é o que o
-projeto fixa. Aqui a sonda salva **um** dos cinco projetos medidos:
+| processo | pico | patamar | responde por |
+| --- | --- | --- | --- |
+| `tsserver` | 1906 MB | 1856 MB | `.ts` |
+| `ngserver` | 2186 MB | 2148 MB | `.html`, e o Angular do `.ts` |
+| os dois | **~4,1 GB** | **~4,0 GB** | tudo |
 
-| projeto | Angular | `@angular/language-service` |
-| --- | --- | --- |
-| spartacus-develop | 21.2.17 | 21.2.17 |
-| j-fis-cloud | 21.2.11 | ausente |
-| j-fis-cloud-ui-lib | 21.2.11 | ausente |
-| projeto-teste | 21.2.4 | ausente |
-| lei-do-esperto | 21.2.6 | ausente |
+Não é "mais memória se substituir". É **o dobro, obrigatoriamente** — o projeto
+inteiro carregado duas vezes, em dois processos Node. É o que o VS Code faz, e é
+por isso que ele é pesado em Angular.
 
-Nos outros quatro, quem responde é o motor embutido — hoje 22.0.1, um major à
-frente. **Isso é exatamente o risco que a 028 nomeia**, e está sendo aceito de
-olhos abertos, por três razões: o `typescript`, que é quem decide se um tipo bate,
-vem do projeto **sempre**, porque esse todo projeto tem; o desacordo possível é
-de sintaxe de template, que é aditiva entre majors; e a alternativa — escrever o
-parser — custa **um parser por revisão de sintaxe, para sempre**, que é o que o
-`angular-plugin` do IntelliJ carrega em quatro cópias.
+**E ele entrega.** Uma completude dentro de `{{ cartEntry. }}` devolveu 20
+membros reais do tipo da entrada — `basePrice`, `deliveryMode`,
+`configurationInfos` —, que é exatamente o que a sondagem do plugin da `24` não
+conseguiu. O `initialize` declara ainda `referencesProvider` e `renameProvider`,
+que são o que falta à fase 3 da `25` e o que a `23` adiou.
 
-**O que esta decisão não resolve:** a IDE não fala LSP. Ela fala o protocolo do
-`tsserver`, que é outro. O cliente LSP é o custo real, e ele não envelhece com o
-Angular — é protocolo, e serve a qualquer servidor depois. Como ele convive com
-o `tsserver` que já sobe — dois processos Node, ou um só, já que o `ngserver`
-monta o próprio `ProjectService` — **não está decidido aqui**, e a conta de
-memória depende disso: substituindo, continua 1,9 GB; ao lado, dobra.
+**O tamanho a embarcar não é 13 MB.** São 13 do servidor, 14 do
+`@angular/language-service` e 24 do `typescript` — **51 MB**, porque as sondas
+apontam para o pacote e não para o projeto.
+
+**O que fica para decidir.** A pergunta deixou de ser "de onde vem o arquivo" e
+passou a ser **se 2 GB a mais valem o template respondendo**. As saídas na mesa:
+
+- **Aceitar os dois processos**, como o VS Code. Custa ~4 GB e 51 MB embarcados;
+  entrega template, referências e rename.
+- **Subir o `ngserver` sob demanda**, só quando um `.html` de componente abrir, e
+  derrubá-lo quando o último fechar. Quem só mexe em `.ts` nunca paga. A `21` já
+  tem a máquina de subir e derrubar provider, e a lição dela vale aqui: subir sob
+  demanda **na thread da interface** trava a janela por trinta segundos.
+- **Não ter tipo no template**, e deixar o `.html` como HTML puro, que é o que a
+  IDE faz hoje e o que a fase 1 da `24` mantém como piso.
+
+Nenhuma é óbvia, e a segunda só é honesta se a espera não parar a janela.
