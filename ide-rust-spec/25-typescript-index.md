@@ -60,7 +60,66 @@ nativo de Java hoje, sem processo externo nenhum.
 | barris (`index.ts`, `public_api.ts`) | 2 279 |
 
 Cerca de 195 mil símbolos, contra os 339 664 que o índice Java guarda em 103 MB.
-Um índice na mesma forma ficaria na casa das **dezenas de MB**.
+Um índice na mesma forma ocuparia dezenas de MB **em disco** — e a memória que ele
+custa não é esse número. Ver "O índice mora no disco".
+
+## O índice mora no disco, e a memória é só o que a consulta tocou
+
+O erro a não cometer é trocar um programa residente por um índice residente. A
+`20` já resolveu isto para Java, e o desenho é o mesmo aqui: **o índice é um
+arquivo, e as consultas saem dos bytes**, sem materializar estrutura nenhuma.
+
+### O que a `20` conseguiu, e onde ela parou
+
+Ela queria mapear o arquivo em memória e deixar o sistema operacional ser o cache
+— residente o que foi tocado, despejado o frio sob pressão —, e por duas razões
+explícitas **não** escreveu um cache próprio: não há política de despejo para
+acertar melhor que a do sistema, e um cache próprio seria uma terceira cópia da
+mesma informação, que é a origem do defeito silencioso que a `19` combateu.
+
+O mapeamento esbarrou em `unsafe_code = "forbid"` (ADR-023). O que ficou no lugar
+foi **ler o arquivo inteiro para um vetor de bytes**: as consultas já saem dos
+bytes, mas os 103 MB são memória nossa, retida enquanto a IDE viver. A própria
+`20` registra a perda: "é redução, não empréstimo".
+
+### O caminho que não precisa nem de mapeamento nem de cache escrito à mão
+
+**Ler sob demanda.** Abrir o arquivo, procurar o deslocamento na tabela, e ler só
+os bytes daquele registro. É I/O comum, seguro, sem dependência nova — e quem
+mantém em cache o que foi lido é o sistema operacional, de graça, com a política
+dele.
+
+Medido contra um arquivo de 100 MB, leituras de 4 KB em posições aleatórias:
+
+| | |
+| --- | --- |
+| primeira passada | 30,3 µs por leitura |
+| segunda passada, cache do sistema quente | 28,1 µs |
+| memória retida por nós | **o descritor do arquivo** |
+
+Os 30 µs são teto: a medição foi feita por um interpretador, com o laço dele por
+cima. Uma consulta que toque vinte registros custa 600 µs — a mesma ordem do
+`Ctrl+clique` de 1,2 ms que a `20` já entrega e que ninguém reclamou.
+
+É exatamente o que o mapeamento daria, obtido por leitura: **memória elástica**,
+que o sistema recupera sob pressão, e que não aparece como memória do processo da
+IDE.
+
+### O que isso significa para o número desta especificação
+
+| | |
+| --- | --- |
+| índice em disco | dezenas de MB |
+| memória nossa, em repouso | perto de zero |
+| memória nossa, respondendo | o que a consulta materializa |
+| memória do sistema, elástica | o que foi tocado recentemente |
+
+E a consequência que vale dizer em voz alta: **isto também se aplica ao índice de
+Java**. Os 103 MB retidos hoje são leitura antecipada de um arquivo que já é
+consultado por bytes; trocar por leitura sob demanda é a mesma mudança, e a `20`
+já diz que "trocar leitura por mapeamento é uma linha" porque tudo abaixo do
+carregamento trabalha sobre `&[u8]`. Fica **registrado aqui e proposto à `20`**,
+não decidido por esta especificação.
 
 ## O que decide tudo: em Java o nome basta, em TypeScript não
 
@@ -161,10 +220,10 @@ sobe na primeira pergunta que o índice não souber responder.
 **Enquanto o analisador roda, não há ganho nenhum.** Ele carrega os 11 287
 arquivos de qualquer forma; o índice não muda nada do que ele faz.
 
-| postura | memória | custo |
+| postura | memória nossa | custo |
 | --- | --- | --- |
-| índice responde, sem analisador | ~**60 MB** | sem `.` nos casos do grupo 3 |
-| índice na frente, analisador sob demanda | 60 MB até o primeiro caso do grupo 3 | nenhum, mas o ganho é adiamento |
+| índice responde, sem analisador | **perto de zero em repouso** | sem `.` nos casos do grupo 3 |
+| índice na frente, analisador sob demanda | idem, até o primeiro caso do grupo 3 | nenhum, mas o ganho é adiamento |
 | como está hoje | 1 900 MB desde o primeiro `.ts` | nenhum |
 
 Num código Angular, tocar num `Observable` é questão de minutos. **O ganho
@@ -219,11 +278,18 @@ O grupo 1 inteiro, sem resolução de módulos.
 - varredura do projeto pelas raízes que o `tsconfig.json` já entrega (ADR-027);
 - tabela de declarações no formato do índice Java: nome, tipo, posição, arquivo
   por número;
+- **o índice nasce em disco**, e a consulta lê só os bytes de que precisa. Não há
+  fase em que ele viva em memória "por enquanto": construir residente e migrar
+  depois é o caminho que a `20` percorreu, e ela mediu 178 MB antes de chegar aos
+  103 MB;
 - `workspace_types` respondido do índice.
 
 **Critério:** `Ctrl+L` num projeto **sem `node_modules`** encontra os tipos, em
-menos de 50 ms, e o número de resultados bate com o que o analisador devolve no
-mesmo projeto **com** `node_modules`. A comparação com o analisador é o teste —
+menos de 50 ms, com o processo da IDE crescendo **menos de 10 MB** em relação ao
+que ele ocupa sem índice nenhum — é o critério que separa "índice em disco" de
+"índice residente", e sem ele a fase pode ser dada por cumprida do jeito errado.
+O número de resultados bate com o que o analisador devolve no mesmo projeto
+**com** `node_modules`. A comparação com o analisador é o teste —
 o mesmo desenho da ADR-027, em que a divergência é defeito nosso.
 
 ### Fase 2 — Resolução de módulos ⬜
