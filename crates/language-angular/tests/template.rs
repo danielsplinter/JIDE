@@ -81,19 +81,20 @@ fn algum_template(raiz: &Path) -> Option<(PathBuf, String, TextPosition)> {
 /// A posição logo depois do ponto de um `{{ algo. }}` em que `algo` é **campo
 /// do componente**.
 ///
-/// # Por que o campo tem de ser do componente, e por que isso não é escolher a
-/// dedo
+/// # O critério da amostra, e por que ele não é escolher a dedo
 ///
-/// O critério da fase fala dos **membros da classe do componente**, e é isso que
-/// precisa ser exercido. Um template real também tem `{{ model. }}` vindo de um
-/// `let-model` de diretiva, cujo contexto o serviço legitimamente não resolve —
-/// e a primeira execução caiu justamente num desses, num `ng-template` com
-/// `cxOutletRef`.
+/// Um template real tem posições que o serviço **não deve** resolver: um
+/// `{{ model. }}` vindo de `let-model` num `ng-template`, cujo contexto é de uma
+/// diretiva. Cobrar resposta ali seria cobrar o que não existe — e a primeira
+/// execução caiu justamente num desses.
 ///
-/// Aceitar aquela posição faria o teste cobrar do plugin uma resposta que ele
-/// não deve dar; recusá-la sem critério seria escolher o caso que passa. O
-/// critério é o do enunciado, e ele é verificável: o nome antes do ponto está
-/// declarado no `.ts` irmão.
+/// O critério não é "declarado no `.ts`", e essa foi a segunda tentativa
+/// errada: ela rejeitava `@if (jogador(); as jogadorAtual)`, que **é**
+/// resolvível e que o serviço resolve. O critério é o do enunciado — o nome tem
+/// de estar **ligado a algo que a IDE pode ver**: um membro da classe do
+/// componente, ou um apelido dado no próprio template.
+///
+/// O `let-` de diretiva não é nenhum dos dois, e continua de fora.
 fn depois_do_ponto(texto: &str, componente: &str) -> Option<TextPosition> {
     for (numero, linha) in texto.lines().enumerate() {
         let Some(abre) = linha.find("{{") else {
@@ -109,7 +110,7 @@ fn depois_do_ponto(texto: &str, componente: &str) -> Option<TextPosition> {
         if nome.is_empty() || !nome.chars().all(|c| c.is_alphanumeric() || c == '_') {
             continue;
         }
-        if !declara_o_campo(componente, nome) {
+        if !declara_o_campo(componente, nome) && !apelidado_no_template(texto, nome) {
             continue;
         }
         let coluna = linha[..abre + 2 + ponto + 1].chars().count();
@@ -141,6 +142,16 @@ fn declara_o_campo(componente: &str, nome: &str) -> bool {
         };
         resto.starts_with(':') || resto.starts_with(" =") || resto.starts_with('=')
     })
+}
+
+/// Este nome é apelido dado no próprio template?
+///
+/// `@if (jogador(); as jogadorAtual)` e `*ngIf="x as y"` ligam um nome a uma
+/// expressão que está ali mesmo, e o serviço resolve os dois. Um `let-model`,
+/// não: o valor vem da diretiva, e não do template.
+fn apelidado_no_template(texto: &str, nome: &str) -> bool {
+    let apelido = format!("as {nome}");
+    texto.contains(&apelido) && !texto.contains(&format!("let-{nome}"))
 }
 
 #[test]

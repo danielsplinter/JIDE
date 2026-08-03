@@ -701,9 +701,29 @@ um nível abaixo de onde ela foi escrita.
 **Decisão:** o suporte a `.html` de Angular será feito carregando o
 `@angular/language-service` como **plugin do `tsserver` do projeto**, e
 perguntando sobre o template com **`projectFileName`** nomeando o `tsconfig` do
-componente irmão. O pacote do plugin **viaja com a IDE** — 14 MB, apontados por
+componente irmão. O pacote do plugin **viaja dentro do executável** — 4,1 MB,
+extraídos num cache carimbado pelo conteúdo e apontados por
 `--pluginProbeLocations` —, e é usado quando o projeto não o tem. **Nenhum
 processo a mais.** Ver a fase 1 da `24`.
+
+**Dentro do executável, e não numa pasta ao lado.** A IDE é um arquivo, e "vem
+junto" precisa continuar querendo dizer *um arquivo para copiar*. Pasta ao lado
+depende de o empacotamento acertar e some quando alguém copia só o binário —
+que é exatamente o que se faz.
+
+**São 4,1 MB e não 14.** O pacote publicado tem 14 MB, dos quais **9 são um
+sourcemap embutido** num arquivo só; os `.d.ts` servem a quem compila contra o
+pacote e nada os lê em execução. O que sobrou é a cadeia que o `tsserver`
+percorre — `package.json`, `index.js`, `factory_bundle.js`,
+`bundles/language-service.js` — e o cabeçalho de licença MIT, que a MIT exige e
+que não foi tocado. Verificado: o pacote podado responde os mesmos 13 membros
+que o inteiro.
+
+**O carimbo do cache é o tamanho dos arquivos embarcados**, e não um resumo
+criptográfico: o que se precisa é distinguir versões, e duas versões do mesmo
+bundle não têm o mesmo número de bytes. Binário novo escreve num diretório novo,
+e o antigo deixa de ser procurado — sem isso um cache velho sobreviveria à
+atualização e responderia por uma versão que não está mais no executável.
 
 **Motivo:** é o único arranjo medido que responde pelo template sem dobrar a
 memória nem exigir um parser nosso.
