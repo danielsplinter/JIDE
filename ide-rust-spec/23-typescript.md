@@ -855,9 +855,11 @@ esconder. Este foi encontrado instrumentando a leitura, e não raciocinando.
 
 **A memória não foi medida** — e foi depois. Ver "O medidor de memória", abaixo.
 
-**O projeto em TypeScript 4.1 não foi exercido.** O teste roda contra o 5.x. Que
-um adapter só atenda as duas pontas é a aposta da ADR-028, e ela continua **não
-verificada** — o que existe é o argumento de que o protocolo é estável.
+**O projeto em TypeScript 4.1 não foi exercido** — e foi depois, fechando a
+ADR-028. Um projeto fixado no 4.1 passa por localizar, subir, completar, buscar
+tipo e mudar por intervalo, sem nenhuma ramificação por versão. O teste confere
+que o pacote instalado é mesmo o 4.1, e que o analisador executado veio de dentro
+do projeto.
 
 **`change_document` reabria o arquivo inteiro** — e passou a ir por intervalo
 depois. Ver "A mudança por intervalo", abaixo.

@@ -678,6 +678,19 @@ ramificar por versão — o que muda entre projetos é qual arquivo se executa, 
 como se conversa com ele. É por isso que "o analisador é o do projeto" custa
 pouco, e é o que torna a decisão sustentável.
 
+**Verificado, e não mais suposto.** Isto era argumento — "o protocolo é estável" —
+enquanto todo teste rodava contra o 5.x, e ficou registrado como pendência por
+isso. Um projeto fixado em **TypeScript 4.1** passou a ser exercido pelo caminho
+que mais mudaria se a aposta estivesse errada: localizar, subir, completar, buscar
+tipo e mudar por intervalo. Nenhuma ramificação por versão foi necessária, e
+nenhuma existe no código.
+
+O teste confere duas coisas que um teste ingênuo deixaria passar: que o pacote
+instalado é **mesmo** o 4.1 — `npm install` de uma versão indisponível resolveria
+para outra, e o teste passaria falando do 5.x de novo — e que o analisador
+executado veio **de dentro do projeto**, e não de um `node_modules` numa pasta
+acima, que é precisamente a confusão que esta ADR existe para evitar.
+
 **O caminho de volta existe e está nomeado.** No dia em que os projetos migrarem e
 o Angular estiver portado, entra o segundo adapter atrás da mesma porta, e o
 primeiro fica para quem ficou para trás. É a composição de capacidades da `04`,

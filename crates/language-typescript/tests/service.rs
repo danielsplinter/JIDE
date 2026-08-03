@@ -624,3 +624,129 @@ fn the_column_the_analyzer_returns_is_translated_back() {
     assert!(runtime.block_on(ativo.shutdown()).is_ok());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A ADR-028: o analisador é o que o projeto fixa, e um adapter serve as duas
+/// pontas.
+///
+/// O usuário tem projetos em Angular 11 e em Angular 15, que fixam TypeScript
+/// muito distantes. A decisão foi não ter tabela de compatibilidade no nosso
+/// código: a IDE sobe o `tsserver` que estiver no `node_modules` do projeto, seja
+/// qual for. Até aqui isso era **argumento** — "o protocolo é estável" — e todo
+/// teste rodava contra o 5.x. Este é o que fecha a decisão, e o faz pelo caminho
+/// que mais mudaria se a aposta estivesse errada: localizar, subir, completar,
+/// buscar tipo e **mudar por intervalo**.
+#[test]
+#[ignore = "exige Node instalado e `npm install typescript@4.1` no projeto de teste"]
+fn the_adapter_serves_a_typescript_4_1_project() {
+    let root = temporary("typescript-4-1");
+    assert!(std::fs::write(root.join("package.json"), r#"{"name":"t"}"#).is_ok());
+    assert!(
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{ "include": ["src/**/*.ts"] }"#,
+        )
+        .is_ok()
+    );
+    let fonte = root.join("src");
+    assert!(std::fs::create_dir_all(&fonte).is_ok());
+    #[cfg(windows)]
+    const NPM: &str = "npm.cmd";
+    #[cfg(not(windows))]
+    const NPM: &str = "npm";
+    let instalado = std::process::Command::new(NPM)
+        .args(["install", "typescript@4.1", "--no-audit", "--no-fund"])
+        .current_dir(&root)
+        .status();
+    assert!(
+        instalado.is_ok_and(|status| status.success()),
+        "o teste instala o TypeScript 4.1 no projeto temporário"
+    );
+
+    // A versão instalada é conferida: `npm install` de uma versão indisponível
+    // resolveria para outra, e o teste passaria falando do 5.x outra vez.
+    let manifesto = std::fs::read_to_string(
+        root.join("node_modules")
+            .join("typescript")
+            .join("package.json"),
+    );
+    let Ok(manifesto) = manifesto else {
+        panic!("o pacote precisa estar instalado para se conferir a versão");
+    };
+    assert!(
+        manifesto.contains(r#""version": "4.1"#),
+        "o projeto precisa estar mesmo no 4.1, e o manifesto diz outra coisa"
+    );
+
+    // E o analisador usado é o **do projeto**. Sem isto, um `node_modules` numa
+    // pasta acima do temporário faria o teste passar falando de outra versão, que
+    // é exatamente a confusão que a ADR-028 existe para evitar.
+    let Some(analisador) = tsserver_in(&root) else {
+        panic!("o analisador do projeto precisa ser encontrado");
+    };
+    assert!(
+        analisador.starts_with(&root),
+        "o analisador precisa vir do projeto, e veio de {analisador:?}"
+    );
+
+    let arquivo = fonte.join("pedido.ts");
+    let codigo = "export class Pedido { total = 0; }\nconst p = new Pedido();\np.\n";
+    assert!(std::fs::write(&arquivo, codigo).is_ok());
+
+    let runtime = runtime();
+    let ativo = match runtime.block_on(provider().activate(context(&root))) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador que o projeto fixa precisa subir: {erro}"),
+    };
+    assert!(
+        runtime
+            .block_on(ativo.open_document(DocumentSnapshot {
+                id: DocumentId(1),
+                path: arquivo,
+                version: 1,
+                text: codigo.to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Mudança por intervalo, que é o comando mais novo que mandamos.
+    let ponto = TextPosition { line: 0, column: 32 };
+    assert!(
+        runtime
+            .block_on(ativo.change_document(DocumentChange {
+                document_id: DocumentId(1),
+                version: 2,
+                range: Some(TextRange { start: ponto, end: ponto }),
+                text: " desconto = 0;".to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(1));
+
+    let itens = runtime.block_on(ativo.completion(CompletionRequest {
+        document_id: DocumentId(1),
+        position: TextPosition { line: 2, column: 2 },
+        prefix: String::new(),
+    }));
+    let itens = match itens {
+        Ok(itens) => itens,
+        Err(erro) => panic!("a completação precisa responder no 4.1: {erro}"),
+    };
+    let nomes: Vec<_> = itens.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        nomes.contains(&"total") && nomes.contains(&"desconto"),
+        "o 4.1 precisa entender o membro digitado como o 5.x entende: {nomes:?}"
+    );
+
+    let achados = match runtime.block_on(ativo.workspace_types("Pedido", 20)) {
+        Ok(achados) => achados,
+        Err(erro) => panic!("a busca por tipo precisa responder no 4.1: {erro}"),
+    };
+    assert!(
+        achados.iter().any(|s| s.name == "Pedido"),
+        "a busca por tipo precisa achar o que o projeto declara: {achados:?}"
+    );
+
+    assert!(runtime.block_on(ativo.shutdown()).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}
