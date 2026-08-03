@@ -829,3 +829,98 @@ fn a_hyphenated_query_finds_the_type_it_names() {
     assert!(runtime.block_on(ativo.shutdown()).is_ok());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A primeira busca, feita logo depois de abrir, encontra o que existe.
+///
+/// # O defeito que este teste guarda
+///
+/// Procurando num projeto Angular grande, a primeira busca depois de abrir a IDE
+/// não achava nada; a mesma busca minutos depois achava. Parecia coisa de
+/// reiniciar, e não era: era **quanto tempo o analisador tinha de vida** quando a
+/// pergunta chegou.
+///
+/// O `tsserver` não responde nada enquanto monta o projeto — ele enfileira os
+/// pedidos e responde todos juntos no fim. Medido contra 8 958 arquivos:
+/// `projectLoadingStart` aos 3,5 s, `projectLoadingFinish` aos **30 s**, e as oito
+/// perguntas enfileiradas respondidas nesse instante. Com prazo de 5 s, toda
+/// busca nesse intervalo virava "não respondeu a tempo", e numa busca isso é
+/// indistinguível de "não achei nada".
+///
+/// # Por que ele precisa de um projeto grande
+///
+/// Um projeto de teste criado na hora carrega em menos de um segundo, e a corrida
+/// **não acontece**. Este teste passaria sem a correção — que é o motivo de ele
+/// apontar para um projeto de verdade, pelo caminho em `IDE_PROJETO_GRANDE`.
+#[test]
+#[ignore = "exige IDE_PROJETO_GRANDE com node_modules instalado; leva ~40s"]
+fn the_first_search_after_opening_finds_what_exists() {
+    let Some(root) = std::env::var_os("IDE_PROJETO_GRANDE").map(PathBuf::from) else {
+        panic!("aponte IDE_PROJETO_GRANDE para um projeto grande com node_modules");
+    };
+    assert!(root.is_dir(), "o projeto precisa existir: {root:?}");
+    assert!(
+        tsserver_in(&root).is_some(),
+        "o projeto precisa ter `node_modules` instalado para o analisador subir"
+    );
+
+    let runtime = runtime();
+    let ativo = match runtime.block_on(provider().activate(context(&root))) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador precisa subir: {erro}"),
+    };
+
+    // Um arquivo qualquer do projeto, para o analisador ter o que montar.
+    let Some(algum) = primeiro_ts(&root) else {
+        panic!("o projeto precisa ter algum `.ts`");
+    };
+    let texto = std::fs::read_to_string(&algum).unwrap_or_default();
+    assert!(
+        runtime
+            .block_on(ativo.open_document(DocumentSnapshot {
+                id: DocumentId(1),
+                path: algum,
+                version: 1,
+                text: texto,
+            }))
+            .is_ok()
+    );
+
+    // **Sem esperar.** É o que o usuário faz: abre a IDE e procura.
+    let inicio = std::time::Instant::now();
+    let achados = runtime.block_on(ativo.workspace_types("customlogin", 100));
+    let achados = match achados {
+        Ok(achados) => achados,
+        Err(erro) => panic!("a primeira busca não pode falhar por prazo: {erro}"),
+    };
+    println!(
+        "a primeira busca respondeu em {:?} com {} resultados",
+        inicio.elapsed(),
+        achados.len()
+    );
+    assert!(
+        !achados.is_empty(),
+        "a primeira busca precisa achar o que o projeto declara"
+    );
+
+    assert!(runtime.block_on(ativo.shutdown()).is_ok());
+}
+
+/// Um `.ts` qualquer sob a raiz, sem descer em `node_modules`.
+fn primeiro_ts(root: &std::path::Path) -> Option<PathBuf> {
+    let mut pilha = vec![root.to_path_buf()];
+    while let Some(pasta) = pilha.pop() {
+        let entradas = std::fs::read_dir(&pasta).ok()?;
+        for entrada in entradas.flatten() {
+            let caminho = entrada.path();
+            let nome = caminho.file_name()?.to_str()?.to_owned();
+            if caminho.is_dir() {
+                if nome != "node_modules" && !nome.starts_with('.') {
+                    pilha.push(caminho);
+                }
+            } else if nome.ends_with(".ts") && !nome.ends_with(".d.ts") {
+                return Some(caminho);
+            }
+        }
+    }
+    None
+}

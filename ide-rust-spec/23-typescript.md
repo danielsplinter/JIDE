@@ -1127,6 +1127,42 @@ três pedaços. Filtrar o lixo não adianta quando o que se procura nunca chega.
 
 Duas correções, e a que parecia suficiente era a menor das duas.
 
+#### E a primeira busca depois de abrir não achava nada
+
+A mesma busca, minutos depois, achava. Parecia coisa de reiniciar a IDE, e não
+era: era **quanto tempo o analisador tinha de vida** quando a pergunta chegou.
+
+**O `tsserver` não responde nada enquanto monta o projeto.** Ele enfileira os
+pedidos e responde todos juntos no fim. Medido contra os 8 958 arquivos:
+
+| instante | o que aconteceu |
+| --- | --- |
+| 12 ms | primeira pergunta enviada |
+| 3,5 s | `projectLoadingStart` |
+| **30,4 s** | `projectLoadingFinish`, e **as oito perguntas respondidas de uma vez** |
+
+Nosso prazo era de 5 s. Toda busca feita nesse intervalo virava "o analisador não
+respondeu a tempo" — e numa busca essa mensagem é indistinguível de "não achei
+nada".
+
+O sinal sempre esteve no protocolo; nós é que descartávamos os eventos. A sessão
+passou a anotar `projectLoadingFinish`, e a busca pelo projeto usa um prazo longo
+enquanto isso não chegou.
+
+**Só a busca ganha esse prazo, e por três razões**: quem a pediu está esperando
+por ela, ela roda fora da thread da interface, e ela é cancelável — o giro na tela
+é o que torna trinta segundos uma espera honesta em vez de um travamento. As três
+são conquistas dos consertos anteriores, e é o que permite esta correção ser
+simples. Completação continua com o prazo curto: ali quem digita segue digitando,
+e uma lista que aparecesse trinta segundos depois seria pior do que nenhuma.
+
+##### O teste precisa de um projeto de verdade, e é o ponto
+
+Um projeto de teste criado na hora carrega em menos de um segundo, e a corrida
+**não acontece** — o teste passaria sem a correção. Por isso este aponta para um
+projeto real, e foi conferido por sabotagem: com o prazo curto de volta, ele
+reprova em 5,04 s com exatamente a mensagem que aparecia na tela.
+
 #### O que isto confirma sobre o método
 
 Três dos defeitos desta especificação vieram de testar a camada de baixo e

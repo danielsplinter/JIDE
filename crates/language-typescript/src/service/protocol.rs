@@ -117,6 +117,15 @@ pub(crate) struct Session {
     pendentes: Pendentes,
     /// Ligado quando a saída fecha: o processo morreu.
     morto: Arc<AtomicBool>,
+    /// Ligado quando o analisador termina de carregar um projeto pela primeira
+    /// vez.
+    ///
+    /// **Enquanto isso é falso, ele não responde nada.** O `tsserver` enfileira
+    /// os pedidos que chegam durante a carga e responde todos juntos no fim.
+    /// Medido contra um projeto Angular de 8 958 arquivos: `projectLoadingStart`
+    /// aos 3,5 s, `projectLoadingFinish` aos **30 s**, e as oito perguntas
+    /// enfileiradas respondidas nesse instante — nenhuma antes.
+    pronto: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -126,6 +135,8 @@ impl Session {
         let leitura_conversa = Arc::clone(&conversa);
         let entregar = Arc::clone(&pendentes);
         let avisar = Arc::clone(&morto);
+        let pronto = Arc::new(AtomicBool::new(false));
+        let anotar_pronto = Arc::clone(&pronto);
 
         // O laço de leitura é próprio, e não pode ser o de quem pergunta:
         // eventos chegam sem pedido, e a resposta de uma pergunta pode vir
@@ -148,7 +159,12 @@ impl Session {
                 else {
                     return;
                 };
-                runtime.block_on(leitura(&leitura_conversa, &entregar, &avisar));
+                runtime.block_on(leitura(
+                    &leitura_conversa,
+                    &entregar,
+                    &avisar,
+                    &anotar_pronto,
+                ));
             })
             .ok();
 
@@ -157,7 +173,18 @@ impl Session {
             proxima_seq: AtomicU64::new(1),
             pendentes,
             morto,
+            pronto,
         }
+    }
+
+    /// Se o analisador já terminou de montar o projeto ao menos uma vez.
+    ///
+    /// Antes disso, todo prazo curto vira "não respondeu a tempo" — e essa
+    /// mensagem, numa busca, é indistinguível de "não achei nada". Foi o que se
+    /// via: a primeira busca depois de abrir a IDE não achava nada, e a mesma
+    /// busca minutos depois achava.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.pronto.load(Ordering::Acquire)
     }
 
     pub(crate) fn is_alive(&self) -> bool {
@@ -234,6 +261,7 @@ async fn leitura(
     conversa: &Arc<dyn ProcessConversation>,
     entregar: &Pendentes,
     avisar: &AtomicBool,
+    pronto: &AtomicBool,
 ) {
     while let Some(valor) = read_message(conversa.as_ref()).await {
         match classify(&valor) {
@@ -256,6 +284,12 @@ async fn leitura(
                 }
             }
             Some(Message::Event { name }) => {
+                // O único evento que muda o que fazemos: ele diz quando parar de
+                // dar ao analisador o prazo de quem ainda está montando o
+                // projeto.
+                if name == "projectLoadingFinish" {
+                    pronto.store(true, Ordering::Release);
+                }
                 tracing::debug!(evento = name, "evento do analisador");
             }
             None => tracing::debug!("mensagem do analisador em formato desconhecido"),

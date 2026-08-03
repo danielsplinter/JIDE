@@ -35,6 +35,23 @@ pub const TYPESCRIPT_SERVICE_PROVIDER_ID: &str = "typescript.service";
 /// um projeto enorme; nos dois casos, esperar mais só adia a degradação.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Quanto se espera enquanto o analisador ainda monta o projeto.
+///
+/// **Ele não responde nada até terminar.** Os pedidos que chegam durante a carga
+/// ficam enfileirados e são respondidos todos juntos no fim; medido contra um
+/// projeto Angular de 8 958 arquivos, isso levou 30 s. Com o prazo curto, toda
+/// busca feita nesse intervalo virava "não respondeu a tempo" — que numa busca é
+/// indistinguível de "não achei nada". Era o que acontecia com a primeira busca
+/// depois de abrir a IDE.
+///
+/// Só a **busca pelo projeto** ganha este prazo, e por três razões: quem a pediu
+/// está esperando por ela, ela roda fora da thread da interface, e ela é
+/// cancelável — o giro na tela é o que torna a espera honesta em vez de um
+/// travamento. Completação continua com o prazo curto: ali quem digita segue
+/// digitando, e uma lista que aparecesse trinta segundos depois seria pior do
+/// que nenhuma.
+const LOADING_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Teto de memória do processo do analisador, em megabytes.
 ///
 /// **É orçamento imposto, e não sofrido.** A `08` trata memória como requisito
@@ -400,6 +417,11 @@ impl ActiveLanguage for ActiveTypeScriptService {
         } else {
             identificador.as_str()
         };
+        let prazo = if self.session.is_ready() {
+            REQUEST_TIMEOUT
+        } else {
+            LOADING_TIMEOUT
+        };
         let resposta = self
             .session
             .request(
@@ -408,7 +430,7 @@ impl ActiveLanguage for ActiveTypeScriptService {
                     "searchValue": busca,
                     "maxResultCount": limit,
                 }),
-                REQUEST_TIMEOUT,
+                prazo,
             )
             .await
             .map_err(|detalhe| self.failure(detalhe))?;
