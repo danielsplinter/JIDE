@@ -131,6 +131,17 @@ pub struct LanguageHost {
     config: LanguageHostConfig,
     registry: Mutex<Registry>,
     next_request_id: AtomicU64,
+    /// Quem a próxima pergunta sem resposta mandou acordar.
+    ///
+    /// **Anotado, e não ativado aqui.** Subir um analisador externo é criar um
+    /// processo, e criar processo no Windows com antivírus no caminho leva o que
+    /// leva — feito na chamada, isso acontece na thread da interface, e a janela
+    /// para. É o mesmo defeito que a busca textual e a busca por tipo já tiveram
+    /// nesta IDE, pela mesma razão.
+    ///
+    /// Quem tem o laço de quadros drena isto e ativa fora dele. Ver a fase 5 da
+    /// `25`.
+    a_acordar: Mutex<Vec<ProviderId>>,
 }
 
 impl LanguageHost {
@@ -151,6 +162,7 @@ impl LanguageHost {
             },
             registry: Mutex::new(Registry::default()),
             next_request_id: AtomicU64::new(1),
+            a_acordar: Mutex::new(Vec::new()),
         }
     }
 
@@ -1101,9 +1113,30 @@ impl LanguageHost {
             })
             .map(|(id, _)| id.clone());
         drop(registry);
-        if let Some(id) = parado {
-            let _ = self.ensure_active(&id);
+        if let Some(id) = parado
+            && let Ok(mut fila) = self.a_acordar.lock()
+            && !fila.contains(&id)
+        {
+            fila.push(id);
         }
+    }
+
+    /// Quem foi mandado acordar e ainda não subiu.
+    ///
+    /// Drenado por quem tem o laço de quadros, que ativa **fora** da thread da
+    /// interface: subir um analisador é criar um processo, e criar processo não
+    /// cabe num quadro.
+    #[must_use]
+    pub fn take_pending_activation(&self) -> Vec<ProviderId> {
+        self.a_acordar
+            .lock()
+            .map(|mut fila| std::mem::take(&mut *fila))
+            .unwrap_or_default()
+    }
+
+    /// Sobe um provider, agora. Quem chama decide em que thread.
+    pub fn activate_provider(&self, provider_id: &ProviderId) -> Result<(), LanguageHostError> {
+        self.ensure_active(provider_id).map(|_| ())
     }
 
     fn worker_for_document(
@@ -1730,11 +1763,24 @@ mod tests {
             matches!(pedir(), Err(LanguageHostError::Unresolved(_))),
             "sem ninguém que saiba e tenha o documento, a resposta é dizer isso"
         );
+        // A pergunta **anota** quem acordar, e não o acorda: subir um analisador
+        // é criar um processo, e criar processo não cabe num quadro. Quem tem o
+        // laço drena e ativa fora da thread da interface.
         assert_eq!(
             externo.activations.load(Ordering::Relaxed),
-            1,
-            "a pergunta que ninguém soube é o que sobe o analisador"
+            0,
+            "a pergunta não pode subir processo na thread de quem perguntou"
         );
+        let pendentes = host.take_pending_activation();
+        assert_eq!(
+            pendentes,
+            vec![ProviderId("ts.externo".to_owned())],
+            "mas ela precisa dizer quem acordar"
+        );
+        for id in pendentes {
+            success(host.activate_provider(&id));
+        }
+        assert_eq!(externo.activations.load(Ordering::Relaxed), 1);
 
         // Ele subiu sem o texto de nada, e quem o tem é a aplicação: ela reabre.
         assert!(

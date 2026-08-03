@@ -738,6 +738,21 @@ isso o giro tinha outro jeito de não parar nunca. Morrer também é uma forma d
 terminar — é a mesma regra que a construção do índice já seguia, e que faltava
 aqui.
 
+#### E acordar travava a janela
+
+Ativar um provider era síncrono, e a pergunta que o acorda vem da thread da
+interface. Subir um processo Node no Windows, com antivírus no caminho, leva o
+que leva — e a janela parava enquanto isso.
+
+**É a terceira vez que este defeito aparece nesta IDE, sempre pelo mesmo
+motivo**: trabalho que não cabe num quadro feito dentro do quadro. Antes foram a
+busca textual, que travava por 106 s com o cache frio, e a busca por tipo, que
+esperava o analisador montar o projeto.
+
+A pergunta passou a **anotar** quem acordar; quem ativa é o laço de quadros, numa
+thread própria. O host decide, e a aplicação executa — a mesma divisão que a
+reoferta de documentos já seguia.
+
 #### E quanto isso economiza, honestamente
 
 Com 14% a 17% dos pontos alcançados pelo índice, **o analisador continua sendo

@@ -651,6 +651,42 @@ impl NativeIde {
         });
     }
 
+    /// Sobe, fora da thread da interface, quem a última pergunta mandou acordar.
+    ///
+    /// **Criar processo não cabe num quadro.** O analisador externo é acordado
+    /// pela primeira pergunta que o índice não soube — e subir um processo Node
+    /// no Windows, com antivírus no caminho, leva o tempo que leva. Feito na
+    /// chamada, isso acontecia na thread da interface e a janela parava: é o
+    /// mesmo defeito que a busca textual e a busca por tipo já tiveram aqui.
+    fn wake_pending_providers(&mut self) {
+        let Some(host) = self.languages.host.as_ref() else {
+            return;
+        };
+        let pendentes = host.take_pending_activation();
+        if pendentes.is_empty() {
+            return;
+        }
+        let host = Arc::clone(host);
+        std::thread::Builder::new()
+            .name("language-wake".to_owned())
+            .spawn(move || {
+                for provider_id in pendentes {
+                    match host.activate_provider(&provider_id) {
+                        Ok(()) => tracing::info!(
+                            provider = provider_id.0,
+                            "provider acordado pela pergunta"
+                        ),
+                        Err(error) => tracing::warn!(
+                            provider = provider_id.0,
+                            %error,
+                            "o provider acordado não subiu"
+                        ),
+                    }
+                }
+            })
+            .ok();
+    }
+
     /// Adianta o giro do carregamento do projeto, e pede o quadro seguinte.
     ///
     /// **A IDE nao sabe o que esta sendo preparado.** Ela pergunta ao host se
@@ -2435,6 +2471,7 @@ impl ApplicationHandler for NativeIde {
         changed |= self.collect_type_search();
         changed |= self.advance_search_spinner();
         changed |= self.advance_project_loading();
+        self.wake_pending_providers();
         self.suspend_idle_languages();
         self.measure_memory();
         // O realce vem da thread do provider e chega quando fica pronto: é aqui

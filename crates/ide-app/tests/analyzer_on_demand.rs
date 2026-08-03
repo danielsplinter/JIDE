@@ -138,8 +138,18 @@ fn opening_does_not_start_the_analyzer_but_an_unanswerable_question_does() {
         },
     ));
 
-    // A ativação é síncrona, mas o processo leva um instante para aparecer na
-    // tabela do sistema.
+    // A pergunta **anota** quem acordar; quem ativa é o laço de quadros, fora da
+    // thread da interface. Aqui o teste faz o papel dele.
+    assert_eq!(
+        processos.live_conversations().len(),
+        0,
+        "perguntar não pode subir processo na thread de quem perguntou"
+    );
+    for provider_id in host.take_pending_activation() {
+        assert!(host.activate_provider(&provider_id).is_ok());
+    }
+
+    // O processo leva um instante para aparecer na tabela do sistema.
     for _ in 0..40 {
         if !processos.live_conversations().is_empty() {
             break;
@@ -226,6 +236,9 @@ fn the_analyzer_that_woke_up_gets_the_documents_it_missed() {
             prefix: String::new(),
         },
     ));
+    for provider_id in host.take_pending_activation() {
+        assert!(host.activate_provider(&provider_id).is_ok());
+    }
 
     // Ele subiu. E o host precisa dizer que o documento falta a ele.
     assert_eq!(
