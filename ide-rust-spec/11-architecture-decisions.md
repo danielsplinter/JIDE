@@ -695,3 +695,66 @@ acima, que é precisamente a confusão que esta ADR existe para evitar.
 o Angular estiver portado, entra o segundo adapter atrás da mesma porta, e o
 primeiro fica para quem ficou para trás. É a composição de capacidades da `04`,
 um nível abaixo de onde ela foi escrita.
+
+## ADR-029 — A ponte para o template viaja com a IDE; o motor continua sendo o do projeto
+
+**Decisão:** o suporte a `.html` de Angular será feito falando **LSP** com o
+`@angular/language-server`, e o arquivo dele **vem embutido no executável da
+IDE** — `include_bytes!`, extraído num diretório de cache com o nome carimbado
+pelo hash do conteúdo, na primeira vez que um projeto Angular abrir. O Node
+continua vindo de fora. As versões do motor — `typescript` e
+`@angular/language-service` — continuam sendo sondadas **no projeto**, por
+`--tsProbeLocations` e `--ngProbeLocations`. Ver a `24`.
+
+**Motivo:** a sondagem da fase 1 da `24` mostrou que carregar o
+`@angular/language-service` como plugin do `tsserver` **não responde por um
+`.html`** — o plugin carrega, dobra o tempo de carga, e a pergunta nunca chega
+nele, porque um `.html` não é código para o `tsserver`. Quem abre essa porta é o
+`language-server`, que trata o template ele mesmo. E ele **não está em nenhum
+projeto**: nos cinco projetos Angular locais, zero o têm.
+
+**Por que embutir, e não baixar:** baixar trocaria "13 MB no clone" por "o build
+precisa de rede", e a segunda é pior — quebra em avião, em rede corporativa e em
+máquina nova. Exigir do projeto está fora de questão: é dependência de
+ferramenta, e não de produto, e não se põe no `package.json` de quem usa.
+
+**É um arquivo só, e isso foi verificado.** O `server/index.js` do pacote tem
+13 MB com tudo empacotado dentro. Copiado sozinho — sem `package.json`, sem
+`bin/`, sem `node_modules` — ele sobe e responde ao `initialize`, declarando
+`definitionProvider`, `typeDefinitionProvider`, `referencesProvider`,
+`renameProvider`, `completionProvider`, `hoverProvider`, `signatureHelpProvider`,
+`documentSymbolProvider`, `codeActionProvider` e `inlayHintProvider`. **Referências
+e rename** estão aí, e são justamente o que falta à fase 3 da `25` e o que a `23`
+adiou.
+
+**O hash no nome não é preciosismo.** Ele faz a troca de versão se resolver
+sozinha: binário novo, hash novo, arquivo novo, e o antigo vira lixo que a IDE
+apaga. Sem isso, um cache velho sobreviveria à atualização e responderia por uma
+versão que não está mais no binário — a resposta velha com cara de nova, que a
+`21` já nomeou.
+
+**O que esta ADR admite, e a 028 proibia.** A 028 diz que o analisador é o que o
+projeto fixa. Aqui a sonda salva **um** dos cinco projetos medidos:
+
+| projeto | Angular | `@angular/language-service` |
+| --- | --- | --- |
+| spartacus-develop | 21.2.17 | 21.2.17 |
+| j-fis-cloud | 21.2.11 | ausente |
+| j-fis-cloud-ui-lib | 21.2.11 | ausente |
+| projeto-teste | 21.2.4 | ausente |
+| lei-do-esperto | 21.2.6 | ausente |
+
+Nos outros quatro, quem responde é o motor embutido — hoje 22.0.1, um major à
+frente. **Isso é exatamente o risco que a 028 nomeia**, e está sendo aceito de
+olhos abertos, por três razões: o `typescript`, que é quem decide se um tipo bate,
+vem do projeto **sempre**, porque esse todo projeto tem; o desacordo possível é
+de sintaxe de template, que é aditiva entre majors; e a alternativa — escrever o
+parser — custa **um parser por revisão de sintaxe, para sempre**, que é o que o
+`angular-plugin` do IntelliJ carrega em quatro cópias.
+
+**O que esta decisão não resolve:** a IDE não fala LSP. Ela fala o protocolo do
+`tsserver`, que é outro. O cliente LSP é o custo real, e ele não envelhece com o
+Angular — é protocolo, e serve a qualquer servidor depois. Como ele convive com
+o `tsserver` que já sobe — dois processos Node, ou um só, já que o `ngserver`
+monta o próprio `ProjectService` — **não está decidido aqui**, e a conta de
+memória depende disso: substituindo, continua 1,9 GB; ao lado, dobra.
