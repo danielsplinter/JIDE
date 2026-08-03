@@ -146,8 +146,9 @@ pub(crate) struct ActiveTypeScriptService {
     session: Session,
     /// Caminho e texto de cada documento aberto.
     ///
-    /// O texto fica aqui porque a mudança é aplicada reabrindo o arquivo
-    /// inteiro, e para reabrir é preciso ter o que reabrir.
+    /// O texto fica aqui porque a mudança vai por intervalo: é preciso ter o
+    /// texto anterior para saber se o intervalo cabe nele, e para reabrir com o
+    /// texto inteiro quando não cabe.
     documentos: Mutex<HashMap<DocumentId, (PathBuf, String)>>,
 }
 
@@ -189,6 +190,24 @@ impl ActiveTypeScriptService {
             .await
             .map_err(|detalhe| self.failure(detalhe))
     }
+
+    /// Reescreve um intervalo do arquivo aberto no analisador.
+    ///
+    /// `change` também não tem resposta no protocolo. Isso é o que a torna
+    /// barata e é o que a torna perigosa: um intervalo errado não volta como
+    /// erro, volta como respostas erradas daí em diante.
+    async fn mudar(
+        &self,
+        path: &Path,
+        atual: &str,
+        range: TextRange,
+        texto: &str,
+    ) -> Result<(), LanguageError> {
+        self.session
+            .notify("change", change_arguments(path, atual, range, texto))
+            .await
+            .map_err(|detalhe| self.failure(detalhe))
+    }
 }
 
 #[async_trait]
@@ -206,15 +225,32 @@ impl ActiveLanguage for ActiveTypeScriptService {
         Ok(())
     }
 
+    /// Manda só o que mudou, e reabre o arquivo quando não pode confiar no
+    /// intervalo.
+    ///
+    /// Reabrir a cada tecla mandava o arquivo inteiro pelo cano — num arquivo de
+    /// 3 000 linhas, isso a cada caractere digitado. O intervalo manda os bytes
+    /// que mudaram.
+    ///
+    /// **A troca só é segura porque a conversão de posição já estava provada.**
+    /// `to_service` é a mesma que carrega completação e definição contra o
+    /// analisador de verdade desde a fase 3c: se ela errasse por um, aqueles
+    /// testes já teriam falhado. Errar aqui é pior do que errar lá — uma
+    /// completação errada aparece na tela, um intervalo errado **reescreve o
+    /// buffer no lugar errado** e envenena tudo o que vier depois, calado.
+    ///
+    /// Por isso a válvula: intervalo que não cabe no texto que temos significa
+    /// que o nosso espelho e o editor discordam, e aí reabrir é o que
+    /// ressincroniza os dois. Ver `cabe_no_texto`.
     async fn change_document(&self, change: DocumentChange) -> Result<(), LanguageError> {
         let (path, atual) = self.documento(change.document_id)?;
         let novo = apply(&atual, change.range, &change.text);
-        // O protocolo tem mudança por intervalo, e ela é o caminho rápido.
-        // Reabrir com o texto inteiro é lento e é **certo**: a conversão de
-        // linha e coluna do domínio para a do analisador erra por um, e errar
-        // aqui reescreve no lugar errado sem erro nenhum a apontar. Trocar por
-        // incremental é trabalho com medição, e não palpite.
-        self.abrir(&path, &novo).await?;
+        match change.range.filter(|range| cabe_no_texto(&atual, *range)) {
+            Some(range) => self.mudar(&path, &atual, range, &change.text).await?,
+            // Sem intervalo é substituição do documento inteiro (ADR-017), e
+            // intervalo que não cabe é desconfiança: os dois pedem o texto todo.
+            None => self.abrir(&path, &novo).await?,
+        }
         self.documentos
             .lock()
             .map_err(|_| LanguageError::Provider("registro de documentos travado".to_owned()))?
@@ -260,8 +296,8 @@ impl ActiveLanguage for ActiveTypeScriptService {
         &self,
         request: CompletionRequest,
     ) -> Result<Vec<CompletionItem>, LanguageError> {
-        let (path, _) = self.documento(request.document_id)?;
-        let (line, offset) = to_service(request.position);
+        let (path, texto) = self.documento(request.document_id)?;
+        let (line, offset) = to_service(&texto, request.position);
         let resposta = self
             .session
             .request(
@@ -297,8 +333,8 @@ impl ActiveLanguage for ActiveTypeScriptService {
         &self,
         request: DefinitionRequest,
     ) -> Result<Vec<Location>, LanguageError> {
-        let (path, _) = self.documento(request.document_id)?;
-        let (line, offset) = to_service(request.position);
+        let (path, texto) = self.documento(request.document_id)?;
+        let (line, offset) = to_service(&texto, request.position);
         let resposta = self
             .session
             .request(
@@ -446,8 +482,31 @@ fn path_argument(path: &Path) -> String {
 ///
 /// Um deslocamento de uma linha aponta para o lugar errado sem erro nenhum a
 /// apontar — a completação viria do que está acima do cursor.
-const fn to_service(position: TextPosition) -> (u32, u32) {
-    (position.line + 1, position.column + 1)
+///
+/// # E a coluna não conta a mesma coisa nos dois lados
+///
+/// **Nós contamos caractere; o analisador conta unidade UTF-16.** Um emoji vale
+/// um caractere e duas unidades, e tudo o que vier depois dele na linha tem
+/// coluna diferente nas duas contagens. Por isso o texto entra aqui: a conversão
+/// não é aritmética, é uma releitura da linha.
+///
+/// Isto foi **medido**, e não deduzido: uma sondagem trocou a primeira letra de
+/// um membro numa linha com emoji, e a troca caiu no espaço anterior — o membro
+/// virou `Xdesconto` em vez de `Xesconto`. Ver a sondagem em `tests/service.rs`.
+fn to_service(texto: &str, position: TextPosition) -> (u32, u32) {
+    let unidades = texto
+        .split_inclusive('\n')
+        .nth(position.line as usize)
+        .map_or(position.column, |linha| {
+            let linha = linha.strip_suffix('\n').unwrap_or(linha);
+            let linha = linha.strip_suffix('\r').unwrap_or(linha);
+            linha
+                .chars()
+                .take(position.column as usize)
+                .map(|caractere| caractere.len_utf16() as u32)
+                .sum()
+        });
+    (position.line + 1, unidades + 1)
 }
 
 const fn from_service(line: u32, offset: u32) -> TextPosition {
@@ -538,6 +597,57 @@ fn apply(current: &str, range: Option<TextRange>, text: &str) -> String {
     updated
 }
 
+/// Os argumentos de uma mudança por intervalo.
+///
+/// Isto é função pura de propósito. Mandar intervalo e reabrir o arquivo inteiro
+/// deixam o analisador **no mesmo estado**, e por isso nenhum teste de ponta a
+/// ponta consegue dizer qual dos dois rodou — um teste que passasse "porque a
+/// completação funcionou" passaria igual com o caminho caro. O que dá para
+/// provar em separado é a **decisão** (`cabe_no_texto`) e o **payload** (aqui);
+/// o de ponta a ponta prova que o conjunto funciona contra o analisador de
+/// verdade.
+fn change_arguments(
+    path: &Path,
+    atual: &str,
+    range: TextRange,
+    texto: &str,
+) -> serde_json::Value {
+    let (line, offset) = to_service(atual, range.start);
+    let (end_line, end_offset) = to_service(atual, range.end);
+    serde_json::json!({
+        "file": path_argument(path),
+        "line": line,
+        "offset": offset,
+        "endLine": end_line,
+        "endOffset": end_offset,
+        "insertString": texto,
+    })
+}
+
+/// Se o intervalo existe mesmo no texto que temos.
+///
+/// É a válvula da mudança incremental. `apply` **acomoda** intervalo inválido
+/// grudando o texto no fim da linha, o que sempre produziu alguma coisa; mandar
+/// esse intervalo ao analisador produziria um buffer diferente do nosso, e nada
+/// avisaria. Quando não cabe, o caminho é reabrir com o texto inteiro, que
+/// ressincroniza os dois lados.
+fn cabe_no_texto(texto: &str, range: TextRange) -> bool {
+    let cabe = |posicao: ide_domain::TextPosition| {
+        texto
+            .split_inclusive('\n')
+            .nth(posicao.line as usize)
+            .is_some_and(|linha| {
+                let linha = linha.strip_suffix('\n').unwrap_or(linha);
+                let linha = linha.strip_suffix('\r').unwrap_or(linha);
+                // Igual ao comprimento é o fim da linha, que é posição válida.
+                posicao.column as usize <= linha.chars().count()
+            })
+    };
+    (range.start.line, range.start.column) <= (range.end.line, range.end.column)
+        && cabe(range.start)
+        && cabe(range.end)
+}
+
 /// Byte onde a linha e a coluna caem, contando colunas em caracteres.
 fn offset_of(source: &str, line: usize, column: usize) -> usize {
     let mut offset = 0;
@@ -560,6 +670,93 @@ fn offset_of(source: &str, line: usize, column: usize) -> usize {
 mod tests {
     use super::*;
     use ide_process::NativeProcessSupervisor;
+
+    fn intervalo(inicio: (u32, u32), fim: (u32, u32)) -> TextRange {
+        TextRange {
+            start: TextPosition { line: inicio.0, column: inicio.1 },
+            end: TextPosition { line: fim.0, column: fim.1 },
+        }
+    }
+
+    /// Um intervalo dentro do texto pode ir por mudança incremental.
+    #[test]
+    fn a_range_inside_the_text_fits() {
+        let texto = "class Pedido {\n  total = 0;\n}\n";
+        assert!(cabe_no_texto(texto, intervalo((1, 2), (1, 7))));
+        // O fim da linha é posição válida: é onde se digita.
+        assert!(cabe_no_texto(texto, intervalo((1, 12), (1, 12))));
+    }
+
+    /// Linha que não existe não vai por intervalo.
+    ///
+    /// Mandar isto ao analisador deixaria o buffer dele diferente do nosso, e
+    /// **nada avisaria** — as respostas seguintes viriam erradas, calado. Por
+    /// isso o caminho passa a ser reabrir o arquivo inteiro.
+    #[test]
+    fn a_range_past_the_end_does_not_fit() {
+        let texto = "class Pedido {\n}\n";
+        assert!(!cabe_no_texto(texto, intervalo((9, 0), (9, 0))));
+        assert!(!cabe_no_texto(texto, intervalo((0, 0), (0, 99))));
+    }
+
+    /// Intervalo invertido não vai por intervalo.
+    #[test]
+    fn a_backwards_range_does_not_fit() {
+        let texto = "class Pedido {\n}\n";
+        assert!(!cabe_no_texto(texto, intervalo((1, 0), (0, 0))));
+    }
+
+    /// O pedido de mudança leva as duas pontas do intervalo, contadas a partir de
+    /// um.
+    ///
+    /// `change` não tem resposta no protocolo: um argumento errado não volta como
+    /// erro, volta como buffer envenenado e respostas erradas depois. Por isso o
+    /// payload é conferido aqui, e não só pelo efeito.
+    #[test]
+    fn the_change_request_carries_both_ends_of_the_range() {
+        let argumentos = change_arguments(
+            Path::new("/projeto/pedido.ts"),
+            "class Pedido { total = 0; }\n  const x = 1;\n",
+            intervalo((0, 25), (1, 3)),
+            " desconto = 0;",
+        );
+        assert_eq!(argumentos["file"], "/projeto/pedido.ts");
+        assert_eq!(argumentos["line"], 1);
+        assert_eq!(argumentos["offset"], 26);
+        assert_eq!(argumentos["endLine"], 2);
+        assert_eq!(argumentos["endOffset"], 4);
+        assert_eq!(argumentos["insertString"], " desconto = 0;");
+    }
+
+    /// A conversão de posição é a mesma que a completação usa.
+    ///
+    /// É o argumento inteiro de a mudança incremental ser segura: se `to_service`
+    /// errasse por um, os testes de completação contra o analisador de verdade já
+    /// teriam falhado desde a fase 3c.
+    #[test]
+    fn the_position_conversion_is_one_based() {
+        let texto = "linha zero\nlinha um\n";
+        assert_eq!(to_service(texto, TextPosition { line: 0, column: 0 }), (1, 1));
+        assert_eq!(to_service(texto, TextPosition { line: 1, column: 5 }), (2, 6));
+    }
+
+    /// Um emoji antes da coluna a desloca, porque o analisador conta UTF-16.
+    ///
+    /// Isto foi medido contra o analisador de verdade: sem a conversão, a troca
+    /// de um caractere caía no anterior, e o membro trocado continuava existindo.
+    #[test]
+    fn an_astral_character_shifts_the_column() {
+        // Nada de astral antes: caractere e unidade contam igual.
+        let simples = "const e = \"X\";\n";
+        assert_eq!(to_service(simples, TextPosition { line: 0, column: 7 }), (1, 8));
+
+        // Doze caracteres até ali, e treze unidades: o emoji conta duas vezes.
+        let com_emoji = "const e = \"\u{1F642}\";\n";
+        assert_eq!(
+            to_service(com_emoji, TextPosition { line: 0, column: 12 }),
+            (1, 14)
+        );
+    }
 
     /// A nossa lista de arquivos do projeto bate com a do analisador.
     ///

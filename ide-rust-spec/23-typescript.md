@@ -859,10 +859,8 @@ esconder. Este foi encontrado instrumentando a leitura, e não raciocinando.
 um adapter só atenda as duas pontas é a aposta da ADR-028, e ela continua **não
 verificada** — o que existe é o argumento de que o protocolo é estável.
 
-**`change_document` reabre o arquivo inteiro.** O protocolo tem mudança por
-intervalo, e ela é o caminho rápido. Reabrir é lento e é certo: a conversão de
-linha e coluna erra por um, e errar ali reescreve no lugar errado sem erro nenhum
-a apontar. Trocar por incremental é trabalho com medição, e não palpite.
+**`change_document` reabria o arquivo inteiro** — e passou a ir por intervalo
+depois. Ver "A mudança por intervalo", abaixo.
 
 #### E a navegação de TypeScript entra aqui
 
@@ -870,6 +868,69 @@ A fase 1 prometeu índice de símbolos e navegação por nome e não os entregou
 porque em TypeScript quem decide o que um nome alcança é o `import`, e não o nome.
 O analisador sabe de módulos: definição e referências de `.ts` são desta fase, e
 não da 1.
+
+### A mudança por intervalo ✅
+
+Reabrir o arquivo inteiro a cada tecla mandava um `.ts` de 3 000 linhas pelo cano
+a cada caractere digitado. Agora vai o intervalo, com o texto que mudou.
+
+O medo registrado era "a conversão de linha e coluna erra por um". Ele estava
+**meio certo e no lugar errado**, e a sondagem é que separou as duas metades.
+
+#### O que autorizava a troca
+
+`to_service` — a conversão de base zero para base um — já carregava completação e
+definição contra o analisador de verdade desde a fase 3c. Se ela errasse a
+**linha**, aqueles testes já teriam falhado. Essa metade do medo estava paga.
+
+#### A metade que estava certa, e ninguém tinha medido
+
+**O analisador conta coluna em unidade UTF-16; nós contamos caractere.** Um emoji
+vale um caractere e duas unidades, e tudo o que vem depois dele na linha tem
+coluna diferente nas duas contagens.
+
+A sondagem que revelou isso só funcionou na **segunda montagem**, e a primeira é
+a lição. Ela inseria código: com o deslocamento, a sintaxe quebrava — e o
+analisador **se recupera de sintaxe quebrada**, então o membro aparecia na
+completação do mesmo jeito e o teste passava. Um teste verde dizendo o contrário
+do que acontecia.
+
+A segunda troca a primeira letra de um membro. Acertando, ele passa a se chamar
+`Xesconto`; errando por um, a troca cai no espaço anterior e ele continua
+`desconto`, precedido de um `X` solto. **Os dois resultados são programas
+válidos**, e só um é o certo — que é o que torna a sondagem decisiva. Ela
+reprovou: veio `Xdesconto`.
+
+`to_service` passou a receber o texto e a reler a linha, porque a conversão não é
+aritmética. Isto corrigiu junto **completação e definição**, que mandavam a mesma
+coluna errada — ali o defeito era uma sugestão vinda do lugar errado, e não
+corrupção, e por isso ninguém o tinha notado.
+
+#### A válvula, e o que ela protege
+
+Intervalo que não cabe no texto que temos reabre o arquivo inteiro. Não cabe
+significa que o nosso espelho e o editor discordam, e mandar intervalo nesse
+estado deixaria o buffer do analisador diferente do nosso — sem erro nenhum,
+porque `change` **não tem resposta no protocolo**. Todas as respostas seguintes
+viriam erradas, e nada apontaria para a causa.
+
+#### Por que o teste de ponta a ponta não bastava
+
+Mandar intervalo e reabrir deixam o analisador **no mesmo estado**. Nenhum teste
+de caixa-preta consegue dizer qual dos dois rodou: um teste que passasse "porque
+a completação funcionou" passaria igual com o caminho caro, e a otimização podia
+nunca estar acontecendo. Por isso a decisão (`cabe_no_texto`) e o payload
+(`change_arguments`) são funções puras com prova própria, e o teste contra o
+analisador prova que o conjunto funciona.
+
+#### O que ficou
+
+**O caminho de volta tem o mesmo defeito, menor.** `from_service` converte a
+coluna que o analisador devolve subtraindo um, e ela também vem em unidade
+UTF-16. Numa linha com emoji, um diagnóstico ou um resultado de definição aponta
+uma coluna adiante. Corrigir exige o texto do arquivo **de destino**, que numa
+definição em outro arquivo não está em mãos — é trabalho de outro tamanho, e o
+estrago é um realce deslocado, não um buffer envenenado.
 
 ### O medidor de memória ✅
 

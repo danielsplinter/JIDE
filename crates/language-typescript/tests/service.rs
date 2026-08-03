@@ -14,7 +14,10 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use ide_domain::{CompletionRequest, DocumentId, DocumentSnapshot, LanguageId, TextPosition};
+use ide_domain::{
+    CompletionRequest, DocumentChange, DocumentId, DocumentSnapshot, LanguageId, TextPosition,
+    TextRange,
+};
 use ide_language_api::{
     LanguageActivationContext, LanguageError, LanguageProvider, LanguageToolchainConfig,
 };
@@ -289,4 +292,253 @@ fn the_detected_node_says_which_version_it_is() {
         versao.starts_with('v'),
         "a versão vem como o Node a relata: {versao}"
     );
+}
+
+/// Digitar manda só o que mudou, e o analisador enxerga o que foi digitado.
+///
+/// Este é o teste que autoriza a mudança incremental a existir. Reabrir o
+/// arquivo inteiro a cada tecla sempre funcionou; mandar intervalo só funciona
+/// se linha e coluna casarem com as do analisador, e um intervalo aplicado no
+/// lugar errado **não volta como erro** — volta como resposta errada daqui em
+/// diante. A prova pedida é que o membro recém-digitado apareça na completação:
+/// se o intervalo tivesse caído um caractere fora, a classe estaria quebrada e
+/// nada apareceria.
+#[test]
+#[ignore = "exige Node instalado e `npm install typescript` no projeto de teste"]
+fn an_incremental_change_lands_where_the_analyzer_thinks_it_did() {
+    let root = temporary("mudanca-intervalo");
+    assert!(std::fs::write(root.join("package.json"), r#"{"name":"t"}"#).is_ok());
+    #[cfg(windows)]
+    const NPM: &str = "npm.cmd";
+    #[cfg(not(windows))]
+    const NPM: &str = "npm";
+    let instalado = std::process::Command::new(NPM)
+        .args(["install", "typescript@5", "--no-audit", "--no-fund"])
+        .current_dir(&root)
+        .status();
+    assert!(instalado.is_ok_and(|status| status.success()));
+
+    let arquivo = root.join("pedido.ts");
+    let codigo = "class Pedido { total = 0; }\nconst p = new Pedido();\np.\n";
+    assert!(std::fs::write(&arquivo, codigo).is_ok());
+
+    let runtime = runtime();
+    let ativo = match runtime.block_on(provider().activate(context(&root))) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador precisa subir: {erro}"),
+    };
+    assert!(
+        runtime
+            .block_on(ativo.open_document(DocumentSnapshot {
+                id: DocumentId(1),
+                path: arquivo,
+                version: 1,
+                text: codigo.to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Digitar um membro novo dentro da classe: intervalo vazio, logo depois do
+    // `;` da linha zero. É exatamente o que uma tecla produz.
+    let ponto = TextPosition { line: 0, column: 25 };
+    assert!(
+        runtime
+            .block_on(ativo.change_document(DocumentChange {
+                document_id: DocumentId(1),
+                version: 2,
+                range: Some(TextRange { start: ponto, end: ponto }),
+                text: " desconto = 0;".to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(1));
+
+    let itens = runtime.block_on(ativo.completion(CompletionRequest {
+        document_id: DocumentId(1),
+        position: TextPosition { line: 2, column: 2 },
+        prefix: String::new(),
+    }));
+    let itens = match itens {
+        Ok(itens) => itens,
+        Err(erro) => panic!("a completação precisa responder depois da mudança: {erro}"),
+    };
+    let nomes: Vec<_> = itens.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        nomes.contains(&"desconto"),
+        "o membro digitado precisa existir para o analisador, e vieram: {nomes:?}"
+    );
+    // O que já estava não pode ter sido sobrescrito pelo intervalo.
+    assert!(
+        nomes.contains(&"total"),
+        "a mudança por intervalo não pode comer o que estava lá: {nomes:?}"
+    );
+
+    assert!(runtime.block_on(ativo.shutdown()).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Intervalo que não cabe no texto reabre o arquivo, e o analisador acompanha.
+///
+/// É a válvula: espelho e editor discordando é a situação em que mandar intervalo
+/// envenenaria o buffer do analisador em silêncio. Reabrir custa caro e
+/// ressincroniza os dois, e este teste cobra que o caminho caro **funcione**, e
+/// não só que ele exista.
+#[test]
+#[ignore = "exige Node instalado e `npm install typescript` no projeto de teste"]
+fn a_range_that_does_not_fit_falls_back_to_reopening() {
+    let root = temporary("intervalo-invalido");
+    assert!(std::fs::write(root.join("package.json"), r#"{"name":"t"}"#).is_ok());
+    #[cfg(windows)]
+    const NPM: &str = "npm.cmd";
+    #[cfg(not(windows))]
+    const NPM: &str = "npm";
+    let instalado = std::process::Command::new(NPM)
+        .args(["install", "typescript@5", "--no-audit", "--no-fund"])
+        .current_dir(&root)
+        .status();
+    assert!(instalado.is_ok_and(|status| status.success()));
+
+    let arquivo = root.join("pedido.ts");
+    let codigo = "class Pedido { total = 0; }\nconst p = new Pedido();\np.\n";
+    assert!(std::fs::write(&arquivo, codigo).is_ok());
+
+    let runtime = runtime();
+    let ativo = match runtime.block_on(provider().activate(context(&root))) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador precisa subir: {erro}"),
+    };
+    assert!(
+        runtime
+            .block_on(ativo.open_document(DocumentSnapshot {
+                id: DocumentId(1),
+                path: arquivo,
+                version: 1,
+                text: codigo.to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Uma linha que não existe. O texto guardado é remendado do jeito que der, e
+    // o arquivo inteiro vai para o analisador.
+    let fora = TextPosition { line: 40, column: 0 };
+    assert!(
+        runtime
+            .block_on(ativo.change_document(DocumentChange {
+                document_id: DocumentId(1),
+                version: 2,
+                range: Some(TextRange { start: fora, end: fora }),
+                text: "\nclass Recibo {}\n".to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(1));
+
+    let achados = match runtime.block_on(ativo.workspace_types("Recibo", 20)) {
+        Ok(achados) => achados,
+        Err(erro) => panic!("a busca precisa responder depois da reabertura: {erro}"),
+    };
+    let nomes: Vec<_> = achados.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        nomes.contains(&"Recibo"),
+        "reabrir precisa entregar o texto novo ao analisador, e veio: {nomes:?}"
+    );
+
+    assert!(runtime.block_on(ativo.shutdown()).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// SONDAGEM: a coluna do analisador conta caractere ou unidade UTF-16?
+///
+/// Nós contamos **caractere**. O TypeScript trabalha em UTF-16 por dentro, e um
+/// emoji vale um caractere e duas unidades — se o protocolo seguir o interno,
+/// tudo depois dele na linha tem coluna diferente, e a mudança por intervalo
+/// escreve um caractere fora do lugar sem erro nenhum a apontar.
+///
+/// **A montação é o que torna a sondagem decisiva.** A primeira tentativa
+/// inseria código, e um deslocamento produzia sintaxe quebrada — da qual o
+/// analisador se recupera, e o teste passava do mesmo jeito. Aqui se troca a
+/// primeira letra do membro: acertando, o membro passa a se chamar `Xesconto`;
+/// errando por um, a troca cai no espaço anterior e ele continua `desconto`.
+/// Os dois resultados são programas válidos, e só um deles é o certo.
+#[test]
+#[ignore = "exige Node instalado e `npm install typescript` no projeto de teste"]
+fn an_astral_character_before_the_edit_does_not_shift_it() {
+    let root = temporary("emoji");
+    assert!(std::fs::write(root.join("package.json"), r#"{"name":"t"}"#).is_ok());
+    #[cfg(windows)]
+    const NPM: &str = "npm.cmd";
+    #[cfg(not(windows))]
+    const NPM: &str = "npm";
+    let instalado = std::process::Command::new(NPM)
+        .args(["install", "typescript@5", "--no-audit", "--no-fund"])
+        .current_dir(&root)
+        .status();
+    assert!(instalado.is_ok_and(|status| status.success()));
+
+    let arquivo = root.join("pedido.ts");
+    let codigo = "const e = \"\u{1F642}\"; class Pedido { desconto = 0; }\nconst p = new Pedido();\np.\n";
+    assert!(std::fs::write(&arquivo, codigo).is_ok());
+
+    let runtime = runtime();
+    let ativo = match runtime.block_on(provider().activate(context(&root))) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador precisa subir: {erro}"),
+    };
+    assert!(
+        runtime
+            .block_on(ativo.open_document(DocumentSnapshot {
+                id: DocumentId(1),
+                path: arquivo,
+                version: 1,
+                text: codigo.to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+
+    let Some(linha) = codigo.lines().next() else {
+        panic!("o código tem uma primeira linha");
+    };
+    let Some(byte) = linha.find("desconto") else {
+        panic!("o membro está na primeira linha");
+    };
+    let coluna = linha[..byte].chars().count() as u32;
+    assert!(
+        runtime
+            .block_on(ativo.change_document(DocumentChange {
+                document_id: DocumentId(1),
+                version: 2,
+                range: Some(TextRange {
+                    start: TextPosition { line: 0, column: coluna },
+                    end: TextPosition { line: 0, column: coluna + 1 },
+                }),
+                text: "X".to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(1));
+
+    let itens = runtime.block_on(ativo.completion(CompletionRequest {
+        document_id: DocumentId(1),
+        position: TextPosition { line: 2, column: 2 },
+        prefix: String::new(),
+    }));
+    let itens = match itens {
+        Ok(itens) => itens,
+        Err(erro) => panic!("a completação precisa responder: {erro}"),
+    };
+    let nomes: Vec<_> = itens.iter().map(|item| item.label.as_str()).collect();
+    assert!(
+        nomes.contains(&"Xesconto"),
+        "a troca precisa cair na primeira letra do membro; vieram: {nomes:?}"
+    );
+    assert!(
+        !nomes.contains(&"desconto"),
+        "o membro antigo não pode sobreviver — a troca caiu um caractere fora, e a         coluna do analisador não é a nossa: {nomes:?}"
+    );
+
+    assert!(runtime.block_on(ativo.shutdown()).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
 }
