@@ -10,8 +10,8 @@ use crate::bootstrap::{java_source, project_sources, startup_root};
 use crate::bridges::position_at_offset;
 use crate::controllers::{
     DebugController as AppDebugController, DocumentController, ImportedProject, LanguageController,
-    NativeWindowState, ProjectController, RuntimeState, TaskController as AppTaskController,
-    TypeSearchOutcome, WorkspaceController,
+    NavigationOutcome, NativeWindowState, ProjectController, RuntimeState,
+    TaskController as AppTaskController, TypeSearchOutcome, WorkspaceController,
 };
 use crate::ui_bridge::{UiAction, UiBridge};
 use crate::{debug, java_contribution, run, style_contribution, typescript_contribution};
@@ -539,8 +539,24 @@ impl NativeIde {
         }
     }
 
+    /// Vai para a declaração, fora da thread da interface.
+    ///
+    /// # Por que isto não pode ser síncrono
+    ///
+    /// Perguntar ao analisador externo custa o que ele demorar. Enquanto ele
+    /// monta o projeto — trinta segundos num monorepo — ele não responde nada, e
+    /// o pedido espera o prazo inteiro. Feito na chamada, isso é a janela parada
+    /// a cada clique.
+    ///
+    /// Antes da fase 5 da `25` isso não aparecia: o analisador subia junto com o
+    /// projeto e já estava quente quando alguém clicava. Subir sob demanda tirou
+    /// a espera do começo e a pôs no primeiro clique — e revelou que a chamada
+    /// sempre esteve no lugar errado.
+    ///
+    /// É o mesmo defeito da busca textual e da busca por tipo, pela terceira e
+    /// quarta vez: trabalho que não cabe num quadro, feito dentro do quadro.
     fn navigate_to_definition(&mut self, request: NavigationRequest) {
-        let Some(language_host) = &self.languages.host else {
+        let Some(host) = self.languages.host.as_ref().map(Arc::clone) else {
             return;
         };
         let Some(document) = self.documents.language.get(&request.document_id) else {
@@ -550,25 +566,49 @@ impl NativeIde {
             document_id: request.document_id,
             position: position_at_offset(&document.text, request.byte_offset),
         };
-        match pollster::block_on(
-            language_host.definition(language_host.request_context(), definition),
-        ) {
-            Ok(locations) => {
-                if let Some(location) = locations.first() {
-                    self.open_document(OpenDocumentRequest::new(&location.path).at(
-                        location.range.start.line as usize,
-                        location.range.start.column as usize,
-                    ));
-                } else if let Some(shell) = self.ui.shell.as_mut() {
-                    shell.set_status_message(format!("Definition not found: {}", request.token));
-                }
-            }
-            Err(error) => {
-                if let Some(shell) = self.ui.shell.as_mut() {
-                    shell.set_status_message(error.to_string());
-                }
-            }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _cancel = self.languages.navigation.start(receiver);
+        let token = request.token.clone();
+        std::thread::spawn(move || {
+            let resposta = pollster::block_on(host.definition(host.request_context(), definition));
+            let saida = match resposta {
+                Ok(locations) => NavigationOutcome {
+                    token,
+                    location: locations.first().cloned(),
+                    failure: None,
+                },
+                Err(error) => NavigationOutcome {
+                    token,
+                    location: None,
+                    failure: Some(error.to_string()),
+                },
+            };
+            let _ = sender.send(saida);
+        });
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(format!("Procurando {}…", request.token));
         }
+    }
+
+    /// Recolhe o resultado da navegação, se já chegou.
+    fn collect_navigation(&mut self) -> bool {
+        let Some(resultado) = self.languages.navigation.collect() else {
+            return false;
+        };
+        if let Some(location) = resultado.location {
+            self.open_document(OpenDocumentRequest::new(&location.path).at(
+                location.range.start.line as usize,
+                location.range.start.column as usize,
+            ));
+            return true;
+        }
+        if let Some(shell) = self.ui.shell.as_mut() {
+            // Falhar e não achar são coisas diferentes, e a mensagem diz qual foi.
+            shell.set_status_message(resultado.failure.unwrap_or_else(|| {
+                format!("Definition not found: {}", resultado.token)
+            }));
+        }
+        true
     }
 
     /// Responde à busca de tipo enquanto houver consulta esperando.
@@ -2471,6 +2511,7 @@ impl ApplicationHandler for NativeIde {
         changed |= self.collect_type_search();
         changed |= self.advance_search_spinner();
         changed |= self.advance_project_loading();
+        changed |= self.collect_navigation();
         self.wake_pending_providers();
         self.suspend_idle_languages();
         self.measure_memory();
@@ -3386,6 +3427,16 @@ mod tests {
                 byte_offset,
                 token: token.to_owned(),
             });
+            // A navegação deixou de ser síncrona na fase 5 da `25`: perguntar ao
+            // analisador custa o que ele demorar, e esperar por isso na chamada
+            // é a janela parada. Quem recolhe é o laço de quadros, e aqui o teste
+            // faz o papel dele.
+            let mut esperas = 0;
+            while !ide.collect_navigation() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                esperas += 1;
+                assert!(esperas < 500, "a navegação precisa terminar");
+            }
             let mensagem = ide
                 .ui
                 .shell

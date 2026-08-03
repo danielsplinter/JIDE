@@ -753,6 +753,26 @@ A pergunta passou a **anotar** quem acordar; quem ativa é o laço de quadros, n
 thread própria. O host decide, e a aplicação executa — a mesma divisão que a
 reoferta de documentos já seguia.
 
+#### E o travamento seguinte não era acordar: era perguntar
+
+Acordado fora da thread da interface, o `Ctrl+clique` **continuou travando**. A
+causa era outra, e mais antiga: a navegação chamava o host com `block_on` na
+thread da interface, e sempre chamou.
+
+Antes da fase 5 isso não aparecia. O analisador subia junto com o projeto e já
+estava quente quando alguém clicava: a resposta vinha em milissegundos. Subir sob
+demanda tirou a espera do começo e a pôs no primeiro clique — e revelou que a
+chamada sempre esteve no lugar errado.
+
+**Quatro vezes o mesmo defeito, nesta ordem**: a busca textual (106 s com o cache
+frio), a busca por tipo (30 s esperando o analisador montar o projeto), acordar o
+provider (criar processo), e agora a navegação. Sempre trabalho que não cabe num
+quadro, feito dentro do quadro; sempre invisível enquanto o que se esperava era
+rápido.
+
+A navegação foi para uma thread, com o resultado recolhido no quadro — o mesmo
+`SearchController` das duas buscas, pela terceira vez.
+
 #### E quanto isso economiza, honestamente
 
 Com 14% a 17% dos pontos alcançados pelo índice, **o analisador continua sendo

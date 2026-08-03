@@ -162,6 +162,14 @@ pub(super) struct TypeSearchOutcome {
     pub(super) failure: Option<String>,
 }
 
+/// O que a navegação achou, quando ela termina.
+pub(super) struct NavigationOutcome {
+    /// O nome sobre o qual se clicou, para a mensagem dizer de quem se fala.
+    pub(super) token: String,
+    pub(super) location: Option<ide_domain::Location>,
+    pub(super) failure: Option<String>,
+}
+
 #[derive(Default)]
 pub(super) struct LanguageController {
     /// O host é compartilhado porque a busca por tipo o consulta de outra thread.
@@ -181,6 +189,8 @@ pub(super) struct LanguageController {
     pub(super) preparing_since: Option<Instant>,
     /// A busca por tipo em curso, que fala com o analisador e não pode esperar.
     pub(super) type_search: SearchController<TypeSearchOutcome>,
+    /// A navegação em curso. Ver `navigate_to_definition`.
+    pub(super) navigation: SearchController<NavigationOutcome>,
     /// Quedas já anunciadas, para não repetir o aviso a cada verificação.
     pub(super) announced_failures: std::collections::HashSet<String>,
     /// Realces pedidos e ainda não entregues.
