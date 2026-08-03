@@ -58,6 +58,12 @@ const LANGUAGE_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(
 /// que muda em minutos seria trabalho por trabalho.
 const SUSPENSION_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// De quanto em quanto a memória é medida.
+///
+/// Consultar a tabela de processos custa; e o número que interessa muda em
+/// segundos, não em milissegundos.
+const MEMORY_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -130,7 +136,11 @@ impl NativeIde {
             .replace_event_bus(self.runtime.config.event_capacity.max(1));
         let root = startup_root(&self.runtime.config, std::env::current_dir().ok())
             .ok_or_else(|| "não foi possível determinar o diretório do projeto".to_owned())?;
-        let processes: Arc<dyn ProcessSupervisor> = Arc::new(NativeProcessSupervisor::default());
+        let nativo = Arc::new(NativeProcessSupervisor::default());
+        // O supervisor concreto fica guardado para a medição: ele é quem sabe
+        // quais processos externos existem, porque foi ele que os criou.
+        self.runtime.processes = Some(Arc::clone(&nativo));
+        let processes: Arc<dyn ProcessSupervisor> = nativo;
         let java = java_contribution::contribution(processes.clone());
         let language_host = LanguageHost::new(&root);
         language_host
@@ -1492,6 +1502,81 @@ impl NativeIde {
         }
     }
 
+    /// Mede o que a IDE custa, somando o que roda fora dela.
+    ///
+    /// **São dois números, e o segundo é o que ninguém veria.** O analisador de
+    /// TypeScript é um processo próprio: contabilmente separado, fisicamente a
+    /// mesma RAM. No Windows, o Gerenciador de Tarefas ainda o soma sob a IDE.
+    ///
+    /// Sem isto, o teto de heap do analisador o derrubaria, o provider nativo
+    /// assumiria, e a IDE ficaria **silenciosamente pior** — sem tipos, sem
+    /// completação — sem dizer por quê. É a família de defeito que a `21`
+    /// nomeou, e medir é o que a tira do escuro.
+    fn measure_memory(&mut self) {
+        let agora = std::time::Instant::now();
+        if self
+            .languages
+            .last_memory_check
+            .is_some_and(|anterior| agora.duration_since(anterior) < MEMORY_CHECK)
+        {
+            return;
+        }
+        self.languages.last_memory_check = Some(agora);
+        self.notice_fallen_providers();
+        let externos = self
+            .runtime
+            .processes
+            .as_ref()
+            .map(|supervisor| supervisor.live_conversations())
+            .unwrap_or_default();
+        let leitura = ide_core::MemoryMeter::read(&externos);
+        // Só se anuncia quando muda de patamar: repetir o mesmo número a cada
+        // cinco segundos apagaria a mensagem que estivesse na barra.
+        if leitura != self.languages.memory {
+            self.languages.memory = leitura;
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_memory_usage(leitura.own_mb, leitura.external_mb);
+            }
+        }
+    }
+
+    /// Diz quando um analisador caiu, em vez de deixar a IDE piorar calada.
+    ///
+    /// O host já degrada sozinho: o provider que morre vira `Failed`, sai das
+    /// rotas, e o nativo assume — o `.ts` continua colorido. **Esse é o
+    /// problema.** Sem aviso, o que se vê é a completação por tipo simplesmente
+    /// parar de existir, sem erro nenhum, e ninguém tem por onde começar.
+    ///
+    /// Cada queda se anuncia uma vez: repetir a cada verificação apagaria
+    /// qualquer outra mensagem da barra para sempre.
+    fn notice_fallen_providers(&mut self) {
+        let Some(host) = self.languages.host.as_ref() else {
+            return;
+        };
+        let Ok(providers) = host.providers() else {
+            return;
+        };
+        let caidos: Vec<_> = providers
+            .into_iter()
+            .filter(|snapshot| snapshot.state == ide_language_api::ProviderState::Failed)
+            .filter(|snapshot| {
+                self.languages
+                    .announced_failures
+                    .insert(snapshot.metadata.provider_id.0.clone())
+            })
+            .collect();
+        for snapshot in caidos {
+            let nome = snapshot.metadata.display_name.clone();
+            let motivo = snapshot.last_error.unwrap_or_else(|| "sem detalhe".to_owned());
+            tracing::warn!(provider = %snapshot.metadata.provider_id.0, %motivo, "provider caiu");
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_status_message(format!(
+                    "{nome} parou; seguindo com a análise nativa ({motivo})"
+                ));
+            }
+        }
+    }
+
     fn refresh_project_tasks(&mut self, root: &Path) {
         let language = typescript_contribution::language_id();
         let tasks = typescript_contribution::project_tasks(root);
@@ -2175,6 +2260,7 @@ impl ApplicationHandler for NativeIde {
         ));
         let mut changed = false;
         self.suspend_idle_languages();
+        self.measure_memory();
         // O realce vem da thread do provider e chega quando fica pronto: é aqui
         // que ele encontra a tela, sem que a tecla tenha esperado por ele.
         let realces = self.languages.collect_syntax();

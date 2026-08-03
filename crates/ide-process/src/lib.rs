@@ -76,6 +76,40 @@ pub trait ProcessSupervisor: Send + Sync {
 pub struct NativeProcessSupervisor {
     next_id: AtomicU64,
     children: Arc<Mutex<HashMap<ProcessId, Child>>>,
+    /// Processos de conversas abertas, para quem precisa medi-los.
+    ///
+    /// A lista mora aqui porque é aqui que eles nascem. Duplicá-la noutro lugar
+    /// criaria duas verdades sobre a mesma coisa, e uma envelheceria.
+    conversations: Arc<std::sync::Mutex<Vec<ProcessId>>>,
+}
+
+impl NativeProcessSupervisor {
+    /// Os processos das conversas que ainda respondem.
+    ///
+    /// Quem morreu sai da lista na próxima consulta: perguntar é o momento em
+    /// que se descobre, e um relógio próprio aqui seria uma segunda fonte de
+    /// tempo no processo.
+    #[must_use]
+    pub fn live_conversations(&self) -> Vec<ProcessId> {
+        let Ok(mut conversas) = self.conversations.lock() else {
+            return Vec::new();
+        };
+        conversas.retain(|id| processo_vivo(*id));
+        conversas.clone()
+    }
+}
+
+/// Se o sistema ainda conhece este processo.
+fn processo_vivo(id: ProcessId) -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(id.0 as u32);
+    let mut sistema = System::new();
+    sistema.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    sistema.process(pid).is_some()
 }
 
 #[async_trait]
@@ -122,7 +156,13 @@ impl ProcessSupervisor for NativeProcessSupervisor {
         &self,
         request: ProcessRequest,
     ) -> Result<Box<dyn ProcessConversation>, ProcessError> {
-        Ok(Box::new(conversation::NativeConversation::start(request)?))
+        let conversa = conversation::NativeConversation::start(request)?;
+        if let Some(id) = conversa.process_id()
+            && let Ok(mut conversas) = self.conversations.lock()
+        {
+            conversas.push(id);
+        }
+        Ok(Box::new(conversa))
     }
 
     async fn execute(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessError> {

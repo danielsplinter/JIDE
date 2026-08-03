@@ -10,6 +10,7 @@ async-trait.workspace = true
 ide-domain = { path = "../ide-domain" }
 thiserror.workspace = true
 tokio.workspace = true
+sysinfo.workspace = true
 tracing.workspace = true
 
 [lints]

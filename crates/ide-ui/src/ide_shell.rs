@@ -228,6 +228,11 @@ struct ShellContext {
     theme: Theme,
     status_message: String,
     project_summary: Option<String>,
+    /// O que a IDE custa, já pronto para a barra de estado.
+    ///
+    /// Vem pronto de quem mede: a tela não soma nem formata número de memória —
+    /// ela mostra o texto que recebeu, como faz com todo o resto.
+    memory_usage: Option<String>,
     /// Tamanho da janela no último quadro.
     ///
     /// A soltura do ponteiro não recebe tamanho, e as janelas precisam dele
@@ -562,6 +567,22 @@ impl IdeShell {
     #[must_use]
     pub fn status_message(&self) -> &str {
         &self.context.status_message
+    }
+
+    /// Quanto a IDE custa: o processo dela e o que roda fora.
+    ///
+    /// **São dois números de propósito.** Contabilmente são processos
+    /// separados; fisicamente é a mesma RAM, e quem fica lento é quem está na
+    /// frente de quem usa. Mostrar só o nosso esconderia metade da conta.
+    ///
+    /// Zero externo não aparece: quem só edita Java não precisa ver um campo
+    /// vazio a vida toda.
+    pub fn set_memory_usage(&mut self, own_mb: u64, external_mb: u64) {
+        self.context.memory_usage = Some(if external_mb == 0 {
+            format!("{own_mb} MB")
+        } else {
+            format!("{own_mb} + {external_mb} MB")
+        });
     }
 
     pub fn set_status_message(&mut self, message: impl Into<String>) {

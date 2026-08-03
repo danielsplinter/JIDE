@@ -536,6 +536,9 @@ impl IdeShell {
         if let Some(summary) = self.context.project_summary.as_deref() {
             trailing.push(summary.to_owned());
         }
+        if let Some(memoria) = self.context.memory_usage.as_deref() {
+            trailing.push(memoria.to_owned());
+        }
         status_bar.set_trailing(trailing);
         status_bar.layout(
             &self.layout_context(),

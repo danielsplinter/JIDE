@@ -157,6 +157,11 @@ pub(super) struct LanguageController {
     pub(super) toolchains: ToolchainRegistry,
     /// Quando se perguntou pela última vez se havia provider ocioso.
     pub(super) last_suspension_check: Option<Instant>,
+    /// Quando a memória foi medida pela última vez, e quanto deu.
+    pub(super) last_memory_check: Option<Instant>,
+    pub(super) memory: ide_core::MemoryReading,
+    /// Quedas já anunciadas, para não repetir o aviso a cada verificação.
+    pub(super) announced_failures: std::collections::HashSet<String>,
     /// Realces pedidos e ainda não entregues.
     ///
     /// Guardá-los é o que permite não esperar: a tecla posta o pedido, e o
@@ -502,6 +507,8 @@ pub(super) struct RuntimeState {
     pub(super) startup_error: Option<String>,
     pub(super) config: ide_core::AppConfig,
     pub(super) config_path: Option<PathBuf>,
+    /// O supervisor concreto, para perguntar quais processos externos existem.
+    pub(super) processes: Option<Arc<ide_process::NativeProcessSupervisor>>,
     /// Raiz do projeto aberto, para resolver a ferramenta em vigor.
     ///
     /// A escolha de ferramenta passou a ser por projeto na fase 0 da `23`, e sem

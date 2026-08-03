@@ -853,11 +853,7 @@ esconder. Este foi encontrado instrumentando a leitura, e não raciocinando.
 
 ##### O que ficou de fora, e por quê
 
-**A memória não foi medida.** O teto está imposto — o processo sobe com limite de
-heap declarado, e ultrapassá-lo o derruba, que é a queda da fase 3b. Mas os
-**dois números** do orçamento da `08` não existem: `MemoryBudget` continua sem
-código, e não há nada que some o processo externo ao heap da IDE e mostre isso.
-O critério pede medição, e o que há é enforcement.
+**A memória não foi medida** — e foi depois. Ver "O medidor de memória", abaixo.
 
 **O projeto em TypeScript 4.1 não foi exercido.** O teste roda contra o 5.x. Que
 um adapter só atenda as duas pontas é a aposta da ADR-028, e ela continua **não
@@ -874,6 +870,63 @@ A fase 1 prometeu índice de símbolos e navegação por nome e não os entregou
 porque em TypeScript quem decide o que um nome alcança é o `import`, e não o nome.
 O analisador sabe de módulos: definição e referências de `.ts` são desta fase, e
 não da 1.
+
+### O medidor de memória ✅
+
+A `08` trata memória como requisito arquitetural com orçamento explícito, e
+define `MemoryBudget` desde a primeira versão — que nunca existiu em código. O
+que se fez aqui é a metade dele que precisa vir primeiro: **medir**. Um teto sem
+medição derruba o processo e ninguém sabe por quê.
+
+#### São dois números, e o segundo é o que ninguém veria
+
+`MemoryReading { own_mb, external_mb }`, mostrados na barra de estado como
+`300 + 206 MB`. Somá-los num só esconderia metade da conta; e mostrar só o nosso
+esconderia justamente a metade que cresce com o projeto — no `j-fis-cloud`, 206 MB
+para 458 arquivos.
+
+Contabilmente são processos separados. Fisicamente é a mesma RAM, e no Windows o
+Gerenciador de Tarefas ainda agrupa o filho sob o pai e **soma no total exibido**:
+o analisador já aparece como memória da IDE para quem olha. "Não é o meu processo"
+é verdade contábil que não significa nada para quem está com a máquina paginando.
+
+Quando não há externo, o campo não aparece: quem só edita Java não precisa ver um
+zero a vida toda.
+
+#### O medidor não guarda a lista de processos
+
+`MemoryMeter::read(external: &[ProcessId])` é sem estado. Quem sabe quais
+processos existem é o supervisor, que os criou — `live_conversations()`. Duplicar
+esse registro no medidor criaria duas verdades sobre a mesma coisa, e uma delas
+envelheceria: o processo morre, o supervisor sabe, e o medidor continua contando
+um morto. Recebendo a lista de fora, um PID vencido simplesmente não é encontrado
+e some da soma sozinho — o que é um teste.
+
+A leitura é acionada de fora, a cada cinco segundos, como a suspensão por
+ociosidade: consultar a tabela de processos custa, e o número muda em segundos.
+Só se anuncia quando muda de patamar, para não apagar a cada quadro a mensagem
+que estiver na barra.
+
+#### O aviso de queda, que é o risco de verdade
+
+Medir o custo era o pedido; o perigo era outro. O host **degrada sozinho**: o
+analisador que morre vira `Failed`, sai das rotas, e o provider nativo assume — o
+`.ts` continua colorido, a estrutura continua aparecendo. **É exatamente isso que
+torna a queda invisível.** O que se percebe é a completação por tipo deixando de
+existir, sem erro nenhum, sem por onde começar a procurar.
+
+Agora cada queda se anuncia uma vez, com o motivo, dizendo que a análise seguiu
+no provider nativo. Uma vez, e não a cada verificação: repetir tomaria a barra
+para sempre. É a mesma família de defeito que a fase 3a produziu — o analisador
+dado por morto na primeira resposta, com a degradação funcionando perfeitamente
+pelo motivo errado. Aquele levou instrumentação para aparecer; este passa a se
+anunciar.
+
+#### O que continua fora
+
+O **teto** — a outra metade do `MemoryBudget` — continua sem código. Impor limite
+antes de haver medição registrada num projeto real seria escolher o número no
+palpite.
 
 ### Fase 4 — Depurar ⬜ Fora de escopo
 

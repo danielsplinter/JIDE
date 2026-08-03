@@ -158,6 +158,12 @@ depurar funcione com um clique nas execuções seguintes.
 
 ## Orçamento
 
+> **Estado.** A **medição** existe em código: `MemoryMeter` e `MemoryReading` em
+> `ide-core`, com os dois números na barra de estado, e o aviso quando um
+> analisador externo cai. Ver "O medidor de memória" na `23`. O **teto** abaixo
+> continua só aqui: impor limite sem medição registrada num projeto real seria
+> escolher o número no palpite.
+
 ```rust
 pub struct MemoryBudget {
     pub syntax_bytes: usize,

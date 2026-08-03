@@ -86,6 +86,14 @@ pub trait ProcessConversation: Send + Sync {
 
     /// Se o processo ainda está de pé.
     async fn is_running(&self) -> bool;
+
+    /// O processo do sistema, para quem precisa medi-lo.
+    ///
+    /// `None` quando não há um, ou quando o sistema não o informa. Medir é
+    /// opcional — uma conversa que não diga seu processo continua servindo.
+    fn process_id(&self) -> Option<ide_domain::ProcessId> {
+        None
+    }
 }
 
 /// O que se pede ao lado que escreve.
@@ -110,6 +118,10 @@ pub(crate) struct NativeConversation {
     escritas: mpsc::UnboundedSender<Escrita>,
     leituras: mpsc::UnboundedSender<Leitura>,
     vivo: Arc<AtomicBool>,
+    /// O processo que esta conversa criou, para quem precisa medi-lo.
+    ///
+    /// `None` quando o sistema não o informa. Medir é opcional; conversar não.
+    pid: Option<u32>,
 }
 
 impl NativeConversation {
@@ -119,7 +131,7 @@ impl NativeConversation {
         }
         let (escritas, receptor_escritas) = mpsc::unbounded_channel();
         let (leituras, receptor_leituras) = mpsc::unbounded_channel();
-        let (pronto, aberto) = std::sync::mpsc::sync_channel(1);
+        let (pronto, aberto) = std::sync::mpsc::sync_channel::<Result<Option<u32>, ProcessError>>(1);
         let vivo = Arc::new(AtomicBool::new(true));
         let sinal = Arc::clone(&vivo);
 
@@ -132,10 +144,11 @@ impl NativeConversation {
         // A partida é esperada aqui para que um executável inválido vire erro de
         // quem chamou, e não uma conversa que nunca responde.
         match aberto.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(pid)) => Ok(Self {
                 escritas,
                 leituras,
                 vivo,
+                pid,
             }),
             Ok(Err(erro)) => Err(erro),
             Err(_) => Err(ProcessError::ConversationClosed),
@@ -178,7 +191,7 @@ fn conversa(
     request: ProcessRequest,
     mut escritas: mpsc::UnboundedReceiver<Escrita>,
     mut leituras: mpsc::UnboundedReceiver<Leitura>,
-    pronto: &std::sync::mpsc::SyncSender<Result<(), ProcessError>>,
+    pronto: &std::sync::mpsc::SyncSender<Result<Option<u32>, ProcessError>>,
     vivo: &AtomicBool,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -227,7 +240,7 @@ fn conversa(
                 }
             });
         }
-        let _ = pronto.send(Ok(()));
+        let _ = pronto.send(Ok(child.id()));
 
         // O lado que lê vive numa tarefa própria: enquanto ele espera por uma
         // linha que ainda não chegou, o lado que escreve continua atendendo.
@@ -353,6 +366,10 @@ impl ProcessConversation for NativeConversation {
 
     async fn is_running(&self) -> bool {
         self.vivo.load(Ordering::Acquire)
+    }
+
+    fn process_id(&self) -> Option<ide_domain::ProcessId> {
+        self.pid.map(|pid| ide_domain::ProcessId(u64::from(pid)))
     }
 }
 

@@ -6,7 +6,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod memory;
+
 pub use ide_domain::ToolRole;
+pub use memory::{MemoryMeter, MemoryReading};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
