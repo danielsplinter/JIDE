@@ -30,6 +30,18 @@ pub struct TsConfig {
     pub files: Vec<PathBuf>,
     /// Outros `tsconfig` que este projeto referencia.
     pub references: Vec<PathBuf>,
+    /// Raiz a partir da qual um `import` sem `./` é procurado.
+    pub base_url: Option<PathBuf>,
+    /// Apelidos de módulo, do `paths` do compilador.
+    ///
+    /// É o que faz `@spartacus/core` achar `core-libs/core/public_api` sem que
+    /// exista pasta nenhuma com esse nome. Num monorepo Angular são centenas de
+    /// entradas — 315 no projeto de referência da `25` —, e sem elas quase todo
+    /// `import` do projeto fica sem destino.
+    ///
+    /// O padrão pode ter um `*`, e o que ele casa entra no lugar do `*` do
+    /// destino. Cada apelido tem uma **lista** de destinos, tentados em ordem.
+    pub paths: Vec<(String, Vec<String>)>,
     /// Raízes que vieram dos arquivos referenciados, já resolvidas.
     ///
     /// Um `tsconfig.json` de **solução** não tem arquivos próprios: ele declara
@@ -175,6 +187,29 @@ fn load_with(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<TsConfig, T
         }
         if let Some(out) = options.get("outDir").and_then(serde_json::Value::as_str) {
             config.out_dir = Some(PathBuf::from(out));
+        }
+        // `baseUrl` e `paths` são resolvidos **relativos ao arquivo que os
+        // declara**, e não ao que o estende. É a regra do TypeScript, e ignorá-la
+        // quebra o caso comum de um `tsconfig.base.json` uma pasta acima.
+        if let Some(base) = options.get("baseUrl").and_then(serde_json::Value::as_str) {
+            config.base_url = Some(config.directory.join(base));
+        }
+        if let Some(mapa) = options.get("paths").and_then(serde_json::Value::as_object) {
+            config.paths = mapa
+                .iter()
+                .map(|(padrao, destinos)| {
+                    let destinos = destinos
+                        .as_array()
+                        .map(|itens| {
+                            itens
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (padrao.clone(), destinos)
+                })
+                .collect();
         }
     }
     // `include`, `exclude` e `files` **substituem** o que veio da base, e não se

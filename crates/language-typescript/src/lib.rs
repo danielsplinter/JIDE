@@ -5,6 +5,7 @@
 #![doc = "fases seguintes da `23`, e não como crates novas."]
 
 mod analyzer;
+mod modules;
 mod project;
 mod service;
 mod toolchain;
@@ -13,3 +14,9 @@ pub use analyzer::{TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID, TypeScriptLan
 pub use project::{NPM_BUILD_SYSTEM_ID, NpmAdapter, TsConfig, TsConfigError, npm::scripts, tsconfig};
 pub use service::{TYPESCRIPT_SERVICE_PROVIDER_ID, TypeScriptServiceProvider, tsserver_in};
 pub use toolchain::{NODE_TOOLCHAIN_ID, NodeToolchainProvider, node_executable};
+
+/// O resolvedor de módulos e o que ele precisa, para quem confere de fora.
+///
+/// Exposto porque o critério da fase 2 da `25` é uma **comparação com o
+/// analisador**, e ela mora num teste de integração.
+pub use modules::{ModuleResolver, Reexportacao, declarante};

@@ -453,21 +453,72 @@ a `23` já teve de desfazer no analisador externo.
 **`node_modules` fica fora.** O índice responde pelos tipos **do projeto**; os das
 dependências são o que o analisador externo traz.
 
-### Fase 2 — Resolução de módulos ⬜### Fase 2 — Resolução de módulos ⬜
+### Fase 2 — Resolução de módulos ✅
 
-A parte cara, e a que decide se as fases 3 e 4 existem.
+A parte cara, e a que decidia se as fases 3 e 4 existem. Ela convergiu.
 
-- `import` relativo;
-- `paths` e `baseUrl` do `tsconfig.json` — 315 entradas no projeto de referência;
-- barris: seguir a reexportação até a declaração, com ciclo detectado.
+#### O critério é uma comparação, e não uma lista
 
-**Critério:** para uma amostra de nomes importados do projeto real, o arquivo que
-o índice aponta é o mesmo que o analisador aponta. Divergência é defeito nosso.
+Para uma amostra de `import` do projeto apontado, **o arquivo que nós resolvemos
+tem de ser o mesmo que o analisador resolve**. É o desenho da ADR-027: a origem é
+o `tsconfig.json`, nós dois o lemos, e a divergência é defeito nosso.
 
-**Se esta fase não convergir, a especificação para aqui** — e o que a fase 1
-entregou continua valendo sozinho, que é o motivo de ela vir primeiro.
+Uma lista escrita à mão só provaria que o teste concorda com quem o escreveu. O
+analisador discorda quando estamos errados — e discordou.
 
-### Fase 3 — Definição e referências ⬜
+| projeto | importações conferidas | divergentes |
+| --- | --- | --- |
+| monorepo de biblioteca | 174 | **0** |
+| aplicação | 46 | **0** |
+
+A amostra é enviesada de propósito, e o viés não é o nosso: só entram as
+importações que o **projeto** declara como internas — as relativas e as que casam
+um apelido do `paths`. Filtrar pelo que já sabemos resolver provaria só que
+sabemos o que sabemos.
+
+#### O defeito que a comparação achou
+
+Sete divergências, todas o mesmo caso: `./require-logged-in.commands` resolvia
+para lugar nenhum.
+
+`Path::with_extension` **substitui** o que vem depois do último ponto. Um
+especificador com ponto no nome — `./pedido.service`, `./pedido.model`,
+`./algo.commands`, que são o idioma do Angular — virava `pedido.ts`, um arquivo
+que não existe.
+
+O nome de um módulo em TypeScript pode ter quantos pontos quiser; a extensão é só
+o que o disco tem a mais. A construção do candidato passou a **acrescentar** em
+vez de trocar, e ficaram dois testes de unidade nomeando o caso.
+
+**Nenhum teste de unidade teria pego isso**: os que eu escrevi usavam
+`./pedido`, sem ponto, porque é assim que se escreve um exemplo.
+
+#### O que ficou resolvido
+
+| forma | |
+| --- | --- |
+| relativa | `./pedido`, `../modelo/pedido`, com `..` normalizado sem tocar no disco |
+| pasta | `./modelo` como `modelo/index.ts` |
+| pasta, jeito Angular | `./libs/core` como `core/public_api.ts`, que é o que o `ng-packagr` gera |
+| apelido do `paths` | exato e com `*`, com os destinos tentados em ordem |
+| `baseUrl` | importar por caminho absoluto dentro do projeto |
+| barril | atravessado até quem declara, com ciclo detectado e teto de profundidade |
+
+Dependência instalada devolve `None` **de propósito**, e isso não é erro: é dizer
+"não alcanço", que é diferente de "não existe".
+
+#### Onde isto mora, e por que não é no analisador
+
+Resolver módulo é conhecimento de **projeto** — depende do `tsconfig.json`, do
+`baseUrl`, do `paths`. O analisador responde sobre texto, e a guarda de
+arquitetura o mantém assim. O resolvedor é um módulo irmão: recebe o que o
+analisador extraiu — a lista de `import` e de reexportação, que é texto — e
+decide para onde cada um aponta.
+
+Também por isso esta fase **não liga nenhuma capacidade**. Ela entrega uma peça
+correta e conferida; usá-la é a fase 3.
+
+### Fase 3 — Definição e referências ⬜### Fase 3 — Definição e referências ⬜
 
 Grupo 2, sem tipos ainda.
 
