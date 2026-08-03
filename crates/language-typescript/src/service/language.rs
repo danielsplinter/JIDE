@@ -175,6 +175,19 @@ impl ActiveTypeScriptService {
             .ok_or_else(|| LanguageError::Provider("documento não está aberto".to_owned()))
     }
 
+    /// Caminho e texto de tudo o que está aberto, para converter posições.
+    ///
+    /// Enquanto se digita, o buffer não é o que está no disco; ler o arquivo para
+    /// converter a coluna de uma posição no próprio arquivo aberto daria a linha
+    /// errada. Registro travado devolve lista vazia: a conversão cai para a
+    /// aproximação, e não para o erro.
+    fn abertos(&self) -> Vec<(PathBuf, String)> {
+        self.documentos
+            .lock()
+            .map(|registro| registro.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     async fn abrir(&self, path: &Path, texto: &str) -> Result<(), LanguageError> {
         // `open` não tem resposta no protocolo, e esperar por uma travaria toda
         // abertura de arquivo.
@@ -276,7 +289,7 @@ impl ActiveLanguage for ActiveTypeScriptService {
     }
 
     async fn diagnostics(&self, document_id: DocumentId) -> Result<Vec<Diagnostic>, LanguageError> {
-        let (path, _) = self.documento(document_id)?;
+        let (path, texto) = self.documento(document_id)?;
         let resposta = self
             .session
             .request(
@@ -288,7 +301,12 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .map_err(|detalhe| self.failure(detalhe))?;
         Ok(resposta
             .as_array()
-            .map(|itens| itens.iter().filter_map(diagnostic_from).collect())
+            .map(|itens| {
+                itens
+                    .iter()
+                    .filter_map(|item| diagnostic_from(item, &texto))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -350,7 +368,13 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .map_err(|detalhe| self.failure(detalhe))?;
         Ok(resposta
             .as_array()
-            .map(|itens| itens.iter().filter_map(location_from).collect())
+            .map(|itens| {
+                let mut textos = Textos::com_abertos(self.abertos());
+                itens
+                    .iter()
+                    .filter_map(|item| location_from(item, &mut textos))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -385,7 +409,13 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .map_err(|detalhe| self.failure(detalhe))?;
         Ok(resposta
             .as_array()
-            .map(|itens| itens.iter().filter_map(symbol_from).collect())
+            .map(|itens| {
+                let mut textos = Textos::com_abertos(self.abertos());
+                itens
+                    .iter()
+                    .filter_map(|item| symbol_from(item, &mut textos))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -395,7 +425,7 @@ impl ActiveLanguage for ActiveTypeScriptService {
     }
 }
 
-fn symbol_from(valor: &serde_json::Value) -> Option<SemanticSymbol> {
+fn symbol_from(valor: &serde_json::Value, textos: &mut Textos) -> Option<SemanticSymbol> {
     let name = valor.get("name")?.as_str()?.to_owned();
     let kind = match valor.get("kind").and_then(serde_json::Value::as_str)? {
         "class" | "local class" => SymbolKind::Class,
@@ -406,13 +436,15 @@ fn symbol_from(valor: &serde_json::Value) -> Option<SemanticSymbol> {
         // lista com o que a pergunta não é.
         _ => return None,
     };
-    let inicio = position_from(valor.get("start")?)?;
-    let fim = position_from(valor.get("end")?).unwrap_or(inicio);
+    let path = PathBuf::from(valor.get("file")?.as_str()?);
+    let texto = textos.de(&path).map(str::to_owned);
+    let inicio = position_from(valor.get("start")?, texto.as_deref())?;
+    let fim = position_from(valor.get("end")?, texto.as_deref()).unwrap_or(inicio);
     Some(SemanticSymbol {
         name,
         kind,
         location: Location {
-            path: PathBuf::from(valor.get("file")?.as_str()?),
+            path,
             range: TextRange {
                 start: inicio,
                 end: fim,
@@ -500,31 +532,103 @@ fn to_service(texto: &str, position: TextPosition) -> (u32, u32) {
         .map_or(position.column, |linha| {
             let linha = linha.strip_suffix('\n').unwrap_or(linha);
             let linha = linha.strip_suffix('\r').unwrap_or(linha);
-            linha
+            let dentro: u32 = linha
                 .chars()
                 .take(position.column as usize)
                 .map(|caractere| caractere.len_utf16() as u32)
-                .sum()
+                .sum();
+            // O que passa do fim da linha atravessa sem tradução, como faz o
+            // caminho de volta. Truncar aqui e preservar lá tornaria as duas
+            // conversões não inversas, e é o que o teste de ida e volta pega.
+            dentro + position.column.saturating_sub(linha.chars().count() as u32)
         });
     (position.line + 1, unidades + 1)
 }
 
-const fn from_service(line: u32, offset: u32) -> TextPosition {
+/// O caminho de volta, com o mesmo desencontro de contagem.
+///
+/// O analisador devolve a coluna em **unidade UTF-16**; o domínio a quer em
+/// **caractere**. Sem o texto, só dá para desfazer a base um — o que está certo
+/// para toda linha sem caractere astral e erra para adiante nas outras, deixando
+/// o realce de um diagnóstico deslocado.
+///
+/// Por isso o texto é opcional aqui, e não obrigatório como na ida: numa
+/// definição que leva a um arquivo ilegível, ficar sem posição nenhuma seria pior
+/// do que ficar com uma coluna adiante.
+fn from_service(texto: Option<&str>, line: u32, offset: u32) -> TextPosition {
+    let unidades = offset.saturating_sub(1);
+    let linha = line.saturating_sub(1);
+    let coluna = texto
+        .and_then(|texto| texto.split_inclusive('\n').nth(linha as usize))
+        .map_or(unidades, |conteudo| {
+            let conteudo = conteudo.strip_suffix('\n').unwrap_or(conteudo);
+            let conteudo = conteudo.strip_suffix('\r').unwrap_or(conteudo);
+            coluna_de_unidades(conteudo, unidades)
+        });
     TextPosition {
-        line: line.saturating_sub(1),
-        column: offset.saturating_sub(1),
+        line: linha,
+        column: coluna,
     }
 }
 
-fn position_from(valor: &serde_json::Value) -> Option<TextPosition> {
-    let line = u32::try_from(valor.get("line")?.as_u64()?).ok()?;
-    let offset = u32::try_from(valor.get("offset")?.as_u64()?).ok()?;
-    Some(from_service(line, offset))
+/// Quantos caracteres cabem antes de tantas unidades UTF-16.
+///
+/// O que sobra é somado de volta: uma coluna além do fim da linha — que o
+/// analisador usa para marcar o fim de um intervalo — tem de continuar depois de
+/// todas as outras, e não grudar no último caractere.
+fn coluna_de_unidades(linha: &str, unidades: u32) -> u32 {
+    let mut restantes = unidades;
+    let mut coluna = 0;
+    for caractere in linha.chars() {
+        let tamanho = caractere.len_utf16() as u32;
+        if restantes < tamanho {
+            break;
+        }
+        restantes -= tamanho;
+        coluna += 1;
+    }
+    coluna + restantes
 }
 
-fn diagnostic_from(valor: &serde_json::Value) -> Option<Diagnostic> {
-    let inicio = position_from(valor.get("start")?)?;
-    let fim = position_from(valor.get("end")?).unwrap_or(inicio);
+fn position_from(valor: &serde_json::Value, texto: Option<&str>) -> Option<TextPosition> {
+    let line = u32::try_from(valor.get("line")?.as_u64()?).ok()?;
+    let offset = u32::try_from(valor.get("offset")?.as_u64()?).ok()?;
+    Some(from_service(texto, line, offset))
+}
+
+/// Os textos dos arquivos que aparecem numa resposta.
+///
+/// Converter a coluna pede **a linha**, e uma definição leva a qualquer arquivo do
+/// projeto. O que está aberto vem do espelho — e tem de vir de lá, porque o buffer
+/// sendo editado não é o que está no disco. O resto é lido, uma vez só por
+/// resposta: uma definição costuma trazer um resultado, e a leitura que falha
+/// devolve a coluna sem conversão em vez de descartar a posição.
+struct Textos {
+    conhecidos: HashMap<PathBuf, Option<String>>,
+}
+
+impl Textos {
+    fn com_abertos(abertos: Vec<(PathBuf, String)>) -> Self {
+        Self {
+            conhecidos: abertos
+                .into_iter()
+                .map(|(caminho, texto)| (caminho, Some(texto)))
+                .collect(),
+        }
+    }
+
+    fn de(&mut self, path: &Path) -> Option<&str> {
+        if !self.conhecidos.contains_key(path) {
+            self.conhecidos
+                .insert(path.to_path_buf(), std::fs::read_to_string(path).ok());
+        }
+        self.conhecidos.get(path)?.as_deref()
+    }
+}
+
+fn diagnostic_from(valor: &serde_json::Value, texto: &str) -> Option<Diagnostic> {
+    let inicio = position_from(valor.get("start")?, Some(texto))?;
+    let fim = position_from(valor.get("end")?, Some(texto)).unwrap_or(inicio);
     Some(Diagnostic {
         range: TextRange {
             start: inicio,
@@ -568,11 +672,13 @@ fn completion_from(valor: &serde_json::Value) -> Option<CompletionItem> {
     })
 }
 
-fn location_from(valor: &serde_json::Value) -> Option<Location> {
-    let inicio = position_from(valor.get("start")?)?;
-    let fim = position_from(valor.get("end")?).unwrap_or(inicio);
+fn location_from(valor: &serde_json::Value, textos: &mut Textos) -> Option<Location> {
+    let path = PathBuf::from(valor.get("file")?.as_str()?);
+    let texto = textos.de(&path).map(str::to_owned);
+    let inicio = position_from(valor.get("start")?, texto.as_deref())?;
+    let fim = position_from(valor.get("end")?, texto.as_deref()).unwrap_or(inicio);
     Some(Location {
-        path: PathBuf::from(valor.get("file")?.as_str()?),
+        path,
         range: TextRange {
             start: inicio,
             end: fim,
@@ -738,6 +844,52 @@ mod tests {
         let texto = "linha zero\nlinha um\n";
         assert_eq!(to_service(texto, TextPosition { line: 0, column: 0 }), (1, 1));
         assert_eq!(to_service(texto, TextPosition { line: 1, column: 5 }), (2, 6));
+    }
+
+    /// O caminho de volta desfaz exatamente a ida.
+    ///
+    /// Ida e volta usam o mesmo texto, e uma posição que sai e entra tem de
+    /// voltar a ser ela mesma. É o que impede as duas conversões de divergirem
+    /// quando uma for mexida — o desencontro entre elas foi o defeito inteiro.
+    #[test]
+    fn the_return_path_undoes_the_outgoing_one() {
+        let texto = "const e = \"\u{1F642}\"; class Pedido { desconto = 0; }\nsegunda linha\n";
+        for linha in 0..2u32 {
+            for coluna in 0..20u32 {
+                let posicao = TextPosition { line: linha, column: coluna };
+                let (l, o) = to_service(texto, posicao);
+                assert_eq!(
+                    from_service(Some(texto), l, o),
+                    posicao,
+                    "ida e volta precisam fechar em {posicao:?}"
+                );
+            }
+        }
+    }
+
+    /// Sem o texto, a volta só desfaz a base um.
+    ///
+    /// É a aproximação de sempre, e continua certa para toda linha sem caractere
+    /// astral. Vale mais do que descartar a posição de uma definição num arquivo
+    /// que não deu para ler.
+    #[test]
+    fn without_the_text_the_return_path_only_undoes_the_one_base() {
+        assert_eq!(
+            from_service(None, 3, 8),
+            TextPosition { line: 2, column: 7 }
+        );
+    }
+
+    /// Uma coluna além do fim da linha continua além.
+    ///
+    /// O analisador marca o fim de um intervalo assim, e grudá-la no último
+    /// caractere encolheria o realce de um diagnóstico em um.
+    #[test]
+    fn a_column_past_the_end_of_the_line_stays_past_it() {
+        assert_eq!(coluna_de_unidades("abc", 3), 3);
+        assert_eq!(coluna_de_unidades("abc", 9), 9);
+        // O emoji vale duas unidades e um caractere.
+        assert_eq!(coluna_de_unidades("\u{1F642}!", 3), 2);
     }
 
     /// Um emoji antes da coluna a desloca, porque o analisador conta UTF-16.

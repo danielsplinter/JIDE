@@ -923,14 +923,28 @@ nunca estar acontecendo. Por isso a decisão (`cabe_no_texto`) e o payload
 (`change_arguments`) são funções puras com prova própria, e o teste contra o
 analisador prova que o conjunto funciona.
 
-#### O que ficou
+#### O caminho de volta, corrigido em seguida
 
-**O caminho de volta tem o mesmo defeito, menor.** `from_service` converte a
-coluna que o analisador devolve subtraindo um, e ela também vem em unidade
-UTF-16. Numa linha com emoji, um diagnóstico ou um resultado de definição aponta
-uma coluna adiante. Corrigir exige o texto do arquivo **de destino**, que numa
-definição em outro arquivo não está em mãos — é trabalho de outro tamanho, e o
-estrago é um realce deslocado, não um buffer envenenado.
+`from_service` tinha o mesmo defeito, e foi corrigido depois: a coluna que o
+analisador devolve também vem em unidade UTF-16, e numa linha com emoji um
+diagnóstico ou uma definição apontava uma coluna adiante.
+
+**Traduzir de volta pede a linha do arquivo de destino**, e uma definição leva a
+qualquer lugar do projeto. Quem está aberto vem do espelho — e tem de vir de lá,
+porque o buffer sendo editado não é o que está no disco. O resto é lido, uma vez
+só por resposta. Leitura que falha devolve a aproximação de antes, em vez de
+descartar a posição: uma coluna adiante vale mais do que nenhuma.
+
+**As duas conversões passaram a ser inversas, e o teste de ida e volta é o que as
+prende uma à outra.** Ele reprovou de saída, e por um motivo que nenhum dos dois
+lados tinha errado sozinho: coluna além do fim da linha era truncada na ida e
+preservada na volta. Nenhum teste de uma conversão só pegaria isso — o desencontro
+entre elas era o defeito inteiro, e é ele que o teste agora vigia.
+
+A sondagem contra o analisador de verdade também reprovou na primeira montagem, e
+outra vez **o número errado era o do teste**: o `navto` devolve o intervalo da
+declaração inteira, começando no `export`, e não o do nome. O analisador desmentiu
+o palpite, que é para isso que a sondagem existe.
 
 ### O medidor de memória ✅
 

@@ -542,3 +542,85 @@ fn an_astral_character_before_the_edit_does_not_shift_it() {
     assert!(runtime.block_on(ativo.shutdown()).is_ok());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// SONDAGEM: a coluna que o analisador **devolve** também conta UTF-16.
+///
+/// É o caminho de volta do mesmo desencontro. Um tipo declarado depois de um
+/// emoji na mesma linha tem coluna diferente nas duas contagens, e sem conversão
+/// a IDE apontaria um caractere adiante — o realce de um diagnóstico caindo ao
+/// lado do que ele acusa.
+#[test]
+#[ignore = "exige Node instalado e `npm install typescript` no projeto de teste"]
+fn the_column_the_analyzer_returns_is_translated_back() {
+    let root = temporary("emoji-volta");
+    assert!(std::fs::write(root.join("package.json"), r#"{"name":"t"}"#).is_ok());
+    assert!(
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{ "include": ["src/**/*.ts"] }"#,
+        )
+        .is_ok()
+    );
+    let fonte = root.join("src");
+    assert!(std::fs::create_dir_all(&fonte).is_ok());
+    #[cfg(windows)]
+    const NPM: &str = "npm.cmd";
+    #[cfg(not(windows))]
+    const NPM: &str = "npm";
+    let instalado = std::process::Command::new(NPM)
+        .args(["install", "typescript@5", "--no-audit", "--no-fund"])
+        .current_dir(&root)
+        .status();
+    assert!(instalado.is_ok_and(|status| status.success()));
+
+    let arquivo = fonte.join("pedido.ts");
+    let codigo = "const e = \"\u{1F642}\"; export class PedidoDeCompra {}\n";
+    assert!(std::fs::write(&arquivo, codigo).is_ok());
+
+    let runtime = runtime();
+    let ativo = match runtime.block_on(provider().activate(context(&root))) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador precisa subir: {erro}"),
+    };
+    assert!(
+        runtime
+            .block_on(ativo.open_document(DocumentSnapshot {
+                id: DocumentId(1),
+                path: arquivo,
+                version: 1,
+                text: codigo.to_owned(),
+            }))
+            .is_ok()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+
+    let achados = match runtime.block_on(ativo.workspace_types("PedidoDeCompra", 20)) {
+        Ok(achados) => achados,
+        Err(erro) => panic!("a busca precisa responder: {erro}"),
+    };
+    let Some(achado) = achados.iter().find(|s| s.name == "PedidoDeCompra") else {
+        panic!("o tipo declarado precisa aparecer: {achados:?}");
+    };
+
+    // A coluna esperada, contada em caracteres como o resto da IDE conta.
+    //
+    // O intervalo que o `navto` devolve cobre a **declaração inteira**, e não o
+    // nome: começa no `export`. Esperar o nome foi o primeiro palpite, e o
+    // analisador desmentiu — o número errado era o do teste.
+    let Some(linha) = codigo.lines().next() else {
+        panic!("o código tem uma primeira linha");
+    };
+    let Some(byte) = linha.find("export") else {
+        panic!("a declaração está na primeira linha");
+    };
+    // Quinze caracteres até ali, e dezesseis unidades UTF-16: o emoji conta duas
+    // vezes. É essa diferença que o teste cobra.
+    let esperada = linha[..byte].chars().count() as u32;
+    assert_eq!(
+        achado.location.range.start.column, esperada,
+        "com um emoji na linha, a coluna devolvida precisa vir traduzida para caractere"
+    );
+
+    assert!(runtime.block_on(ativo.shutdown()).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}
