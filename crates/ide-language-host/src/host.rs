@@ -27,6 +27,10 @@ use tokio::sync::oneshot;
 
 #[derive(Clone, Debug)]
 pub struct LanguageHostConfig {
+    /// Subir todo candidato ao abrir, e não só quem acrescenta capacidade.
+    ///
+    /// Ver `eager_language_providers` na configuração da IDE.
+    pub eager_providers: bool,
     pub worker_queue_capacity: usize,
     pub max_active_providers: usize,
 }
@@ -36,6 +40,10 @@ impl Default for LanguageHostConfig {
         Self {
             worker_queue_capacity: 64,
             max_active_providers: 8,
+            // Subir junto é o comportamento que se conhece, e o mesmo de
+            // qualquer outra IDE. Sob demanda é escolha, e quem a faz sabe o
+            // que troca.
+            eager_providers: true,
         }
     }
 }
@@ -159,6 +167,7 @@ impl LanguageHost {
             config: LanguageHostConfig {
                 worker_queue_capacity: config.worker_queue_capacity.max(1),
                 max_active_providers: config.max_active_providers.max(1),
+                eager_providers: config.eager_providers,
             },
             registry: Mutex::new(Registry::default()),
             next_request_id: AtomicU64::new(1),
@@ -395,8 +404,13 @@ impl LanguageHost {
                 .unwrap_or_else(LanguageCapabilities::empty);
             let acrescenta = !minhas.difference(cobertas).is_empty();
             // De pé já, ou acrescenta o que ninguém cobre, ou ninguém subiu
-            // ainda e o arquivo precisa de alguém agora.
-            if !de_pe.contains(&provider_id) && !acrescenta && !nenhum_subiu {
+            // ainda e o arquivo precisa de alguém agora. Com `eager_providers`,
+            // todo candidato entra — que é a postura de qualquer outra IDE.
+            if !self.config.eager_providers
+                && !de_pe.contains(&provider_id)
+                && !acrescenta
+                && !nenhum_subiu
+            {
                 continue;
             }
             match self.ensure_active(&provider_id) {
@@ -517,6 +531,84 @@ impl LanguageHost {
     /// enquanto isso a janela não fica parada esperando a análise. Falhar aqui
     /// significa que a mudança **não** entrou na fila, e quem chamou não deve
     /// avançar o que considera já enviado.
+    /// Abre um documento nos providers que servem, **sem esperar por eles**.
+    ///
+    /// A rota é registrada na hora; o que não espera é o provider processar. Um
+    /// analisador ocupado montando o projeto atende a abertura quando puder, e
+    /// quem chamou segue desenhando o quadro.
+    ///
+    /// A versão que espera continua existindo para quem precisa saber que o
+    /// documento chegou — os testes, e a primeira abertura de um projeto.
+    pub fn post_open_document(
+        &self,
+        context: LanguageRequestContext,
+        document: DocumentSnapshot,
+    ) -> Result<ProviderId, LanguageHostError> {
+        let extension = document_extension(&document.path);
+        let candidates = self.candidate_ids(&extension, LanguageCapabilities::empty())?;
+        let (de_pe, capacidades) = self.retrato_dos_providers()?;
+        let mut cobertas = LanguageCapabilities::empty();
+        let mut nenhum_subiu = true;
+        let mut aceito = None;
+        for provider_id in candidates {
+            let minhas = capacidades
+                .get(&provider_id)
+                .copied()
+                .unwrap_or_else(LanguageCapabilities::empty);
+            let acrescenta = !minhas.difference(cobertas).is_empty();
+            if !self.config.eager_providers
+                && !de_pe.contains(&provider_id)
+                && !acrescenta
+                && !nenhum_subiu
+            {
+                continue;
+            }
+            let Ok(worker) = self.ensure_active(&provider_id) else {
+                continue;
+            };
+            if worker.post_open(context.clone(), document.clone()).is_err() {
+                continue;
+            }
+            nenhum_subiu = false;
+            cobertas |= minhas;
+            self.registry
+                .lock()
+                .map_err(|_| LanguageHostError::WorkerStopped)?
+                .route(document.id, provider_id.clone());
+            aceito.get_or_insert(provider_id);
+        }
+        aceito.ok_or(LanguageHostError::DocumentNotRouted(document.id))
+    }
+
+    /// Quem está de pé e o que cada um sabe fazer, num retrato só.
+    fn retrato_dos_providers(
+        &self,
+    ) -> Result<
+        (
+            std::collections::HashSet<ProviderId>,
+            std::collections::HashMap<ProviderId, LanguageCapabilities>,
+        ),
+        LanguageHostError,
+    > {
+        let registry = self
+            .registry
+            .lock()
+            .map_err(|_| LanguageHostError::WorkerStopped)?;
+        Ok((
+            registry
+                .providers
+                .iter()
+                .filter(|(_, entry)| entry.worker.is_some())
+                .map(|(id, _)| id.clone())
+                .collect(),
+            registry
+                .providers
+                .iter()
+                .map(|(id, entry)| (id.clone(), entry.capabilities))
+                .collect(),
+        ))
+    }
+
     pub fn post_change_document(
         &self,
         context: LanguageRequestContext,
@@ -1489,21 +1581,16 @@ mod tests {
             "a morte precisa ser dita, e não confundida com falha de pedido: {depois:?}"
         );
 
-        // **A fase 5 da `25` trocou a queda imediata por não subir o analisador
-        // à toa.** Antes, abrir ativava todos os candidatos, e o de baixo já
-        // tinha o documento: a queda não custava reabertura. Agora abrir ativa
-        // só quem já está de pé, porque subir um analisador externo custa 1,9 GB
-        // e trinta segundos — e pagá-los ao abrir o primeiro `.ts` é pagá-los
-        // mesmo quando ninguém vai perguntar nada que exija tipos.
+        // O de baixo já tinha o documento aberto: a queda é **imediata**, e não
+        // custa uma reabertura. É o que a postura padrão — subir junto — dá de
+        // graça, e é uma das razões de ela ser o padrão.
         //
-        // O que se perdeu vale pouco na prática: com o índice como principal,
-        // quem morre é o analisador, e o índice já está de pé respondendo. O
-        // caso deste teste — o principal morrendo — passou a custar a reabertura
-        // que a linha abaixo exercita, e quem a faz é a aplicação, que tem o
-        // texto.
+        // Sob demanda a troca é outra: o de baixo só sobe quando alguém precisa
+        // dele, e a queda custa a reabertura que a aplicação faz no quadro
+        // seguinte. As duas posturas estão cobertas, cada uma no seu teste.
         assert!(
-            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_err(),
-            "sem ter recebido o documento, o de baixo não tem o que responder"
+            pollster::block_on(host.syntax(host.request_context(), DocumentId(1))).is_ok(),
+            "depois da queda, quem responde é o de baixo, sem reabrir"
         );
 
         // E reabrir continua funcionando, que é o caminho de quando **nenhum**
@@ -1725,7 +1812,16 @@ mod tests {
     /// O limite de um provider não é a morte dele.
     #[test]
     fn saying_it_does_not_know_looks_for_someone_who_does() {
-        let host = LanguageHost::new(".");
+        // Sob demanda: é a postura em que "não sei" tem consequência visível.
+        // Com todos de pé desde a abertura, a passagem adiante é imediata e o
+        // acordar não acontece — as duas coisas estão cobertas, cada uma na sua.
+        let host = LanguageHost::with_config(
+            ".",
+            super::LanguageHostConfig {
+                eager_providers: false,
+                ..super::LanguageHostConfig::default()
+            },
+        );
         let indice = Arc::new(TestProvider::new(
             "ts.indice",
             LanguageCapabilities::SYNTAX | LanguageCapabilities::COMPLETION,

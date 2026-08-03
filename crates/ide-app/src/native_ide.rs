@@ -142,7 +142,14 @@ impl NativeIde {
         self.runtime.processes = Some(Arc::clone(&nativo));
         let processes: Arc<dyn ProcessSupervisor> = nativo;
         let java = java_contribution::contribution(processes.clone());
-        let language_host = LanguageHost::new(&root);
+        // A postura vem da configuração, e o padrão é subir junto.
+        let language_host = LanguageHost::with_config(
+            &root,
+            ide_language_host::LanguageHostConfig {
+                eager_providers: self.runtime.config.eager_language_providers,
+                ..ide_language_host::LanguageHostConfig::default()
+            },
+        );
         language_host
             .register(java.provider.clone())
             .map_err(|error| error.to_string())?;

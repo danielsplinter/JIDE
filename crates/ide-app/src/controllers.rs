@@ -319,7 +319,13 @@ impl LanguageController {
             // que é o que acontece a cada tecla, apenas entra na fila.
             let result = match documents.language.get(&snapshot.id) {
                 None => {
-                    pollster::block_on(host.open_document(host.request_context(), snapshot.clone()))
+                    // **Abrir também não espera.** O comentário antigo aqui dizia
+                    // que abrir é raro e que o resto depende dele; o que faltava
+                    // ver é que o worker atende um pedido por vez. Com um
+                    // analisador ocupado montando o projeto, a abertura ficava
+                    // enfileirada atrás de um pedido com prazo de cinco segundos
+                    // — e a janela parava, a cada quadro, até ele terminar.
+                    host.post_open_document(host.request_context(), snapshot.clone())
                         .map(|_| ())
                 }
                 Some(previous) if previous.version != snapshot.version => {

@@ -256,6 +256,30 @@ impl ProviderWorker {
     /// O provider já roda em thread própria; era a **espera** que punha a
     /// análise no meio da digitação. Quem posta segue com a tecla e recolhe o
     /// resultado depois.
+    /// Manda abrir e devolve por onde a resposta vem. O espelho de
+    /// [`Self::post_change`].
+    ///
+    /// # Por que abrir também precisa disto
+    ///
+    /// O worker atende **um pedido por vez**. Enquanto o analisador externo monta
+    /// o projeto, um pedido de definição fica esperando o prazo dele — e uma
+    /// abertura enfileirada atrás disso espera junto. Feita com espera na thread
+    /// da interface, é a janela parada por segundos a cada quadro.
+    pub(super) fn post_open(
+        &self,
+        context: LanguageRequestContext,
+        document: DocumentSnapshot,
+    ) -> Result<oneshot::Receiver<Result<(), LanguageHostError>>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::Open {
+            context,
+            document,
+            response,
+        })?;
+        Ok(receiver)
+    }
+
     pub(super) fn post_change(
         &self,
         context: LanguageRequestContext,

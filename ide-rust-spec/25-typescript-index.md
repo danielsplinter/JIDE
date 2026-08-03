@@ -793,6 +793,36 @@ IDE travada.
 O primeiro defeito é que produzia o segundo: sem ele, aquele clique nunca teria
 acordado ninguém.
 
+#### O último travamento, e a decisão que veio dele
+
+Abrir um documento também esperava. O comentário no código dizia que abrir é raro
+e que o resto depende dele — e o que faltava ver é que **o worker atende um
+pedido por vez**. Com o analisador montando o projeto, uma abertura ficava
+enfileirada atrás de um pedido com prazo de cinco segundos, e a janela parava a
+cada quadro até ele terminar.
+
+Foi o quinto lugar em que o mesmo defeito apareceu, e o último: agora **nenhuma**
+chamada ao host espera na thread da interface.
+
+##### Subir junto voltou a ser o padrão
+
+Depois de a IDE travar três vezes seguidas na mão de quem a usa, a postura padrão
+voltou a ser a de qualquer outra IDE: **todo provider sobe ao abrir o arquivo**.
+Sob demanda continua inteiro, atrás de uma chave:
+
+```toml
+eager_language_providers = false
+```
+
+A escolha não é técnica, é de quem usa. Subir junto custa 1,9 GB e trinta
+segundos desde o primeiro `.ts`, e em troca nada surpreende depois. Sob demanda
+economiza isso para quem só navega, busca e edita código com tipos declarados, e
+põe a espera no primeiro clique difícil.
+
+E a chave devolveu de graça a queda imediata: com todos de pé, o provider de
+baixo já tem o documento quando o de cima morre, e a troca não custa reabertura.
+Cada postura tem o seu teste.
+
 #### E quanto isso economiza, honestamente
 
 Com 14% a 17% dos pontos alcançados pelo índice, **o analisador continua sendo

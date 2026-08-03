@@ -18,6 +18,24 @@ use tracing_subscriber::EnvFilter;
 pub struct AppConfig {
     #[serde(default = "default_event_capacity")]
     pub event_capacity: usize,
+    /// Subir todo provider de linguagem ao abrir um arquivo, e não sob demanda.
+    ///
+    /// # As duas posturas, e por que a escolha é de quem usa
+    ///
+    /// **Ligado** (o padrão): tudo o que sabe responder pela linguagem sobe
+    /// junto. Custa memória e tempo desde o primeiro arquivo aberto — num
+    /// monorepo Angular, 1,9 GB e trinta segundos —, e em troca a primeira
+    /// pergunta difícil já encontra todo mundo pronto. É como as outras IDEs
+    /// fazem.
+    ///
+    /// **Desligado**: sobe quem responde primeiro, e o resto entra quando
+    /// alguém perguntar algo que ninguém de pé soube. Quem só navega, busca e
+    /// edita código com tipos declarados nunca paga pelo analisador externo.
+    ///
+    /// A chave é neutra: ela não menciona linguagem nem analisador. Vale para
+    /// qualquer provider que venha depois.
+    #[serde(default = "sim")]
+    pub eager_language_providers: bool,
     /// Providers de linguagem que não devem entrar em serviço.
     ///
     /// # Por que é uma lista de identificadores, e não uma opção por linguagem
@@ -58,6 +76,7 @@ impl Default for AppConfig {
             run: RunConfig::default(),
             debug: DebugConfig::default(),
             toolchains: ToolchainConfig::default(),
+            eager_language_providers: sim(),
             disabled_providers: BTreeSet::new(),
         }
     }
@@ -387,6 +406,15 @@ pub fn config_path() -> Option<PathBuf> {
 
 fn resolve_config_path(explicit: Option<PathBuf>, base: Option<PathBuf>) -> Option<PathBuf> {
     explicit.or_else(|| base.map(|base| base.join("er-ide").join("config.toml")))
+}
+
+/// O padrão de `eager_language_providers`.
+///
+/// Subir junto é o comportamento que se conhece: previsível, e o mesmo de
+/// qualquer outra IDE. Sob demanda economiza, e quem quiser a economia liga a
+/// chave sabendo o que troca.
+const fn sim() -> bool {
+    true
 }
 
 fn default_event_capacity() -> usize {
