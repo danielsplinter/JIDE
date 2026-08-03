@@ -4,6 +4,7 @@ mod bridges;
 mod controllers;
 mod debug;
 mod java_contribution;
+mod markup_contribution;
 mod native_ide;
 mod run;
 mod style_contribution;

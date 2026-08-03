@@ -1,0 +1,19 @@
+[package]
+name = "language-markup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ide-domain = { path = "../ide-domain" }
+ide-language-api = { path = "../ide-language-api" }
+tree-sitter.workspace = true
+tree-sitter-html.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+
+[lints]
+workspace = true

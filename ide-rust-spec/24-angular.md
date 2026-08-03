@@ -483,12 +483,24 @@ TypeScript como arquivo virtual. **A análise é deles; o plugin só mapeia.**
 dentro do `tsserver` que já sobe. Sem segundo processo, como no IntelliJ; sem
 parser nosso, como no VS Code.
 
-#### O que continua valendo desta fase
+#### A camada nativa de `.html`, que estava escrita e não construída
 
-A parte que não dependia da premissa: **a camada nativa de `.html` é HTML puro**.
-Sem nada de Angular, um template abre com realce de HTML, e `@if`, `@for` e
-`@defer` são texto comum — não destacados, e **não marcados como erro**. Isso
-continua sendo o comportamento certo, e é o que a IDE faz hoje.
+**A parte que não dependia da premissa também não existia.** Esta seção dizia
+que "um template abre com realce de HTML" e que isso "é o que a IDE faz hoje".
+Não era: **não havia provider nenhum de `.html`** no workspace, e um template
+abria como texto cru. A frase descrevia uma intenção no presente do indicativo,
+que é a forma mais fácil de uma especificação mentir.
+
+Agora existe: a crate `language-markup`, sobre a gramática de HTML do
+tree-sitter, com realce e estrutura e **nenhum diagnóstico**. `@if`, `@for` e
+`@defer` são texto comum para ela — não destacados, e não marcados como erro —,
+e o realce **sobrevive** ao que ela não entendeu: a etiqueta dentro de um bloco
+`@if` continua colorida, porque nó de erro não interrompe a travessia.
+
+Num projeto Angular o mesmo `.html` passa a ser atendido por **dois** providers:
+este, com `SYNTAX`, e o analisador de TypeScript, com `COMPLETION` e
+`DEFINITION`. Eles não competem — é a composição de capacidades da `04` aplicada
+a um arquivo que pertence a dois assuntos.
 
 E o custo medido do plugin — o dobro do tempo de carga — é razão a mais para ele
 não subir por padrão quando chegar a hora.

@@ -214,6 +214,7 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
                 "ide-workspace",
                 "language-angular",
                 "language-java",
+                "language-markup",
                 "language-style",
                 "language-typescript",
             ]),
@@ -266,7 +267,13 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
         // da `23`, com o sistema de build de npm e a instalação de Node — e é
         // por isso que o analisador dela passou a precisar da mesma cerca que o
         // de Java tem.
-        // Folhas de estilo não compilam nem executam: só gramática e contrato.
+        // Nem marcação nem folhas de estilo compilam ou executam: só gramática
+        // e contrato. As duas param no mesmo par de dependências, e é o mínimo
+        // que uma linguagem pode custar nesta arquitetura.
+        (
+            "language-markup",
+            BTreeSet::from(["ide-domain", "ide-language-api"]),
+        ),
         (
             "language-style",
             BTreeSet::from(["ide-domain", "ide-language-api"]),
@@ -971,15 +978,16 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         .filter(|dependencies| dependencies.contains("ide-domain"))
         .count();
 
-    // 17: 14 depois da fase 8 da `12`, mais TypeScript, mais as folhas de
-    // estilo, mais Angular. A conta que a consolidação prometeu — uma
-    // linguagem, uma crate — segue valendo na quarta.
+    // 18: 14 depois da fase 8 da `12`, mais TypeScript, mais as folhas de
+    // estilo, mais Angular, mais a marcação. A conta que a consolidação
+    // prometeu — uma linguagem, uma crate — segue valendo na quinta.
     //
     // Angular custou **uma** crate com dois módulos e nenhum provider: ela
     // entrega um descritor de plugin, e quem responde é o analisador que já
-    // existia. É o desenho mais barato que a `24` encontrou, e a métrica
-    // registra que ele foi barato de verdade.
-    assert_eq!(crates.len(), 17, "a refatoração não deve pulverizar crates");
+    // existia. A marcação custou outra, e ela existe porque um `.html` precisa
+    // de realce mesmo sem framework nenhum — a frase da `24` sobre a camada
+    // nativa ser HTML puro estava escrita e não construída.
+    assert_eq!(crates.len(), 18, "a refatoração não deve pulverizar crates");
     // 51: as 46 anteriores mais cinco, que é o que Angular custou no grafo.
     //
     // **Duas de produção** — `ide-app -> language-angular` e
@@ -991,8 +999,8 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // A conta inclui `dev-dependencies` de propósito, desde sempre: teste que
     // alcança meio mundo é acoplamento igual, só que sem aparecer no binário.
     assert!(
-        edge_count <= 51,
-        "o grafo interno ultrapassou a linha final de 51 arestas: {edge_count}"
+        edge_count <= 55,
+        "o grafo interno ultrapassou a linha final de 55 arestas: {edge_count}"
     );
     // O fan-out da raiz de composição **cresce com o número de linguagens**, e
     // é para isso que ela existe: é o único lugar que pode nomear todas. 16 é
@@ -1001,8 +1009,8 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // O que este número precisa pegar não é o crescimento — é o crescimento
     // **sem linguagem nova**, que seria a raiz virando depósito.
     assert!(
-        app_fan_out <= 16,
-        "ide-app ultrapassou o fan-out final de 16: {app_fan_out}"
+        app_fan_out <= 17,
+        "ide-app ultrapassou o fan-out final de 17: {app_fan_out}"
     );
     // Era `>= 13`, absoluto, e a fase 8 mostrou que a forma estava errada: o
     // número caiu para 11 sozinho quando cinco crates viraram módulos, sem que
@@ -1015,9 +1023,10 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     );
 
     let line_limits = [
-        // 18: cada linguagem é mais uma linha de `mod` na raiz de composição, e
-        // é exatamente o que ela deve custar. Angular custou a sua, e nada mais.
-        ("crates/ide-app/src/main.rs", 18),
+        // 19: cada linguagem é mais uma linha de `mod` na raiz de composição, e
+        // é exatamente o que ela deve custar. Angular custou a sua, a marcação a
+        // dela, e nada mais.
+        ("crates/ide-app/src/main.rs", 19),
         // 31 desde a fase 2 da decomposição do shell: o módulo `text` reúne
         // funções que viviam duplicadas no shell e no editor. O teto existe para
         // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.

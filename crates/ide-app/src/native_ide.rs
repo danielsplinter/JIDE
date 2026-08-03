@@ -14,7 +14,10 @@ use crate::controllers::{
     TaskController as AppTaskController, TypeSearchOutcome, WorkspaceController,
 };
 use crate::ui_bridge::{UiAction, UiBridge};
-use crate::{debug, java_contribution, run, style_contribution, typescript_contribution};
+use crate::{
+    debug, java_contribution, markup_contribution, run, style_contribution,
+    typescript_contribution,
+};
 use ide_application::{
     ApplicationCommand, DebugRequest, IdeEvent, NavigationRequest, NewItemRequest,
     OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, SearchScope,
@@ -199,6 +202,17 @@ impl NativeIde {
         self.languages
             .contributions
             .register(typescript)
+            .map_err(|error| error.to_string())?;
+        // A marcação entra ao lado do analisador, e não no lugar dele: num
+        // projeto Angular o mesmo `.html` é atendido pelos dois, cada um com as
+        // capacidades que tem.
+        let marcacao = markup_contribution::contribution();
+        language_host
+            .register(marcacao.provider.clone())
+            .map_err(|error| error.to_string())?;
+        self.languages
+            .contributions
+            .register(marcacao)
             .map_err(|error| error.to_string())?;
         let estilo = style_contribution::contribution();
         language_host
