@@ -333,6 +333,15 @@ impl IdeShell {
         self.search.close();
     }
 
+    /// Diz que há busca em curso, e onde o giro está.
+    ///
+    /// A fase vem de fora porque o relógio é de quem tem o laço de quadros. Passar
+    /// `None` apaga o giro sem entregar resultado, que é o caso de uma busca
+    /// cancelada.
+    pub fn set_search_progress(&mut self, phase: Option<f32>) {
+        self.search.set_searching(phase);
+    }
+
     /// Entrega o que a linguagem encontrou.
     pub fn set_type_search_results(&mut self, results: Vec<TypeSearchHit>) {
         self.search.set_type_results(results);

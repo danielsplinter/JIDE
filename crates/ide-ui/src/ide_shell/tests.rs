@@ -4324,6 +4324,81 @@ fn inspection_selection(shell: &IdeShell) -> Option<&str> {
     editor.selected_text(source)
 }
 
+/// Enquanto procura, a janela mostra o giro no lugar do resultado.
+///
+/// **Uma lista vazia não distingue "procurando" de "não achei nada".** Antes, a
+/// espera era uma linha na barra de estado — no canto oposto ao que se olha
+/// quando se abre a janela de busca. Quem procurava via a lista vazia e concluía
+/// que não havia resultado, num projeto grande em que a busca ainda estava
+/// varrendo.
+#[test]
+fn while_searching_the_window_spins_where_the_result_will_be() {
+    let size = Size::new(1280.0, 800.0);
+    let mut shell = shell_with_package();
+    shell.open_type_search();
+
+    shell.set_search_progress(Some(0.0));
+    let girando = paint_circles(&mut shell, size);
+    assert!(
+        !girando.is_empty(),
+        "com busca em curso, a janela precisa desenhar o giro"
+    );
+
+    // O resultado apaga o giro: ele diz "ainda não", e já chegou.
+    shell.set_type_search_results(Vec::new());
+    let parado = paint_circles(&mut shell, size);
+    // A diferença é o anel inteiro, e não um círculo qualquer que a tela já
+    // desenhasse: é o que impede este teste de passar por outro motivo.
+    assert!(
+        girando.len() >= parado.len() + 8,
+        "entregue o resultado, o anel inteiro precisa sumir: {} contra {}",
+        parado.len(),
+        girando.len()
+    );
+}
+
+/// O giro não deixa a lista da busca anterior aparecer embaixo dele.
+///
+/// Sem isto, a resposta velha ficaria na tela como se fosse a desta pergunta.
+#[test]
+fn the_spinner_replaces_the_previous_results() {
+    let size = Size::new(1280.0, 800.0);
+    let root = std::env::temp_dir().join(format!("er-giro-{}", std::process::id()));
+    let mut shell = shell_with_package();
+    shell.open_type_search();
+    shell.set_type_search_results(vec![type_hit(
+        "PedidoAntigo",
+        "classe",
+        &root.join("PedidoAntigo.java"),
+        0,
+    )]);
+    assert!(
+        painted_texts(&mut shell, size)
+            .iter()
+            .any(|text| text.contains("PedidoAntigo")),
+        "a lista da busca anterior está na tela antes da nova pergunta"
+    );
+
+    shell.set_search_progress(Some(0.25));
+    assert!(
+        !painted_texts(&mut shell, size)
+            .iter()
+            .any(|text| text.contains("PedidoAntigo")),
+        "a resposta velha não pode ficar embaixo do giro"
+    );
+}
+
+fn paint_circles(shell: &mut IdeShell, size: Size) -> Vec<f32> {
+    shell
+        .paint(size)
+        .iter()
+        .filter_map(|command| match command {
+            PaintCommand::FillCircle(circle) => Some(circle.radius),
+            _ => None,
+        })
+        .collect()
+}
+
 fn painted_texts(shell: &mut IdeShell, size: Size) -> Vec<String> {
     shell
         .paint(size)

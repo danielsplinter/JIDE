@@ -535,6 +535,8 @@ pub(super) struct DebugController {
 pub(super) struct SearchController<T> {
     pub(super) pending: Option<Receiver<T>>,
     pub(super) cancel: Option<ide_domain::CancellationToken>,
+    /// Quando esta busca começou, que é de onde sai a fase do giro.
+    pub(super) started: Option<Instant>,
 }
 
 // `derive(Default)` exigiria `T: Default`, que não é verdade nem necessário: um
@@ -544,6 +546,7 @@ impl<T> Default for SearchController<T> {
         Self {
             pending: None,
             cancel: None,
+            started: None,
         }
     }
 }
@@ -557,7 +560,19 @@ impl<T> SearchController<T> {
         let token = ide_domain::CancellationToken::new();
         self.cancel = Some(token.clone());
         self.pending = Some(receiver);
+        self.started = Some(Instant::now());
         token
+    }
+
+    /// Onde o giro está, de 0 a 1, ou `None` se nada roda.
+    ///
+    /// Uma volta por segundo: rápido o bastante para se ler como espera ativa,
+    /// devagar o bastante para não piscar.
+    pub(super) fn spinner_phase(&self) -> Option<f32> {
+        let inicio = self.started?;
+        self.pending
+            .as_ref()
+            .map(|_| inicio.elapsed().as_secs_f32().fract())
     }
 
     /// O resultado, se já chegou. Não espera por nada.
@@ -567,6 +582,7 @@ impl<T> SearchController<T> {
             Ok(achados) => {
                 self.pending = None;
                 self.cancel = None;
+                self.started = None;
                 Some(achados)
             }
             // Vazio significa que a varredura ainda está rodando.
@@ -574,6 +590,7 @@ impl<T> SearchController<T> {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.pending = None;
                 self.cancel = None;
+                self.started = None;
                 None
             }
         }
@@ -653,6 +670,34 @@ mod tests {
         );
         // E so uma vez: colher de novo nao pode repetir o resultado anterior.
         assert!(controller.collect().is_none());
+    }
+
+    /// A fase do giro existe enquanto a busca existe, e some quando ela acaba.
+    ///
+    /// **É o que decide se o quadro continua sendo pedido.** Uma fase que
+    /// sobrevivesse ao resultado deixaria a IDE redesenhando para sempre; uma que
+    /// nascesse vazia congelaria o giro no primeiro quadro, e um giro parado
+    /// parece a IDE travada — pior do que não ter giro nenhum.
+    #[test]
+    fn the_spinner_phase_lives_exactly_as_long_as_the_search() {
+        let mut controller = SearchController::<Vec<ide_workspace::SearchMatch>>::default();
+        assert_eq!(controller.spinner_phase(), None, "sem busca, nada gira");
+
+        let (envio, receptor) = std::sync::mpsc::channel();
+        let _token = controller.start(receptor);
+        let fase = controller.spinner_phase();
+        assert!(
+            fase.is_some_and(|valor| (0.0..1.0).contains(&valor)),
+            "com busca em curso a fase precisa existir e caber na volta: {fase:?}"
+        );
+
+        assert!(envio.send(Vec::new()).is_ok());
+        assert!(controller.collect().is_some());
+        assert_eq!(
+            controller.spinner_phase(),
+            None,
+            "colhido o resultado, o giro precisa parar"
+        );
     }
 
     /// A thread que morreu sem responder nao deixa a busca pendurada.

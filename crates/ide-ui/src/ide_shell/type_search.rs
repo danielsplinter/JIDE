@@ -6,7 +6,7 @@
 
 use ide_domain::Location;
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
-use ui_components::{ListView, ModalHost, TextInput};
+use ui_components::{ListView, ModalHost, Spinner, TextInput};
 use ui_core::{Point, Rect, Size, UiEvent, WidgetId};
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutStyle};
@@ -16,6 +16,7 @@ use crate::search::{ContentSearchHit, TypeSearchHit};
 const MODAL_ID: WidgetId = WidgetId(10_410);
 const INPUT_ID: WidgetId = WidgetId(10_411);
 const LIST_ID: WidgetId = WidgetId(10_412);
+const SPINNER_ID: WidgetId = WidgetId(10_413);
 /// A janela é larga porque cada linha traz o caminho junto do nome.
 const PANEL_SIZE: Size = Size::new(760.0, 420.0);
 const ROW_HEIGHT: f32 = 26.0;
@@ -92,6 +93,11 @@ pub(super) struct TypeSearchSurface {
     selected: usize,
     /// Primeira linha visível, que é onde a rolagem mora.
     first_visible: usize,
+    /// Onde o giro está, quando há busca em curso.
+    ///
+    /// `None` é "nada rodando". A fase vem de fora a cada quadro: a janela não
+    /// tem relógio, e o componente também não.
+    searching: Option<f32>,
 }
 
 impl Default for TypeSearchSurface {
@@ -104,6 +110,7 @@ impl Default for TypeSearchSurface {
             content_results: Vec::new(),
             selected: 0,
             first_visible: 0,
+            searching: None,
         }
     }
 }
@@ -142,8 +149,20 @@ impl TypeSearchSurface {
         self.modal.close();
     }
 
+    /// Diz que há busca em curso, e onde o giro está.
+    ///
+    /// **A espera aparece onde o resultado vai aparecer.** Antes ela era uma
+    /// linha na barra de estado, no canto oposto ao que se está olhando: quem
+    /// abre a janela de busca olha para a lista, e a lista ficava vazia sem dizer
+    /// se estava procurando ou se não achou nada. São duas situações diferentes
+    /// que se pareciam.
+    pub(super) fn set_searching(&mut self, phase: Option<f32>) {
+        self.searching = phase;
+    }
+
     /// Entrega o que a linguagem encontrou.
     pub(super) fn set_type_results(&mut self, results: Vec<TypeSearchHit>) {
+        self.searching = None;
         self.type_results = results;
         self.content_results.clear();
         self.selected = 0;
@@ -152,6 +171,7 @@ impl TypeSearchSurface {
 
     /// Entrega as ocorrências encontradas dentro do escopo da aplicação.
     pub(super) fn set_content_results(&mut self, results: Vec<ContentSearchHit>) {
+        self.searching = None;
         self.content_results = results;
         self.type_results.clear();
         self.selected = 0;
@@ -260,6 +280,16 @@ impl TypeSearchSurface {
         field.event(&mut EventContext::default(), &UiEvent::FocusGained);
         field.layout(layout, input);
         field.paint(paint);
+
+        // Enquanto procura, o lugar do resultado mostra o giro — e **só** o
+        // giro. Desenhar a lista velha embaixo faria a busca anterior parecer a
+        // resposta desta.
+        if let Some(phase) = self.searching {
+            let mut giro = Spinner::new(SPINNER_ID, "Procurando").with_phase(phase);
+            giro.layout(layout, list_rect);
+            giro.paint(paint);
+            return true;
+        }
 
         let mut list =
             ListView::new(LIST_ID, self.labels(source_root_names)).with_row_height(ROW_HEIGHT);

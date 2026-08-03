@@ -629,9 +629,25 @@ impl NativeIde {
                 failure,
             });
         });
-        if let Some(shell) = self.ui.shell.as_mut() {
-            shell.set_status_message("Procurando tipos…".to_owned());
-        }
+    }
+
+    /// Adianta o giro da janela de busca, e pede o quadro seguinte.
+    ///
+    /// **Devolver `true` é o que mantém a animação viva.** O laço já acorda a
+    /// cada 30 ms, mas só redesenha quando alguma coisa mudou; sem isto o giro
+    /// desenharia um quadro e congelaria — que é pior do que não ter giro nenhum,
+    /// porque um giro parado parece a IDE travada.
+    fn advance_search_spinner(&mut self) -> bool {
+        let fase = self
+            .workspace
+            .search
+            .spinner_phase()
+            .or_else(|| self.languages.type_search.spinner_phase());
+        let Some(shell) = self.ui.shell.as_mut() else {
+            return false;
+        };
+        shell.set_search_progress(fase);
+        fase.is_some()
     }
 
     /// Recolhe o resultado da busca por tipo, se já chegou.
@@ -714,7 +730,6 @@ impl NativeIde {
 
         let (sender, receiver) = std::sync::mpsc::channel();
         let cancel = self.workspace.search.start(receiver);
-        let mensagem = format!("Procurando “{query}”…");
         let query = query.to_owned();
         // O serviço é criado na thread: ele não guarda estado do projeto, e
         // mandá-lo para lá emprestado prenderia a IDE ao tempo da varredura.
@@ -725,9 +740,6 @@ impl NativeIde {
             // lugar desta. Nos dois casos não há o que fazer com o resultado.
             let _ = sender.send(achados);
         });
-        if let Some(shell) = self.ui.shell.as_mut() {
-            shell.set_status_message(mensagem);
-        }
     }
 
     /// Recolhe o resultado da busca, se já chegou. Não espera por nada.
@@ -2365,6 +2377,7 @@ impl ApplicationHandler for NativeIde {
         ));
         let mut changed = self.collect_content_search();
         changed |= self.collect_type_search();
+        changed |= self.advance_search_spinner();
         self.suspend_idle_languages();
         self.measure_memory();
         // O realce vem da thread do provider e chega quando fica pronto: é aqui
