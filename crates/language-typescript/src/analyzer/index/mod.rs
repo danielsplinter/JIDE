@@ -22,7 +22,7 @@ use ide_domain::{Location, SemanticSymbol, SymbolKind, TextPosition, TextRange};
 use super::parser::TypeScriptParser;
 
 /// O índice de um projeto, aberto para consulta.
-pub(super) struct WorkspaceIndex {
+pub(crate) struct WorkspaceIndex {
     aberto: file::Aberto,
 }
 
@@ -32,7 +32,7 @@ impl WorkspaceIndex {
     /// Reconstrói sempre, por enquanto: saber o que mudou desde a última vez é a
     /// fase 4 da `20` para Java, e trazê-la para cá antes de haver o que
     /// aproveitar seria escrever invalidação sem ter uso.
-    pub(super) fn build(root: &Path, source_roots: &[PathBuf]) -> Option<Self> {
+    pub(crate) fn build(root: &Path, source_roots: &[PathBuf]) -> Option<Self> {
         let caminho = file::caminho_do_indice(root)?;
         let parser = TypeScriptParser::new().ok()?;
         let mut declaracoes = Vec::new();
@@ -44,7 +44,7 @@ impl WorkspaceIndex {
     }
 
     /// Abre um índice já gravado, sem reconstruir.
-    pub(super) fn open(root: &Path) -> Option<Self> {
+    pub(crate) fn open(root: &Path) -> Option<Self> {
         let caminho = file::caminho_do_indice(root)?;
         Some(Self {
             aberto: file::Aberto::open(&caminho)?,
@@ -67,7 +67,7 @@ impl WorkspaceIndex {
     ///
     /// A varredura percorre a tabela de nomes, que está em memória e é pequena.
     /// Os registros de símbolo só saem do disco para os nomes que casaram.
-    pub(super) fn tipos(&self, query: &str, limit: usize) -> Vec<SemanticSymbol> {
+    pub(crate) fn tipos(&self, query: &str, limit: usize) -> Vec<SemanticSymbol> {
         let segmentos = segmentos(query);
         let mut casaram: Vec<(u8, usize, &str, u32, u32)> = Vec::new();
         for (nome, primeiro, quantos) in self.aberto.cada_nome() {

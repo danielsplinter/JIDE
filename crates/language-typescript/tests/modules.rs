@@ -277,3 +277,118 @@ fn mesmo_arquivo(esquerda: &Path, direita: &Path) -> bool {
     };
     normal(esquerda) == normal(direita)
 }
+
+/// A definição que o provider nativo dá é a mesma que o analisador dá.
+///
+/// É o critério da fase 3 da `25`, conferido no projeto apontado. O de
+/// `definition.rs` monta os casos difíceis à mão — nome repetido, barril,
+/// apelido —; este cobra que, no código de verdade, os dois concordem.
+///
+/// Só entram os nomes que o analisador aponta para **dentro do projeto**: o
+/// índice não alcança dependência instalada de propósito, e cobrar isso seria
+/// cobrar o que a `25` decidiu não fazer.
+#[test]
+#[ignore = "exige IDE_PROJETO_GRANDE com node_modules instalado"]
+fn our_definition_is_the_analyzers_definition() {
+    let root = projeto();
+    assert!(tsserver_in(&root).is_some(), "o projeto precisa ter `node_modules`");
+    let config = configuracao(&root);
+    let apelidos: Vec<String> = config.paths.iter().map(|(padrao, _)| padrao.clone()).collect();
+    let amostra = importacoes(&root, &apelidos, 120);
+    assert!(!amostra.is_empty());
+
+    let runtime = runtime();
+    let externo = TypeScriptServiceProvider::new(Arc::new(NativeProcessSupervisor::default()));
+    let deles = match runtime.block_on(externo.activate(LanguageActivationContext {
+        workspace_root: root.clone(),
+        source_roots: Vec::new(),
+        toolchains: Vec::new(),
+    })) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o analisador precisa subir: {erro}"),
+    };
+    let nativo = match pollster::block_on(
+        language_typescript::TypeScriptLanguageProvider::new().activate(LanguageActivationContext {
+            workspace_root: root.clone(),
+            source_roots: Vec::new(),
+            toolchains: Vec::new(),
+        }),
+    ) {
+        Ok(ativo) => ativo,
+        Err(erro) => panic!("o provider nativo precisa ativar: {erro}"),
+    };
+
+    let mut conferidos = 0usize;
+    let mut divergentes: Vec<String> = Vec::new();
+    for (numero, importacao) in amostra.iter().enumerate() {
+        let Ok(texto) = std::fs::read_to_string(&importacao.arquivo) else {
+            continue;
+        };
+        // A posição do **nome importado**, e não a do especificador: é onde o
+        // `Ctrl+clique` cai.
+        let Some(linha) = texto.lines().nth(importacao.posicao.line as usize) else {
+            continue;
+        };
+        let Some(inicio) = linha.find("{ ") else { continue };
+        let nome_col = (linha[..inicio + 2].chars().count()) as u32;
+        let posicao = TextPosition {
+            line: importacao.posicao.line,
+            column: nome_col,
+        };
+
+        let documento = DocumentId(numero as u64 + 1);
+        let instantaneo = DocumentSnapshot {
+            id: documento,
+            path: importacao.arquivo.clone(),
+            version: 1,
+            text: texto,
+        };
+        if runtime.block_on(deles.open_document(instantaneo.clone())).is_err() {
+            continue;
+        }
+        let _ = pollster::block_on(nativo.open_document(instantaneo));
+
+        let pedido = DefinitionRequest {
+            document_id: documento,
+            position: posicao,
+        };
+        let esperado = runtime.block_on(deles.definition(pedido.clone()));
+        let nosso = pollster::block_on(nativo.definition(pedido));
+        let _ = runtime.block_on(deles.close_document(documento));
+        let _ = pollster::block_on(nativo.close_document(documento));
+
+        let Ok(esperado) = esperado else { continue };
+        let Some(esperado) = esperado.first().map(|local| local.path.clone()) else {
+            continue;
+        };
+        if esperado.to_string_lossy().contains("node_modules") {
+            continue;
+        }
+        let Ok(nosso) = nosso else { continue };
+        conferidos += 1;
+        let iguais = nosso
+            .first()
+            .is_some_and(|local| mesmo_arquivo(&local.path, &esperado));
+        if !iguais {
+            divergentes.push(format!(
+                "{}:{} -> nós {:?}, o analisador {:?}",
+                importacao.arquivo.display(),
+                posicao.line,
+                nosso.first().map(|local| local.path.clone()),
+                esperado
+            ));
+        }
+    }
+
+    println!("{conferidos} definições conferidas, {} divergentes", divergentes.len());
+    for divergencia in divergentes.iter().take(10) {
+        println!("   {divergencia}");
+    }
+    assert!(conferidos >= 10, "a amostra precisa ter o que conferir: {conferidos}");
+    assert!(
+        divergentes.is_empty(),
+        "{} de {conferidos} definições abrem outro arquivo",
+        divergentes.len()
+    );
+    assert!(runtime.block_on(deles.shutdown()).is_ok());
+}

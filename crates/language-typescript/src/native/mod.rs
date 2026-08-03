@@ -1,5 +1,12 @@
 //! O provider nativo de TypeScript.
 //!
+//! # Por que ele não mora em `analyzer`
+//!
+//! Ele **compõe** duas coisas de naturezas diferentes: a análise, que responde
+//! sobre texto, e a resolução de módulos, que depende do `tsconfig.json`. O
+//! `analyzer` promete não alcançar projeto, e a promessa vale — quem alcança é
+//! quem compõe, que é aqui. Ver a fase 3 da `25`.
+//!
 //! Ele responde por **texto**, e não por tipos: realce, estrutura e erro de
 //! sintaxe. Tipo é o que o analisador externo traz, na fase 3 da `23` — e este
 //! provider não sai quando ele chegar. É o chão: sem Node instalado, sem o
@@ -8,13 +15,14 @@
 
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
 use ide_domain::{
-    Diagnostic, DocumentChange, DocumentId, DocumentSnapshot, LanguageId, ProviderId,
-    SemanticSymbol, SyntaxSnapshot,
+    DefinitionRequest, Diagnostic, DocumentChange, DocumentId, DocumentSnapshot, LanguageId,
+    Location, ProviderId, SemanticSymbol, SyntaxSnapshot,
 };
 use ide_language_api::{
     ReadinessSignal,
@@ -22,11 +30,13 @@ use ide_language_api::{
     LanguageError, LanguageMetadata, LanguageProvider,
 };
 
-use super::index::WorkspaceIndex;
-use super::parser::TypeScriptParser;
-use super::syntax;
+use crate::analyzer::index::WorkspaceIndex;
+use crate::analyzer::references;
+use crate::modules::{ModuleResolver, Reexportacao, declarante};
+use crate::analyzer::parser::TypeScriptParser;
+use crate::analyzer::syntax;
+use crate::analyzer::TYPESCRIPT_LANGUAGE_ID;
 
-pub const TYPESCRIPT_LANGUAGE_ID: &str = "typescript";
 pub const TYPESCRIPT_PROVIDER_ID: &str = "typescript.syntax";
 
 pub struct TypeScriptLanguageProvider;
@@ -67,6 +77,7 @@ impl LanguageProvider for TypeScriptLanguageProvider {
         LanguageCapabilities::SYNTAX
             | LanguageCapabilities::DIAGNOSTICS
             | LanguageCapabilities::WORKSPACE_SYMBOLS
+            | LanguageCapabilities::DEFINITION
     }
 
     async fn activate(
@@ -83,6 +94,11 @@ impl LanguageProvider for TypeScriptLanguageProvider {
 /// `SyntaxSnapshot` lê o que está aqui — recalcular a pedido faria a mesma
 /// travessia duas vezes por tecla.
 struct ParsedDocument {
+    /// De que arquivo ele veio.
+    ///
+    /// A navegação parte daqui: o `import` é relativo ao arquivo que o escreve,
+    /// e sem saber qual é não há de onde resolver.
+    path: PathBuf,
     text: String,
     snapshot: SyntaxSnapshot,
 }
@@ -98,6 +114,11 @@ struct ActiveTypeScript {
     index: Arc<Mutex<Option<WorkspaceIndex>>>,
     /// O sinal que diz quando a varredura terminou.
     readiness: ReadinessSignal,
+    /// Para onde cada `import` do projeto aponta.
+    ///
+    /// Ele é do **projeto** — depende do `tsconfig.json` —, e é por isto que
+    /// este provider não mora no `analyzer`. Ver a fase 3 da `25`.
+    resolver: ModuleResolver,
 }
 
 impl ActiveTypeScript {
@@ -134,24 +155,36 @@ impl ActiveTypeScript {
             })
             .map_err(|erro| LanguageError::Provider(erro.to_string()))?;
 
+        // O `tsconfig.json` da raiz é a origem do que `paths` e `baseUrl` valem
+        // (ADR-027). Sem ele, sobram as importações relativas — que continuam
+        // funcionando, e é a degradação certa: menos resposta, nunca resposta
+        // errada.
+        let resolver = ModuleResolver::new(
+            &crate::project::tsconfig::load(&context.workspace_root.join("tsconfig.json"))
+                .unwrap_or_default(),
+        );
+
         Ok(Self {
             language_id: LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned()),
             parser: TypeScriptParser::new()?,
             documents: Mutex::new(HashMap::new()),
             index,
             readiness,
+            resolver,
         })
     }
 
     fn analyze(
         &self,
         document_id: DocumentId,
+        path: &Path,
         version: u64,
         text: &str,
     ) -> Result<ParsedDocument, LanguageError> {
         let tree = self.parser.parse(text, None)?;
         let pass = syntax::analyze(&tree, text);
         Ok(ParsedDocument {
+            path: path.to_path_buf(),
             text: text.to_owned(),
             snapshot: SyntaxSnapshot {
                 document_id,
@@ -189,7 +222,7 @@ impl ActiveLanguage for ActiveTypeScript {
     }
 
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {
-        let parsed = self.analyze(document.id, document.version, &document.text)?;
+        let parsed = self.analyze(document.id, &document.path, document.version, &document.text)?;
         self.store(document.id, parsed)
     }
 
@@ -204,9 +237,10 @@ impl ActiveLanguage for ActiveTypeScript {
                 // um fechamento em corrida chega assim.
                 return Ok(());
             };
-            apply(&current.text, change.range, &change.text)
+            (current.path.clone(), apply(&current.text, change.range, &change.text))
         };
-        let parsed = self.analyze(change.document_id, change.version, &text)?;
+        let (caminho, text) = text;
+        let parsed = self.analyze(change.document_id, &caminho, change.version, &text)?;
         self.store(change.document_id, parsed)
     }
 
@@ -260,6 +294,105 @@ impl ActiveLanguage for ActiveTypeScript {
             ));
         };
         Ok(index.tipos(query, limit))
+    }
+
+    /// Onde o nome sob o cursor é declarado.
+    ///
+    /// # A pergunta não é "quem se chama assim"
+    ///
+    /// Em Java, pacote e classpath tornam um nome globalmente resolvível.
+    /// Em TypeScript quem decide é o **`import`**: dois módulos podem declarar
+    /// `LoginService`, e abrir o primeiro que o índice achasse seria abrir o
+    /// errado com a mesma cara de certo.
+    ///
+    /// Por isso o caminho é: o nome sai do texto, o `import` diz de que módulo
+    /// ele vem, o resolvedor diz que arquivo é esse, e os barris são
+    /// atravessados até quem declara.
+    ///
+    /// # Não achar é uma resposta
+    ///
+    /// Nome que vem de dependência instalada devolve lista vazia, e não erro:
+    /// o índice responde pelo projeto. É o que o host precisa para encaminhar a
+    /// pergunta a quem alcança mais — o analisador externo, quando houver.
+    async fn definition(&self, request: DefinitionRequest) -> Result<Vec<Location>, LanguageError> {
+        let (caminho, texto) = {
+            let documentos = self
+                .documents
+                .lock()
+                .map_err(|_| LanguageError::Provider("registro de documentos travado".to_owned()))?;
+            let Some(parsed) = documentos.get(&request.document_id) else {
+                return Ok(Vec::new());
+            };
+            (parsed.path.clone(), parsed.text.clone())
+        };
+        let Some(nome) = references::identificador_em(
+            &self.parser,
+            &texto,
+            request.position.line,
+            request.position.column,
+        ) else {
+            return Ok(Vec::new());
+        };
+
+        // O arquivo aberto responde pelo **texto do editor**, e não pelo do
+        // disco: quem acabou de escrever a classe espera achá-la.
+        let aqui = references::do_texto(&self.parser, &texto);
+        if let Some(range) = aqui.declaracao(&nome) {
+            return Ok(vec![Location {
+                path: caminho,
+                range,
+            }]);
+        }
+
+        // O cursor **dentro de um `import`** decide sozinho: ali o módulo está
+        // escrito na mesma linha, e procurar o nome pela lista acharia outro
+        // homônimo importado de outro lugar no mesmo arquivo.
+        let de_dentro = references::importacao_em(
+            &self.parser,
+            &texto,
+            request.position.line,
+            request.position.column,
+        );
+        // Fora dele, o nome que o destino conhece pode não ser o que este
+        // arquivo usa: `import { Pedido as PedidoAntigo }` põe dois em jogo.
+        let Some((la, especificador)) = de_dentro
+            .as_ref()
+            .map(|(nome, de)| (nome.clone(), de.as_str()))
+            .or_else(|| aqui.origem(&nome))
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(modulo) = self.resolver.resolve(&caminho, especificador) else {
+            return Ok(Vec::new());
+        };
+        let parser = &self.parser;
+        let exportacoes = |arquivo: &Path| {
+            references::de_arquivo(parser, arquivo)
+                .reexportados
+                .into_iter()
+                .map(|trazido| Reexportacao {
+                    nome: trazido.usado,
+                    origem: trazido.origem,
+                    de: trazido.de,
+                })
+                .collect()
+        };
+        let declara = |arquivo: &Path, nome: &str| {
+            references::de_arquivo(parser, arquivo)
+                .declaracao(nome)
+                .is_some()
+        };
+        let Some(destino) = declarante(&self.resolver, &modulo, &la, &exportacoes, &declara)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(range) = references::de_arquivo(parser, &destino).declaracao(&la) else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![Location {
+            path: destino,
+            range,
+        }])
     }
 
     async fn syntax(&self, document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {

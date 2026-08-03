@@ -1,4 +1,4 @@
-//! Análise de TypeScript: gramática, realce, estrutura e erro de sintaxe.
+//! Análise de TypeScript: gramática, realce, estrutura e índice de nomes.
 //!
 //! **Este módulo não alcança processo nem modelo de projeto.** Ele responde
 //! sobre texto — não executa `npm`, não lê `package.json`, não pergunta ao
@@ -9,10 +9,11 @@
 //! fora do lado de dentro, e não particiona o lado de dentro. Quem garante é uma
 //! guarda de texto, em `ide-core/tests/architecture.rs`. Ver a fase 8 da `12`.
 
-mod index;
-mod language;
+pub(crate) mod index;
 mod lines;
-mod parser;
-mod syntax;
+pub(crate) mod parser;
+pub(crate) mod references;
+pub(crate) mod syntax;
 
-pub use language::{TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID, TypeScriptLanguageProvider};
+/// O nome da linguagem, que é texto e não projeto.
+pub const TYPESCRIPT_LANGUAGE_ID: &str = "typescript";

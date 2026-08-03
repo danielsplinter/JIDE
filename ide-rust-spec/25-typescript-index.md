@@ -518,15 +518,73 @@ decide para onde cada um aponta.
 Também por isso esta fase **não liga nenhuma capacidade**. Ela entrega uma peça
 correta e conferida; usá-la é a fase 3.
 
-### Fase 3 — Definição e referências ⬜### Fase 3 — Definição e referências ⬜
+### Fase 3 — Definição ✅, referências ⬜
 
-Grupo 2, sem tipos ainda.
+`Ctrl+clique` abre a declaração certa, sem tipos e sem processo externo.
 
-**Critério:** `Ctrl+clique` num nome importado abre a declaração certa, e não a
-primeira com aquele nome. O teste que importa é o do nome repetido em dois
-módulos.
+#### O critério, e o teste que importa
 
-### Fase 4 — O `.` declarado ⬜
+**Dois módulos declaram `LoginService`.** Um índice que respondesse "quem se
+chama assim" acertaria por sorte metade das vezes; quem decide é o `import` do
+arquivo que pergunta. O caminho é: o nome sai do texto, o `import` diz de que
+módulo ele vem, o resolvedor da fase 2 diz que arquivo é esse, e os barris são
+atravessados até quem declara.
+
+Seis casos montados à mão — nome repetido, declaração local, barril, apelido do
+`paths`, dependência instalada, `import { A as B }` — e a conferência contra o
+analisador em projeto real:
+
+| projeto | definições conferidas | divergentes |
+| --- | --- | --- |
+| monorepo de biblioteca | 94 | **0** |
+| aplicação | 46 | **0** |
+
+#### As duas divergências que a conferência achou
+
+**Tipo não bastava.** O índice em disco guarda tipos, porque a pergunta dele é
+"ir para o tipo". Mas `Ctrl+clique` cai sobre qualquer nome: `appConfig`,
+`routes`, uma função utilitária. **79 de 94** definições divergiam, todas por
+isso — devolvíamos "não alcanço" para nome que não fosse tipo.
+
+Consertar não custou nada no arquivo do índice: as declarações de um arquivo são
+extraídas **sob demanda**, e passaram a incluir função e `const` de nível de
+módulo. Variável dentro de bloco fica de fora — ela não é destino de navegação
+entre arquivos, e registrá-la faria a busca achar a primeira homônima de qualquer
+função.
+
+**Posição importa, e não só o texto.** Sobrou uma divergência:
+
+```ts
+import { login as fetchingToken, visitLoginPage } from '../support/utils/login';
+```
+
+Com o cursor sobre `login`, ele está sobre o nome de **origem** — e `login` não é
+um nome que este arquivo use. Procurar "de onde vem `login`" pela lista de
+importados achava **outro** `login`, vindo de outro módulo na mesma tela, e abria
+o arquivo errado com a mesma cara de certo.
+
+O cursor dentro de um `import` passou a decidir sozinho: ali o módulo está
+escrito na mesma linha.
+
+#### Onde o provider passou a morar
+
+`definition` precisa do resolvedor, e resolver módulo depende do
+`tsconfig.json` — projeto. O `analyzer` promete não alcançar projeto, e a
+promessa vale: o provider **compõe** as duas coisas, e por isso saiu de
+`analyzer/` para um módulo irmão. A análise continua sobre texto; quem alcança
+projeto é quem compõe.
+
+#### O que fica desta fase
+
+**Referências ainda não.** Achar quem *usa* um nome pede uma tabela de
+ocorrências — o índice de Java guarda 2,7 milhões delas —, e isso muda o formato
+do arquivo. Definição não precisava, porque ela anda **do uso para a declaração**,
+e o uso está sob o cursor.
+
+Fica registrado como a metade que falta desta fase, e não como fase nova: quem
+tem o índice e o resolvedor tem as duas peças de que ela precisa.
+
+### Fase 4 — O `.` declarado ⬜### Fase 4 — O `.` declarado ⬜
 
 - tabela de membros por tipo, incluindo herança;
 - tipo do receptor para as quatro formas declaradas;

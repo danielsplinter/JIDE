@@ -232,23 +232,30 @@ pub fn declarante(
     declara: &dyn Fn(&Path, &str) -> bool,
 ) -> Option<PathBuf> {
     let mut visitados = HashSet::new();
-    let mut fila = vec![(arquivo.to_path_buf(), 0usize)];
-    while let Some((atual, profundidade)) = fila.pop() {
-        if profundidade > PROFUNDIDADE || !visitados.insert(atual.clone()) {
+    let mut fila = vec![(arquivo.to_path_buf(), nome.to_owned(), 0usize)];
+    while let Some((atual, procurado, profundidade)) = fila.pop() {
+        if profundidade > PROFUNDIDADE || !visitados.insert((atual.clone(), procurado.clone())) {
             continue;
         }
-        if declara(&atual, nome) {
+        if declara(&atual, &procurado) {
             return Some(atual);
         }
         for reexportacao in exportacoes(&atual) {
             // Uma reexportação nominal só interessa se for **deste** nome.
             if let Some(exportado) = reexportacao.nome.as_deref()
-                && exportado != nome
+                && exportado != procurado
             {
                 continue;
             }
+            // `export { A as B } from './a'` muda o nome no meio do caminho: de
+            // `B` para cá, `A` para lá. Seguir procurando `B` no destino não
+            // acharia nada, e pareceria limite do índice em vez de renomeação.
+            let adiante = reexportacao
+                .origem
+                .clone()
+                .unwrap_or_else(|| procurado.clone());
             if let Some(destino) = resolver.resolve(&atual, &reexportacao.de) {
-                fila.push((destino, profundidade + 1));
+                fila.push((destino, adiante, profundidade + 1));
             }
         }
     }
@@ -260,6 +267,8 @@ pub fn declarante(
 pub struct Reexportacao {
     /// O nome reexportado, ou `None` para `export * from`.
     pub nome: Option<String>,
+    /// Como o módulo de origem o declara, quando a reexportação renomeia.
+    pub origem: Option<String>,
     /// O especificador do módulo de onde ele vem.
     pub de: String,
 }
@@ -478,6 +487,7 @@ mod tests {
                     let de = linha.split_once("from '")?.1.split_once('\'')?.0;
                     Some(Reexportacao {
                         nome: None,
+                        origem: None,
                         de: de.to_owned(),
                     })
                 })
@@ -518,6 +528,7 @@ mod tests {
                     let de = linha.split_once("from '")?.1.split_once('\'')?.0;
                     Some(Reexportacao {
                         nome: None,
+                        origem: None,
                         de: de.to_owned(),
                     })
                 })
@@ -547,6 +558,7 @@ mod tests {
         let exportacoes = |_: &Path| {
             vec![Reexportacao {
                 nome: Some("A".to_owned()),
+                origem: Some("A".to_owned()),
                 de: "./a".to_owned(),
             }]
         };

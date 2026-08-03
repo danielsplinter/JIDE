@@ -6,11 +6,13 @@
 
 mod analyzer;
 mod modules;
+mod native;
 mod project;
 mod service;
 mod toolchain;
 
-pub use analyzer::{TYPESCRIPT_LANGUAGE_ID, TYPESCRIPT_PROVIDER_ID, TypeScriptLanguageProvider};
+pub use analyzer::TYPESCRIPT_LANGUAGE_ID;
+pub use native::{TYPESCRIPT_PROVIDER_ID, TypeScriptLanguageProvider};
 pub use project::{NPM_BUILD_SYSTEM_ID, NpmAdapter, TsConfig, TsConfigError, npm::scripts, tsconfig};
 pub use service::{TYPESCRIPT_SERVICE_PROVIDER_ID, TypeScriptServiceProvider, tsserver_in};
 pub use toolchain::{NODE_TOOLCHAIN_ID, NodeToolchainProvider, node_executable};
