@@ -58,7 +58,7 @@ pub(super) struct NativeWindowState {
 pub(super) struct WorkspaceController {
     pub(super) service: WorkspaceService,
     /// A busca textual em curso, que é trabalho de workspace como o resto daqui.
-    pub(super) search: SearchController,
+    pub(super) search: SearchController<Vec<ide_workspace::SearchMatch>>,
 }
 
 impl WorkspaceController {
@@ -152,9 +152,20 @@ impl DocumentController {
     }
 }
 
+/// O que a busca por tipo devolve quando termina.
+///
+/// Traz junto **por que** veio vazia. Sem isso, "nenhuma ocorrência" num projeto
+/// cheio de tipos não tem explicação em lugar nenhum — que foi o defeito achado
+/// no primeiro projeto grande de verdade.
+pub(super) struct TypeSearchOutcome {
+    pub(super) found: Vec<ide_domain::SemanticSymbol>,
+    pub(super) failure: Option<String>,
+}
+
 #[derive(Default)]
 pub(super) struct LanguageController {
-    pub(super) host: Option<LanguageHost>,
+    /// O host é compartilhado porque a busca por tipo o consulta de outra thread.
+    pub(super) host: Option<Arc<LanguageHost>>,
     pub(super) contributions: ContributionRegistry,
     pub(super) toolchains: ToolchainRegistry,
     /// Quando se perguntou pela última vez se havia provider ocioso.
@@ -162,6 +173,8 @@ pub(super) struct LanguageController {
     /// Quando a memória foi medida pela última vez, e quanto deu.
     pub(super) last_memory_check: Option<Instant>,
     pub(super) memory: ide_core::MemoryReading,
+    /// A busca por tipo em curso, que fala com o analisador e não pode esperar.
+    pub(super) type_search: SearchController<TypeSearchOutcome>,
     /// Quedas já anunciadas, para não repetir o aviso a cada verificação.
     pub(super) announced_failures: std::collections::HashSet<String>,
     /// Realces pedidos e ainda não entregues.
@@ -515,18 +528,29 @@ pub(super) struct DebugController {
 /// Uma busca nova cancela a anterior. Sem isso, cada tecla numa caixa de busca
 /// deixaria mais uma varredura de um minuto rodando no fundo, todas lendo o mesmo
 /// disco e disputando entre si.
-#[derive(Default)]
-pub(super) struct SearchController {
-    pub(super) pending: Option<Receiver<Vec<ide_workspace::SearchMatch>>>,
+///
+/// É genérico porque a busca por **tipo** tem o mesmo problema e a mesma forma:
+/// ela pergunta ao analisador externo, e num projeto grande a resposta demora o
+/// bastante para a janela parar. O que muda é o que volta pelo canal.
+pub(super) struct SearchController<T> {
+    pub(super) pending: Option<Receiver<T>>,
     pub(super) cancel: Option<ide_domain::CancellationToken>,
 }
 
-impl SearchController {
+// `derive(Default)` exigiria `T: Default`, que não é verdade nem necessário: um
+// controlador vazio não tem resultado nenhum para inventar.
+impl<T> Default for SearchController<T> {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            cancel: None,
+        }
+    }
+}
+
+impl<T> SearchController<T> {
     /// Cancela o que estiver em curso e guarda o canal do novo pedido.
-    pub(super) fn start(
-        &mut self,
-        receiver: Receiver<Vec<ide_workspace::SearchMatch>>,
-    ) -> ide_domain::CancellationToken {
+    pub(super) fn start(&mut self, receiver: Receiver<T>) -> ide_domain::CancellationToken {
         if let Some(anterior) = self.cancel.take() {
             anterior.cancel();
         }
@@ -537,7 +561,7 @@ impl SearchController {
     }
 
     /// O resultado, se já chegou. Não espera por nada.
-    pub(super) fn collect(&mut self) -> Option<Vec<ide_workspace::SearchMatch>> {
+    pub(super) fn collect(&mut self) -> Option<T> {
         let receiver = self.pending.as_ref()?;
         match receiver.try_recv() {
             Ok(achados) => {
@@ -598,7 +622,7 @@ mod tests {
     /// minuto rodando no fundo, todas lendo o mesmo disco.
     #[test]
     fn a_new_search_cancels_the_previous_one() {
-        let mut controller = SearchController::default();
+        let mut controller = SearchController::<Vec<ide_workspace::SearchMatch>>::default();
         let (_primeiro_envio, primeiro) = std::sync::mpsc::channel();
         let anterior = controller.start(primeiro);
         assert!(!anterior.is_cancelled());
@@ -617,7 +641,7 @@ mod tests {
     /// E o ponto inteiro da correcao: o quadro segue desenhando.
     #[test]
     fn collecting_does_not_wait_for_the_search() {
-        let mut controller = SearchController::default();
+        let mut controller = SearchController::<Vec<ide_workspace::SearchMatch>>::default();
         let (envio, receptor) = std::sync::mpsc::channel();
         let _token = controller.start(receptor);
         assert!(controller.collect().is_none());
@@ -634,7 +658,7 @@ mod tests {
     /// A thread que morreu sem responder nao deixa a busca pendurada.
     #[test]
     fn a_search_thread_that_dies_does_not_hang_the_controller() {
-        let mut controller = SearchController::default();
+        let mut controller = SearchController::<Vec<ide_workspace::SearchMatch>>::default();
         let (envio, receptor) = std::sync::mpsc::channel::<Vec<ide_workspace::SearchMatch>>();
         let _token = controller.start(receptor);
         drop(envio);

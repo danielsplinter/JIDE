@@ -1063,6 +1063,33 @@ O guarda de arquitetura reprovou o primeiro desenho: um campo novo na raiz de
 composição. Ele estava certo — a busca é trabalho de workspace, e o lugar dela é
 dentro do controlador que já existe. O número de campos ficou onde estava.
 
+#### E o `Ctrl+L` travava pelo mesmo motivo, um atalho ao lado
+
+Com o `npm install` rodado, a completação por `.` passou a funcionar — e o
+`Ctrl+L` passou a travar. Ele também perguntava **inline**: `pollster::block_on`
+na thread da interface, uma vez por linguagem registrada.
+
+A completação por `.` não travava porque ela pergunta sobre **um arquivo**; a
+busca por tipo pergunta sobre o **projeto inteiro**, e num projeto de nove mil
+arquivos o analisador leva o tempo que leva. Mesma correção: thread própria,
+resultado recolhido no quadro, e o cancelamento vai **dentro do
+`LanguageRequestContext`** — que já carregava um token desde sempre —, de modo que
+a desistência chega ao analisador, e não só ao laço daqui.
+
+##### A correção quase quebrou as outras linguagens
+
+A queixa "analisador indisponível" acusava o **primeiro** provider falho que
+encontrasse. Num projeto Java o provider de TypeScript está falho quase sempre, e
+**deve estar**: não há `node_modules` num projeto Java, e não deveria haver. Uma
+busca Java que legitimamente não achasse nada responderia "TypeScript
+indisponível" — a mensagem certa para o projeto errado, que é pior do que
+nenhuma.
+
+A queixa passou a ser filtrada pelas extensões dos arquivos **abertos**, e sem
+arquivo aberto ela cala. Uma linguagem que só tem provider nativo — o realce de
+CSS hoje, a próxima que entrar amanhã — nunca produz queixa: para ela, "nada
+encontrado" é a resposta inteira, e inventar uma causa seria mentir.
+
 #### O que isto confirma sobre o método
 
 Três dos defeitos desta especificação vieram de testar a camada de baixo e

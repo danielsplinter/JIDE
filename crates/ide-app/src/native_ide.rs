@@ -11,7 +11,7 @@ use crate::bridges::position_at_offset;
 use crate::controllers::{
     DebugController as AppDebugController, DocumentController, ImportedProject, LanguageController,
     NativeWindowState, ProjectController, RuntimeState, TaskController as AppTaskController,
-    WorkspaceController,
+    TypeSearchOutcome, WorkspaceController,
 };
 use crate::ui_bridge::{UiAction, UiBridge};
 use crate::{debug, java_contribution, run, style_contribution, typescript_contribution};
@@ -193,7 +193,7 @@ impl NativeIde {
             .contributions
             .register(estilo)
             .map_err(|error| error.to_string())?;
-        self.languages.host = Some(language_host);
+        self.languages.host = Some(Arc::new(language_host));
         let tree = self
             .workspace
             .service
@@ -556,7 +556,7 @@ impl NativeIde {
     /// A tela guarda o que foi digitado e pede uma vez; quem tem o provedor de
     /// linguagem é o app, e é aqui que a pergunta vira resposta.
     fn answer_type_search(&mut self, query: String) {
-        let Some(host) = self.languages.host.as_ref() else {
+        let Some(host) = self.languages.host.as_ref().map(Arc::clone) else {
             return;
         };
         // A pergunta vai a **todas** as linguagens registradas, uma extensão de
@@ -569,75 +569,105 @@ impl NativeIde {
             .iter()
             .filter_map(|contribution| contribution.descriptor.extensions.first().cloned())
             .collect();
-        let mut encontrados = Vec::new();
-        let mut ultimo_erro = None;
-        for extensao in extensoes {
-            match pollster::block_on(host.workspace_types(
-                host.request_context(),
-                &extensao,
-                query.clone(),
-                TYPE_SEARCH_LIMIT,
-            )) {
-                Ok(symbols) => encontrados.extend(symbols),
-                // Uma linguagem que não sabe responder não estraga a busca das
-                // outras: sem índice, a resposta dela é "nada", e nada é uma
-                // resposta.
-                Err(error) => ultimo_erro = Some(error),
+
+        // De que linguagens se está falando agora. É o que impede a busca de
+        // acusar o analisador de uma linguagem que nem está no projeto.
+        let abertas: Vec<String> = self
+            .documents
+            .application
+            .values()
+            .filter_map(|documento| documento.path.extension()?.to_str().map(str::to_owned))
+            .collect();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = self.languages.type_search.start(receiver);
+        std::thread::spawn(move || {
+            let mut encontrados = Vec::new();
+            let mut ultimo_erro = None;
+            for extensao in extensoes {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                // O token vai **dentro** do contexto: assim a desistência chega
+                // ao analisador, e não só a este laço.
+                let mut contexto = host.request_context();
+                contexto.cancellation = cancel.clone();
+                match pollster::block_on(host.workspace_types(
+                    contexto,
+                    &extensao,
+                    query.clone(),
+                    TYPE_SEARCH_LIMIT,
+                )) {
+                    Ok(symbols) => encontrados.extend(symbols),
+                    // Uma linguagem que não sabe responder não estraga a busca
+                    // das outras: sem índice, a resposta dela é "nada", e nada é
+                    // uma resposta.
+                    Err(error) => ultimo_erro = Some(error.to_string()),
+                }
             }
-        }
-        encontrados.truncate(TYPE_SEARCH_LIMIT);
-        // Vazio pode ser "não existe" ou "ninguém sabia responder", e os dois se
-        // parecem na tela. Num projeto Angular sem `node_modules`, o analisador
-        // externo não sobe, o provider nativo assume — e ele **não tem índice**,
-        // então responde `Ok` com nada. Sem esta verificação, a busca por tipo
-        // dizia "nenhuma ocorrência" num projeto cheio de tipos, e a causa não
-        // aparecia em lugar nenhum. Foi o que aconteceu.
-        let indisponivel = encontrados.is_empty().then(|| self.analisador_ausente()).flatten();
+            encontrados.truncate(TYPE_SEARCH_LIMIT);
+            // Vazio pode ser "não existe" ou "ninguém sabia responder", e os dois
+            // se parecem na tela. Num projeto Angular sem `node_modules`, o
+            // analisador externo não sobe, o provider nativo assume — e ele **não
+            // tem índice**, então responde `Ok` com nada. Sem esta verificação, a
+            // busca dizia "nenhum tipo encontrado" num projeto cheio de tipos, e
+            // a causa não aparecia em lugar nenhum.
+            let failure = encontrados
+                .is_empty()
+                .then(|| {
+                    host.providers()
+                        .ok()
+                        .and_then(|providers| analisador_ausente(providers, &abertas))
+                        .or(ultimo_erro)
+                })
+                .flatten();
+            let _ = sender.send(TypeSearchOutcome {
+                found: encontrados,
+                failure,
+            });
+        });
         if let Some(shell) = self.ui.shell.as_mut() {
-            if encontrados.is_empty() {
-                if let Some(motivo) = indisponivel {
-                    shell.set_status_message(motivo);
-                    return;
-                }
-                if let Some(error) = ultimo_erro {
-                    shell.set_status_message(error.to_string());
-                    return;
-                }
-                shell.set_status_message("Nenhum tipo encontrado".to_owned());
-            }
-            shell.set_type_search_results(
-                encontrados
-                    .into_iter()
-                    .filter_map(|symbol| {
-                        Some(TypeSearchHit {
-                            name: symbol.name,
-                            kind: type_kind_label(symbol.kind)?.to_owned(),
-                            location: symbol.location,
-                        })
-                    })
-                    .collect(),
-            );
+            shell.set_status_message("Procurando tipos…".to_owned());
         }
     }
 
-    /// A queixa de um analisador que não subiu, se houver.
+    /// Recolhe o resultado da busca por tipo, se já chegou.
     ///
-    /// É a mesma informação que o aviso de queda dá, dita **na hora em que a
-    /// pergunta falha** em vez de cinco segundos depois na barra. A degradação da
-    /// ADR-025 é para a IDE continuar servindo, e não para ela ficar
-    /// silenciosamente pior.
-    fn analisador_ausente(&self) -> Option<String> {
-        let host = self.languages.host.as_ref()?;
-        let providers = host.providers().ok()?;
-        providers.into_iter().find_map(|snapshot| {
-            (snapshot.state == ide_language_api::ProviderState::Failed).then(|| {
-                let nome = snapshot.metadata.display_name;
-                let motivo = snapshot
-                    .last_error
-                    .unwrap_or_else(|| "sem detalhe".to_owned());
-                format!("{nome} indisponível, e a análise nativa não tem índice: {motivo}")
-            })
-        })
+    /// **Perguntar ao analisador não cabe num quadro.** A busca rodava inline, e
+    /// num projeto Angular de nove mil arquivos o `Ctrl+L` travava a janela — o
+    /// mesmo defeito da busca textual, um atalho ao lado. A completação por `.`
+    /// não travava porque ela pergunta sobre **um** arquivo; esta pergunta é
+    /// sobre o projeto inteiro.
+    fn collect_type_search(&mut self) -> bool {
+        let Some(resultado) = self.languages.type_search.collect() else {
+            return false;
+        };
+        let Some(shell) = self.ui.shell.as_mut() else {
+            return false;
+        };
+        if resultado.found.is_empty() {
+            shell.set_status_message(
+                resultado
+                    .failure
+                    .unwrap_or_else(|| "Nenhum tipo encontrado".to_owned()),
+            );
+        } else {
+            shell.set_status_message(format!("{} tipos", resultado.found.len()));
+        }
+        shell.set_type_search_results(
+            resultado
+                .found
+                .into_iter()
+                .filter_map(|symbol| {
+                    Some(TypeSearchHit {
+                        name: symbol.name,
+                        kind: type_kind_label(symbol.kind)?.to_owned(),
+                        location: symbol.location,
+                    })
+                })
+                .collect(),
+        );
+        true
     }
 
     /// Responde à busca textual usando a árvore já carregada no Explorer.
@@ -2331,6 +2361,7 @@ impl ApplicationHandler for NativeIde {
             std::time::Instant::now() + std::time::Duration::from_millis(30),
         ));
         let mut changed = self.collect_content_search();
+        changed |= self.collect_type_search();
         self.suspend_idle_languages();
         self.measure_memory();
         // O realce vem da thread do provider e chega quando fica pronto: é aqui
@@ -2962,6 +2993,51 @@ fn event_label(event: &WindowEvent) -> &'static str {
     }
 }
 
+/// A queixa de um analisador que não subiu, **da linguagem que está em uso**.
+///
+/// É a mesma informação que o aviso de queda dá, dita na hora em que a pergunta
+/// falha em vez de cinco segundos depois na barra. A degradação da ADR-025 é para
+/// a IDE continuar servindo, e não para ela ficar silenciosamente pior.
+///
+/// # Por que o filtro por extensão existe
+///
+/// Sem ele, esta função acusava o **primeiro** provider falho que encontrasse. Num
+/// projeto Java o provider de TypeScript está falho quase sempre — não há
+/// `node_modules` num projeto Java, e não deveria haver —, e uma busca Java que
+/// legitimamente não achasse nada responderia "TypeScript indisponível". A
+/// mensagem certa para o projeto errado é pior do que nenhuma mensagem.
+///
+/// Lista de extensões vazia devolve `None`: sem saber sobre o que se está
+/// perguntando, calar é a resposta conservadora.
+fn analisador_ausente(
+    providers: Vec<ide_language_host::ProviderSnapshot>,
+    relevantes: &[String],
+) -> Option<String> {
+    if relevantes.is_empty() {
+        return None;
+    }
+    providers.into_iter().find_map(|snapshot| {
+        if snapshot.state != ide_language_api::ProviderState::Failed {
+            return None;
+        }
+        let cuida = snapshot.metadata.extensions.iter().any(|extensao| {
+            relevantes
+                .iter()
+                .any(|aberta| aberta.eq_ignore_ascii_case(extensao))
+        });
+        if !cuida {
+            return None;
+        }
+        let nome = snapshot.metadata.display_name;
+        let motivo = snapshot
+            .last_error
+            .unwrap_or_else(|| "sem detalhe".to_owned());
+        Some(format!(
+            "{nome} indisponível, e a análise nativa não tem índice: {motivo}"
+        ))
+    })
+}
+
 /// Como o tipo é chamado na tela — o que o usuário escreveria.
 ///
 /// Devolve `None` para o que não é tipo: a busca fala de classes, e um método
@@ -3057,7 +3133,7 @@ mod tests {
         // A contribuição, e não só o provider: é dela que sai a lista de
         // extensões que a sincronização consulta. Ver a fase 1b da `23`.
         assert!(ide.languages.contributions.register(java).is_ok());
-        ide.languages.host = Some(language_host);
+        ide.languages.host = Some(Arc::new(language_host));
         ide.ui.shell = Some(test_shell(&root));
         let document_id = match ide.ui.shell.as_mut() {
             Some(shell) => open_test_document(shell, &uso),
@@ -3141,7 +3217,7 @@ mod tests {
         // A contribuição, e não só o provider: é dela que sai a lista de
         // extensões que a sincronização consulta. Ver a fase 1b da `23`.
         assert!(ide.languages.contributions.register(java).is_ok());
-        ide.languages.host = Some(language_host);
+        ide.languages.host = Some(Arc::new(language_host));
         ide.ui.shell = Some(test_shell(&root));
         if let Some(shell) = ide.ui.shell.as_mut() {
             open_test_document(shell, &alvo);
@@ -3207,7 +3283,7 @@ mod tests {
         // que sai a lista de extensões que a sincronização de documentos
         // consulta. Ver a fase 1b da `23`.
         assert!(ide.languages.contributions.register(java).is_ok());
-        ide.languages.host = Some(language_host);
+        ide.languages.host = Some(Arc::new(language_host));
         ide.ui.shell = Some(test_shell(&root));
         if let Some(shell) = ide.ui.shell.as_mut() {
             open_test_document(shell, &file);
@@ -3273,7 +3349,7 @@ mod tests {
 
         let mut ide = NativeIde::default();
         assert!(ide.languages.contributions.register(typescript).is_ok());
-        ide.languages.host = Some(language_host);
+        ide.languages.host = Some(Arc::new(language_host));
         ide.ui.shell = Some(test_shell(&root));
         if let Some(shell) = ide.ui.shell.as_mut() {
             open_test_document(shell, &file);
@@ -3518,6 +3594,84 @@ mod tests {
         );
         assert!(startup_root(&AppConfig::default(), None).is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn snapshot_falho(
+        provider: &str,
+        nome: &str,
+        extensoes: &[&str],
+        estado: ide_language_api::ProviderState,
+    ) -> ide_language_host::ProviderSnapshot {
+        ide_language_host::ProviderSnapshot {
+            metadata: ide_language_api::LanguageMetadata {
+                language_id: LanguageId(provider.to_owned()),
+                provider_id: ProviderId(provider.to_owned()),
+                display_name: nome.to_owned(),
+                extensions: extensoes.iter().map(|e| (*e).to_owned()).collect(),
+                api_version: ide_language_api::LANGUAGE_API_VERSION,
+                trigger_characters: Vec::new(),
+            },
+            capabilities: ide_language_api::LanguageCapabilities::empty(),
+            state: estado,
+            last_error: Some("faltou `npm install`".to_owned()),
+        }
+    }
+
+    /// A queixa é da linguagem em uso, e não da primeira que estiver falha.
+    ///
+    /// **Num projeto Java o provider de TypeScript está falho quase sempre**, e
+    /// deve estar: não há `node_modules` num projeto Java. Sem este filtro, uma
+    /// busca Java que não achasse nada responderia "TypeScript indisponível" — a
+    /// mensagem certa para o projeto errado, que é pior do que nenhuma.
+    #[test]
+    fn the_complaint_names_only_the_language_in_use() {
+        let providers = vec![
+            snapshot_falho(
+                "typescript",
+                "TypeScript",
+                &["ts", "tsx"],
+                ide_language_api::ProviderState::Failed,
+            ),
+            snapshot_falho(
+                "java",
+                "Java",
+                &["java"],
+                ide_language_api::ProviderState::Active,
+            ),
+        ];
+
+        // Editando Java: o TypeScript falho não interessa a esta pergunta.
+        assert_eq!(
+            analisador_ausente(providers.clone(), &["java".to_owned()]),
+            None,
+            "uma busca Java não pode ser explicada por um analisador de TypeScript"
+        );
+
+        // Editando TypeScript: aí sim.
+        let queixa = analisador_ausente(providers.clone(), &["ts".to_owned()]);
+        assert!(
+            queixa.is_some_and(|texto| texto.contains("TypeScript") && texto.contains("npm")),
+            "a queixa precisa nomear a linguagem e dizer o que fazer"
+        );
+
+        // Sem arquivo aberto, calar é a resposta conservadora.
+        assert_eq!(analisador_ausente(providers, &[]), None);
+    }
+
+    /// Uma linguagem sem analisador externo nenhum nunca produz queixa.
+    ///
+    /// É o caso de qualquer linguagem que só tenha provider nativo — hoje o
+    /// realce de CSS, amanhã a próxima que entrar. Para elas, "nada encontrado"
+    /// é a resposta inteira, e inventar uma causa seria mentir.
+    #[test]
+    fn a_language_without_an_external_analyzer_never_complains() {
+        let providers = vec![snapshot_falho(
+            "css",
+            "CSS",
+            &["css", "scss"],
+            ide_language_api::ProviderState::Active,
+        )];
+        assert_eq!(analisador_ausente(providers, &["css".to_owned()]), None);
     }
 
     #[test]
