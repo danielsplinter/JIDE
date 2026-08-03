@@ -16,9 +16,20 @@ projeto grande de verdade — um monorepo Angular de 8 958 arquivos:
 Nada disso é defeito do analisador: ele faz o que precisa fazer. É o custo da
 forma como ele responde, e esta especificação pergunta se há outra.
 
-## O que se mediu antes de propor
+## De onde vêm os números, e o que eles não dizem
 
-Toda afirmação abaixo tem número, e todos vieram do `spartacus-develop`.
+A caracterização do problema — 1,9 GB, 30,4 s, 11 287 arquivos — foi medida num
+projeto só: o `spartacus-develop`, um monorepo de biblioteca com 8 958 arquivos.
+Ele é um **caso extremo escolhido de propósito**, e é onde os defeitos
+apareceram. Mas um caso extremo não caracteriza a média, e nada aqui deve ser
+lido como "todo projeto Angular custa isso".
+
+O que **não** pode depender de projeto é a solução. Os critérios das fases são
+verificados contra qualquer projeto apontado por `IDE_PROJETO_GRANDE`, com a
+consulta e o resultado esperado tirados do próprio projeto — ver "O critério não
+sabe de que projeto se trata".
+
+## O que se mediu antes de propor
 
 ### A memória são as árvores, não os tipos
 
@@ -151,12 +162,34 @@ funciona sem `node_modules`. Java responde a mesma pergunta em 12,6 ms.
 
 O `.` declarado cobre mais do que parece num código Angular:
 
-| forma | frequência |
+| forma | |
 | --- | --- |
 | `constructor(private svc: LoginService)` | o padrão de injeção de dependência |
+| `inject(LoginService)` | o mesmo, no idioma novo |
 | `const p: Pedido` | anotação explícita |
 | `const p = new Pedido()` | inferência trivial |
 | `this.` dentro da classe | onipresente |
+
+**Quanto disso o índice alcançaria, medido em quatro projetos.** Contando os dois
+idiomas de injeção e classificando cada tipo injetado como declarado no projeto
+ou vindo de dependência:
+
+| projeto | injeções | do próprio projeto |
+| --- | --- | --- |
+| monorepo de biblioteca | 8 251 | **85%** |
+| aplicação | 108 | **76%** |
+| biblioteca pequena | 25 | **72%** |
+| aplicação pequena | 6 | 67% |
+
+Os de fora se repetem: `Store`, `HttpClient`, `Router`, `FormBuilder`,
+`ElementRef`. A expectativa de que uma aplicação comum fosse dominada por tipos
+do framework **não se confirmou** — em todos, a maioria dos receptores injetados
+é declarada no próprio código.
+
+Duas ressalvas, e elas importam: isto mede o **primeiro** `.` de um receptor
+injetado, e não a cadeia depois dele — `this.svc.buscar().` já saiu do projeto,
+porque o retorno costuma ser um `Observable`. E três dos quatro projetos são do
+mesmo autor, o que não é uma amostra de "qualquer projeto Angular".
 
 A resolução de módulos é a parte cara: 315 entradas em `paths`, `baseUrl`,
 `moduleResolution: "bundler"` e 2 279 barris que reexportam barris.
@@ -253,6 +286,37 @@ Há um desenho que daria tipos completos **e** memória baixa: um verificador
 medição dos 11 MB sustenta a ideia — calcular é barato, guardar é caro. É o que o
 rust-analyzer faz para Rust, levou anos e uma equipe, e para uma linguagem com
 sistema de tipos menor. Fica **registrado e fora de escopo**.
+
+## O critério não sabe de que projeto se trata
+
+Um teste que dissesse um nome de tipo à mão só valeria para o projeto de onde
+esse nome veio. Os critérios desta especificação **tiram a pergunta do projeto**:
+uma varredura independente do índice acha nomes declarados, e o teste cobra que o
+índice ache os mesmos. Apontar `IDE_PROJETO_GRANDE` para outro projeto passa a
+verificar aquele outro.
+
+Verificado em quatro, de tamanhos e naturezas diferentes:
+
+| projeto | arquivos | varredura | pior consulta | memória |
+| --- | --- | --- | --- | --- |
+| monorepo de biblioteca | 8 956 | 7,0 s | 7,6 ms | +1 MB |
+| aplicação | 82 | 101 ms | 58 µs | +1 MB |
+| biblioteca pequena | 49 | 51 ms | 84 µs | 0 |
+| aplicação pequena | 37 | 50 ms | 148 µs | 0 |
+
+### O teste ingênuo estava errado, e o índice estava certo
+
+A primeira versão da varredura de conferência aceitava `export class X` em
+qualquer indentação. Num `.spec.ts` de regra de ESLint, ela achou
+`LoadProductsFail` **dentro de um literal de texto** — código citado como string,
+não declarado. O índice não o indexou, e não deveria.
+
+A gramática distingue declaração de texto; o varredor ingênuo não distinguia. A
+conferência passou a contar só o que está na coluna zero, e o registro fica
+porque o instinto seria o contrário: quando os dois discordam, o mais simples
+parece o mais confiável.
+
+**E isso só apareceu porque o critério deixou de usar um nome escolhido a dedo.**
 
 ## Fases
 
