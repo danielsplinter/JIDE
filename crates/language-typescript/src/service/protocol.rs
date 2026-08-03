@@ -303,6 +303,12 @@ async fn leitura(
     // A saída fechou. Quem espera é acordado agora, e não daqui a nunca: é este
     // o sinal que faz o provider dizer que deixou de existir.
     avisar.store(true, Ordering::Release);
+    // E **não há mais o que preparar**. Um analisador que morre antes de montar
+    // o projeto nunca manda `projectLoadingFinish`, e sem esta linha o sinal de
+    // prontidão ficaria falso para sempre — a IDE girando a animação de
+    // carregamento no meio da tela até alguém fechá-la. Morrer também é uma
+    // forma de terminar.
+    pronto.mark_ready();
     if let Ok(mut pendentes) = entregar.lock() {
         for (_, canal) in pendentes.drain() {
             let _ = canal.send(Err("o analisador encerrou".to_owned()));

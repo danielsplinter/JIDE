@@ -173,6 +173,10 @@ pub(super) struct LanguageController {
     /// Quando a memória foi medida pela última vez, e quanto deu.
     pub(super) last_memory_check: Option<Instant>,
     pub(super) memory: ide_core::MemoryReading,
+    /// Documentos já reoferecidos a um provider que subiu depois.
+    ///
+    /// Ver a reoferta em `synchronize_languages`: uma tentativa por documento.
+    pub(super) reoffered: std::collections::HashSet<DocumentId>,
     /// Desde quando alguma linguagem prepara o projeto, para o giro ter relógio.
     pub(super) preparing_since: Option<Instant>,
     /// A busca por tipo em curso, que fala com o analisador e não pode esperar.
@@ -269,6 +273,27 @@ impl LanguageController {
         for document_id in closed {
             let _ = pollster::block_on(host.close_document(host.request_context(), document_id));
             documents.language.remove(&document_id);
+        }
+
+        // **Um provider que subiu depois não tem o texto de nada.**
+        //
+        // Desde a fase 5 da `25`, o analisador externo sobe na primeira pergunta
+        // que o índice não soube — e sobe sem documento nenhum. Quem tem o texto
+        // é esta camada, e é aqui que ele é reentregue: esquecer o registro faz
+        // o laço abaixo reabrir, e reabrir agora alcança quem acabou de subir.
+        //
+        // Sem isto, o analisador ficava de pé sem projeto para montar. O
+        // `tsserver` não carrega projeto sem um arquivo aberto, então o sinal de
+        // prontidão nunca chegava e **o giro do carregamento não parava mais**.
+        //
+        // **Uma tentativa por documento.** Se o analisador recusar o arquivo, o
+        // documento continua faltando a ele para sempre, e sem esta marca o laço
+        // o reabriria a cada quadro — trinta vezes por segundo, contra um
+        // processo que já disse não. Insistir não ajuda ninguém.
+        for document_id in host.documents_missing_providers() {
+            if self.reoffered.insert(document_id) {
+                documents.language.remove(&document_id);
+            }
         }
 
         let mut syntax = Vec::new();

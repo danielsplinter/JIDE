@@ -153,6 +153,97 @@ fn opening_does_not_start_the_analyzer_but_an_unanswerable_question_does() {
     );
 }
 
+/// O analisador que subiu recebe os documentos, e para de dizer que carrega.
+///
+/// # O defeito que este teste guarda
+///
+/// A fase 5 acordava o analisador na pergunta e **não lhe entregava nada**. O
+/// `tsserver` não carrega projeto sem um arquivo aberto, então ele ficava de pé
+/// sem nada para montar: `projectLoadingFinish` nunca vinha, o sinal de
+/// prontidão nunca ficava pronto, e a animação de carregamento girava no meio da
+/// tela para sempre.
+///
+/// Quem tem o texto é a aplicação, e é ela que reoferece — mas o host precisa
+/// **dizer** o que falta, e é isso que se cobra aqui.
+#[test]
+#[ignore = "exige IDE_PROJETO_GRANDE com node_modules instalado"]
+fn the_analyzer_that_woke_up_gets_the_documents_it_missed() {
+    let root = projeto();
+    let Some(arquivo) = algum_ts(&root) else {
+        panic!("o projeto precisa ter um `.ts` que sirva aos dois lados");
+    };
+    let processos = Arc::new(NativeProcessSupervisor::default());
+    let host = LanguageHost::new(root.clone());
+    let nativo: Arc<dyn LanguageProvider> =
+        Arc::new(language_typescript::TypeScriptLanguageProvider::new());
+    let externo: Arc<dyn LanguageProvider> = Arc::new(
+        language_typescript::TypeScriptServiceProvider::new(
+            Arc::clone(&processos) as Arc<dyn ide_process::ProcessSupervisor>,
+        ),
+    );
+    assert!(host.register(nativo).is_ok());
+    assert!(host.register(externo).is_ok());
+    assert!(
+        host.configure_selection(
+            ide_domain::LanguageId(language_typescript::TYPESCRIPT_LANGUAGE_ID.to_owned()),
+            ide_language_host::ProviderSelection {
+                primary: ide_domain::ProviderId(
+                    language_typescript::TYPESCRIPT_PROVIDER_ID.to_owned()
+                ),
+                fallbacks: vec![ide_domain::ProviderId(
+                    language_typescript::TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned()
+                )],
+            },
+        )
+        .is_ok()
+    );
+
+    let Ok(texto) = std::fs::read_to_string(&arquivo) else {
+        panic!("o arquivo precisa ser legível");
+    };
+    let instantaneo = DocumentSnapshot {
+        id: DocumentId(1),
+        path: arquivo.clone(),
+        version: 1,
+        text: texto.clone(),
+    };
+    assert!(
+        pollster::block_on(host.open_document(host.request_context(), instantaneo.clone())).is_ok()
+    );
+    assert!(
+        host.documents_missing_providers().is_empty(),
+        "com um provider só de pé, não falta documento a ninguém"
+    );
+
+    let Some((linha, coluna)) = posicao_de_um_ponto_dificil(&texto) else {
+        panic!("o arquivo precisa ter um ponto que o índice não tipa");
+    };
+    let _ = pollster::block_on(host.completion(
+        host.request_context(),
+        CompletionRequest {
+            document_id: DocumentId(1),
+            position: TextPosition { line: linha, column: coluna },
+            prefix: String::new(),
+        },
+    ));
+
+    // Ele subiu. E o host precisa dizer que o documento falta a ele.
+    assert_eq!(
+        host.documents_missing_providers(),
+        vec![DocumentId(1)],
+        "sem isto, o analisador fica de pé sem projeto para montar, e a animação          de carregamento não para nunca"
+    );
+
+    // A aplicação reoferece, e aí não falta mais nada.
+    assert!(
+        pollster::block_on(host.open_document(host.request_context(), instantaneo)).is_ok()
+    );
+    assert!(
+        host.documents_missing_providers().is_empty(),
+        "reoferecido, o documento chegou a quem faltava"
+    );
+}
+
 /// A posição de um ponto que o índice **não** sabe tipar.
 ///
 /// Duas formas servem, e a segunda existe porque a primeira não aparece em todo

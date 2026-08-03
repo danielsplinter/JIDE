@@ -717,6 +717,27 @@ responde a partir da seguinte: a aplicação reabre os documentos no quadro
 seguinte. Num projeto grande ele leva trinta segundos para montar o projeto de
 qualquer forma — um quadro a mais não é o que se vai sentir.
 
+#### O giro que não parava, e o que faltava ligar
+
+Ao abrir o projeto real e dar `Ctrl+clique`, o Node subia — e a animação de
+carregamento girava para sempre.
+
+**O host dizia o que faltava, e ninguém escutava.** `documents_missing_providers`
+foi escrito nesta fase e não foi ligado à aplicação. O analisador acordava sem
+documento nenhum, e o `tsserver` **não carrega projeto sem um arquivo aberto**:
+`projectLoadingFinish` nunca vinha, o sinal de prontidão nunca ficava pronto, e
+a IDE dizia que estava preparando o projeto até alguém fechá-la.
+
+A aplicação passou a reoferecer os documentos que faltam — **uma tentativa por
+documento**. Insistir a cada quadro contra um analisador que recusou o arquivo
+seria trinta reaberturas por segundo contra um processo que já disse não.
+
+E o sinal de prontidão passou a ser marcado também quando o analisador **morre**.
+Um processo que cai antes de montar o projeto nunca manda o evento de fim, e sem
+isso o giro tinha outro jeito de não parar nunca. Morrer também é uma forma de
+terminar — é a mesma regra que a construção do índice já seguia, e que faltava
+aqui.
+
 #### E quanto isso economiza, honestamente
 
 Com 14% a 17% dos pontos alcançados pelo índice, **o analisador continua sendo
