@@ -1236,6 +1236,22 @@ impl IdeShell {
         }
     }
 
+    /// Se o texto digitado agora chega ao editor de código.
+    ///
+    /// **A resposta não é "há um documento aberto".** Com a janela de busca na
+    /// frente, existe um documento aberto atrás dela e ele não está recebendo
+    /// nada — mas quem perguntasse pelo documento ativo receberia `Some` e agiria
+    /// como se estivesse. Foi o que acontecia: digitar um ponto na busca abria o
+    /// menu de completação no editor, sobre uma janela que não era a dele.
+    ///
+    /// Isto vale para **todas** as janelas sobrepostas, e não só para a busca: a
+    /// pergunta é a mesma que `text_input` já responde para si mesma, dita em voz
+    /// alta para quem precisa dela do lado de fora.
+    #[must_use]
+    pub fn text_reaches_editor(&self) -> bool {
+        self.open_surface().is_none() && self.context.focus == ShellFocus::Editor
+    }
+
     pub fn text_input(&mut self, text: &str) {
         // O teclado vai a quem tem o foco, e quem sabe disso é o anfitrião. Ele
         // só alcança um componente que esteja na pilha, então ela é declarada

@@ -311,12 +311,17 @@ impl IdeShell {
 
     /// Abre a busca de tipo por nome. É o que `Ctrl+L` pede.
     pub fn open_type_search(&mut self) {
+        // A lista de completação é do editor, e o editor deixou de receber teclas.
+        // Deixada aberta, ela ficaria pairando sobre a janela de busca e ainda
+        // se refazendo a cada letra digitada nela.
+        self.clear_completions();
         let outcome = self.search.open_types();
         self.apply_type_search_outcome(outcome);
     }
 
     /// Abre a mesma janela da busca de tipos no modo de conteúdo.
     pub fn open_content_search(&mut self) {
+        self.clear_completions();
         let title = self.catalog.language_names.first().map_or_else(
             || "Buscar conteúdo".to_owned(),
             |language| format!("Buscar conteúdo em {language}"),

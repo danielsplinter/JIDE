@@ -2923,9 +2923,18 @@ impl ApplicationHandler for NativeIde {
                                 // Alguns caracteres pedem completação sozinhos —
                                 // em Java, o ponto. Quais são é a linguagem
                                 // quem diz; o editor só pergunta.
-                                if let (Some(document_id), Some(host)) =
-                                    (shell.active_document(), self.languages.host.as_ref())
-                                {
+                                //
+                                // E só pergunta quando a tecla é **dele**. Com a
+                                // janela de busca na frente, há documento ativo
+                                // atrás dela e ele não está recebendo nada:
+                                // digitar um ponto na busca abria o menu de
+                                // completação sobre uma janela que não era a do
+                                // editor.
+                                if let (true, Some(document_id), Some(host)) = (
+                                    shell.text_reaches_editor(),
+                                    shell.active_document(),
+                                    self.languages.host.as_ref(),
+                                ) {
                                     let triggers = host.trigger_characters(document_id);
                                     completion_requested |=
                                         text.chars().any(|typed| triggers.contains(&typed));

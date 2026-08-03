@@ -4324,6 +4324,68 @@ fn inspection_selection(shell: &IdeShell) -> Option<&str> {
     editor.selected_text(source)
 }
 
+/// Com uma janela na frente, a tecla digitada não é do editor.
+///
+/// **Existir documento ativo não significa que ele esteja recebendo alguma
+/// coisa.** Com a busca aberta há um arquivo aberto atrás dela, e quem
+/// perguntasse só pelo documento ativo receberia `Some` e agiria como se a tecla
+/// fosse dele: digitar um ponto na caixa de busca abria o menu de completação do
+/// editor, sobre uma janela que não era a dele.
+///
+/// A pergunta vale para toda janela sobreposta, e não só para a busca — é por
+/// isso que a resposta é uma só.
+#[test]
+fn a_key_typed_over_an_open_window_does_not_belong_to_the_editor() {
+    let mut shell = shell_editing("int total = 10;");
+    shell.context.focus = ShellFocus::Editor;
+    assert!(
+        shell.text_reaches_editor(),
+        "sem janela na frente e com o editor em foco, a tecla é dele"
+    );
+    assert!(
+        shell.active_document().is_some(),
+        "há documento aberto, e é isso que enganava"
+    );
+
+    shell.open_type_search();
+    assert!(
+        !shell.text_reaches_editor(),
+        "com a busca na frente, a tecla não é do editor"
+    );
+    assert!(
+        shell.active_document().is_some(),
+        "o documento continua ativo atrás da janela"
+    );
+
+    shell.close_type_search();
+    assert!(
+        shell.text_reaches_editor(),
+        "fechada a janela, quem decide volta a ser o foco"
+    );
+}
+
+/// Abrir a busca dispensa a lista de completação que estivesse aberta.
+///
+/// Sem isto ela ficaria pairando sobre a janela de busca, e ainda se refazendo a
+/// cada letra digitada nela.
+#[test]
+fn opening_the_search_dismisses_the_completion_list() {
+    let mut shell = shell_editing("int total = 10;");
+    shell.context.focus = ShellFocus::Editor;
+    shell.set_completions(vec![CompletionItem {
+        label: "getPedido()".to_owned(),
+        detail: None,
+        kind: ide_domain::CompletionKind::Method,
+    }]);
+    assert!(shell.completion_open(), "a lista precisa estar aberta antes");
+
+    shell.open_type_search();
+    assert!(
+        !shell.completion_open(),
+        "a lista do editor não pode sobreviver à janela que tomou o teclado"
+    );
+}
+
 /// Enquanto procura, a janela mostra o giro no lugar do resultado.
 ///
 /// **Uma lista vazia não distingue "procurando" de "não achei nada".** Antes, a
