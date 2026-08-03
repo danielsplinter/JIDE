@@ -386,6 +386,63 @@ readonly FORM_CONTROL_NAME = { ORDER: 'order' } as const;
 
 Um membro só, e o certo, atravessando o `as const`.
 
+#### Até onde a cópia embarcada serve, medido
+
+A pergunta que decide se embarcar uma versão foi boa ideia: **ela serve qualquer
+projeto Angular?** Não serve, e o limite foi medido contra projetos montados para
+isso — Angular 11, 13, 15 e 17, cada um com o TypeScript da sua época.
+
+| projeto | TypeScript | com a cópia embarcada (21.2.17) |
+| --- | --- | --- |
+| Angular 11.2.14 | 4.1.6 | ❌ `Unresolved` |
+| Angular 13.4.0 | 4.6.4 | ❌ `Unresolved` |
+| Angular 15.2.10 | 4.9.5 | ✅ 3 membros |
+| Angular 17.3.12 | 5.4.5 | ✅ 3 membros |
+| Angular 21.2.6 (real) | 5.9.3 | ✅ 13 membros |
+| Angular 21.2.17 (real) | 5.9.3 | ✅ resolve `as const` |
+
+**E o limite não é da cópia embarcada.** O Angular 13 falha **também com o
+`@angular/language-service` 13.4.0 do próprio projeto**, e falha igual com
+TypeScript 4.6 ou 4.9 — então não é a versão que embarcamos nem a do compilador.
+A pilha de erro diz onde é:
+
+```text
+Could not find source file: '.../hud.component.html'
+  at getValidSourceFile                    (tsserver.js)
+  at Object.getCompletionsAtPosition       (tsserver.js)
+  at Object.getCompletionsAtPosition       (@angular/language-service)
+```
+
+O serviço antigo **repassa** a pergunta sobre o template ao TypeScript, que
+recusa o `.html` por ele não ser arquivo do programa. O da versão 21 responde
+ele mesmo. É uma mudança de dentro do serviço do Angular, e nada do nosso lado a
+contorna — o `extraFileExtensions` foi tentado nas duas execuções e não muda
+nada.
+
+**A degradação é segura, e isso foi verificado à parte.** Num projeto onde o
+plugin não serve, ele ainda assim **carrega**, e o `.ts` continua respondendo
+idêntico:
+
+```text
+Angular 11 / TypeScript 4.1
+  sem o plugin   .ts -> 3 itens: nivel, nome, pontuacao
+  COM o plugin   .ts -> 3 itens: nivel, nome, pontuacao
+```
+
+O template devolve `Unresolved`, que faz a pergunta descer para o próximo
+candidato. Nenhum projeto fica pior por a IDE trazer a cópia.
+
+**O que continua sem medida:** os projetos de 11 a 17 são sintéticos —
+`tsconfig` escrito à mão, um componente, um `NgModule`. Um aplicativo real
+daquelas versões pode se comportar de outro jeito, e o limite acima é o que se
+mediu, não uma promessa. É por isso que **não há trava por versão no código**:
+recusar o plugin com base nisto poderia desligá-lo num projeto real que
+funcionaria.
+
+**O piso de Node é declarado pelo pacote**, e não por nós:
+`"engines": { "node": "^20.19.0 || ^22.12.0 || >=24.0.0" }`. Abaixo disso, quem
+não sobe é a cópia embarcada; o `tsserver` do projeto continua o do projeto.
+
 #### O que as duas ferramentas de referência fazem, verificado no disco
 
 Vale registrar, porque foi a comparação com elas que levou à correção.
