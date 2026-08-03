@@ -158,6 +158,32 @@ depurar funcione com um clique nas execuções seguintes.
 
 ## Orçamento
 
+> **O primeiro número real.** Medido no `spartacus-develop`, 8 958 arquivos, com
+> o teto de 2 GB que a `23` impõe ao analisador:
+>
+> | instante | memória do analisador |
+> | --- | --- |
+> | subiu | 67 MB |
+> | `projectLoadingStart` (3,8 s) | 180 MB |
+> | 15 s | 641 MB |
+> | 24 s | 1 331 MB |
+> | **`projectLoadingFinish` (32,4 s)** | **1 902 MB** |
+> | depois da coleta | 1 735 MB |
+>
+> Com a IDE em 411 MB, a soma passa de 2,3 GB. **O pico é 93% do teto imposto**:
+> este projeto cabe, e um pouco maior não caberia — o analisador seria derrubado
+> e a IDE cairia para o provider nativo, que é a degradação da ADR-025
+> funcionando, com menos.
+>
+> A memória **não é a causa da demora**: as duas crescem juntas porque vêm do
+> mesmo trabalho — ler e tipar nove mil arquivos. Ela é o que esse trabalho
+> ocupa, e não o que o atrasa.
+>
+> O teto de 2 GB foi escolhido antes de existir medição, com o argumento de que
+> "aperta em monorepo grande, que é justamente onde se quer que aperte". A
+> medição confirma que aperta; se ela deve continuar apertando aí é decisão de
+> quem usa a IDE nesses projetos, e não dedução.
+
 > **Estado.** A **medição** existe em código: `MemoryMeter` e `MemoryReading` em
 > `ide-core`, com os dois números na barra de estado, e o aviso quando um
 > analisador externo cai. Ver "O medidor de memória" na `23`. O **teto** abaixo
