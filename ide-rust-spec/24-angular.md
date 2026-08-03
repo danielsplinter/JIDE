@@ -288,6 +288,53 @@ Sobram dois caminhos, e nenhum é o que esta fase supunha:
 **Nenhum dos dois é uma fase; cada um é uma decisão.** Escolher exige responder de
 onde vem o servidor, e a resposta muda o que a IDE promete sobre versões.
 
+#### Como as duas ferramentas de referência resolvem, verificado no disco
+
+**VS Code** — extensão `angular.ng-template` 22.0.1, instalada na máquina:
+
+- ela **embute** o pacote `@angular/language-server` 22.0.1, com um binário
+  `ngserver`. Esse pacote **não está em nenhum dos projetos de referência**;
+- o cliente o inicia passando `--ngProbeLocations` e `--tsProbeLocations`, que
+  apontam para o projeto. **O servidor vem da extensão; as versões do motor vêm
+  do projeto.**
+
+Ou seja: a regra "a versão é a do projeto" é mantida, mas **a ponte não**. Ela é
+da ferramenta, e acompanha a ferramenta.
+
+**IntelliJ** — `angular-plugin` do IDEA 2026.1.4:
+
+- ele traz um plugin de `tsserver` **próprio**, `ws-typescript-angular-plugin`;
+- as dependências dele são `typescript` 5.4.5 e **`@volar/typescript` 2.4.27**;
+- ele **não** traz o `@angular/language-service`.
+
+O Volar é a máquina genérica de **arquivo virtual**: ela faz uma região embutida
+— um template dentro de um componente — aparecer para o TypeScript como se fosse
+código, com o mapa de posições nos dois sentidos. É exatamente o obstáculo que a
+sondagem encontrou: um `.html` não é código para o `tsserver`, e alguém precisa
+fazê-lo ser.
+
+*Inferência, e não leitura de código:* das dependências se conclui que a JetBrains
+escreveu a ponte, e não que ela reimplementou a análise de Angular inteira.
+
+#### O terceiro caminho, que a sondagem revelou
+
+Some-se aos dois anteriores um que não estava na mesa:
+
+- **Um plugin de `tsserver` nosso, sobre uma máquina de arquivo virtual.** É o
+  que a JetBrains fez. O mapeamento posição-a-posição é genérico — serve a Vue,
+  a Svelte, a qualquer linguagem dentro de linguagem, e é a mesma ideia que a
+  seção "Linguagem dentro de linguagem" já defende para o realce. O que **não**
+  é genérico é saber recortar a expressão de dentro do `{{ }}` e ligar o template
+  ao componente, e isso é Angular.
+
+As três opções diferem no que custam e no que quebram, e nenhuma é barata:
+
+| caminho | o que a IDE ganha | o que ela passa a manter |
+| --- | --- | --- |
+| cliente LSP para o `ngserver` | tudo, feito por quem faz o Angular | um cliente LSP, e de onde vem o servidor |
+| plugin nosso sobre arquivo virtual | controle, e o mesmo mecanismo serve Vue amanhã | a ponte, e ela envelhece com a sintaxe do template |
+| mapear no nosso código, sem plugin | nada a instalar | o recorte da expressão **e** a resolução, em Rust |
+
 #### O que continua valendo desta fase
 
 A parte que não dependia da premissa: **a camada nativa de `.html` é HTML puro**.
