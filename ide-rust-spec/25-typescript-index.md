@@ -962,10 +962,19 @@ estado, que não pisca.
 para quem a reencontrar, e o motivo de ela não estar aqui é experiência, e não
 esquecimento.*
 
-**O aviso para quem espera pelo analisador continua sendo o que falta.** A barra
-de estado diz que está procurando, mas não diz *pelo quê* se espera, e não há
-como desistir — o `SearchController` da navegação sabe cancelar, e falta o gesto
-que o acione. Se isso for feito, que seja **sem animação no meio da tela**.
+**E o aviso para quem espera saiu da lista.** Ele já foi tentado de duas formas —
+o giro no meio da tela e a mensagem `Procurando X…` na barra —, e as duas foram
+**retiradas depois de usadas**, pelo mesmo motivo: quase todo pedido é respondido
+em milissegundos pelo índice, e o aviso aparece e some antes de ser lido.
+
+Duas tentativas retiradas são evidência, e não coincidência. **Fica sem aviso**,
+e sem item pendente: o que sobra na tela é a resposta — o arquivo abre, ou a
+barra diz que não achou.
+
+*A capacidade de desistir continua existindo por baixo: o `SearchController` da
+navegação sabe cancelar, e nenhuma chamada ao host espera na thread da janela.
+Se alguém for incomodado por uma espera longa de verdade, o que falta é o gesto —
+e a terceira tentativa começa sabendo que as duas primeiras piscaram.*
 
 #### Critério
 
@@ -974,10 +983,9 @@ minuto. Nenhum arquivo perde realce, estrutura ou navegação por nome enquanto
 isso.
 
 *Este critério pedia também que um pedido feito antes de o analisador ficar
-pronto mostrasse giro naquele pedido, com cancelamento. A primeira metade foi
-tentada e **retirada** — ver acima. A segunda continua valendo, e continua
-faltando: quem espera merece saber pelo quê e poder desistir. Ela não segura a
-fase, e é a única coisa que sobra dela.*
+pronto mostrasse giro naquele pedido, com cancelamento. As duas formas de avisar
+foram tentadas e **retiradas** — ver acima —, e a exigência saiu junto. A fase
+está completa sem ela.*
 
 ### Adiar a abertura no analisador ⛔ Recusado
 

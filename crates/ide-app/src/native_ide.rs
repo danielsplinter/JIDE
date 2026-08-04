@@ -633,9 +633,13 @@ impl NativeIde {
         //
         // O que sobra é a resposta — o arquivo abre, ou a barra diz que não
         // achou. Quem espera de verdade, porque o analisador está montando o
-        // projeto, continua sem aviso: é a pendência registrada na fase 6 da
-        // `25`, e ela pede um aviso que **diga pelo quê** se espera e deixe
-        // desistir. Um texto genérico que pisca não era isso.
+        // projeto, **fica sem aviso, e isso é a decisão** e não uma pendência:
+        // avisar foi tentado de duas formas, o giro e o texto, e as duas foram
+        // retiradas depois de usadas. Duas tentativas retiradas são evidência.
+        //
+        // O cancelamento continua existindo por baixo — o `SearchController`
+        // sabe cancelar —, e falta só o gesto. Uma terceira tentativa começa
+        // sabendo que as duas primeiras piscaram.
     }
 
     /// Recolhe o resultado da navegação, se já chegou.
