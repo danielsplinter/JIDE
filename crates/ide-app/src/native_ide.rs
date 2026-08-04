@@ -786,6 +786,19 @@ impl NativeIde {
         // praticamente mentindo — quem olha conclui que deve esperar.
         //
         // Quem é "alheio" vem da composição, e não daqui: ver a fase 6 da `25`.
+        // **E ele volta quando alguém pede o que só o analisador oferece.**
+        //
+        // Uma navegação em curso é exatamente isso: o índice responde na hora
+        // quando sabe, e o que desce para o analisador espera o que ele estiver
+        // levando. Girar aqui é o aviso honesto — aparece quando há espera de
+        // verdade, e não durante a abertura inteira. Ver a fase 6 da `25`.
+        if let Some(fase) = self.languages.navigation.spinner_phase() {
+            self.languages.preparing_since = None;
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_project_loading(Some(fase));
+            }
+            return true;
+        }
         let alheios = &self.languages.alheios;
         let preparando = self.languages.host.as_ref().is_some_and(|host| {
             host.preparing_providers()

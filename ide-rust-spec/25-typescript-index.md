@@ -881,7 +881,7 @@ sobrecargas e fazer o tipo voltar da assinatura para dentro da lambda. É o
 verificador de tipos, que a ADR-025 recusou — e a recusa continua valendo, com o
 exemplo agora medido em vez de argumentado.
 
-### Fase 6 — O giro relata o que a IDE prepara ✅ (metade)
+### Fase 6 — O giro relata o que a IDE prepara ✅
 
 **O giro de carregamento cobre a preparação da IDE, e não a do analisador
 externo.** Quando o índice termina, ele termina. O que precisa do analisador e o
@@ -948,16 +948,19 @@ nenhum. Um teste fixa que o externo é o alheio e o nativo não, porque trocá-l
 faria o giro voltar a durar a montagem do projeto ou sumir com o índice ainda
 sendo construído.
 
-**Não feito:** o **giro por pedido, com cancelamento**. Quem pedir tipo antes de
-o analisador ficar pronto continua com o que existia — a busca tem giro e
-cancelamento próprios, a completação tem prazo de cinco segundos, e o
-`Ctrl+clique` cai no nativo. O que falta é o aviso explícito de "esperando o
-analisador" com saída.
+**E ele volta na navegação.** Um `Ctrl+clique` em curso é exatamente "alguém
+pediu o que talvez só o analisador ofereça": o índice responde na hora quando
+sabe, e o que desce para o analisador espera o que ele estiver levando. O giro
+aparece **ali**, e some quando a resposta chega.
 
-Enquanto essa metade não existir, **o risco é aviso de menos**: alguém pede tipo
-aos dez segundos e espera sem sinal claro do porquê. É menos ruim do que o giro
-de setenta segundos que mandava esperar sem motivo, e é menos do que a fase
-prometeu.
+É o mesmo desenho invertido: antes ele girava a abertura inteira, quando quase
+nada estava bloqueado; agora ele gira no instante em que há espera de verdade.
+
+**O que ainda não existe é o cancelamento.** Quem pedir navegação com o
+analisador ainda montando vê o giro, mas não tem como desistir — o pedido corre
+até o prazo. As buscas já cancelam pelo `SearchController`; a navegação usa o
+mesmo controlador e o mesmo cancelamento existe, mas não há gesto na interface
+que o acione. É o que falta, e é pequeno.
 
 #### Critério
 
