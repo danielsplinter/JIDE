@@ -1099,3 +1099,98 @@ fn the_ide_does_not_draw() {
         "a IDE voltou a desenhar primitiva crua: desenhar é da biblioteca, e o          que falta nela deve ser pedido a ela"
     );
 }
+
+/// **Nenhum teste aponta para o disco de quem o escreveu.**
+///
+/// Um caminho absoluto num teste é um teste que só uma máquina roda — e nas
+/// outras ele não falha, ele fica **mudo**: parece cobertura e não é. Três
+/// medições viveram assim por meses, com o nome de usuário de quem desenvolve
+/// dentro do repositório, até alguém perguntar se havia código preso aos
+/// projetos de teste.
+///
+/// A forma certa é uma variável de ambiente, como `ER_IDE_PROJETO_TS` já fazia:
+/// quem tem um projeto grande aponta para ele, e quem não tem vê o teste dizer
+/// o que falta em vez de calar.
+///
+/// # O que ela distingue, e o que ela não distingue
+///
+/// A pasta pessoal de alguém tem um **nome de usuário** depois dela. É isso que
+/// separa `/home/joao/projeto`, que é o disco de uma pessoa, de `/home/.config`,
+/// que um teste de resolução de caminho fabrica para testar a regra — e que não
+/// existe em máquina nenhuma.
+///
+/// Sem essa distinção a guarda acusaria os testes que **precisam** escrever um
+/// caminho absoluto porque é o caminho que eles testam; ela viraria ruído, e
+/// guarda que vira ruído é desligada.
+///
+/// Os pedaços são montados em tempo de execução para a guarda não se acusar.
+#[test]
+fn no_source_file_points_at_someones_disk() {
+    let root = workspace_root();
+    let proibidos = [
+        format!("C:{}Users{}", '\\', '\\'),
+        format!("C:{}Users{}", '/', '/'),
+        format!("{}home{}", '/', '/'),
+        format!("{}Users{}", '/', '/'),
+    ];
+    let mut achados = BTreeSet::new();
+
+    for entry in fs::read_dir(root.join("crates"))
+        .unwrap_or_else(|error| panic!("não foi possível listar as crates: {error}"))
+    {
+        let crate_dir = match entry {
+            Ok(entry) => entry.path(),
+            Err(_) => continue,
+        };
+        if !crate_dir.is_dir() {
+            continue;
+        }
+        for sub in ["src", "tests"] {
+            let dir = crate_dir.join(sub);
+            if !dir.is_dir() {
+                continue;
+            }
+            for path in rust_sources(&dir) {
+                let Ok(source) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (numero, linha) in source.lines().enumerate() {
+                    // Linha de documentação explica um caminho; ela não o usa.
+                    let cortada = linha.trim_start();
+                    if cortada.starts_with("//") {
+                        continue;
+                    }
+                    if proibidos
+                        .iter()
+                        .any(|proibido| nomeia_uma_pessoa(linha, proibido))
+                    {
+                        let relative = path.strip_prefix(&root).unwrap_or(&path);
+                        achados.insert(format!("{}:{}", relative.display(), numero + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        achados.is_empty(),
+        "teste preso ao disco de uma máquina; use uma variável de ambiente: {achados:?}"
+    );
+}
+
+/// Se depois da pasta de casa vem um **nome de usuário**.
+///
+/// `/home/joao/projeto` nomeia uma pessoa; `/home/.config` é um caminho que um
+/// teste inventou para exercitar a regra de resolução, e não existe em máquina
+/// nenhuma. A diferença é a primeira letra do que vem a seguir.
+fn nomeia_uma_pessoa(linha: &str, prefixo: &str) -> bool {
+    let mut resto = linha;
+    while let Some(posicao) = resto.find(prefixo) {
+        let depois = &resto[posicao + prefixo.len()..];
+        if depois.starts_with(|c: char| c.is_alphanumeric()) {
+            return true;
+        }
+        resto = depois;
+    }
+    false
+}

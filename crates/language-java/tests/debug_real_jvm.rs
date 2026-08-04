@@ -464,15 +464,23 @@ async fn invoking_with_a_boxed_parameter_changes_the_object_and_keeps_the_target
 /// A ordem é a mesma da IDE: conecta assim que a porta abre — com a aplicação
 /// ainda subindo —, registra o breakpoint numa classe que só será carregada
 /// depois, e espera a parada quando a requisição chega.
+/// O projeto vem de `ER_IDE_PROJETO_MAVEN`. **Estava escrito à mão, com o
+/// caminho da máquina de quem desenvolve** — e um teste assim não falha nas
+/// outras máquinas, ele fica mudo: parece cobertura e não é.
+///
+/// ```text
+/// ER_IDE_PROJETO_MAVEN=/caminho/do/projeto cargo test -p language-java --test debug_real_jvm -- --ignored --nocapture
+/// ```
 #[tokio::test]
-#[ignore = "requires Maven and the example Spring Boot project"]
+#[ignore = "exige Maven, JDK e ER_IDE_PROJETO_MAVEN"]
 async fn stops_on_a_controller_breakpoint_of_a_running_spring_boot_application() {
-    let project =
-        PathBuf::from("C:/Users/jdani/Documents/projetos/java/spring-boot-four-endpoints");
-    if !project.join("pom.xml").is_file() {
-        eprintln!("projeto de exemplo ausente; teste ignorado");
-        return;
-    }
+    let Some(project) = std::env::var_os("ER_IDE_PROJETO_MAVEN").map(PathBuf::from) else {
+        panic!("aponte ER_IDE_PROJETO_MAVEN para um projeto Maven de verdade");
+    };
+    assert!(
+        project.join("pom.xml").is_file(),
+        "o projeto apontado precisa ter um pom.xml: {project:?}"
+    );
     let source_root = project.join("src/main/java");
     let controller = source_root.join("br/com/exemplo/endpoints/controller/ItemController.java");
     assert!(

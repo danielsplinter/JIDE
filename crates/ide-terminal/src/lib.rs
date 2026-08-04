@@ -699,7 +699,7 @@ mod tests {
             );
         }
         for other in [
-            "PS C:\\Users\\jdani> ",
+            "PS C:\\Users\\alguem> ",
             "",
             "Started FourEndpointsApplication in 1.6 seconds",
             "Escolha uma opção (informe o número desejado)?",
@@ -811,16 +811,25 @@ mod tests {
     /// `mvn.cmd` é um arquivo de lote, então é o caso que trava o terminal na
     /// pergunta do `cmd`. Marcado como `ignored` porque depende de Maven, JDK e
     /// das dependências do projeto já baixadas.
+    ///
+    /// O projeto vem de `ER_IDE_PROJETO_MAVEN`. **Estava escrito à mão, com o
+    /// caminho da máquina de quem desenvolve** — um teste assim não falha nas
+    /// outras máquinas, ele fica mudo, que é pior: parece cobertura e não é.
+    ///
+    /// ```text
+    /// ER_IDE_PROJETO_MAVEN=/caminho/do/projeto cargo test -p ide-terminal -- --ignored --nocapture
+    /// ```
     #[cfg(windows)]
     #[test]
-    #[ignore = "requires Maven and a Spring Boot project"]
+    #[ignore = "exige Maven, JDK e ER_IDE_PROJETO_MAVEN"]
     fn stop_then_run_again_restarts_a_maven_application() {
-        let project =
-            PathBuf::from("C:/Users/jdani/Documents/projetos/java/spring-boot-four-endpoints");
-        if !project.join("pom.xml").is_file() {
-            eprintln!("projeto de exemplo ausente; teste ignorado");
-            return;
-        }
+        let Some(project) = std::env::var_os("ER_IDE_PROJETO_MAVEN").map(PathBuf::from) else {
+            panic!("aponte ER_IDE_PROJETO_MAVEN para um projeto Maven de verdade");
+        };
+        assert!(
+            project.join("pom.xml").is_file(),
+            "o projeto apontado precisa ter um pom.xml: {project:?}"
+        );
         let profile = ShellProfile {
             kind: ShellKind::PowerShell,
             executable: PathBuf::from("powershell.exe"),

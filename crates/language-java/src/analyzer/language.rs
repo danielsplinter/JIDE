@@ -1867,10 +1867,26 @@ pub(super) fn point_after_text(start: Point, inserted: &str) -> Point {
 mod tests {
     use super::*;
 
-    /// O projeto grande usado nas medições. Só existe na máquina de quem
-    /// desenvolve, e por isso as medições são `#[ignore]`.
-    const PROJETO_DE_REFERENCIA: &str =
-        r"C:\Users\jdani\Documents\projetos\java\camel-main\camel-main";
+    /// O projeto grande usado nas medições, apontado por `ER_IDE_PROJETO_JAVA`.
+    ///
+    /// **Estava escrito à mão, com o caminho da máquina de quem desenvolve.** Um
+    /// caminho absoluto num teste é um teste que só uma máquina roda — e nas
+    /// outras ele não falha, ele fica mudo: parece cobertura e não é. É o mesmo
+    /// motivo pelo qual as medições de TypeScript leem `ER_IDE_PROJETO_TS`.
+    ///
+    /// ```text
+    /// ER_IDE_PROJETO_JAVA=/caminho/do/projeto cargo test -p language-java -- --ignored --nocapture
+    /// ```
+    fn projeto_de_referencia() -> PathBuf {
+        let Some(caminho) = std::env::var_os("ER_IDE_PROJETO_JAVA").map(PathBuf::from) else {
+            panic!("aponte ER_IDE_PROJETO_JAVA para um projeto Java de verdade");
+        };
+        assert!(
+            caminho.exists(),
+            "o projeto apontado precisa existir: {caminho:?}"
+        );
+        caminho
+    }
 
     /// A conversão de posição não varre o arquivo, e continua correta.
     ///
@@ -2255,11 +2271,7 @@ int x;";
     #[test]
     #[ignore = "mede um projeto grande local; ver a fase 3 da 19"]
     fn indexing_a_large_project_costs_what_the_spec_says() {
-        let root = PathBuf::from(PROJETO_DE_REFERENCIA);
-        if !root.is_dir() {
-            eprintln!("projeto de referência ausente: {}", root.display());
-            return;
-        }
+        let root = projeto_de_referencia();
         let inicio = std::time::Instant::now();
         let documentos = match Documents::new() {
             Ok(documentos) => documentos,
@@ -2324,7 +2336,7 @@ int x;";
     #[test]
     #[ignore = "mede um projeto grande local; ver a fase 2 da 20"]
     fn opening_a_large_project_from_the_saved_index() {
-        let root = PathBuf::from(PROJETO_DE_REFERENCIA);
+        let root = projeto_de_referencia();
         let arquivo = caminho_da_medicao();
         if !arquivo.is_file() {
             eprintln!("grave o indice antes: rode indexing_a_large_project");

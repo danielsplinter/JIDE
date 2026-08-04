@@ -273,13 +273,24 @@ mod medicao {
         total
     }
 
+    /// Quanto custa varrer um projeto de verdade.
+    ///
+    /// O caminho vem de `ER_IDE_PROJETO`, e não do disco de quem escreveu o
+    /// teste. **Um caminho absoluto aqui é um teste que só uma máquina roda** —
+    /// e ele não falha nas outras, ele fica mudo, que é pior: parece cobertura e
+    /// não é.
+    ///
+    /// ```text
+    /// ER_IDE_PROJETO=/caminho/do/projeto cargo test -p ide-workspace -- --ignored --nocapture
+    /// ```
     #[test]
-    #[ignore = "medição manual; exige o projeto de referência"]
+    #[ignore = "medição manual; exige ER_IDE_PROJETO"]
     fn scan_time_on_a_real_project() {
-        let root = Path::new(r"C:\Users\jdani\Documents\projetos\java\camel-main\camel-main");
-        if !root.exists() {
-            return;
-        }
+        let Some(root) = std::env::var_os("ER_IDE_PROJETO").map(std::path::PathBuf::from) else {
+            panic!("aponte ER_IDE_PROJETO para um projeto de verdade");
+        };
+        let root = root.as_path();
+        assert!(root.exists(), "o projeto apontado precisa existir: {root:?}");
         let service = super::WorkspaceService::native();
         let inicio = Instant::now();
         let Ok(arvore) = service.scan(root) else {
