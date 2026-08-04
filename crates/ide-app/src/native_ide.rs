@@ -961,24 +961,35 @@ impl NativeIde {
             return false;
         };
         let quantos = achadas.len();
+        // **A linha de código, e não o nome do arquivo.** Uma lista de usos sem
+        // o texto em volta obriga a abrir um por um para saber qual interessa —
+        // é o que a busca por conteúdo já entendeu, e o mesmo painel a mostra.
+        let mut textos: std::collections::HashMap<PathBuf, String> =
+            std::collections::HashMap::new();
+        let itens: Vec<ContentSearchHit> = achadas
+            .into_iter()
+            .map(|local| {
+                let conteudo = textos.entry(local.path.clone()).or_insert_with(|| {
+                    std::fs::read_to_string(&local.path).unwrap_or_default()
+                });
+                let preview = conteudo
+                    .lines()
+                    .nth(local.range.start.line as usize)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                ContentSearchHit {
+                    preview,
+                    location: local,
+                }
+            })
+            .collect();
         if let Some(shell) = self.ui.shell.as_mut() {
-            shell.set_content_search_results(
-                achadas
-                    .into_iter()
-                    .map(|local| ContentSearchHit {
-                        preview: format!(
-                            "{}:{}",
-                            local
-                                .path
-                                .file_name()
-                                .and_then(|nome| nome.to_str())
-                                .unwrap_or_default(),
-                            local.range.start.line + 1
-                        ),
-                        location: local,
-                    })
-                    .collect(),
-            );
+            // **Abrir o painel faz parte da resposta.** Sem isto, quem pergunta
+            // vê só uma contagem na barra de estado, e a lista fica atrás de
+            // uma janela fechada — que é o mesmo que não responder.
+            shell.open_content_search();
+            shell.set_content_search_results(itens);
             shell.set_status_message(format!("{quantos} uso(s)"));
         }
         true
