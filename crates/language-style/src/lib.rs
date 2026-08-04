@@ -20,7 +20,7 @@ use ide_domain::{
 };
 use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
-    LanguageError, LanguageMetadata, LanguageProvider,
+    LanguageError, LanguageMetadata, LanguageProvider, ReadinessSignal,
 };
 use tree_sitter::{Node, Parser, Point, Tree};
 
@@ -106,11 +106,33 @@ struct ActiveStyle {
     language_id: LanguageId,
     /// A raiz do projeto, para o `node_modules` de um especificador nu.
     raiz: PathBuf,
-    /// Quem importa quem, montado na primeira vez que faz falta.
+    /// Quem importa quem, montado **em segundo plano** ao abrir o projeto.
     ///
-    /// Sob demanda porque a varredura custa, e quem só realça nunca paga por
-    /// ela: um projeto aberto para leitura não monta grafo nenhum.
-    grafo: Mutex<Option<std::sync::Arc<resolucao::Grafo>>>,
+    /// # Por que não na primeira pergunta, e por que não aqui na thread
+    ///
+    /// Montar sob demanda punia justamente quem estava digitando: medido no
+    /// monorepo de referência, a primeira completação num `.scss` esperava
+    /// **588 ms** pela varredura.
+    ///
+    /// Montar dentro de `activate` seria pior. A ativação acontece na abertura
+    /// de um documento, e essa acontece **na thread da interface** — a mesma
+    /// família de travamento que a `25` caçou cinco vezes.
+    ///
+    /// Então sobe uma linha de execução à parte, e quem pergunta antes de ela
+    /// terminar recebe o que dá para responder sem o grafo. Degradar, e não
+    /// esperar.
+    grafo: std::sync::Arc<Mutex<Option<std::sync::Arc<resolucao::Grafo>>>>,
+    /// Se o grafo já está de pé.
+    ///
+    /// É o mesmo `ReadinessSignal` que o analisador de TypeScript usa, e pelo
+    /// mesmo motivo: quem espera precisa saber se ainda vale esperar.
+    prontidao: ReadinessSignal,
+    /// Se uma varredura já está correndo.
+    ///
+    /// **Por instância, e não global.** Como estático, dois projetos abertos em
+    /// sequência disputariam a mesma marca, e o segundo poderia desistir de
+    /// montar por causa do primeiro — ficando sem grafo para sempre.
+    montando: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// O que cada arquivo põe em escopo, já calculado.
     ///
     /// # Por que este cache não é otimização prematura
@@ -133,10 +155,16 @@ impl ActiveStyle {
         parser
             .set_language(&tree_sitter_css::LANGUAGE.into())
             .map_err(|erro| LanguageError::Provider(erro.to_string()))?;
+        let grafo = std::sync::Arc::new(Mutex::new(None));
+        let prontidao = ReadinessSignal::new();
+        let montando = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        montar_ao_fundo(&raiz, &grafo, &prontidao, &montando);
         Ok(Self {
             language_id: LanguageId(STYLE_LANGUAGE_ID.to_owned()),
             raiz,
-            grafo: Mutex::new(None),
+            grafo,
+            prontidao,
+            montando,
             escopos: Mutex::new(HashMap::new()),
             parser: Mutex::new(parser),
             documentos: Mutex::new(HashMap::new()),
@@ -174,18 +202,13 @@ impl ActiveStyle {
         pronto
     }
 
-    /// O grafo de quem importa quem, montado na primeira vez.
-    fn grafo(&self) -> Result<std::sync::Arc<resolucao::Grafo>, LanguageError> {
-        let mut guardado = self
-            .grafo
-            .lock()
-            .map_err(|_| LanguageError::Provider("grafo de estilo travado".to_owned()))?;
-        if let Some(pronto) = guardado.as_ref() {
-            return Ok(pronto.clone());
-        }
-        let montado = std::sync::Arc::new(resolucao::Grafo::construir(&self.raiz));
-        *guardado = Some(montado.clone());
-        Ok(montado)
+    /// O grafo, se ele já estiver de pé.
+    ///
+    /// `None` enquanto a varredura corre. Quem pergunta nesse intervalo recebe
+    /// o que o próprio arquivo e o que ele importa oferecem — menos, e não
+    /// errado.
+    fn grafo(&self) -> Option<std::sync::Arc<resolucao::Grafo>> {
+        self.grafo.lock().ok()?.clone()
     }
 
     fn analisar(
@@ -232,6 +255,28 @@ impl ActiveStyle {
 impl ActiveLanguage for ActiveStyle {
     fn language_id(&self) -> &LanguageId {
         &self.language_id
+    }
+
+    fn readiness(&self) -> Option<ReadinessSignal> {
+        Some(self.prontidao.clone())
+    }
+
+    /// Um `.scss` gravado pode ter mudado o que importa, e o grafo envelhece
+    /// com isso.
+    ///
+    /// Remontar inteiro é o caminho simples e correto: a alternativa seria
+    /// comparar as importações de antes com as de agora, e o "antes" não existe
+    /// aqui. Corre ao fundo, como na abertura, e o cache de escopos vai junto —
+    /// ele foi calculado sobre o grafo velho.
+    async fn file_changed(&self, path: &Path) -> Result<(), LanguageError> {
+        if path.extension().and_then(|valor| valor.to_str()) != Some("scss") {
+            return Ok(());
+        }
+        if let Ok(mut escopos) = self.escopos.lock() {
+            escopos.clear();
+        }
+        montar_ao_fundo(&self.raiz, &self.grafo, &self.prontidao, &self.montando);
+        Ok(())
     }
 
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {
@@ -360,8 +405,10 @@ impl ActiveLanguage for ActiveStyle {
         // monorepo com mil e poucas variáveis. Aqui só sobrevive o que o prefixo
         // deixa passar, e só esses viram texto novo.
         let mut de_cima = Vec::new();
-        if espaco.is_none() {
-            for ancestral in self.grafo()?.ancestrais(&caminho) {
+        if espaco.is_none()
+            && let Some(grafo) = self.grafo()
+        {
+            for ancestral in grafo.ancestrais(&caminho) {
                 de_cima.push(self.escopo_de(&ancestral, sigilo));
             }
         }
@@ -565,6 +612,45 @@ fn sigilo_antes(texto: &str, inicio: usize) -> Option<char> {
         .chars()
         .next_back()
         .filter(|caractere| matches!(caractere, '$' | '%'))
+}
+
+/// Sobe a varredura numa linha de execução à parte.
+///
+/// Uma por vez: uma sequência de gravações não pode empilhar varreduras do
+/// projeto inteiro. Quem chegar enquanto uma corre não faz nada, e a que está
+/// correndo já vai ler o disco como ele está agora.
+fn montar_ao_fundo(
+    raiz: &Path,
+    destino: &std::sync::Arc<Mutex<Option<std::sync::Arc<resolucao::Grafo>>>>,
+    prontidao: &ReadinessSignal,
+    montando: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    if montando.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let raiz = raiz.to_path_buf();
+    let destino = destino.clone();
+    let prontidao = prontidao.clone();
+    let marca = montando.clone();
+    let devolver = montando.clone();
+    // Se a linha não pode subir, o grafo fica sem montar: a completação
+    // responde menos, e a IDE não deixa de responder.
+    let subiu = std::thread::Builder::new()
+        .name("estilo-grafo".to_owned())
+        .spawn(move || {
+            let montado = std::sync::Arc::new(resolucao::Grafo::construir(&raiz));
+            if let Ok(mut guardado) = destino.lock() {
+                *guardado = Some(montado);
+            }
+            prontidao.mark_ready();
+            marca.store(false, Ordering::Release);
+        });
+    if subiu.is_err() {
+        // Sem a linha, não há varredura e não haverá prontidão: a marca precisa
+        // voltar, senão nenhuma tentativa futura passa deste ponto.
+        devolver.store(false, Ordering::Release);
+    }
 }
 
 /// As propriedades que a completação conhece.

@@ -1426,7 +1426,7 @@ E o tempo, em build otimizado:
 
 | | |
 | --- | --- |
-| primeira chamada, que monta o grafo | 588 ms |
+| primeira chamada, que montava o grafo | 588 ms — **saiu do caminho**, ver abaixo |
 | mediana | **0 ms** |
 | p90 | 13 ms |
 | pior | 208 ms |
@@ -1447,6 +1447,31 @@ O que realmente mudou a experiência não foi nenhuma das quatro: foi **olhar a
 distribuição em vez do pior caso**. Mediana zero e p90 de 13 ms dizem que o
 caminho comum já estava bom, e que o número que me incomodava era a cauda.
 
+##### O grafo passa a ser montado na abertura ✅
+
+Os 588 ms da primeira pergunta não eram trabalho a menos a fazer: eram trabalho
+no **momento errado**. Agora a varredura sobe junto com o projeto, numa linha de
+execução à parte.
+
+**Por que à parte, e não dentro de `activate`.** A ativação acontece na abertura
+de um documento, e essa acontece **na thread da interface**. Uma varredura de
+588 ms ali é exatamente a família de travamento que a `25` caçou cinco vezes.
+
+**Quem pergunta antes recebe menos, e não espera.** Sem o grafo, a completação
+responde com o que o próprio arquivo declara e o que ele importa — degradar, e
+não bloquear. É a mesma postura do analisador de TypeScript, e usa o mesmo
+`ReadinessSignal`.
+
+**Gravar um `.scss` remonta.** O `file_changed` que a `19` criou para o índice
+serve aqui: acrescentar um `@import` num agregador passa a valer sem reiniciar,
+e o cache de escopos é limpo junto, porque foi calculado sobre o grafo velho.
+Uma varredura por vez, para uma sequência de gravações não empilhar varreduras
+do projeto inteiro.
+
+*A marca de "montando" é **por instância**, e não estática: como estática, dois
+projetos abertos em sequência disputariam a mesma, e o segundo poderia desistir
+de montar por causa do primeiro — ficando sem grafo para sempre.*
+
 #### Nível 1d — O escopo como índice ⬜
 
 O que a cauda pede, e é o mesmo desenho que a `20` fez para Java e a `25` para
@@ -1455,8 +1480,9 @@ pergunta. A completação vira uma consulta, e não uma travessia.
 
 Aqui o dado é pequeno — 785 arquivos e 1362 variáveis no projeto de referência,
 contra os 103 MB do índice de Java —, então cabe em memória sem o formato em
-disco da `20`. O que ele compra é a cauda de 208 ms virar consulta, e os 588 ms
-da primeira pergunta saírem do caminho de quem digita.
+disco da `20`. O que sobra para ele comprar é **a cauda de 208 ms** virar consulta. Os 588 ms
+da primeira pergunta já saíram do caminho, e por um remédio mais barato: mover o
+quando, e não mudar a estrutura.
 
 #### Nível 2 — Os nomes das propriedades ✅
 

@@ -372,6 +372,26 @@ impl Drop for Projeto {
     }
 }
 
+/// Espera o grafo de importação ficar de pé.
+///
+/// Ele é montado **em segundo plano** ao abrir o projeto, para a varredura não
+/// cair na thread da interface. Quem pergunta antes recebe menos, e o teste
+/// precisa dizer qual dos dois momentos está exercendo — este espera, e cobra o
+/// resultado completo.
+fn esperar_pronto(ativo: &dyn ActiveLanguage) {
+    let Some(sinal) = ativo.readiness() else {
+        panic!("o provider de estilo precisa anunciar prontidão");
+    };
+    let limite = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !sinal.is_ready() {
+        assert!(
+            std::time::Instant::now() < limite,
+            "o grafo precisa ficar pronto"
+        );
+        std::thread::yield_now();
+    }
+}
+
 fn abrir_em(ativo: &dyn ActiveLanguage, caminho: &std::path::Path, texto: &str) -> DocumentId {
     let id = DocumentId(7);
     assert!(
@@ -469,6 +489,7 @@ fn a_partial_sees_what_its_importer_brought() {
     );
 
     let ativo = projeto.ativo();
+    esperar_pronto(ativo.as_ref());
     let id = abrir_em(ativo.as_ref(), &caminho, parcial);
     let nomes = completar(ativo.as_ref(), id, depois_de(parcial, "color: $"), "");
     assert_eq!(
@@ -495,10 +516,87 @@ fn a_namespaced_use_above_does_not_leak_down() {
     );
 
     let ativo = projeto.ativo();
+    esperar_pronto(ativo.as_ref());
     let id = abrir_em(ativo.as_ref(), &caminho, parcial);
     let nomes = completar(ativo.as_ref(), id, depois_de(parcial, "color: $"), "");
     assert!(
         nomes.is_empty(),
         "um `@use` com apelido não vaza para quem foi importado: {nomes:?}"
     );
+}
+
+/// **Quem pergunta antes do grafo recebe menos, e não espera.**
+///
+/// A varredura do projeto corre em segundo plano desde a abertura. Uma pergunta
+/// que chegue antes dela terminar é respondida com o que dá — o próprio arquivo
+/// e o que ele importa —, e não bloqueia até o grafo existir.
+///
+/// É a mesma postura do analisador de TypeScript: degradar, e não esperar.
+#[test]
+fn before_the_graph_is_up_the_answer_is_smaller_and_never_blocks() {
+    let projeto = Projeto::novo("antes-do-grafo");
+    projeto.arquivo("src/_tema.scss", "$cor-primaria: #333;\n");
+    let componente = "@import '../tema';\n\n.cartao {\n  color: $\n}\n";
+    let caminho = projeto.arquivo("src/app/cartao.component.scss", componente);
+
+    let ativo = projeto.ativo();
+    let id = abrir_em(ativo.as_ref(), &caminho, componente);
+    // **Sem esperar.** O que este arquivo importa não depende do grafo.
+    let nomes = completar(ativo.as_ref(), id, depois_de(componente, "color: $"), "");
+    assert_eq!(
+        nomes,
+        vec!["cor-primaria".to_owned()],
+        "o que vem de baixo responde antes do grafo existir"
+    );
+
+    // E o sinal existe, para quem precisar saber que ainda falta.
+    let Some(sinal) = ativo.readiness() else {
+        panic!("o provider precisa anunciar prontidão");
+    };
+    let _ = sinal.is_ready();
+}
+
+/// Gravar um `.scss` remonta o grafo, e o cache de escopos vai junto.
+///
+/// Sem isso, acrescentar um `@import` num arquivo agregador só teria efeito na
+/// próxima vez que a IDE abrisse — e o escopo já calculado continuaria valendo
+/// sobre um grafo que deixou de ser verdade.
+#[test]
+fn saving_a_stylesheet_rebuilds_the_graph() {
+    let projeto = Projeto::novo("regravar");
+    projeto.arquivo("src/_tema.scss", "$cor-primaria: #333;\n");
+    let parcial = ".cartao {\n  color: $\n}\n";
+    let caminho = projeto.arquivo("src/componentes/_cartao.scss", parcial);
+    // O agregador ainda **não** traz o tema.
+    let agregado = projeto.arquivo("src/agregado.scss", "@import './componentes/cartao';\n");
+
+    let ativo = projeto.ativo();
+    esperar_pronto(ativo.as_ref());
+    let id = abrir_em(ativo.as_ref(), &caminho, parcial);
+    let antes = completar(ativo.as_ref(), id, depois_de(parcial, "color: $"), "");
+    assert!(antes.is_empty(), "o tema ainda não está em escopo: {antes:?}");
+
+    // Agora ele traz, e a IDE é avisada da gravação.
+    projeto.arquivo(
+        "src/agregado.scss",
+        "@import './tema';\n@import './componentes/cartao';\n",
+    );
+    assert!(pollster::block_on(ativo.file_changed(&agregado)).is_ok());
+
+    // **Esperar pela resposta, e não pelo sinal.** O sinal de prontidão não
+    // volta atrás: ele diz que houve um grafo, e não que este é o novo. O que
+    // se afirma aqui é consistência eventual, que é o que uma remontagem em
+    // segundo plano oferece — esperar o sinal passaria por sorte.
+    let limite = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let depois = completar(ativo.as_ref(), id, depois_de(parcial, "color: $"), "");
+        if depois == vec!["cor-primaria".to_owned()] {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < limite,
+            "gravar precisa refazer o grafo; ainda em {depois:?}"
+        );
+        std::thread::yield_now();
+    }
 }
