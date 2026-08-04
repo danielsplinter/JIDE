@@ -792,20 +792,20 @@ impl NativeIde {
         // quando sabe, e o que desce para o analisador espera o que ele estiver
         // levando. Girar aqui é o aviso honesto — aparece quando há espera de
         // verdade, e não durante a abertura inteira. Ver a fase 6 da `25`.
-        if let Some(fase) = self.languages.navigation.spinner_phase() {
-            self.languages.preparing_since = None;
-            if let Some(shell) = self.ui.shell.as_mut() {
-                shell.set_project_loading(Some(fase));
-            }
-            return true;
-        }
+        //
+        // **A navegação não pode desviar do caminho de apagar.** A primeira
+        // versão disto devolvia cedo e zerava o `preparing_since`; quando a
+        // navegação terminava, o caminho de baixo concluía que nunca houvera
+        // giro e **não o apagava** — a animação ficava para sempre. As duas
+        // origens agora escolhem só a *fase*, e a saída é uma só.
+        let da_navegacao = self.languages.navigation.spinner_phase();
         let alheios = &self.languages.alheios;
         let preparando = self.languages.host.as_ref().is_some_and(|host| {
             host.preparing_providers()
                 .iter()
                 .any(|provider| !alheios.contains(provider))
         });
-        if preparando {
+        if preparando || da_navegacao.is_some() {
             let inicio = *self
                 .languages
                 .preparing_since
@@ -813,7 +813,8 @@ impl NativeIde {
             // Um giro que passa de meio minuto não é carga: é sinal que não
             // chegou. Dizer **quem** o segura tira a procura do palpite — e o
             // palpite já custou caro nesta base.
-            if inicio.elapsed() >= PACIENCIA_COM_O_GIRO
+            if preparando
+                && inicio.elapsed() >= PACIENCIA_COM_O_GIRO
                 && !self.languages.reclamou_do_giro
             {
                 self.languages.reclamou_do_giro = true;
@@ -825,7 +826,9 @@ impl NativeIde {
                     );
                 }
             }
-            let fase = inicio.elapsed().as_secs_f32().fract();
+            // A navegação, quando há uma, manda na fase; senão o relógio da
+            // preparação. Qualquer das duas passa pela mesma saída abaixo.
+            let fase = da_navegacao.unwrap_or_else(|| inicio.elapsed().as_secs_f32().fract());
             if let Some(shell) = self.ui.shell.as_mut() {
                 shell.set_project_loading(Some(fase));
             }
