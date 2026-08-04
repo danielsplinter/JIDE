@@ -192,6 +192,12 @@ pub(super) struct LanguageController {
     /// Uma vez por carregamento, e não a cada quadro: o laço passa aqui trinta
     /// vezes por segundo, e um aviso repetido nessa cadência esconde o resto.
     pub(super) reclamou_do_giro: bool,
+    /// Providers cuja preparação **não** é da IDE.
+    ///
+    /// A lista vem da raiz de composição, e não daqui: este módulo não sabe o
+    /// nome de analisador nenhum, e a guarda de arquitetura existe para que
+    /// continue assim. Ver a fase 6 da `25`.
+    pub(super) alheios: Vec<ide_domain::ProviderId>,
     /// A busca por tipo em curso, que fala com o analisador e não pode esperar.
     pub(super) type_search: SearchController<TypeSearchOutcome>,
     /// A navegação em curso. Ver `navigate_to_definition`.

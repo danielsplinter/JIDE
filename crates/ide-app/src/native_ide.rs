@@ -193,6 +193,10 @@ impl NativeIde {
                 plugins,
             ))
             .map_err(|error| error.to_string())?;
+        // Quem prepara coisa que não é da IDE não segura o giro de carregamento.
+        self.languages
+            .alheios
+            .extend(typescript_contribution::analisadores_externos());
         self.languages.toolchains.register_contribution(&typescript);
         self.tasks
             .controller
@@ -773,11 +777,21 @@ impl NativeIde {
     /// O relogio e daqui, como o do giro da busca: o componente nao tem relogio,
     /// e a janela tambem nao.
     fn advance_project_loading(&mut self) -> bool {
-        let preparando = self
-            .languages
-            .host
-            .as_ref()
-            .is_some_and(|host| host.preparing());
+        // **O giro relata o que a IDE prepara, e não o que ela espera.**
+        //
+        // Medido no monorepo de referência: a preparação do analisador externo
+        // leva de 28 a 76 s, e nesse intervalo inteiro realce, estrutura, busca
+        // por nome e navegação **já respondem**, do índice e do provider
+        // nativo. Girar durante tudo isso está tecnicamente certo e
+        // praticamente mentindo — quem olha conclui que deve esperar.
+        //
+        // Quem é "alheio" vem da composição, e não daqui: ver a fase 6 da `25`.
+        let alheios = &self.languages.alheios;
+        let preparando = self.languages.host.as_ref().is_some_and(|host| {
+            host.preparing_providers()
+                .iter()
+                .any(|provider| !alheios.contains(provider))
+        });
         if preparando {
             let inicio = *self
                 .languages

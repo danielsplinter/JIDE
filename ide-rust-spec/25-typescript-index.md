@@ -881,7 +881,7 @@ sobrecargas e fazer o tipo voltar da assinatura para dentro da lambda. É o
 verificador de tipos, que a ADR-025 recusou — e a recusa continua valendo, com o
 exemplo agora medido em vez de argumentado.
 
-### Fase 6 — O giro relata o que a IDE prepara ⬜ Decidida
+### Fase 6 — O giro relata o que a IDE prepara ✅ (metade)
 
 **O giro de carregamento cobre a preparação da IDE, e não a do analisador
 externo.** Quando o índice termina, ele termina. O que precisa do analisador e o
@@ -938,6 +938,26 @@ trocado por aviso nenhum, e a espera vira travamento sem animação. O
 o nome de analisador nenhum, então a lista não pode ser escrita lá dentro — ela
 vem da **raiz de composição**, como já vêm os contribuintes de plugin. Sem
 mudança no contrato neutro, e sem o núcleo aprender o que é um `tsserver`.
+
+#### O que foi feito, e o que não
+
+**Feito:** o giro de abertura passa a olhar só os providers que preparam coisa
+nossa. Quem é alheio vem de `analisadores_externos()`, na contribuição — a raiz
+de composição declara, e o `native_ide` continua sem saber o nome de analisador
+nenhum. Um teste fixa que o externo é o alheio e o nativo não, porque trocá-los
+faria o giro voltar a durar a montagem do projeto ou sumir com o índice ainda
+sendo construído.
+
+**Não feito:** o **giro por pedido, com cancelamento**. Quem pedir tipo antes de
+o analisador ficar pronto continua com o que existia — a busca tem giro e
+cancelamento próprios, a completação tem prazo de cinco segundos, e o
+`Ctrl+clique` cai no nativo. O que falta é o aviso explícito de "esperando o
+analisador" com saída.
+
+Enquanto essa metade não existir, **o risco é aviso de menos**: alguém pede tipo
+aos dez segundos e espera sem sinal claro do porquê. É menos ruim do que o giro
+de setenta segundos que mandava esperar sem motivo, e é menos do que a fase
+prometeu.
 
 #### Critério
 

@@ -234,6 +234,17 @@ pub fn service_provider(
 /// O nativo não é reserva de emergência: é o chão. Sem Node, sem o pacote
 /// `typescript` no projeto, ou com o processo morto, é ele que responde, e a
 /// IDE continua útil. Ver a ADR-025.
+/// Os providers desta linguagem cujo trabalho **não é da IDE**.
+///
+/// O analisador externo monta o programa dentro de um processo alheio, e o que
+/// ele monta não é cache nosso: não sobrevive ao processo e não é nosso de
+/// reconstruir. Por isso a preparação dele não conta como "a IDE carregando".
+/// Ver a fase 6 da `25`.
+#[must_use]
+pub fn analisadores_externos() -> Vec<ProviderId> {
+    vec![ProviderId(TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned())]
+}
+
 #[must_use]
 pub fn selection() -> ProviderSelection {
     // **O índice na frente, o analisador atrás.** Até a fase 4 da `25` a ordem
@@ -307,6 +318,25 @@ mod tests {
                 "o descritor não reclama `{extensao}`, que o provider responde: {declaradas:?}"
             );
         }
+    }
+
+    /// **O analisador externo é alheio; o provider nativo não.**
+    ///
+    /// É a regra da fase 6 da `25`: o que a IDE constrói e guarda é dela, e o
+    /// grafo de tipos de um processo alheio não é. Trocar os dois faria o giro
+    /// de carregamento voltar a durar a montagem do projeto — de 28 a 76 s
+    /// medidos —, ou sumir enquanto o índice ainda está sendo construído.
+    #[test]
+    fn o_alheio_e_o_analisador_externo_e_nao_o_nativo() {
+        let alheios = analisadores_externos();
+        assert_eq!(
+            alheios,
+            vec![ProviderId(TYPESCRIPT_SERVICE_PROVIDER_ID.to_owned())]
+        );
+        assert!(
+            !alheios.contains(&ProviderId(TYPESCRIPT_PROVIDER_ID.to_owned())),
+            "o índice e o realce são trabalho da IDE, e seguram o giro"
+        );
     }
 
     /// Sem contribuinte, nada muda: um projeto sem framework não paga por este
