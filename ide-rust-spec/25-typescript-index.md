@@ -804,6 +804,26 @@ sobrecargas e fazer o tipo voltar da assinatura para dentro da lambda. É o
 verificador de tipos, que a ADR-025 recusou — e a recusa continua valendo, com o
 exemplo agora medido em vez de argumentado.
 
+### Adiar a abertura no analisador ⛔ Recusado
+
+A ideia: manter o processo de pé, que custa **66 MB**, e só lhe mandar o `open`
+quando chegar uma pergunta que o índice não soube. Quem passa a manhã navegando e
+buscando nunca pagaria os 1,9 GB.
+
+**Recusada, e a razão está nesta mesma especificação.** É a fase 5 outra vez, com
+outra roupa — e a fase 5 foi medida em uso: a IDE travou quando o analisador
+precisou subir, e o modelo voltou a ser carregar junto.
+
+A conta que a proposta escondia: ela troca **66 MB o tempo todo** por **uma
+espera imprevisível no pior momento**. O primeiro `Ctrl+clique` que precisasse de
+tipo pagaria a montagem inteira do projeto — 4 s no projeto pequeno, de 30 a 70 s
+no monorepo, medidos. Economia que aparece como travamento.
+
+E os 66 MB são o número que desfaz a premissa: **carregar junto não custa 1,9 GB
+na abertura, custa 66 MB.** Os 1,9 GB chegam no primeiro `.ts` do projeto que
+alguém abre — e aí a espera acontece enquanto o giro está na tela, que é onde ela
+é honesta.
+
 ### Fase 5 — Subir o analisador sob demanda ✅
 
 Abrir um `.ts` deixou de subir o analisador. Ele sobe na primeira pergunta que
