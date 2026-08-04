@@ -32,6 +32,8 @@ use std::{
 
 use crate::project::TsConfig;
 
+mod instalada;
+
 /// Quantos barris se atravessa antes de desistir.
 ///
 /// Um barril que reexporta de outro é normal; uma cadeia de vinte é sinal de
@@ -96,9 +98,27 @@ impl ModuleResolver {
 
     /// O arquivo para onde um `import` aponta, visto de um arquivo.
     ///
-    /// Devolve `None` quando o destino não é do projeto — uma dependência de
-    /// `node_modules`, por exemplo. **Não é erro**: é o índice dizendo que não
-    /// alcança, que é diferente de dizer que não existe.
+    /// Devolve `None` quando não se acha o destino — um pacote que não está
+    /// instalado, ou que não declara tipo nenhum. **Não é erro**: é o índice
+    /// dizendo que não alcança, que é diferente de dizer que não existe.
+    ///
+    /// # A ordem, e por que o projeto vem primeiro
+    ///
+    /// Relativo, depois `paths`, depois `baseUrl`, e **só então**
+    /// `node_modules`. É a ordem do próprio TypeScript, e ela importa aqui pelo
+    /// mesmo motivo que lá: um apelido do `paths` costuma apontar para o código
+    /// do projeto que substitui um pacote publicado — num monorepo,
+    /// `@empresa/core` é a pasta ao lado, e não o que está instalado. Procurar
+    /// em `node_modules` antes responderia com a versão publicada enquanto quem
+    /// edita olha para a local.
+    ///
+    /// # `node_modules` entrou na fase 9, e não estava aqui antes
+    ///
+    /// A fase 1 o deixou de fora do **índice**, para a busca por nome não encher
+    /// de tipos que ninguém escreve — e isso continua valendo. O que estava
+    /// junto e não devia é a **resolução**: sem ela a IDE só sabe o que o projeto
+    /// declara, e ela é usada em projetos diferentes, onde o que se injeta vem do
+    /// framework.
     #[must_use]
     pub fn resolve(&self, de: &Path, especificador: &str) -> Option<PathBuf> {
         if especificador.starts_with('.') {
@@ -112,8 +132,12 @@ impl ModuleResolver {
         }
         // Sem apelido, `baseUrl` ainda permite importar por caminho absoluto
         // dentro do projeto — `app/servicos/pedido` em vez de `../../servicos`.
-        let base = self.base_url.as_ref()?;
-        arquivo_em(&base.join(especificador))
+        if let Some(base) = self.base_url.as_ref()
+            && let Some(caminho) = arquivo_em(&base.join(especificador))
+        {
+            return Some(caminho);
+        }
+        instalada::resolver(de, especificador)
     }
 
     fn tentar_apelido(&self, apelido: &Apelido, especificador: &str) -> Option<PathBuf> {
@@ -454,18 +478,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&raiz);
     }
 
-    /// Uma dependência instalada não é resolvida, e isso não é erro.
+    /// Uma dependência **que não está instalada** não é resolvida.
     ///
-    /// O índice responde pelos tipos do projeto. Dizer `None` é dizer "não
-    /// alcanço", que é diferente de "não existe" — e é a distinção que a `25`
-    /// faz questão de manter.
+    /// Dizer `None` é dizer "não alcanço", que é diferente de "não existe" — e é
+    /// a distinção que a `25` faz questão de manter.
+    ///
+    /// *Este teste cobrava outra coisa até a fase 9: que **nenhuma** dependência
+    /// fosse resolvida, instalada ou não. Era a fase 1 misturando duas
+    /// perguntas — o que entra na busca por nome e o que responde depois do
+    /// ponto. A primeira continua sem `node_modules`; a segunda passou a
+    /// entrar.*
     #[test]
-    fn an_installed_dependency_is_not_resolved() {
+    fn a_dependency_that_is_not_installed_is_not_resolved() {
         let raiz = projeto("dependencia");
         escrever(&raiz.join("src/uso.ts"), "");
         let resolver = ModuleResolver::new(&config(&raiz, Vec::new()));
 
         assert_eq!(resolver.resolve(&raiz.join("src/uso.ts"), "@angular/core"), None);
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
+    /// **O projeto vence a dependência instalada.**
+    ///
+    /// Num monorepo, um apelido do `paths` aponta para o código local que
+    /// substitui um pacote publicado — e o pacote também está em
+    /// `node_modules`, porque alguma outra dependência o trouxe. Responder com
+    /// o instalado mostraria a versão publicada a quem está editando a local:
+    /// resposta plausível, e errada.
+    #[test]
+    fn the_project_outranks_the_installed_package() {
+        let raiz = projeto("precedencia");
+        escrever(&raiz.join("src/uso.ts"), "");
+        escrever(&raiz.join("libs/core/index.ts"), "export class Local {}\n");
+        escrever(
+            &raiz.join("node_modules/@empresa/core/package.json"),
+            "{\"types\": \"./index.d.ts\"}",
+        );
+        escrever(
+            &raiz.join("node_modules/@empresa/core/index.d.ts"),
+            "export declare class Publicado {}\n",
+        );
+        let resolver = ModuleResolver::new(&config(
+            &raiz,
+            vec![("@empresa/core".to_owned(), vec!["libs/core/index.ts".to_owned()])],
+        ));
+
+        let achado = resolver.resolve(&raiz.join("src/uso.ts"), "@empresa/core");
+        assert_eq!(
+            achado.as_deref().and_then(Path::file_name),
+            Some("index.ts".as_ref()),
+            "o apelido do projeto manda: {achado:?}"
+        );
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
+    /// **E a dependência instalada é alcançada quando o projeto não a
+    /// substitui.**
+    ///
+    /// É o que faltava para a IDE não saber só o que o projeto declara. Medido
+    /// na fase 8: numa aplicação Angular, 24 dos 51 elos de cadeia sem resposta
+    /// esbarravam exatamente aqui.
+    #[test]
+    fn an_installed_dependency_is_reached() {
+        let raiz = projeto("instalada");
+        escrever(&raiz.join("src/uso.ts"), "");
+        escrever(
+            &raiz.join("node_modules/@angular/forms/package.json"),
+            "{\"typings\": \"./types/forms.d.ts\"}",
+        );
+        escrever(
+            &raiz.join("node_modules/@angular/forms/types/forms.d.ts"),
+            "export declare class FormBuilder {}\n",
+        );
+        let resolver = ModuleResolver::new(&config(&raiz, Vec::new()));
+
+        let achado = resolver.resolve(&raiz.join("src/uso.ts"), "@angular/forms");
+        assert_eq!(
+            achado.as_deref().and_then(Path::file_name),
+            Some("forms.d.ts".as_ref()),
+            "veio: {achado:?}"
+        );
         let _ = std::fs::remove_dir_all(&raiz);
     }
 

@@ -1202,6 +1202,94 @@ genéricos. O ganho não é "1,9 GB a menos"; é: quem só navega, busca e edita
 código com tipos declarados nunca paga por ele, e ninguém paga por ele **antes**
 de precisar.
 
+### Fase 9 — Os tipos das dependências instaladas ✅
+
+`this.formBuilder.` acha que `formBuilder` é um `FormBuilder`, e para aí:
+`FormBuilder` vem de `@angular/forms`. A fase 8 mediu quanto isso custa — **24
+dos 51** elos de cadeia sem resposta numa aplicação Angular esbarravam
+exatamente aqui.
+
+**E o argumento não é o número, é o alcance.** Uma IDE que só sabe o que o
+projeto declara serve a um projeto. Ela vai ser aberta em projetos diferentes, e
+em quase todos o que se injeta vem do framework, não do código de quem edita.
+
+#### A fase 1 misturava duas perguntas
+
+Ela deixou `node_modules` de fora, e a razão que escreveu era da **busca por
+nome**: a lista não pode encher de tipos que ninguém escreveu. Isso continua
+inteiro — um projeto Angular tem dezenas de milhares de tipos instalados, e eles
+afogariam os poucos do projeto.
+
+O que foi junto sem precisar era a **resolução**. São duas perguntas:
+
+| pergunta | `node_modules` entra? |
+| --- | --- |
+| quais tipos existem, para a busca | **não**, e uma guarda fixa isso |
+| o que este tipo tem, depois do ponto | **sim**, desta fase em diante |
+
+Separá-las é o que permitiu esta fase sem desfazer o que a fase 1 acertou.
+
+#### Como se acha o arquivo de tipos de um pacote
+
+Na ordem do Node e do TypeScript, e não numa nossa:
+
+1. **`exports`**, que é o que os pacotes modernos usam e o que decide subcaminho
+   — `@angular/forms/signals` é uma entrada própria, com tipos próprios. O valor
+   é um mapa de condições que aninha, e a que interessa é `types`: um `default`
+   apontando para o JavaScript compilado não tem tipo nenhum para ler;
+2. **`types`** ou **`typings`**, para o pacote inteiro;
+3. **`index.d.ts`** ao lado, que é o costume antigo;
+4. **`@types/<pacote>`**, para dependência escrita em JavaScript — com a troca de
+   `@escopo/nome` por `escopo__nome`, que é a convenção do DefinitelyTyped.
+
+O `node_modules` é procurado **subindo**, como o Node faz: num monorepo a
+dependência está na raiz e o código está alguns níveis abaixo.
+
+#### O projeto vence o pacote instalado
+
+Relativo, depois `paths`, depois `baseUrl`, e **só então** `node_modules`. É a
+ordem do TypeScript, e ela importa: num monorepo, um apelido do `paths` aponta
+para o código local que substitui um pacote publicado — e o publicado costuma
+estar instalado também, porque outra dependência o trouxe. Responder com ele
+mostraria a versão publicada a quem está editando a local: **resposta plausível,
+e errada**.
+
+#### Quanto rendeu, e quanto custou
+
+| projeto | pontos | sem as dependências | com | ganho |
+|---|---|---|---|---|
+| aplicação | 179 | 28,5% | **53,6%** | +25 pontos, quase o dobro |
+| monorepo de biblioteca | 8 192 | 32,5% | **38,5%** | +6 pontos |
+
+**É a maior de todas as fases**, e por uma margem grande: a 7 rendeu 2,5 pontos e
+a 8 rendeu 3,3 no monorepo e zero na aplicação. Aqui a aplicação quase dobra —
+que é coerente com o que a fase 8 tinha diagnosticado, e é a primeira vez que
+uma previsão desta especificação acerta antes da medição.
+
+**E custou tempo.** A mesma amostra, em compilação otimizada:
+
+| projeto | antes | depois | por ponto |
+|---|---|---|---|
+| aplicação | 0,34 s | 1,63 s | ~9 ms |
+| monorepo | 182 s | 359 s | ~44 ms |
+
+O `forms.d.ts` do Angular tem **208 KB**, e ele é analisado inteiro a cada ponto
+que passa por ele. Nada disso trava a tela — desde a correção do sexto
+`block_on`, a completação não espera na thread da janela —, mas 44 ms por
+pergunta num monorepo é a próxima coisa a medir de perto.
+
+*O conserto óbvio é guardar os membros já extraídos por arquivo: um `.d.ts` de
+dependência não muda enquanto a IDE está aberta. Não foi feito aqui de propósito
+— esta fase mudou uma decisão da fase 1, e misturar isso com uma otimização
+faria duas coisas ao mesmo tempo, o que esta especificação já aprendeu a não
+fazer.*
+
+#### Critério
+
+Cumprido: `this.http.` com `HttpClient` vindo de `@angular/common/http` completa
+com `get` e `post`, sem o analisador subir. Um pacote **não instalado** continua
+sendo "não sei", e a busca por nome continua sem `node_modules`.
+
 ### Fase 8 — O segundo elo da cadeia ✅
 
 `this.svc.` — o `this.svc` é alcançável e o que vem depois não. A medição da fase

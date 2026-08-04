@@ -291,13 +291,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&raiz);
     }
 
-    /// `node_modules` fica de fora.
+    /// **`node_modules` fica de fora da busca, e continua ficando.**
     ///
-    /// O índice responde pelos tipos **do projeto**; os das dependências são o
-    /// que o analisador externo traz, e misturá-los encheria a busca com o que
-    /// ninguém escreveu.
+    /// A fase 9 pôs as dependências ao alcance do **ponto** — `this.http.`
+    /// responde com os membros de `HttpClient`, que está em `node_modules`. Esta
+    /// guarda existe para a outra pergunta não ir junto: quem procura um tipo
+    /// pelo nome quer o que **escreveu**, e um projeto Angular tem dezenas de
+    /// milhares de tipos instalados que afogariam os poucos do projeto.
+    ///
+    /// São duas perguntas, e a fase 1 as tratava como uma só. Separá-las é o que
+    /// permitiu a fase 9 sem desfazer o que a 1 acertou.
     #[test]
-    fn dependencies_are_left_out() {
+    fn dependencies_are_left_out_of_the_search() {
         let raiz = projeto("dependencias");
         assert!(std::fs::create_dir_all(raiz.join("node_modules/coisa")).is_ok());
         assert!(

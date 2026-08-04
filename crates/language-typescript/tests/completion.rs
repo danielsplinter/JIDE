@@ -290,9 +290,53 @@ fn what_it_does_not_know_it_says_it_does_not_know() {
     let _ = std::fs::remove_dir_all(&raiz);
 }
 
-/// Um tipo de dependência instalada também é "não sei".
+/// **O critério da fase 9.** Um tipo de dependência instalada é alcançado.
+///
+/// Num projeto real quase tudo o que se injeta vem do framework — medido na
+/// fase 8, 24 dos 51 elos de cadeia sem resposta numa aplicação Angular
+/// esbarravam num tipo de `node_modules`. Uma IDE que só sabe o que o projeto
+/// declara serve a um projeto.
 #[test]
-fn a_type_from_a_dependency_is_also_unknown() {
+fn a_type_from_an_installed_dependency_is_reached() {
+    let raiz = projeto("instalada");
+    escrever(
+        &raiz.join("node_modules/@angular/common/package.json"),
+        "{\"exports\": {\"./http\": {\"types\": \"./types/http.d.ts\"}}}",
+    );
+    escrever(
+        &raiz.join("node_modules/@angular/common/types/http.d.ts"),
+        "export declare class HttpClient {\n  get(url: string): void;\n  post(url: string): void;\n}\n",
+    );
+    escrever(
+        &raiz.join("src/pagina.ts"),
+        "import { HttpClient } from '@angular/common/http';\n\
+         export class Pagina {\n\
+        \x20 constructor(private http: HttpClient) {}\n\
+        \x20 abrir() {\n\
+        \x20   this.http.\n\
+        \x20 }\n\
+         }\n",
+    );
+    let ativo = ativado(&raiz);
+
+    let itens = match completar(ativo.as_ref(), &raiz.join("src/pagina.ts"), "this.http.") {
+        Ok(itens) => itens,
+        Err(erro) => panic!("`this.http.` precisa completar: {erro}"),
+    };
+    assert!(
+        itens.contains(&"get".to_owned()) && itens.contains(&"post".to_owned()),
+        "os membros do tipo instalado: {itens:?}"
+    );
+    let _ = std::fs::remove_dir_all(&raiz);
+}
+
+/// Um tipo de dependência **que não está instalada** é "não sei".
+///
+/// *Este teste cobrava outra coisa até a fase 9: que nenhuma dependência fosse
+/// alcançada, instalada ou não. Era a fase 1 misturando o que entra na busca por
+/// nome com o que responde depois do ponto.*
+#[test]
+fn a_type_from_a_dependency_that_is_not_installed_is_unknown() {
     let raiz = projeto("dependencia");
     escrever(
         &raiz.join("src/pagina.ts"),
@@ -309,7 +353,7 @@ fn a_type_from_a_dependency_is_also_unknown() {
     let resposta = completar(ativo.as_ref(), &raiz.join("src/pagina.ts"), "http.");
     assert!(
         matches!(resposta, Err(LanguageError::Unresolved(_))),
-        "o índice não alcança dependência, e diz isso: {resposta:?}"
+        "sem o pacote instalado não há o que ler, e a IDE diz isso: {resposta:?}"
     );
     let _ = std::fs::remove_dir_all(&raiz);
 }
