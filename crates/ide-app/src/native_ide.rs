@@ -957,6 +957,9 @@ impl NativeIde {
             // mostrado a procura, e quem perguntou fica sem saber se a IDE
             // ouviu. O giro vem do mesmo lugar das outras buscas.
             shell.open_content_search();
+            // O campo mostra de que nome esta lista fala. Vazio, a janela
+            // pareceria uma busca que ninguém pediu.
+            shell.set_search_query(request.token.clone());
             shell.set_content_search_results(Vec::new());
             shell.set_status_message(format!("Procurando usos de {}…", request.token));
         }

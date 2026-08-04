@@ -353,6 +353,14 @@ impl IdeShell {
     }
 
     /// Entrega as ocorrências encontradas dentro do escopo fornecido pela aplicação.
+    /// Escreve no campo de busca o texto informado.
+    ///
+    /// Serve a quem abriu a janela **sem digitar** — as referências chegam com
+    /// o nome já escolhido pelo cursor.
+    pub fn set_search_query(&mut self, texto: impl Into<String>) {
+        self.search.set_query(texto);
+    }
+
     pub fn set_content_search_results(&mut self, results: Vec<ContentSearchHit>) {
         self.search.set_content_results(results);
     }

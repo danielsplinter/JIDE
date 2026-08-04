@@ -145,6 +145,15 @@ impl TypeSearchSurface {
         self.modal.open();
     }
 
+    /// Escreve no campo o que a busca já sabe que se procura.
+    ///
+    /// Quem chegou aqui por `Ctrl+Shift+clique` não digitou nada, e um campo em
+    /// branco esconde **de que nome** aquela lista fala — e tira a chance de
+    /// corrigir a pergunta sem refazer o gesto.
+    pub(super) fn set_query(&mut self, texto: impl Into<String>) {
+        self.query = texto.into();
+    }
+
     pub(super) fn close(&mut self) {
         self.modal.close();
     }
