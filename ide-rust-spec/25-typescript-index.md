@@ -1215,10 +1215,22 @@ mostrou que estimar quanto rende cada um erra para mais.
 tipo da linguagem. Sozinha, a biblioteca rendeu 2,5 pontos; sozinho, o elo
 esbarraria em `string` e `Observable` sem saber o que são.
 
-**O que precisa ser consertado junto:** método não guarda o tipo de retorno. A
-gramática o põe em `return_type`, e a extração lê `type`, que é o campo de uma
-propriedade. Sem isso, `this.buscar().` nunca terá receptor — e `detail` de
-método também aparece vazio na lista de hoje.
+**O que precisava ser consertado junto já foi.** Método não guardava o tipo de
+retorno: a gramática o põe em `return_type` e a extração lia `type`, que é o
+campo de uma propriedade. `buscar(): Pedido` guardava `buscar` e perdia `Pedido`.
+
+Parecia cosmético — o método aparecia na lista sem dizer o que devolve —, e não
+era: **é deste campo que sai o receptor do elo seguinte**. Feito depois, esta
+fase nasceria cega para toda cadeia que passa por uma chamada, e **pareceria
+funcionar**, porque `this.campo.` responderia e só `this.buscar().` não.
+
+*A correção trouxe uma segunda, que ela própria criou:* o conteúdo gravado no
+cache da biblioteca mudou — os tipos de retorno entraram, e o arquivo foi de 410
+para 458 KB — **sem que a chave mudasse**, porque a chave é a versão do
+TypeScript. Quem já tivesse o arquivo antigo leria para sempre um cache sem tipo
+de retorno, e nada acusaria: um cache incompleto tem a mesma cara de um certo. O
+arquivo passou a se identificar na primeira linha, e um de outro formato é
+**descartado, e não convertido** — a mesma regra que o índice em disco já tinha.
 
 **Critério:** `this.campo.` completa com os membros do tipo do campo, num projeto
 real, sem o analisador subir. A cobertura é medida com `tests/cobertura.rs`, no
@@ -1345,11 +1357,10 @@ por trás deles, e inventar uma seria oferecer membros que ninguém declarou.
 O ponto sobre a variável responde; o ponto dentro da lambda continua descendo
 para o analisador.
 
-**E método não mostra assinatura.** A gramática guarda o tipo de retorno de um
-método em `return_type`, e a extração lê `type` — que é o campo de uma
-propriedade. Então `forEach` aparece na lista sem dizer o que recebe nem o que
-devolve. É anterior a esta fase e vale para o código do projeto também; ficou
-registrado aqui porque foi um teste desta fase que o encontrou.
+*Havia aqui um segundo item — método não guardava o tipo de retorno, porque a
+gramática o põe em `return_type` e a extração lia `type`. Foi um teste desta fase
+que o encontrou, e ele **foi corrigido antes da fase 8**, que depende dele. Ver
+lá o porquê.*
 
 **Fora isso, ela resolve tudo o que o TypeScript declara**, e não um punhado de
 tipos escolhidos a dedo: `string`, `number`, `Array`, `Date`, `Promise`, `Map`,

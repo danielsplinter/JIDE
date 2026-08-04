@@ -37,6 +37,16 @@ use ide_domain::CompletionItem;
 
 use super::{members, parser::TypeScriptParser};
 
+/// A primeira linha do cache, que diz que ele é nosso e de qual formato.
+///
+/// **O número sobe sempre que o conteúdo gravado mudar**, e não só quando o
+/// formato mudar. A chave do arquivo é a versão do TypeScript, que não muda
+/// quando **nós** passamos a guardar mais coisa — foi o que aconteceu quando
+/// método passou a guardar o tipo de retorno. Sem esta linha, quem já tivesse o
+/// arquivo antigo continuaria lendo o conteúdo velho para sempre, e nada
+/// acusaria: um cache incompleto tem a mesma cara de um cache certo.
+const ASSINATURA: &str = "ERTSLIB2";
+
 /// Uma declaração vinda de um arquivo da biblioteca.
 struct Parte {
     /// O nome do `lib` de onde ela veio — `es5`, `dom`, `es2022.array`.
@@ -138,7 +148,8 @@ impl Biblioteca {
     /// um índice binário corrompido vira um relatório de defeito sem pista, e
     /// este abre num editor de texto.
     pub(crate) fn escrever(&self) -> String {
-        let mut saida = String::new();
+        let mut saida = String::from(ASSINATURA);
+        saida.push('\n');
         // Ordenado: um arquivo que muda de ordem a cada gravação é impossível de
         // comparar entre duas execuções.
         let mut nomes: Vec<&String> = self.tipos.keys().collect();
@@ -178,6 +189,16 @@ impl Biblioteca {
     /// cache é reconstruível por definição, e recusá-lo inteiro por causa de uma
     /// linha estranha custaria os 3,3 MB de novo.
     pub(crate) fn reler(texto: &str) -> Self {
+        // **Um arquivo de outra versão é descartado, e não convertido.** É a
+        // mesma regra do índice em disco, e ela tem endereço: a correção que fez
+        // método guardar o tipo de retorno mudou o **conteúdo** sem mudar a
+        // chave, que é a versão do TypeScript. Sem esta linha, quem já tivesse
+        // rodado a versão anterior leria para sempre um cache sem tipo de
+        // retorno — e nada acusaria, porque o arquivo continua bem formado.
+        let Some(resto) = texto.strip_prefix(ASSINATURA) else {
+            return Self::default();
+        };
+        let texto = resto;
         let mut tipos: HashMap<String, Vec<Parte>> = HashMap::new();
         let mut atual: Option<(String, Parte)> = None;
         for linha in texto.lines() {
@@ -454,6 +475,25 @@ mod tests {
             detalhe.contains("claro") && detalhe.contains("escuro"),
             "o detalhe voltou truncado: {detalhe:?}"
         );
+    }
+
+    /// **Um cache de outro formato é descartado, e não lido pela metade.**
+    ///
+    /// A chave do arquivo é a versão do TypeScript, e ela não muda quando *nós*
+    /// passamos a guardar mais coisa. Foi o que aconteceu quando método passou a
+    /// guardar o tipo de retorno: o arquivo antigo continuava bem formado e
+    /// continuava sendo aceito, com metade da informação. Nada acusaria.
+    #[test]
+    fn a_cache_of_another_format_is_discarded() {
+        let velho = "T\tArray\tes5\nM\tm\tforEach\t\n";
+        assert_eq!(
+            Biblioteca::reler(velho).nomes(),
+            0,
+            "sem a assinatura, o arquivo não é nosso"
+        );
+        let atual = biblioteca().escrever();
+        assert!(atual.starts_with("ERTSLIB"), "o cache precisa se identificar");
+        assert!(Biblioteca::reler(&atual).nomes() > 0);
     }
 
     /// A corrente de `reference lib` é lida do comentário.

@@ -359,6 +359,28 @@ pub(crate) fn todos_os_tipos(parser: &TypeScriptParser, texto: &str) -> Vec<(Str
     achados
 }
 
+/// O tipo escrito ao lado de um membro.
+///
+/// # Propriedade guarda em `type`; método guarda em `return_type`
+///
+/// A gramática separa os dois porque são conceitos diferentes — uma propriedade
+/// **tem** um tipo, um método **devolve** um. Lendo só `type`, todo método saía
+/// sem tipo nenhum: `buscar(): Pedido` guardava `buscar` e perdia `Pedido`.
+///
+/// **O estrago aparecia pequeno e não era.** Na lista de completação o método
+/// só aparecia sem dizer o que devolve, que é cosmético. Mas é deste campo que
+/// sai o receptor do elo seguinte de uma cadeia: `this.buscar().` só tem
+/// resposta se `buscar` tiver guardado `Pedido`. Sem isto, metade dos elos de
+/// uma cadeia em código Angular — as chamadas — nasceria cega, e **pareceria
+/// funcionar**, porque a outra metade responderia.
+fn tipo_do_membro(membro: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
+    membro
+        .child_by_field_name("type")
+        .or_else(|| membro.child_by_field_name("return_type"))
+        .and_then(|no| no.utf8_text(bytes).ok())
+        .map(|texto| texto.trim_start_matches(':').trim().to_owned())
+}
+
 fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8]) -> Membros {
     let mut membros = Membros::default();
     if let Some(corpo) = tipo.child_by_field_name("body") {
@@ -384,10 +406,7 @@ fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8]) -> Membros {
             }
             membros.itens.push(CompletionItem {
                 label: nome.to_owned(),
-                detail: filho
-                    .child_by_field_name("type")
-                    .and_then(|no| no.utf8_text(bytes).ok())
-                    .map(|texto| texto.trim_start_matches(':').trim().to_owned()),
+                detail: tipo_do_membro(filho, bytes),
                 kind,
             });
         }
@@ -573,6 +592,53 @@ mod tests {
         assert!(
             !nomes.contains(&"constructor"),
             "o construtor não se acessa por ponto"
+        );
+    }
+
+    /// **Método guarda o que devolve, e não só o nome.**
+    ///
+    /// A gramática põe o tipo de uma propriedade em `type` e o de um método em
+    /// `return_type`, e a extração lia só o primeiro: `buscar(): Pedido` guardava
+    /// `buscar` e perdia `Pedido`.
+    ///
+    /// Parecia cosmético — o método aparecia na lista sem dizer o que devolve —,
+    /// mas é deste campo que sai o receptor do elo seguinte de uma cadeia. Sem
+    /// ele, `this.buscar().` nunca teria resposta.
+    #[test]
+    fn a_method_records_what_it_returns() {
+        let texto = "export class Servico {\n  \
+                     nome: string;\n  \
+                     buscar(): Pedido {}\n  \
+                     salvar(p: Pedido): void {}\n}\n";
+        let Some(membros) = membros_de(&parser(), texto, "Servico") else {
+            panic!("a classe precisa ser achada");
+        };
+        let tipo_de = |procurado: &str| -> Option<String> {
+            membros
+                .itens
+                .iter()
+                .find(|item| item.label == procurado)
+                .and_then(|item| item.detail.clone())
+        };
+        assert_eq!(tipo_de("nome"), Some("string".to_owned()));
+        assert_eq!(tipo_de("buscar"), Some("Pedido".to_owned()));
+        assert_eq!(tipo_de("salvar"), Some("void".to_owned()));
+    }
+
+    /// O mesmo numa interface, onde a espécie do nó é outra.
+    ///
+    /// `method_signature` e `method_definition` são nós diferentes na gramática,
+    /// e um conserto que só alcance um dos dois deixa metade do caso de pé.
+    #[test]
+    fn an_interface_method_records_it_too() {
+        let texto = "export interface Servico {\n  buscar(): Pedido;\n  nome: string;\n}\n";
+        let Some(membros) = membros_de(&parser(), texto, "Servico") else {
+            panic!("a interface precisa ser achada");
+        };
+        let buscar = membros.itens.iter().find(|item| item.label == "buscar");
+        assert_eq!(
+            buscar.and_then(|item| item.detail.clone()),
+            Some("Pedido".to_owned())
         );
     }
 
