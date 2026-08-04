@@ -251,10 +251,20 @@ impl ActiveLanguage for ActiveStyle {
         );
         let inicio = cursor.saturating_sub(request.prefix.len());
         let Some(sigilo) = sigilo_antes(&texto, inicio) else {
-            // Fora de um nome que este arquivo inventa, não há o que oferecer
-            // **ainda**: nomes de propriedade são o nível 2, e uma lista vazia
-            // diz isso melhor do que um erro.
-            return Ok(Vec::new());
+            // Sem sigilo, o que cabe é o nome de uma propriedade — e só onde uma
+            // propriedade cabe. Ver [`cabe_uma_propriedade`].
+            return Ok(if cabe_uma_propriedade(&texto, inicio) {
+                propriedades()
+                    .filter(|nome| nome.starts_with(&request.prefix))
+                    .map(|nome| CompletionItem {
+                        label: nome.to_owned(),
+                        detail: None,
+                        kind: CompletionKind::Field,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            });
         };
         // `v.$cor` pergunta pelo módulo `v`; `$cor` pergunta pelo que entrou sem
         // qualificação. Oferecer um no lugar do outro daria nomes que o arquivo
@@ -474,6 +484,54 @@ fn sigilo_antes(texto: &str, inicio: usize) -> Option<char> {
         .chars()
         .next_back()
         .filter(|caractere| matches!(caractere, '$' | '%'))
+}
+
+/// As propriedades que a completação conhece.
+///
+/// A lista vem do `mdn-data`, sob CC0-1.0, e viaja dentro do executável — são
+/// 8,1 KB. A procedência e o critério de corte estão em
+/// `dados/PROVENIENCIA.md`.
+///
+/// **É dado, e não lógica.** Propriedades novas entram por ano; atualizar é
+/// trocar um arquivo, e não mexer em código — que é a diferença entre isto e
+/// escrever uma gramática de template, que a `24` recusou.
+fn propriedades() -> impl Iterator<Item = &'static str> {
+    include_str!("../dados/propriedades-css.txt")
+        .lines()
+        .filter(|linha| !linha.is_empty())
+}
+
+/// Uma propriedade cabe aqui?
+///
+/// # As duas condições, e por que as duas
+///
+/// **Dentro de um bloco.** No topo de um arquivo só cabem seletor e regra `@`;
+/// oferecer `display` ali seria oferecer o que não compila. A conta é de chaves
+/// abertas menos fechadas, e o aninhamento do SCSS entra de graça nela.
+///
+/// **No começo de uma declaração.** O caractere anterior, fora espaços, precisa
+/// ser `{`, `;` ou `}`. É o que separa `color: |` — onde cabe um **valor**, e
+/// valor é o nível 3 — de `  |`, onde cabe o nome.
+///
+/// A conta ignora chave dentro de texto e de comentário. É aproximação
+/// deliberada: o preço de errar é uma lista oferecida onde não devia, e não uma
+/// resposta errada sobre o código.
+fn cabe_uma_propriedade(texto: &str, inicio: usize) -> bool {
+    let Some(ate) = texto.get(..inicio) else {
+        return false;
+    };
+    let profundidade = ate.chars().fold(0i32, |conta, caractere| match caractere {
+        '{' => conta + 1,
+        '}' => conta - 1,
+        _ => conta,
+    });
+    if profundidade <= 0 {
+        return false;
+    }
+    ate.chars()
+        .rev()
+        .find(|caractere| !caractere.is_whitespace())
+        .is_some_and(|anterior| matches!(anterior, '{' | ';' | '}'))
 }
 
 /// O módulo que qualifica o nome, quando ele vem escrito `v.$cor`.

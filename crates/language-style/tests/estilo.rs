@@ -250,26 +250,82 @@ fn a_percent_offers_the_placeholders() {
     assert_eq!(nomes, vec!["base".to_owned()]);
 }
 
-/// **Fora de um nome que o arquivo inventa, a resposta é vazia — e não um erro.**
+/// **O critério do nível 2.**
 ///
-/// Nome de propriedade é o nível 2, e ainda não existe. Uma lista vazia diz
-/// isso; um erro faria a IDE reclamar de uma posição comum.
+/// No começo de uma declaração, o que cabe é o nome de uma propriedade, e a
+/// lista vem do `mdn-data`, embarcada.
 #[test]
-fn outside_a_sigil_the_answer_is_empty_and_not_a_failure() {
+fn at_the_start_of_a_declaration_the_properties_are_offered() {
     let ativo = ativo();
     let id = abrir(ativo.as_ref(), "tema.scss", TEMA);
     let nomes = completar(ativo.as_ref(), id, depois_de(TEMA, "  col"), "col");
-    assert!(nomes.is_empty(), "nome de propriedade é o nível 2: {nomes:?}");
+    assert!(nomes.contains(&"color".to_owned()), "{nomes:?}");
+    assert!(nomes.contains(&"column-gap".to_owned()), "{nomes:?}");
+    assert!(
+        nomes.iter().all(|nome| nome.starts_with("col")),
+        "o que já foi digitado estreita: {nomes:?}"
+    );
 }
 
-/// Um `.css` sem variável nenhuma não oferece nada, e não falha.
+/// Um `.css` comum recebe a mesma lista: propriedade é de CSS, e não de SCSS.
 #[test]
-fn plain_css_offers_nothing_and_does_not_fail() {
+fn plain_css_gets_the_properties_too() {
     let ativo = ativo();
-    let css = ".cartao {\n  color: #333;\n}\n";
+    let css = ".cartao {\n  col\n}\n";
     let id = abrir(ativo.as_ref(), "tema.css", css);
     let nomes = completar(ativo.as_ref(), id, depois_de(css, "  col"), "col");
-    assert!(nomes.is_empty());
+    assert!(nomes.contains(&"color".to_owned()), "{nomes:?}");
+}
+
+/// **Onde cabe um valor, não cabe um nome de propriedade.**
+///
+/// Depois de `color:` o que falta é o valor, e valor é o nível 3. Oferecer a
+/// lista de propriedades ali seria oferecer o que não compila.
+#[test]
+fn in_value_position_no_property_is_offered() {
+    let ativo = ativo();
+    let css = ".cartao {\n  color: re\n}\n";
+    let id = abrir(ativo.as_ref(), "tema.css", css);
+    let nomes = completar(ativo.as_ref(), id, depois_de(css, "color: re"), "re");
+    assert!(nomes.is_empty(), "valor é o nível 3: {nomes:?}");
+}
+
+/// **No topo do arquivo não cabe propriedade.**
+///
+/// Fora de um bloco só cabem seletor e regra `@`. A conta é de chaves abertas
+/// menos fechadas, e o aninhamento do SCSS entra nela de graça.
+#[test]
+fn outside_a_block_no_property_is_offered() {
+    let ativo = ativo();
+    let css = "col\n.cartao {\n  color: #333;\n}\n";
+    let id = abrir(ativo.as_ref(), "tema.css", css);
+    let nomes = completar(ativo.as_ref(), id, depois_de(css, "col"), "col");
+    assert!(nomes.is_empty(), "no topo não cabe propriedade: {nomes:?}");
+}
+
+/// A lista embarcada é a que a procedência declara.
+///
+/// Sem isto, atualizar o `mdn-data` com outro critério de corte passaria
+/// despercebido até alguém notar uma propriedade faltando.
+#[test]
+fn a_lista_tem_o_tamanho_que_a_procedencia_declara() {
+    let ativo = ativo();
+    let css = ".cartao {\n  \n}\n";
+    let id = abrir(ativo.as_ref(), "tema.css", css);
+    let nomes = completar(ativo.as_ref(), id, depois_de(css, "  "), "");
+    assert_eq!(nomes.len(), 523, "a procedência declara 523 propriedades");
+    assert!(
+        !nomes.iter().any(|nome| nome.starts_with('-')),
+        "prefixo de fornecedor fica de fora"
+    );
+    assert!(
+        !nomes.contains(&"grid-gap".to_owned()),
+        "obsoleta fica de fora"
+    );
+    assert!(
+        nomes.contains(&"anchor-name".to_owned()),
+        "experimental entra: é o que já se escreve hoje"
+    );
 }
 
 /// Um projeto de mentira, com o tema num arquivo e o componente noutro.

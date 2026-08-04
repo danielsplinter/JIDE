@@ -1400,22 +1400,52 @@ Some-se a leitura de `stylePreprocessorOptions.includePaths`, que é onde um
 projeto declara caminhos de busca extras — dado de build, e portanto do mesmo
 lugar de onde a `27` já lê o que é o projeto.
 
-#### Nível 2 — Os nomes das propriedades ⬜
+#### Nível 2 — Os nomes das propriedades ✅
 
-650 propriedades, e a lista existe: o `mdn-data` publica `css/properties.json`
-sob **CC0-1.0** — domínio público, sem exigência de atribuição.
+A lista vem do `mdn-data`, sob **CC0-1.0** — domínio público, sem exigência de
+atribuição —, e viaja dentro do executável.
 
-Levar só o que interessa muda o tamanho por uma ordem de grandeza:
+**523 propriedades, 8,1 KB.** Das 651 do `properties.json`, ficaram de fora as
+`nonstandard` (107), as `obsolete` (15) e as que começam com `-` (100). As
+`experimental` **entraram**, e é escolha: são 39, e incluem `anchor-name`,
+`animation-timeline` e `field-sizing` — coisas que já se escrevem hoje. Recusá-las
+por não serem *baseline* seria a IDE discordando do que o navegador aceita.
 
-| o que levar | tamanho |
-| --- | --- |
-| só os nomes | **10,6 KB** |
-| nomes mais a sintaxe dos valores | 25,4 KB |
-| o `properties.json` inteiro | 336 KB |
+O `properties.json` inteiro tem 336 KB, e a maior parte é a sintaxe dos valores,
+que só o nível 3 usaria.
 
-Dez kilobytes embarcados, pelo mesmo mecanismo da ADR-029. Envelhece devagar —
-propriedades novas por ano —, e é **dado e não lógica**: atualizar é trocar um
-arquivo, e não mexer em código.
+##### Onde uma propriedade cabe, e onde não
+
+Duas condições, e as duas são necessárias:
+
+- **Dentro de um bloco.** No topo do arquivo só cabem seletor e regra `@`. A
+  conta é de chaves abertas menos fechadas, e o aninhamento do SCSS entra nela
+  de graça;
+- **No começo de uma declaração.** O caractere anterior, fora espaços, precisa
+  ser `{`, `;` ou `}`. É o que separa `color: |` — onde cabe um **valor**, e
+  valor é o nível 3 — de `  |`, onde cabe o nome.
+
+A conta ignora chave dentro de texto e de comentário, e isso é aproximação
+deliberada: o preço de errar é uma lista oferecida onde não devia, e não uma
+resposta errada sobre o código.
+
+**Critério:** no começo de uma declaração, digitar `col` oferece `color` e
+`column-gap`; depois de `color:` não oferece propriedade nenhuma; no topo do
+arquivo, nenhuma. **Cumprido.**
+
+##### Medido nos dois projetos
+
+| projeto | posições que ofereceram | pior tempo |
+| --- | --- | --- |
+| `j-fis-cloud` | **11 de 11** | 0 ms |
+| `spartacus-develop` | 386 de 538 | 0 ms |
+
+É o primeiro nível que serve o `j-fis-cloud`, onde não há variável nenhuma
+declarada e por isso os níveis 1 e 1b, corretamente, não ofereciam nada.
+
+*A amostragem é crua* — ela escolhe a primeira linha recuada com `:`, o que
+inclui `&:hover {` e outras que não são declaração. As 152 do `spartacus` são
+disso, e não de posição recusada por engano.
 
 #### Nível 3 — Os valores de cada propriedade ⬜ Fora de escopo por enquanto
 
