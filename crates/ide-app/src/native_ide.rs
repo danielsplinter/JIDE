@@ -826,7 +826,8 @@ impl NativeIde {
             .workspace
             .search
             .spinner_phase()
-            .or_else(|| self.languages.type_search.spinner_phase());
+            .or_else(|| self.languages.type_search.spinner_phase())
+            .or_else(|| self.languages.referencias.spinner_phase());
         let Some(shell) = self.ui.shell.as_mut() else {
             return false;
         };
@@ -951,6 +952,12 @@ impl NativeIde {
             let _ = sender.send(achadas);
         });
         if let Some(shell) = self.ui.shell.as_mut() {
+            // **A janela abre agora, e não quando a resposta chega.** Procurar
+            // pode levar segundos; abrir só no fim mostra o resultado sem ter
+            // mostrado a procura, e quem perguntou fica sem saber se a IDE
+            // ouviu. O giro vem do mesmo lugar das outras buscas.
+            shell.open_content_search();
+            shell.set_content_search_results(Vec::new());
             shell.set_status_message(format!("Procurando usos de {}…", request.token));
         }
     }
@@ -985,10 +992,7 @@ impl NativeIde {
             })
             .collect();
         if let Some(shell) = self.ui.shell.as_mut() {
-            // **Abrir o painel faz parte da resposta.** Sem isto, quem pergunta
-            // vê só uma contagem na barra de estado, e a lista fica atrás de
-            // uma janela fechada — que é o mesmo que não responder.
-            shell.open_content_search();
+            // A janela já está aberta desde o pedido; aqui só chega o conteúdo.
             shell.set_content_search_results(itens);
             shell.set_status_message(format!("{quantos} uso(s)"));
         }
