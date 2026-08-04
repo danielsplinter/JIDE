@@ -301,6 +301,31 @@ impl LanguageHost {
         })
     }
 
+    /// Quem ainda prepara o projeto, pelo nome.
+    ///
+    /// [`Self::preparing`] responde sim ou não, e é o que a animação precisa.
+    /// Isto responde **quem**, e existe para quando ela não para: um giro que
+    /// não termina é sempre um sinal de prontidão que não chegou, e sem o nome
+    /// do provider a procura começa por adivinhação.
+    pub fn preparing_providers(&self) -> Vec<ProviderId> {
+        self.registry
+            .lock()
+            .map(|registry| {
+                registry
+                    .providers
+                    .iter()
+                    .filter(|(_, entry)| {
+                        entry
+                            .worker
+                            .as_ref()
+                            .is_some_and(|worker| worker.is_preparing())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn providers(&self) -> Result<Vec<ProviderSnapshot>, LanguageHostError> {
         let registry = self
             .registry

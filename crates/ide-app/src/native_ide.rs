@@ -18,6 +18,13 @@ use crate::{
     debug, java_contribution, markup_contribution, run, style_contribution,
     typescript_contribution,
 };
+
+/// Quanto tempo de giro ainda é carga, e a partir de quando é suspeita.
+///
+/// Um monorepo grande leva de trinta a setenta segundos para o analisador
+/// montar o projeto — medido. Meio minuto além disso não é lentidão: é sinal de
+/// prontidão que não chegou, e o log passa a dizer de quem.
+const PACIENCIA_COM_O_GIRO: std::time::Duration = std::time::Duration::from_secs(90);
 use ide_application::{
     ApplicationCommand, DebugRequest, IdeEvent, NavigationRequest, NewItemRequest,
     OpenDocumentRequest, RenameDocumentRequest, SaveDocumentRequest, SearchScope,
@@ -776,6 +783,21 @@ impl NativeIde {
                 .languages
                 .preparing_since
                 .get_or_insert_with(std::time::Instant::now);
+            // Um giro que passa de meio minuto não é carga: é sinal que não
+            // chegou. Dizer **quem** o segura tira a procura do palpite — e o
+            // palpite já custou caro nesta base.
+            if inicio.elapsed() >= PACIENCIA_COM_O_GIRO
+                && !self.languages.reclamou_do_giro
+            {
+                self.languages.reclamou_do_giro = true;
+                if let Some(host) = self.languages.host.as_ref() {
+                    tracing::warn!(
+                        preparando = ?host.preparing_providers(),
+                        "o carregamento passou de {:?} e alguém ainda não ficou pronto",
+                        PACIENCIA_COM_O_GIRO
+                    );
+                }
+            }
             let fase = inicio.elapsed().as_secs_f32().fract();
             if let Some(shell) = self.ui.shell.as_mut() {
                 shell.set_project_loading(Some(fase));
@@ -785,6 +807,7 @@ impl NativeIde {
         // Terminou: apaga o giro e pede **um** quadro a mais, para a tela ficar
         // sem ele. Sem esse ultimo quadro, o giro parado continuaria desenhado
         // ate o proximo evento, e um giro parado parece a IDE travada.
+        self.languages.reclamou_do_giro = false;
         let estava = self.languages.preparing_since.take().is_some();
         if estava && let Some(shell) = self.ui.shell.as_mut() {
             shell.set_project_loading(None);

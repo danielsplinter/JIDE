@@ -638,22 +638,43 @@ fn montar_ao_fundo(
     let prontidao = prontidao.clone();
     let marca = montando.clone();
     let devolver = montando.clone();
+    let prontidao_de_reserva = prontidao.clone();
     // Se a linha não pode subir, o grafo fica sem montar: a completação
     // responde menos, e a IDE não deixa de responder.
     let subiu = std::thread::Builder::new()
         .name("estilo-grafo".to_owned())
         .spawn(move || {
+            // **A prontidão é marcada aconteça o que acontecer.** Ela é o que
+            // apaga o giro de carregamento da janela; um caminho que não a
+            // marque deixa a IDE dizendo para sempre que está carregando — e a
+            // `23` já pagou esse defeito uma vez, com o analisador externo.
+            //
+            // O guarda existe porque marcar no fim do corpo não basta: um
+            // pânico aqui dentro pularia a linha, e quem olha a tela não teria
+            // como saber que a varredura morreu.
+            let _guarda = Prontidao(prontidao, marca);
             let montado = std::sync::Arc::new(resolucao::Grafo::construir(&raiz));
             if let Ok(mut guardado) = destino.lock() {
                 *guardado = Some(montado);
             }
-            prontidao.mark_ready();
-            marca.store(false, Ordering::Release);
         });
     if subiu.is_err() {
-        // Sem a linha, não há varredura e não haverá prontidão: a marca precisa
-        // voltar, senão nenhuma tentativa futura passa deste ponto.
+        // Sem a linha não há varredura, e sem varredura não haveria prontidão:
+        // marcar aqui é o que impede o giro eterno, e devolver a marca é o que
+        // permite uma tentativa futura.
+        prontidao_de_reserva.mark_ready();
         devolver.store(false, Ordering::Release);
+    }
+}
+
+/// Marca a prontidão e devolve a vez, saia-se por onde se sair.
+struct Prontidao(ReadinessSignal, std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Prontidao {
+    fn drop(&mut self) {
+        self.0.mark_ready();
+        self.1
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 

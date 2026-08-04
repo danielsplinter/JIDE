@@ -187,6 +187,11 @@ pub(super) struct LanguageController {
     pub(super) reoffered: std::collections::HashSet<DocumentId>,
     /// Desde quando alguma linguagem prepara o projeto, para o giro ter relógio.
     pub(super) preparing_since: Option<Instant>,
+    /// Se já se reclamou deste giro no log.
+    ///
+    /// Uma vez por carregamento, e não a cada quadro: o laço passa aqui trinta
+    /// vezes por segundo, e um aviso repetido nessa cadência esconde o resto.
+    pub(super) reclamou_do_giro: bool,
     /// A busca por tipo em curso, que fala com o analisador e não pode esperar.
     pub(super) type_search: SearchController<TypeSearchOutcome>,
     /// A navegação em curso. Ver `navigate_to_definition`.
