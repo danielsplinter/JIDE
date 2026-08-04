@@ -786,26 +786,19 @@ impl NativeIde {
         // praticamente mentindo — quem olha conclui que deve esperar.
         //
         // Quem é "alheio" vem da composição, e não daqui: ver a fase 6 da `25`.
-        // **E ele volta quando alguém pede o que só o analisador oferece.**
         //
-        // Uma navegação em curso é exatamente isso: o índice responde na hora
-        // quando sabe, e o que desce para o analisador espera o que ele estiver
-        // levando. Girar aqui é o aviso honesto — aparece quando há espera de
-        // verdade, e não durante a abertura inteira. Ver a fase 6 da `25`.
-        //
-        // **A navegação não pode desviar do caminho de apagar.** A primeira
-        // versão disto devolvia cedo e zerava o `preparing_since`; quando a
-        // navegação terminava, o caminho de baixo concluía que nunca houvera
-        // giro e **não o apagava** — a animação ficava para sempre. As duas
-        // origens agora escolhem só a *fase*, e a saída é uma só.
-        let da_navegacao = self.languages.navigation.spinner_phase();
+        // **E a navegação não gira aqui.** Chegou a girar, e foi retirado depois
+        // de experimentado: uma animação no meio da tela a cada `Ctrl+clique`
+        // aparece e some rápido demais na maioria dos cliques, e o que era para
+        // ser aviso vira piscada. Quem espera pela navegação continua com a
+        // mensagem na barra de estado, que não pisca.
         let alheios = &self.languages.alheios;
         let preparando = self.languages.host.as_ref().is_some_and(|host| {
             host.preparing_providers()
                 .iter()
                 .any(|provider| !alheios.contains(provider))
         });
-        if preparando || da_navegacao.is_some() {
+        if preparando {
             let inicio = *self
                 .languages
                 .preparing_since
@@ -826,9 +819,7 @@ impl NativeIde {
                     );
                 }
             }
-            // A navegação, quando há uma, manda na fase; senão o relógio da
-            // preparação. Qualquer das duas passa pela mesma saída abaixo.
-            let fase = da_navegacao.unwrap_or_else(|| inicio.elapsed().as_secs_f32().fract());
+            let fase = inicio.elapsed().as_secs_f32().fract();
             if let Some(shell) = self.ui.shell.as_mut() {
                 shell.set_project_loading(Some(fase));
             }

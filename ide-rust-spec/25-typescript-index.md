@@ -948,19 +948,24 @@ nenhum. Um teste fixa que o externo é o alheio e o nativo não, porque trocá-l
 faria o giro voltar a durar a montagem do projeto ou sumir com o índice ainda
 sendo construído.
 
-**E ele volta na navegação.** Um `Ctrl+clique` em curso é exatamente "alguém
-pediu o que talvez só o analisador ofereça": o índice responde na hora quando
-sabe, e o que desce para o analisador espera o que ele estiver levando. O giro
-aparece **ali**, e some quando a resposta chega.
+**E a navegação não gira.** Chegou a girar — a ideia era boa no papel: o giro
+apareceria exatamente quando alguém pedisse o que só o analisador oferece. Foi
+experimentado e **retirado**.
 
-É o mesmo desenho invertido: antes ele girava a abertura inteira, quando quase
-nada estava bloqueado; agora ele gira no instante em que há espera de verdade.
+O que o papel não mostrava: na maioria dos cliques o índice responde em
+milissegundos, então a animação no meio da tela aparece e some antes de ser
+lida. O que era para ser aviso vira piscada, e uma piscada a cada `Ctrl+clique`
+é pior do que nenhum aviso. Quem espera continua com a mensagem na barra de
+estado, que não pisca.
 
-**O que ainda não existe é o cancelamento.** Quem pedir navegação com o
-analisador ainda montando vê o giro, mas não tem como desistir — o pedido corre
-até o prazo. As buscas já cancelam pelo `SearchController`; a navegação usa o
-mesmo controlador e o mesmo cancelamento existe, mas não há gesto na interface
-que o acione. É o que falta, e é pequeno.
+*Registrado como retirado, e não apagado da spec: a ideia volta a parecer boa
+para quem a reencontrar, e o motivo de ela não estar aqui é experiência, e não
+esquecimento.*
+
+**O aviso para quem espera pelo analisador continua sendo o que falta.** A barra
+de estado diz que está procurando, mas não diz *pelo quê* se espera, e não há
+como desistir — o `SearchController` da navegação sabe cancelar, e falta o gesto
+que o acione. Se isso for feito, que seja **sem animação no meio da tela**.
 
 #### Critério
 
