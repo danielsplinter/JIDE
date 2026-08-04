@@ -30,7 +30,8 @@ pub fn contribution() -> LanguageContribution {
         LanguageDescriptor {
             language_id: language_id(),
             display_name: "Marcação".to_owned(),
-            extensions: vec!["html".to_owned(), "htm".to_owned()],
+            // Uma origem só: ver a nota em `java_contribution`.
+            extensions: provider.metadata().extensions,
             // Um documento de marcação não tem raiz própria: ele mora onde o
             // código que o usa mora, e quem declara isso é o projeto da
             // linguagem.

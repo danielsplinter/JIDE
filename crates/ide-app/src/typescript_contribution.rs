@@ -33,6 +33,19 @@ use language_typescript::{
 /// com a de outra no registro, que é global.
 const TASK_PREFIX: &str = "npm.";
 
+/// A união de várias listas de extensões, sem repetir e em ordem estável.
+fn extensoes_de(listas: &[Vec<String>]) -> Vec<String> {
+    let mut todas: Vec<String> = Vec::new();
+    for lista in listas {
+        for extensao in lista {
+            if !todas.contains(extensao) {
+                todas.push(extensao.clone());
+            }
+        }
+    }
+    todas
+}
+
 #[must_use]
 pub fn language_id() -> LanguageId {
     LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned())
@@ -62,14 +75,17 @@ pub fn contribution(
         LanguageDescriptor {
             language_id: language_id(),
             display_name: "TypeScript".to_owned(),
-            extensions: std::iter::once("ts".to_owned())
-                .chain(
-                    plugins
-                        .iter()
-                        .flat_map(|plugin| plugin.companions())
-                        .map(|regra| regra.extension),
-                )
-                .collect(),
+            // **A união do que os dois providers desta linguagem atendem.**
+            // O nativo responde por `.ts`; o analisador responde por isso mais
+            // o que os plugins acrescentam. O descritor é o portão de cima, e
+            // precisa cobrir os dois — cobrir só um foi o defeito que deixou o
+            // template sem realce e sem navegação.
+            extensions: extensoes_de(&[
+                provider.metadata().extensions,
+                service_provider(processes.clone(), plugins.to_vec())
+                    .metadata()
+                    .extensions,
+            ]),
             // Vazio de propósito, e não por falta: a raiz de um projeto
             // TypeScript é declarada no `tsconfig.json`, e é de lá que o
             // `ProjectModel` a lê (ADR-027). Um nome de convenção aqui seria uma

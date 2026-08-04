@@ -202,7 +202,11 @@ pub fn contribution(processes: Arc<dyn ProcessSupervisor>) -> LanguageContributi
         LanguageDescriptor {
             language_id: language_id(),
             display_name: "Java".to_owned(),
-            extensions: vec!["java".to_owned()],
+            // **Quem sabe o que este provider atende é ele.** Repetir a lista
+            // aqui cria duas origens para a mesma verdade, e elas divergem: foi
+            // exatamente assim que o `.html` ficou sem realce e sem navegação
+            // por uma tarde inteira.
+            extensions: provider.metadata().extensions,
             source_root_names: vec!["java".to_owned()],
         },
         provider,

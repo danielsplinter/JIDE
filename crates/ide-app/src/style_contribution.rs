@@ -22,7 +22,8 @@ pub fn contribution() -> LanguageContribution {
         LanguageDescriptor {
             language_id: language_id(),
             display_name: "Folhas de estilo".to_owned(),
-            extensions: vec!["css".to_owned(), "scss".to_owned()],
+            // Uma origem só: ver a nota em `java_contribution`.
+            extensions: provider.metadata().extensions,
             // Uma folha de estilo não tem raiz própria: ela mora onde o código
             // que a usa mora, e quem declara isso é o projeto da linguagem.
             source_root_names: Vec::new(),
