@@ -22,7 +22,7 @@ use std::{
 use async_trait::async_trait;
 use ide_domain::{
     CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
-    DocumentSnapshot, LanguageId, Location, ProviderId, SemanticSymbol, SyntaxSnapshot,
+    DocumentSnapshot, LanguageId, Location, ProviderId, SemanticSymbol, SyntaxSnapshot, TextRange,
 };
 use ide_language_api::{
     ReadinessSignal,
@@ -244,6 +244,32 @@ impl ActiveTypeScript {
         declarante(&self.resolver, &modulo, &la, &exportacoes, &declara)
     }
 
+    /// O arquivo que um caminho entre aspas aponta, se ele existir.
+    ///
+    /// # Por que isto não é conhecimento de Angular
+    ///
+    /// O caso que trouxe isto foi o `templateUrl` de um componente, mas a regra
+    /// não o menciona: **um texto literal que nomeia um arquivo vizinho leva a
+    /// ele**. Vale para `styleUrls`, para um caminho escrito à mão, e para
+    /// qualquer outro framework que use a mesma convenção.
+    ///
+    /// Resolver aqui, e não no analisador, é o que faz o clique responder na
+    /// hora: o `tsserver` também sabe responder — verificado —, mas ele custa
+    /// dezenas de segundos para subir, e este arquivo ou existe ou não existe.
+    ///
+    /// Só caminho **relativo**: um `'@algum/pacote'` é módulo, e módulo já tem
+    /// dono no caminho de cima. Sem esta cerca, um `import` cairia aqui e
+    /// deixaria de passar pela resolução que sabe atravessar barril.
+    fn arquivo_vizinho(&self, de: &Path, literal: &str) -> Option<PathBuf> {
+        if !literal.starts_with("./") && !literal.starts_with("../") {
+            return None;
+        }
+        let candidato = de
+            .parent()?
+            .join(literal.replace('/', std::path::MAIN_SEPARATOR_STR));
+        candidato.is_file().then_some(candidato)
+    }
+
     fn analyze(
         &self,
         document_id: DocumentId,
@@ -401,7 +427,35 @@ impl ActiveLanguage for ActiveTypeScript {
             request.position.line,
             request.position.column,
         ) else {
-            return Ok(Vec::new());
+            // Sem identificador, ainda pode haver **um texto literal** — o
+            // `templateUrl` de um componente é o caso que trouxe isto.
+            let Some(literal) = references::texto_literal_em(
+                &self.parser,
+                &texto,
+                request.position.line,
+                request.position.column,
+            ) else {
+                // Nem nome nem texto: o cursor está sobre pontuação ou espaço, e
+                // ali **não há** o que abrir. Lista vazia é a verdade.
+                //
+                // Dizer "não sei" aqui faria cada clique perdido descer para o
+                // analisador externo — que é a espera que a fase 5 da `25`
+                // existe para evitar.
+                return Ok(Vec::new());
+            };
+            if let Some(arquivo) = self.arquivo_vizinho(&caminho, &literal) {
+                return Ok(vec![Location {
+                    path: arquivo,
+                    range: TextRange::default(),
+                }]);
+            }
+            // Texto que não é arquivo vizinho pode ser especificador de módulo,
+            // caminho de recurso ou coisa que só quem tem tipos sabe. **Não
+            // sei** deixa a pergunta descer; lista vazia afirmaria que ali não
+            // há destino nenhum.
+            return Err(LanguageError::Unresolved(format!(
+                "`{literal}` não é um arquivo vizinho"
+            )));
         };
 
         // O arquivo aberto responde pelo **texto do editor**, e não pelo do

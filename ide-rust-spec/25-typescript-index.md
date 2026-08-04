@@ -584,6 +584,39 @@ e o uso está sob o cursor.
 Fica registrado como a metade que falta desta fase, e não como fase nova: quem
 tem o índice e o resolvedor tem as duas peças de que ela precisa.
 
+#### O caminho entre aspas também é destino ✅
+
+Veio de uso real: `Ctrl+clique` no `'./future-stock-accordion.component.html'` de
+um `templateUrl` não abria nada.
+
+**A causa é a mesma que esta spec já nomeou uma vez.** Dentro de aspas não há
+identificador, e o caminho nativo devolvia **lista vazia** — que afirma que a
+posição não tem destino, e faz a pergunta morrer ali em vez de descer para quem
+tem tipos. É a distinção entre "não existe" e "não sei", agora aplicada a uma
+terceira posição.
+
+A resposta passa a ser em três níveis, e cada um é uma afirmação diferente:
+
+| onde o cursor está | resposta |
+| --- | --- |
+| identificador | o que a resolução de módulos achar |
+| texto que nomeia um **arquivo vizinho** | aquele arquivo |
+| texto que não é arquivo vizinho | **não sei** — desce para o analisador |
+| pontuação, espaço | lista vazia — ali não há o que abrir |
+
+A última linha importa tanto quanto a segunda: dizer "não sei" para um clique
+perdido faria **cada** clique descer para o analisador externo, que é a espera
+que a fase 5 existe para evitar.
+
+**E a regra não menciona Angular.** Um texto literal que nomeia um arquivo ao
+lado leva a ele — vale para `styleUrls`, para outro framework, para um caminho
+escrito à mão. Especificador de módulo fica de fora por uma cerca explícita: ele
+precisa da resolução que atravessa barril e acrescenta extensão.
+
+**O analisador também sabe responder isto** — verificado contra o `tsserver` com
+o plugin, que devolve o `.html` correto. Mas ele custou 63 s para responder no
+monorepo de referência, e um arquivo vizinho ou existe ou não existe.
+
 ### Fase 4 — O `.` declarado ✅
 
 Completação depois do ponto, sem tipos inferidos e sem processo externo.

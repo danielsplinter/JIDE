@@ -307,3 +307,102 @@ fn posicao_de(texto: &str, trecho: &str) -> (u32, u32) {
     }
     panic!("o trecho {trecho:?} precisa estar no texto");
 }
+
+/// **`Ctrl+clique` no caminho de um `templateUrl` abre o template.**
+///
+/// O caso veio de uso real. Dentro de aspas não há identificador, e o caminho
+/// nativo respondia **lista vazia** — que afirma que a posição não tem destino,
+/// e faz a pergunta morrer ali em vez de descer para quem tem tipos.
+///
+/// O analisador externo sabe responder isto — verificado contra o `tsserver`
+/// com o plugin, que devolve o `.html` —, mas ele custa dezenas de segundos para
+/// subir, e um arquivo vizinho ou existe ou não existe.
+#[test]
+fn clicking_a_template_path_opens_the_template() {
+    let raiz = projeto("template-url");
+    let componente = raiz.join("src/app/cartao.component.ts");
+    let template = raiz.join("src/app/cartao.component.html");
+    escrever(&template, "<p>oi</p>\n");
+    escrever(
+        &componente,
+        "import { Component } from '@angular/core';\n\
+         \n\
+         @Component({\n\
+         \x20 selector: 'app-cartao',\n\
+         \x20 templateUrl: './cartao.component.html',\n\
+         })\n\
+         export class CartaoComponent {}\n",
+    );
+
+    let ativo = ativado(&raiz);
+    // No meio de `cartao.component.html`, dentro das aspas.
+    let achados = definicao(ativo.as_ref(), &componente, 4, 30);
+    assert_eq!(achados.len(), 1, "{achados:?}");
+    assert_eq!(achados[0].path, template);
+}
+
+/// **Um caminho que não existe não vira destino.**
+///
+/// Apontar para um arquivo ausente abriria uma aba vazia, e a resposta certa é
+/// deixar a pergunta seguir para quem talvez saiba mais.
+#[test]
+fn a_path_that_does_not_exist_is_not_a_destination() {
+    let raiz = projeto("template-ausente");
+    let componente = raiz.join("src/app/cartao.component.ts");
+    escrever(
+        &componente,
+        "@Component({\n\x20 templateUrl: './nao-existe.component.html',\n})\n\
+         export class CartaoComponent {}\n",
+    );
+
+    let ativo = ativado(&raiz);
+    let Ok(texto) = std::fs::read_to_string(&componente) else {
+        panic!("o arquivo do teste precisa existir");
+    };
+    assert!(
+        pollster::block_on(ativo.open_document(DocumentSnapshot {
+            id: DocumentId(1),
+            path: componente.clone(),
+            version: 1,
+            text: texto,
+        }))
+        .is_ok()
+    );
+    let resposta = pollster::block_on(ativo.definition(DefinitionRequest {
+        document_id: DocumentId(1),
+        position: TextPosition {
+            line: 1,
+            column: 22,
+        },
+    }));
+    assert!(
+        matches!(resposta, Err(ide_language_api::LanguageError::Unresolved(_))),
+        "sem arquivo, a resposta é «não sei», e não lista vazia: {resposta:?}"
+    );
+}
+
+/// Um especificador de módulo **não** cai na regra de caminho.
+///
+/// `'./pedido.service'` num `import` precisa da resolução que atravessa barril e
+/// acrescenta extensão; tratá-lo como caminho de arquivo o faria falhar por não
+/// existir um `pedido.service` sem sufixo.
+#[test]
+fn a_module_specifier_still_goes_through_resolution() {
+    let raiz = projeto("modulo-nao-e-caminho");
+    let servico = raiz.join("src/app/pedido.service.ts");
+    escrever(&servico, "export class PedidoService {}\n");
+    let consumidor = raiz.join("src/app/cartao.component.ts");
+    escrever(
+        &consumidor,
+        "import { PedidoService } from './pedido.service';\n\
+         export class CartaoComponent {\n\
+         \x20 constructor(private servico: PedidoService) {}\n\
+         }\n",
+    );
+
+    let ativo = ativado(&raiz);
+    // No nome importado, e não no caminho: a resolução de módulo responde.
+    let achados = definicao(ativo.as_ref(), &consumidor, 0, 10);
+    assert_eq!(achados.len(), 1, "{achados:?}");
+    assert_eq!(achados[0].path, servico);
+}

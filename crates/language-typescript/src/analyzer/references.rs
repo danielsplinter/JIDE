@@ -338,6 +338,43 @@ pub(crate) fn identificador_em(
     no.utf8_text(texto.as_bytes()).ok().map(str::to_owned)
 }
 
+/// O conteúdo do texto literal sob o cursor, se houver um.
+///
+/// # Por que isto é separado do identificador
+///
+/// Dentro de aspas não há identificador, e o nó é `string` ou `string_fragment`.
+/// Quem procurava só identificador achava nada — e "nada" era respondido como
+/// **lista vazia**, que afirma que a posição não tem destino. É a mesma família
+/// de erro que a `25` nomeou: dizer "não existe" quando o certo era "não sei".
+///
+/// Serve a qualquer literal de caminho, e não só ao `templateUrl`: um
+/// `styleUrls`, um `import('./x')` ou um caminho escrito à mão respondem pela
+/// mesma regra.
+pub(crate) fn texto_literal_em(
+    parser: &TypeScriptParser,
+    texto: &str,
+    linha: u32,
+    coluna: u32,
+) -> Option<String> {
+    let arvore = parser.parse(texto, None).ok()?;
+    let ponto = tree_sitter::Point {
+        row: linha as usize,
+        column: coluna as usize,
+    };
+    let mut no = arvore
+        .root_node()
+        .named_descendant_for_point_range(ponto, ponto)?;
+    // O cursor pode cair no fragmento ou na string inteira, dependendo de onde
+    // ele está entre as aspas.
+    if no.kind() == "string" && let Some(dentro) = no.named_child(0) {
+        no = dentro;
+    }
+    if !matches!(no.kind(), "string_fragment") {
+        return None;
+    }
+    no.utf8_text(texto.as_bytes()).ok().map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
