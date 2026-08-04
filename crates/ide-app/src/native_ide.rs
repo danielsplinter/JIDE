@@ -625,9 +625,17 @@ impl NativeIde {
             };
             let _ = sender.send(saida);
         });
-        if let Some(shell) = self.ui.shell.as_mut() {
-            shell.set_status_message(format!("Procurando {}…", request.token));
-        }
+        // **Sem aviso de que se está procurando.** Havia um `Procurando X…` na
+        // barra, e ele saiu pelo mesmo motivo que o giro do clique tinha saído
+        // antes: quase todo `Ctrl+clique` é respondido em milissegundos pelo
+        // índice, então o aviso aparecia e sumia antes de ser lido. Uma piscada
+        // a cada clique é pior do que nenhum aviso.
+        //
+        // O que sobra é a resposta — o arquivo abre, ou a barra diz que não
+        // achou. Quem espera de verdade, porque o analisador está montando o
+        // projeto, continua sem aviso: é a pendência registrada na fase 6 da
+        // `25`, e ela pede um aviso que **diga pelo quê** se espera e deixe
+        // desistir. Um texto genérico que pisca não era isso.
     }
 
     /// Recolhe o resultado da navegação, se já chegou.

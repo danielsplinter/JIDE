@@ -30,6 +30,17 @@ pub struct TsConfig {
     pub files: Vec<PathBuf>,
     /// Outros `tsconfig` que este projeto referencia.
     pub references: Vec<PathBuf>,
+    /// Para que versão da linguagem este projeto compila — `"ES2022"`.
+    ///
+    /// É o que decide **quais** dos `lib.*.d.ts` valem, e por isso decide o que a
+    /// completação pode oferecer sem sugerir código que o build recusa. Ver a
+    /// fase 7 da `25`.
+    pub target: Option<String>,
+    /// O `lib` explícito, que manda mais do que o `target`.
+    ///
+    /// Quem escreve `"lib": ["ES2020", "DOM"]` está dizendo exatamente o que
+    /// existe, e o `target` deixa de opinar — é a regra do compilador.
+    pub lib: Vec<String>,
     /// Raiz a partir da qual um `import` sem `./` é procurado.
     pub base_url: Option<PathBuf>,
     /// Apelidos de módulo, do `paths` do compilador.
@@ -187,6 +198,18 @@ fn load_with(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<TsConfig, T
         }
         if let Some(out) = options.get("outDir").and_then(serde_json::Value::as_str) {
             config.out_dir = Some(PathBuf::from(out));
+        }
+        // `target` e `lib` **substituem** o que veio da base, como no compilador:
+        // um `tsconfig.spec.json` que declara o próprio alvo não soma ao do
+        // `tsconfig.base.json`, ele o troca.
+        if let Some(alvo) = options.get("target").and_then(serde_json::Value::as_str) {
+            config.target = Some(alvo.to_owned());
+        }
+        if let Some(itens) = options.get("lib").and_then(serde_json::Value::as_array) {
+            config.lib = itens
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect();
         }
         // `baseUrl` e `paths` são resolvidos **relativos ao arquivo que os
         // declara**, e não ao que o estende. É a regra do TypeScript, e ignorá-la

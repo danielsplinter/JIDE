@@ -37,6 +37,7 @@ use crate::analyzer::index::WorkspaceIndex;
 use crate::analyzer::members;
 use crate::analyzer::references;
 use crate::modules::{ModuleResolver, Reexportacao, declarante};
+use crate::project::stdlib::BibliotecaDoProjeto;
 use crate::analyzer::parser::TypeScriptParser;
 use crate::analyzer::syntax;
 use crate::analyzer::TYPESCRIPT_LANGUAGE_ID;
@@ -149,6 +150,12 @@ struct ActiveTypeScript {
     /// **Aberto**, e não carregado: o que fica em memória é a tabela de nomes, e
     /// os registros saem do disco quando um nome casa.
     index: Arc<Mutex<Option<WorkspaceIndex>>>,
+    /// Os tipos que o próprio TypeScript traz, quando ficarem lidos.
+    ///
+    /// Sobem na mesma linha de execução do índice, e pelo mesmo motivo: são 3,3
+    /// MB de `.d.ts` para analisar, e a ativação é o que dá realce ao arquivo
+    /// que se acabou de abrir. Ver a fase 7 da `25`.
+    biblioteca: Arc<Mutex<Option<BibliotecaDoProjeto>>>,
     /// O sinal que diz quando a varredura terminou.
     readiness: ReadinessSignal,
     /// Para onde cada `import` do projeto aponta.
@@ -176,9 +183,11 @@ impl ActiveTypeScript {
         // já sabe mostrá-lo: gira no meio da tela enquanto dura, e some no fim.
         // Nada aqui é de TypeScript — é "esta linguagem ainda está preparando o
         // projeto".
+        let biblioteca: Arc<Mutex<Option<BibliotecaDoProjeto>>> = Arc::new(Mutex::new(None));
         let raiz = context.workspace_root.clone();
         let raizes = context.source_roots.clone();
         let destino = Arc::clone(&index);
+        let guardar_biblioteca = Arc::clone(&biblioteca);
         let avisar = readiness.clone();
         std::thread::Builder::new()
             .name("typescript-index".to_owned())
@@ -186,6 +195,16 @@ impl ActiveTypeScript {
                 let construido = WorkspaceIndex::build(&raiz, &raizes);
                 if let Ok(mut lugar) = destino.lock() {
                     *lugar = construido;
+                }
+                // A biblioteca vem **depois** do índice, e não antes: o índice
+                // responde busca e navegação, que é o que se pede primeiro ao
+                // abrir um projeto; a biblioteca responde o ponto, que só é
+                // pedido quando alguém começa a escrever.
+                let config = crate::project::tsconfig::load(&raiz.join("tsconfig.json"))
+                    .unwrap_or_default();
+                let lida = crate::project::stdlib::preparar(&raiz, &config);
+                if let Ok(mut lugar) = guardar_biblioteca.lock() {
+                    *lugar = lida;
                 }
                 // Marcado **depois** de guardar, e marcado mesmo se a construção
                 // falhar: um sinal que nunca fica pronto deixaria a IDE dizendo
@@ -209,9 +228,47 @@ impl ActiveTypeScript {
             parser: TypeScriptParser::new()?,
             documents: Mutex::new(HashMap::new()),
             index,
+            biblioteca,
             readiness,
             resolver,
         })
+    }
+
+    /// Os membros de um tipo da biblioteca do TypeScript, seguindo a herança.
+    ///
+    /// A herança importa mais aqui do que no código de um projeto: no DOM quase
+    /// tudo herda — `HTMLDivElement` sozinho declara meia dúzia de membros, e o
+    /// resto vem de `HTMLElement`, `Element`, `Node` e `EventTarget`. Uma lista
+    /// sem isso pareceria certa e estaria quase vazia.
+    ///
+    /// `None` é "a biblioteca não conhece este nome", e é diferente de uma lista
+    /// vazia — que aqui quer dizer "conhece, e o alvo deste projeto não o
+    /// alcança".
+    fn membros_da_biblioteca(&self, tipo: &str) -> Option<Vec<CompletionItem>> {
+        let guarda = self.biblioteca.lock().ok()?;
+        let biblioteca = guarda.as_ref()?;
+        let mut itens: Vec<CompletionItem> = Vec::new();
+        let mut vistos: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut fila = vec![tipo.to_owned()];
+        let mut conhece = false;
+        let mut visitados: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // A cadeia do DOM é funda, e o teto é a mesma rede do caminho do projeto.
+        while let Some(nome) = fila.pop() {
+            if visitados.len() > 32 || !visitados.insert(nome.clone()) {
+                continue;
+            }
+            let Some(membros) = biblioteca.tipos.membros(&nome, &biblioteca.alcance) else {
+                continue;
+            };
+            conhece = true;
+            for item in membros.itens {
+                if vistos.insert(item.label.clone()) {
+                    itens.push(item);
+                }
+            }
+            fila.extend(membros.herda);
+        }
+        conhece.then_some(itens)
     }
 
     /// Os membros de um tipo, seguindo herança e atravessando módulos.
@@ -223,6 +280,13 @@ impl ActiveTypeScript {
     /// Devolve `None` quando não se acha onde o tipo é declarado — vindo de
     /// dependência instalada, por exemplo. Quem chama transforma isso na
     /// terceira resposta.
+    ///
+    /// # O projeto primeiro, a biblioteca depois
+    ///
+    /// Um projeto pode declarar o próprio `Response` ou o próprio `Request`, e
+    /// quando declara é dele que se está falando. A biblioteca do TypeScript
+    /// entra só para os nomes que o projeto não declara — que é a maioria deles,
+    /// e é a fase 7 da `25`.
     fn membros_do_tipo(&self, caminho: &Path, texto: &str, tipo: &str) -> Option<Vec<CompletionItem>> {
         let mut itens: Vec<CompletionItem> = Vec::new();
         let mut vistos: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -241,6 +305,18 @@ impl ActiveTypeScript {
                     && let Ok(outro) = std::fs::read_to_string(&destino)
                 {
                     fila.push((destino, outro, nome, profundidade + 1));
+                    continue;
+                }
+                // Ninguém no projeto declara este nome. Ele pode ser da
+                // linguagem — e aí não há `import` que leve a ele, porque tipo
+                // global não se importa.
+                if let Some(da_biblioteca) = self.membros_da_biblioteca(&nome) {
+                    achou = true;
+                    for item in da_biblioteca {
+                        if vistos.insert(format!("membro:{}", item.label)) {
+                            itens.push(item);
+                        }
+                    }
                 }
                 continue;
             };
@@ -425,6 +501,30 @@ impl ActiveLanguage for ActiveTypeScript {
     /// Este provider tem o que preparar: a varredura do projeto.
     fn readiness(&self) -> Option<ReadinessSignal> {
         Some(self.readiness.clone())
+    }
+
+    /// Espera a preparação do projeto — o índice e a biblioteca.
+    ///
+    /// O padrão do contrato é `true`, que quer dizer "não há o que esperar", e
+    /// era o que este provider respondia enquanto montava índice e biblioteca em
+    /// outra linha de execução. Quem chamasse recebia "pronto" e perguntaria
+    /// cedo demais.
+    ///
+    /// Na IDE isso não aparecia, porque quem espera de verdade é o giro, que lê
+    /// o sinal de prontidão direto. Apareceu num teste — e um teste que corre
+    /// contra duas threads mede a máquina, e não o código.
+    /// A espera é de sistema, e não de `tokio`: quem chama pode estar num
+    /// `pollster::block_on`, que não tem reator — e a espera é para bloquear
+    /// mesmo, porque quem a pede não tem o que fazer sem a resposta.
+    async fn wait_until_indexed(&self, timeout: std::time::Duration) -> bool {
+        let limite = std::time::Instant::now() + timeout;
+        while !self.readiness.is_ready() {
+            if std::time::Instant::now() >= limite {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
     }
 
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {

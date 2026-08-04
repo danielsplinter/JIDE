@@ -14,6 +14,7 @@ mod lines;
 pub(crate) mod members;
 pub(crate) mod parser;
 pub(crate) mod references;
+pub(crate) mod stdlib;
 pub(crate) mod syntax;
 
 /// O nome da linguagem, que é texto e não projeto.

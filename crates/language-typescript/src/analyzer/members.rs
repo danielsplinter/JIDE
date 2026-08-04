@@ -224,6 +224,12 @@ fn nome_do_tipo(no: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
         if let Some(nome) = nome_de_vetor(atual) {
             return Some(nome);
         }
+        if atual.kind() == "predefined_type"
+            && let Ok(texto) = atual.utf8_text(bytes)
+            && let Some(interface) = interface_do_primitivo(texto)
+        {
+            return Some(interface.to_owned());
+        }
         if matches!(atual.kind(), "type_identifier" | "identifier")
             && let Ok(texto) = atual.utf8_text(bytes)
         {
@@ -233,6 +239,28 @@ fn nome_do_tipo(no: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
         pilha.extend(filhos.into_iter().rev());
     }
     None
+}
+
+/// A interface que declara os membros de um tipo primitivo.
+///
+/// `const nome: string` é a anotação mais comum que existe, e o `string`
+/// minúsculo **não é** um nome de tipo declarado em lugar nenhum: quem declara
+/// `charAt`, `trim` e `split` é a `interface String` do `lib.es5.d.ts`. Sem esta
+/// tradução, o ponto sobre a metade das variáveis de um projeto continuaria
+/// dizendo "não sei".
+///
+/// `any`, `unknown`, `void`, `never` e `object` ficam de fora **de propósito**:
+/// não há interface por trás deles, e inventar uma seria oferecer membros que
+/// ninguém declarou.
+fn interface_do_primitivo(escrito: &str) -> Option<&'static str> {
+    Some(match escrito {
+        "string" => "String",
+        "number" => "Number",
+        "boolean" => "Boolean",
+        "symbol" => "Symbol",
+        "bigint" => "BigInt",
+        _ => return None,
+    })
 }
 
 /// `Array` quando o nó é uma das duas formas de vetor, e nada quando não é.
@@ -289,6 +317,46 @@ pub(crate) fn membros_de(parser: &TypeScriptParser, texto: &str, tipo: &str) -> 
         pilha.extend(no.children(&mut cursor));
     }
     None
+}
+
+/// Todos os tipos declarados num texto, com os membros de cada um.
+///
+/// # Por que não é `membros_de` num laço
+///
+/// `membros_de` procura **um** nome e para na primeira declaração dele, que é o
+/// certo para o código de um projeto: ali um tipo é declarado uma vez, e duas
+/// declarações do mesmo nome são dois tipos.
+///
+/// Nos `lib.*.d.ts` do TypeScript a regra é outra — `interface Array` é reaberta
+/// em doze arquivos, e cada abertura acrescenta. Esta função entrega o que cada
+/// arquivo declara, **sem fundir**: fundir é decisão de quem sabe que está
+/// olhando para a biblioteca, e não para código de projeto. Ver a fase 7 da `25`.
+pub(crate) fn todos_os_tipos(parser: &TypeScriptParser, texto: &str) -> Vec<(String, Membros)> {
+    let Ok(arvore) = parser.parse(texto, None) else {
+        return Vec::new();
+    };
+    let bytes = texto.as_bytes();
+    let mut achados = Vec::new();
+    let mut cursor = arvore.walk();
+    let mut pilha = vec![arvore.root_node()];
+    while let Some(no) = pilha.pop() {
+        let declara = matches!(
+            no.kind(),
+            "class_declaration"
+                | "abstract_class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+        );
+        if declara
+            && let Some(nome) = no
+                .child_by_field_name("name")
+                .and_then(|nome| nome.utf8_text(bytes).ok())
+        {
+            achados.push((nome.to_owned(), colher_membros(no, bytes)));
+        }
+        pilha.extend(no.children(&mut cursor));
+    }
+    achados
 }
 
 fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8]) -> Membros {
@@ -407,6 +475,35 @@ mod tests {
         assert_eq!(
             receptor_em(&parser(), texto, 1, 6),
             Receptor::Tipo("Observable".to_owned())
+        );
+    }
+
+    /// **`string` minúsculo é a `interface String`.**
+    ///
+    /// É a anotação mais comum que existe, e o `string` da linguagem não é um
+    /// nome declarado em lugar nenhum: quem declara `charAt` e `trim` é a
+    /// `interface String` do `lib.es5.d.ts`. Sem a tradução, o ponto sobre
+    /// metade das variáveis de um projeto continuaria dizendo "não sei".
+    #[test]
+    fn a_primitive_annotation_is_its_interface() {
+        for (escrito, interface) in [
+            ("string", "String"),
+            ("number", "Number"),
+            ("boolean", "Boolean"),
+        ] {
+            let texto = format!("const v: {escrito} = null!;\nv.\n");
+            assert_eq!(
+                receptor_em(&parser(), &texto, 1, 2),
+                Receptor::Tipo(interface.to_owned()),
+                "`{escrito}` precisa virar `{interface}`"
+            );
+        }
+        // `any` não tem interface por trás, e inventar uma seria oferecer
+        // membros que ninguém declarou.
+        let qualquer = "const v: any = null!;\nv.\n";
+        assert_eq!(
+            receptor_em(&parser(), qualquer, 1, 2),
+            Receptor::Desconhecido
         );
     }
 

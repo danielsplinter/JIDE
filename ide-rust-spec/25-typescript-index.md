@@ -1193,7 +1193,7 @@ pedido cedo** numa sessão que mexa em código com genéricos. O ganho não é "
 a menos"; é: quem só navega, busca e edita código com tipos declarados nunca paga
 por ele, e ninguém paga por ele **antes** de precisar.
 
-### Fase 7 — Os tipos do próprio TypeScript ⬜
+### Fase 7 — Os tipos do próprio TypeScript ✅
 
 `let w: String[];` e um ponto. O índice diz que não sabe onde `String` é
 declarado, a pergunta desce para o analisador, e a resposta custa o prazo dele.
@@ -1268,11 +1268,43 @@ E a fusão não pode valer para o código do projeto: dois módulos que declaram
 3 evitou nas referências. A fusão vale para o que se declara como `interface` no
 mesmo escopo global, que é o que a linguagem define — e não uma regra nossa.
 
-#### O tamanho, antes de qualquer promessa
+#### O tamanho, medido
 
-Cerca de 3 000 declarações no total, das quais 2 136 vêm do `lib.dom.d.ts`. Lidas
-uma vez e gravadas como a `20` já grava, por versão de TypeScript. Não é uma
-escala nova para este índice: o de Java lida com 26 mil arquivos.
+Contra o TypeScript **5.9.3** do `j-fis-cloud`:
+
+| o que | quanto |
+|---|---|
+| nomes de tipo lidos | **1 525** |
+| membros de `Array`, já fundidos | 35 |
+| análise dos 100 arquivos | **1,26 s** (compilação de depuração) |
+| cache em disco | **410 KB** |
+| releitura do cache | **21 ms** |
+
+**A estimativa que abriu esta fase dizia 3 000, e o número é 1 525.** A conta
+antiga somava linhas `declare` — `declare var`, `declare function` —, que não são
+tipos com membros. O erro era para mais, e é o lado inofensivo de errar numa
+estimativa de tamanho; registrado porque a diferença é o dobro.
+
+**O cache paga 43 vezes o que custa**: 21 ms contra 1,26 s. E a chave é a
+**versão do TypeScript**, não o projeto: dois projetos com o mesmo TypeScript têm
+a mesma biblioteca, e gravar por projeto guardaria a mesma coisa várias vezes.
+
+*O formato é de linhas, e não JSON: `CompletionItem` mora em `ide-domain`, que é
+neutro e não conhece serialização — pô-la lá por causa de uma linguagem é o que a
+`12` recusou. E cache que se lê a olho nu se conserta; um binário corrompido vira
+relatório de defeito sem pista.*
+
+#### O `string` minúsculo, que quase ficou de fora
+
+`const nome: string` é a anotação mais comum que existe, e o `string` da
+linguagem **não é** um nome declarado em lugar nenhum: quem declara `charAt`,
+`trim` e `split` é a `interface String` do `lib.es5.d.ts`. Sem a tradução —
+`string` para `String`, `number` para `Number`, e mais três — o ponto sobre
+metade das variáveis de um projeto continuaria dizendo "não sei", com a
+biblioteca inteira carregada ao lado.
+
+`any`, `unknown`, `void` e `never` ficam de fora de propósito: não há interface
+por trás deles, e inventar uma seria oferecer membros que ninguém declarou.
 
 #### O que ela não resolve, e é preciso dizer antes
 
@@ -1280,6 +1312,12 @@ escala nova para este índice: o de Java lida com 26 mil arquivos.
 `String` é instanciar genérico — o verificador de tipos, recusado pela ADR-025.
 O ponto sobre a variável responde; o ponto dentro da lambda continua descendo
 para o analisador.
+
+**E método não mostra assinatura.** A gramática guarda o tipo de retorno de um
+método em `return_type`, e a extração lê `type` — que é o campo de uma
+propriedade. Então `forEach` aparece na lista sem dizer o que recebe nem o que
+devolve. É anterior a esta fase e vale para o código do projeto também; ficou
+registrado aqui porque foi um teste desta fase que o encontrou.
 
 **Fora isso, ela resolve tudo o que o TypeScript declara**, e não um punhado de
 tipos escolhidos a dedo: `string`, `number`, `Array`, `Date`, `Promise`, `Map`,
@@ -1291,15 +1329,35 @@ aqui: a lista envelheceria a cada versão do TypeScript, e quem a mantivesse
 decidiria por engano o que quem usa a IDE alcança. Ler o que veio instalado não
 tem essa escolha para fazer.
 
-#### Critério
+#### Critério, e o que ele achou
 
-Num projeto real, `let w: String[];` e um ponto trazem `forEach`, `map` e
-`length` sem o analisador subir — e o mesmo vale para `Date`, `Promise`, `Map` e
-um `HTMLElement`, que é o que prova que a fase não é sobre um tipo. Um projeto
-com `"target": "ES2022"` **não** oferece o que só existe em ES2024, ainda que a
-declaração esteja no cache. E a medição de 14% a 17% da fase 4 é refeita
-no mesmo projeto, com o número novo escrito aqui ao lado do antigo — sem o qual
-esta fase é uma promessa e não um resultado.
+`let w: String[];` e um ponto trazem `forEach`, `map` e `length` sem o analisador
+subir; `String`, `Number`, `Date`, `Promise`, `Map`, `RegExp`, `HTMLElement` e
+`Response` respondem contra o TypeScript de verdade, o que é o que prova que a
+fase não é sobre um tipo. Um projeto com `"target": "ES2022"` **não** oferece o
+que só existe em ES2024, ainda que a declaração esteja no cache — e os dois
+projetos compartilham o mesmo arquivo de cache, que é o desenho.
+
+**Três defeitos vieram dos testes, e nenhum teria aparecido lendo o código:**
+
+- **`no-default-lib="true"` entrava como um `lib` chamado `true`.** Todo arquivo
+  da biblioteca abre com essa linha, e procurar `lib="` solto colhe o `true`
+  dela. Nenhum `lib.true.d.ts` existe, então nada quebrava — o engano só punha um
+  nome inventado dentro do alcance, calado, esperando o dia em que alguém
+  contasse quantos `lib` valem;
+- **os testes se diziam TypeScript `5.9.3`**, que é a versão instalada nesta
+  máquina. Como o cache é chaveado pela versão, rodar a suíte gravaria quatro
+  tipos de mentira por cima da biblioteca de verdade, e o projeto seguinte
+  abriria com eles. Os testes agora dizem `0.0.0-teste`, que não pode existir;
+- **`wait_until_indexed` respondia `true` sem esperar.** É o padrão do contrato —
+  "não há o que esperar" —, e este provider monta índice e biblioteca em outra
+  linha de execução. Na IDE não aparecia, porque quem espera de verdade lê o
+  sinal de prontidão direto; apareceu num teste, que sem isso mediria a corrida
+  entre duas threads em vez do que o código faz.
+
+**O que falta para fechar a fase:** refazer a medição de 14% a 17% da fase 4 no
+mesmo projeto e escrever o número novo aqui ao lado do antigo. Sem ele, sabe-se
+que a biblioteca responde, e não **quanto** ela tirou do analisador.
 
 ### Correções que vieram desta fase
 
