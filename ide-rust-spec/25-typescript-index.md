@@ -615,8 +615,29 @@ quem procura vê um a mais e descarta, em vez de concluir que não há.
 
 Segundos, e não milissegundos — é o preço de não ter a tabela. Aceitável porque a
 pergunta é rara e explícita, e porque a IDE já sabe rodar trabalho assim fora da
-thread da interface, com giro na tela. **A tabela de ocorrências continua sendo a
-resposta se isso incomodar**, e agora com um número para comparar.
+thread da interface, com giro na tela.
+
+##### E a tabela de ocorrências não é onde está o tempo
+
+Antes de mudar o formato do índice, os 10,2 s de `IconComponent` foram abertos:
+
+| | |
+| --- | --- |
+| varredura do projeto — o que a tabela substituiria | **1,4 s** |
+| confirmar os 228 candidatos | **8,8 s** |
+
+**A tabela tiraria 13%.** Os 86% eram trabalho repetido: o mesmo `import` —
+`IconComponent` vindo de `@spartacus/storefront` — era resolvido **uma vez por
+arquivo**, e cada resolução atravessa barris e analisa os arquivos do caminho.
+Lembrar a resposta por especificador, e não por arquivo, levou os 10,2 s a
+**7,0 s**, e a confirmação de 8,8 s a 5,6 s.
+
+O que sobra é do mesmo tipo: cada candidato ainda é analisado **duas vezes**, uma
+para saber de onde o nome vem e outra para achar as ocorrências. Compartilhar a
+árvore entre as duas é o próximo corte, e também não mexe no formato.
+
+**A tabela continua na mesa**, com o número certo ao lado: ela vale os 1,4 s da
+varredura, e não os dez segundos que pareciam ser dela.
 
 ##### O que falta para chegar às mãos de quem usa
 
