@@ -881,6 +881,71 @@ sobrecargas e fazer o tipo voltar da assinatura para dentro da lambda. É o
 verificador de tipos, que a ADR-025 recusou — e a recusa continua valendo, com o
 exemplo agora medido em vez de argumentado.
 
+### Fase 6 — O giro relata o que a IDE prepara ⬜ Decidida
+
+**O giro de carregamento cobre a preparação da IDE, e não a do analisador
+externo.** Quando o índice termina, ele termina. O que precisa do analisador e o
+encontra ocupado gira **por pedido**, e com cancelamento.
+
+#### O que se mede hoje, e por que isso é informação errada
+
+O giro dura o que o `tsserver` leva para montar o projeto — o sinal de prontidão
+dele é marcado no `projectLoadingFinish`. Medido no `spartacus-develop`, no mesmo
+dia e sem mudança de código: **28, 30, 53, 74 e 76 s**.
+
+Nesse intervalo inteiro a IDE **já responde**: realce, estrutura, busca por nome,
+`Ctrl+clique` e o `.` sobre tipo declarado vêm do provider nativo e do índice.
+Quem olha a tela conclui que deve esperar, e não deve. O giro está tecnicamente
+certo e praticamente mentindo.
+
+| | hoje | com esta fase |
+| --- | --- | --- |
+| giro de abertura | até 76 s | ~8 s — 7,2 do índice, 0,8 do grafo de estilo |
+
+#### A regra, e por que ela é uma frase
+
+**O que a IDE constrói e guarda é dela; o resto não é.** O índice e o grafo de
+estilo são cache nosso. O grafo de tipos do analisador não é cache, não é nosso,
+e não sobrevive ao processo — é estado vivo de um programa alheio.
+
+Uma versão anterior desta ideia mandava girar enquanto houvesse **capacidade que
+ninguém pronto cobre**, pela composição da `04`. Chega quase ao mesmo lugar com
+aritmética; a regra acima cabe numa frase e é explicável a quem usa.
+
+#### Isto **não** é adiar a abertura no analisador
+
+A seção logo abaixo recusa uma proposta que se parece com esta, e a diferença é o
+que ela muda:
+
+| | o que foi recusado | esta fase |
+| --- | --- | --- |
+| quando o analisador sobe | no primeiro pedido que o exija | **junto, como hoje** |
+| quanto se espera ao clicar | a montagem inteira | o que faltar, e quase sempre nada |
+| o que muda | *quando* o trabalho começa | *o que o giro relata* |
+
+O analisador continua subindo desde a abertura. Na maioria dos casos, quando
+alguém clica em algo que precisa de tipo, ele já está pronto e não há giro
+nenhum.
+
+#### Duas coisas que precisam vir junto
+
+**O giro por pedido, com cancelamento.** Quem pedir tipo aos dez segundos tem de
+ver que está esperando, e poder desistir. Sem isso, um giro honesto demais é
+trocado por aviso nenhum, e a espera vira travamento sem animação. O
+`SearchController` já cancela; o mesmo vale aqui.
+
+**Quem declara o que é nosso.** O `native_ide` é guardado por teste contra saber
+o nome de analisador nenhum, então a lista não pode ser escrita lá dentro — ela
+vem da **raiz de composição**, como já vêm os contribuintes de plugin. Sem
+mudança no contrato neutro, e sem o núcleo aprender o que é um `tsserver`.
+
+#### Critério
+
+Abrir o monorepo de referência e ver o giro terminar em segundos, e não em
+minuto. Pedir completação com tipo inferido antes de o analisador ficar pronto
+mostra giro **naquele pedido**, e ele pode ser cancelado. Nenhum arquivo perde
+realce, estrutura ou navegação por nome enquanto isso.
+
 ### Adiar a abertura no analisador ⛔ Recusado
 
 A ideia: manter o processo de pé, que custa **66 MB**, e só lhe mandar o `open`
