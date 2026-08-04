@@ -632,9 +632,15 @@ arquivo**, e cada resolução atravessa barris e analisa os arquivos do caminho.
 Lembrar a resposta por especificador, e não por arquivo, levou os 10,2 s a
 **7,0 s**, e a confirmação de 8,8 s a 5,6 s.
 
-O que sobra é do mesmo tipo: cada candidato ainda é analisado **duas vezes**, uma
-para saber de onde o nome vem e outra para achar as ocorrências. Compartilhar a
-árvore entre as duas é o próximo corte, e também não mexe no formato.
+Compartilhar a árvore entre as duas perguntas do mesmo arquivo — de onde o nome
+vem, e onde ele aparece — rendeu **7,0 s para 6,8 s**. Três por cento, e não a
+metade que a segunda análise parecia valer: **a sexta previsão de custo errada
+desta sessão**. Ficou porque é mais simples assim, e não porque foi rápida.
+
+O que ainda sobra não foi medido por partes. Os candidatos são 228 e o tempo é
+de segundos, então há algo maior do que uma análise repetida — provavelmente a
+travessia de barris dentro de `declarante`, que lê arquivos do caminho. **Medir
+antes de mexer**, que é a lição que esta seção inteira registra.
 
 **A tabela continua na mesa**, com o número certo ao lado: ela vale os 1,4 s da
 varredura, e não os dez segundos que pareciam ser dela.

@@ -86,6 +86,21 @@ pub(crate) fn do_texto(parser: &TypeScriptParser, texto: &str) -> Referencias {
     let Ok(arvore) = parser.parse(texto, None) else {
         return Referencias::default();
     };
+    na_arvore(&arvore, texto)
+}
+
+/// O mesmo, sobre uma árvore que já existe.
+///
+/// # Por que existe separado de [`do_texto`]
+///
+/// Quem procura referências precisa das duas coisas do mesmo arquivo: de onde o
+/// nome vem, e onde ele aparece. Cada uma analisava o texto por conta, e o
+/// arquivo era percorrido **duas vezes**.
+///
+/// *Medido: 7,0 s para 6,8 s no monorepo de referência — **3%**, e não a metade
+/// que a segunda análise parecia valer. O que sobra está em outro lugar, e o
+/// registro fica aqui para a próxima previsão não repetir o erro.*
+pub(crate) fn na_arvore(arvore: &tree_sitter::Tree, texto: &str) -> Referencias {
     let bytes = texto.as_bytes();
     let mut referencias = Referencias::default();
     let mut cursor = arvore.walk();
@@ -511,6 +526,15 @@ pub(crate) fn ocorrencias(parser: &TypeScriptParser, texto: &str, nome: &str) ->
     let Ok(arvore) = parser.parse(texto, None) else {
         return Vec::new();
     };
+    ocorrencias_na_arvore(&arvore, texto, nome)
+}
+
+/// O mesmo, sobre uma árvore que já existe. Ver [`na_arvore`].
+pub(crate) fn ocorrencias_na_arvore(
+    arvore: &tree_sitter::Tree,
+    texto: &str,
+    nome: &str,
+) -> Vec<TextRange> {
     let linhas = LineIndex::new(texto);
     let mut achadas = Vec::new();
     let mut pilha = vec![arvore.root_node()];

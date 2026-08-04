@@ -807,7 +807,13 @@ impl ActiveLanguage for ActiveTypeScript {
         for (arquivo, conteudo) in candidatos {
             // O texto do editor vence o do disco no arquivo que está aberto.
             let conteudo = if arquivo == caminho { texto.clone() } else { conteudo };
-            let referencias = references::do_texto(&self.parser, &conteudo);
+            // **Uma árvore, duas perguntas.** De onde o nome vem e onde ele
+            // aparece saem da mesma análise; cada uma por conta percorria o
+            // arquivo de novo.
+            let Ok(arvore) = self.parser.parse(&conteudo, None) else {
+                continue;
+            };
+            let referencias = references::na_arvore(&arvore, &conteudo);
             let declara_aqui = referencias.declaracao(&la).is_some();
             let alcanca = if declara_aqui {
                 arquivo == declarante_em
@@ -862,7 +868,7 @@ impl ActiveLanguage for ActiveTypeScript {
             if !alcanca {
                 continue;
             }
-            for range in references::ocorrencias(&self.parser, &conteudo, &la) {
+            for range in references::ocorrencias_na_arvore(&arvore, &conteudo, &la) {
                 // A própria declaração só entra se quem perguntou quis.
                 if !request.include_declaration
                     && arquivo == declarante_em
