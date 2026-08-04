@@ -8,9 +8,9 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use ide_domain::{
-    Diagnostic, DiagnosticSeverity, DocumentChange, DocumentId, DocumentSnapshot, LanguageId,
-    OutlineItem, OutlineKind, ProviderId, SyntaxHighlight, SyntaxHighlightKind, SyntaxSnapshot,
-    TextPosition, TextRange,
+    CompletionItem, CompletionKind, CompletionRequest, Diagnostic, DiagnosticSeverity,
+    DocumentChange, DocumentId, DocumentSnapshot, LanguageId, OutlineItem, OutlineKind, ProviderId,
+    SyntaxHighlight, SyntaxHighlightKind, SyntaxSnapshot, TextPosition, TextRange,
 };
 use ide_language_api::{
     ActiveLanguage, LANGUAGE_API_VERSION, LanguageActivationContext, LanguageCapabilities,
@@ -59,12 +59,17 @@ impl LanguageProvider for StyleLanguageProvider {
             // `.css` não atenderia arquivo nenhum.
             extensions: vec!["css".to_owned(), "scss".to_owned()],
             api_version: LANGUAGE_API_VERSION,
-            trigger_characters: Vec::new(),
+            // Cada um destes começa **um nome que o arquivo inventou**, e é
+            // isso que os separa de uma propriedade de CSS: o que vem depois
+            // deles só pode ser sabido lendo este arquivo.
+            trigger_characters: vec!['$', '%'],
         }
     }
 
     fn capabilities(&self) -> LanguageCapabilities {
-        LanguageCapabilities::SYNTAX | LanguageCapabilities::DIAGNOSTICS
+        LanguageCapabilities::SYNTAX
+            | LanguageCapabilities::DIAGNOSTICS
+            | LanguageCapabilities::COMPLETION
     }
 
     async fn activate(
@@ -186,6 +191,54 @@ impl ActiveLanguage for ActiveStyle {
             .map_err(|_| LanguageError::Provider("documentos de estilo travados".to_owned()))?
             .remove(&document_id);
         Ok(())
+    }
+
+    /// O que **este arquivo** declara, e nada mais.
+    ///
+    /// É o nível 1 da fase 5 da `23`: sem lista de propriedades, sem dado
+    /// embarcado, sem tabela de versão. Num projeto com tema, é a completação
+    /// que mais se usa — quem digita `$` quer as cores daquele projeto.
+    ///
+    /// # Por que o rótulo não traz o sigilo
+    ///
+    /// A interface substitui o **trecho de identificador** antes do cursor pelo
+    /// rótulo escolhido, e `$` não é caractere de identificador para ela. Com o
+    /// rótulo `$cor`, aceitar depois de digitar `$` escreveria `$$cor`.
+    ///
+    /// O sigilo vai no `detail`, que é o que a lista mostra ao lado — o nome
+    /// continua legível, e a inserção cai certa.
+    async fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Vec<CompletionItem>, LanguageError> {
+        let texto = self
+            .documentos
+            .lock()
+            .map_err(|_| LanguageError::Provider("documentos de estilo travados".to_owned()))?
+            .get(&request.document_id)
+            .map(|documento| documento.texto.clone())
+            .ok_or_else(|| LanguageError::Provider("documento não está aberto".to_owned()))?;
+
+        let cursor = deslocamento(
+            &texto,
+            request.position.line as usize,
+            request.position.column as usize,
+        );
+        let Some(sigilo) = sigilo_antes(&texto, cursor, &request.prefix) else {
+            // Fora de um nome que este arquivo inventa, não há o que oferecer
+            // **ainda**: nomes de propriedade são o nível 2, e uma lista vazia
+            // diz isso melhor do que um erro.
+            return Ok(Vec::new());
+        };
+        Ok(declaracoes(&texto, sigilo)
+            .into_iter()
+            .filter(|nome| nome.starts_with(&request.prefix))
+            .map(|nome| CompletionItem {
+                detail: Some(format!("{sigilo}{nome}")),
+                label: nome,
+                kind: CompletionKind::Variable,
+            })
+            .collect())
     }
 
     async fn diagnostics(&self, document_id: DocumentId) -> Result<Vec<Diagnostic>, LanguageError> {
@@ -359,6 +412,61 @@ fn aplicar(atual: &str, range: Option<TextRange>, texto: &str) -> String {
     novo.push_str(texto);
     novo.push_str(atual.get(fim..).unwrap_or_default());
     novo
+}
+
+/// O sigilo que abre o nome sendo digitado, se houver um.
+///
+/// Olha o caractere imediatamente antes do trecho já digitado: com o cursor em
+/// `$cor|`, o prefixo é `cor` e o que vem antes é `$`. Com o cursor logo depois
+/// do `$`, o prefixo é vazio e o caractere anterior é o próprio `$`.
+fn sigilo_antes(texto: &str, cursor: usize, prefixo: &str) -> Option<char> {
+    let inicio = cursor.checked_sub(prefixo.len())?;
+    texto
+        .get(..inicio)?
+        .chars()
+        .next_back()
+        .filter(|caractere| matches!(caractere, '$' | '%'))
+}
+
+/// Os nomes que este arquivo declara com um dado sigilo.
+///
+/// # Por que isto lê texto, e não a árvore
+///
+/// A gramática é a de CSS, e **`$cor-primaria` não é CSS**. Ela estilhaça a
+/// declaração em nós de erro — verificado: `$cor-primaria: #333` vira
+/// `ERROR "$c"`, `or`, `-`, `ERROR "primaria"`. Não há nó de onde tirar o nome.
+///
+/// Ler a linha resolve, não envelhece, e é honesto sobre o que está fazendo. É a
+/// mesma razão pela qual o diagnóstico de SCSS já era silenciado: a árvore não
+/// sabe deste arquivo, então quem sabe tem de ser outro.
+fn declaracoes(texto: &str, sigilo: char) -> Vec<String> {
+    let mut nomes = Vec::new();
+    for linha in texto.lines() {
+        let linha = linha.trim_start();
+        let Some(resto) = linha.strip_prefix(sigilo) else {
+            continue;
+        };
+        let nome = resto
+            .chars()
+            .take_while(|caractere| caractere.is_alphanumeric() || *caractere == '-' || *caractere == '_')
+            .collect::<String>();
+        if nome.is_empty() {
+            continue;
+        }
+        // Só declaração: `$cor: #333` e `%base {`. Um **uso** — `color: $cor` —
+        // não começa a linha, e por isso não chega aqui; oferecer usos como se
+        // fossem declarações encheria a lista de repetição.
+        let depois = resto.get(nome.len()..).unwrap_or_default().trim_start();
+        let declara = match sigilo {
+            '$' => depois.starts_with(':'),
+            _ => depois.starts_with('{') || depois.starts_with(','),
+        };
+        if declara && !nomes.contains(&nome) {
+            nomes.push(nome);
+        }
+    }
+    nomes.sort();
+    nomes
 }
 
 fn deslocamento(fonte: &str, linha: usize, coluna: usize) -> usize {

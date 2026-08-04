@@ -1300,6 +1300,102 @@ enquadramento por `Content-Length` que a fase 3a já implementa, e que não exig
 dependência nova. A escolha entre os dois depende de quanto do trabalho de source
 map se quer possuir.
 
+### Fase 5 — Completação em folha de estilo
+
+O provider de estilo responde por realce e estrutura desde a fase 1, e **nada
+mais**. Esta fase acrescenta completação, e ela se divide em três níveis com
+custos que não se parecem. Separá-los é o ponto: fazer o primeiro entrega o caso
+comum sem embarcar nada, e fazer o terceiro é outro projeto.
+
+#### Nível 1 — O que o próprio arquivo declara ✅
+
+`$variavel`, `@mixin`, `%placeholder` e os nomes de classe que já estão
+escritos. Sai da árvore que o provider **já monta** — nenhum dado externo,
+nenhuma lista, nenhuma tabela de versão, nenhuma manutenção anual.
+
+**E é o caso comum.** Num projeto com tema, quem digita `color: $` quer as cores
+*daquele projeto*, e não as 650 propriedades do CSS. A completação que mais se
+usa é a que não precisa saber nada sobre CSS.
+
+Os gatilhos são `$`, `@` e `%`, que é o que separa este nível dos outros: cada
+um deles começa **um nome que o arquivo inventou**.
+
+**Critério:** num `.scss` que declara `$cor-primaria`, digitar `$` dentro de uma
+regra oferece `$cor-primaria`. Um `.css` sem variável nenhuma não oferece nada, e
+não falha. **Cumprido.**
+
+##### Duas coisas que a implementação descobriu
+
+**A árvore não serve, e o texto serve.** A gramática é a de CSS, e
+`$cor-primaria` não é CSS: ela estilhaça a declaração em nós de erro —
+verificado, `$cor-primaria: #333` vira `ERROR "$c"`, `or`, `-`,
+`ERROR "primaria"`. Não há nó de onde tirar o nome. Ler a linha resolve, não
+envelhece, e é a mesma razão pela qual o diagnóstico de SCSS já era silenciado.
+
+**O rótulo não pode trazer o sigilo.** A interface substitui o *trecho de
+identificador* antes do cursor pelo rótulo escolhido, e `$` não é caractere de
+identificador para ela: com o rótulo `$cor`, aceitar depois de digitar `$`
+escreveria `$$cor`. O sigilo vai no `detail`. E digitar `-` **fecha** a lista,
+porque também não é identificador — o que impede o caso que corromperia o texto,
+e limita a filtragem ao primeiro segmento do nome.
+
+##### O que a medição em projeto real mostrou, e é o que falta
+
+Nos 37 `.scss` do `j-fis-cloud`: **zero variáveis SCSS e zero propriedades
+personalizadas declaradas**. Elas existem — 30 e 40 — mas moram em
+`j-fis-cloud-ui-lib`, trazidas por `@use 'j-fis-cloud-ui-lib/styles'`.
+
+**Centralizar tokens num arquivo e importá-lo é como se faz**, e é justamente o
+caso que "o que o próprio arquivo declara" não cobre. Neste projeto, o nível 1
+oferece corretamente nada.
+
+#### Nível 1b — Seguir o `@use` ⬜
+
+O que torna o nível 1 útil num projeto de verdade: resolver `@use`, `@import` e
+`@forward`, e trazer o que o arquivo importado declara.
+
+O custo está na **resolução**, e não na extração: parciais com sublinhado
+(`_variables.scss`), arquivo de índice, especificador nu resolvido em
+`node_modules`, e `@use ... as *` contra o prefixo de espaço de nomes. É um
+resolvedor, e o `com_extensao` da `25` já ensinou que essa família de tarefa
+parece pequena e não é.
+
+#### Nível 2 — Os nomes das propriedades ⬜
+
+650 propriedades, e a lista existe: o `mdn-data` publica `css/properties.json`
+sob **CC0-1.0** — domínio público, sem exigência de atribuição.
+
+Levar só o que interessa muda o tamanho por uma ordem de grandeza:
+
+| o que levar | tamanho |
+| --- | --- |
+| só os nomes | **10,6 KB** |
+| nomes mais a sintaxe dos valores | 25,4 KB |
+| o `properties.json` inteiro | 336 KB |
+
+Dez kilobytes embarcados, pelo mesmo mecanismo da ADR-029. Envelhece devagar —
+propriedades novas por ano —, e é **dado e não lógica**: atualizar é trocar um
+arquivo, e não mexer em código.
+
+#### Nível 3 — Os valores de cada propriedade ⬜ Fora de escopo por enquanto
+
+`display: fl` → `flex` exige interpretar o mini-formato do MDN:
+
+```text
+[ <display-outside> || <display-inside> ] | <display-listitem> | <display-internal> | ...
+```
+
+É um parser de gramática de valores, com referências cruzadas entre 378
+sintaxes. Trabalho de verdade, e nada do que os níveis 1 e 2 fazem depende dele.
+
+#### O que esta fase deliberadamente não faz
+
+**Subir um serviço de CSS em Node.** O `vscode-css-languageservice` existe e
+resolveria os três níveis, mas a ADR-029 mediu o que custa um segundo processo,
+e a assimetria com TypeScript é o argumento: **o TypeScript exige um verificador
+de tipos, e o CSS exige uma lista.** Pagar um processo por uma lista seria trocar
+10 KB por centenas de megabytes.
+
 ## O que fica de fora, e por quê
 
 - **Depurar dentro da IDE**, que era a fase 4 e virou decisão: quem depura
