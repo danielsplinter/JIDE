@@ -800,8 +800,11 @@ impl ActiveLanguage for ActiveTypeScript {
             )));
         };
 
+        let candidatos = self.candidatos(&la);
         let mut achadas = Vec::new();
-        for (arquivo, conteudo) in self.candidatos(&la) {
+        // De onde cada especificador vem, lembrado entre candidatos.
+        let mut resolvidos: HashMap<(Option<PathBuf>, String), Option<PathBuf>> = HashMap::new();
+        for (arquivo, conteudo) in candidatos {
             // O texto do editor vence o do disco no arquivo que está aberto.
             let conteudo = if arquivo == caminho { texto.clone() } else { conteudo };
             let referencias = references::do_texto(&self.parser, &conteudo);
@@ -809,8 +812,52 @@ impl ActiveLanguage for ActiveTypeScript {
             let alcanca = if declara_aqui {
                 arquivo == declarante_em
             } else {
-                self.arquivo_que_declara(&arquivo, &conteudo, &la)
-                    .is_some_and(|destino| destino == declarante_em)
+                // **O mesmo `import` se repete entre arquivos**: num monorepo,
+                // dezenas trazem `IconComponent` de `@spartacus/storefront`.
+                // Resolver uma vez por especificador, e não uma por arquivo,
+                // é o que tira o trabalho repetido — cada resolução atravessa
+                // barris e analisa os arquivos do caminho.
+                let Some((la_de_la, especificador)) = referencias.origem(&la) else {
+                    continue;
+                };
+                let chave = (arquivo.parent().map(Path::to_path_buf), especificador.to_owned());
+                match resolvidos.get(&chave) {
+                    Some(destino) => destino.as_ref() == Some(&declarante_em),
+                    None => {
+                        let destino = self
+                            .resolver
+                            .resolve(&arquivo, especificador)
+                            .and_then(|modulo| {
+                                let parser = &self.parser;
+                                let exportacoes = |arquivo: &Path| {
+                                    references::de_arquivo(parser, arquivo)
+                                        .reexportados
+                                        .into_iter()
+                                        .map(|trazido| Reexportacao {
+                                            nome: trazido.usado,
+                                            origem: trazido.origem,
+                                            de: trazido.de,
+                                        })
+                                        .collect()
+                                };
+                                let declara = |arquivo: &Path, nome: &str| {
+                                    references::de_arquivo(parser, arquivo)
+                                        .declaracao(nome)
+                                        .is_some()
+                                };
+                                declarante(
+                                    &self.resolver,
+                                    &modulo,
+                                    &la_de_la,
+                                    &exportacoes,
+                                    &declara,
+                                )
+                            });
+                        let bate = destino.as_ref() == Some(&declarante_em);
+                        resolvidos.insert(chave, destino);
+                        bate
+                    }
+                }
             };
             if !alcanca {
                 continue;
