@@ -926,6 +926,64 @@ impl NativeIde {
         });
     }
 
+    /// Quem usa o nome sob o cursor, fora da thread da interface.
+    ///
+    /// Mesmo pedido da navegação — documento, posição e nome —, porque é a mesma
+    /// pergunta virada do avesso. O resultado cai no painel da busca por
+    /// conteúdo: uma lista de arquivo e linha é exatamente a forma dele.
+    fn find_references(&mut self, request: NavigationRequest) {
+        let Some(host) = self.languages.host.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let Some(document) = self.documents.language.get(&request.document_id) else {
+            return;
+        };
+        let pedido = ide_domain::ReferencesRequest {
+            document_id: request.document_id,
+            position: position_at_offset(&document.text, request.byte_offset),
+            include_declaration: true,
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _cancel = self.languages.referencias.start(receiver);
+        std::thread::spawn(move || {
+            let achadas = pollster::block_on(host.references(host.request_context(), pedido))
+                .unwrap_or_default();
+            let _ = sender.send(achadas);
+        });
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(format!("Procurando usos de {}…", request.token));
+        }
+    }
+
+    /// Recolhe os usos, se já chegaram. Não espera por nada.
+    fn collect_references(&mut self) -> bool {
+        let Some(achadas) = self.languages.referencias.collect() else {
+            return false;
+        };
+        let quantos = achadas.len();
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_content_search_results(
+                achadas
+                    .into_iter()
+                    .map(|local| ContentSearchHit {
+                        preview: format!(
+                            "{}:{}",
+                            local
+                                .path
+                                .file_name()
+                                .and_then(|nome| nome.to_str())
+                                .unwrap_or_default(),
+                            local.range.start.line + 1
+                        ),
+                        location: local,
+                    })
+                    .collect(),
+            );
+            shell.set_status_message(format!("{quantos} uso(s)"));
+        }
+        true
+    }
+
     /// Recolhe o resultado da busca, se já chegou. Não espera por nada.
     fn collect_content_search(&mut self) -> bool {
         let Some(found) = self.workspace.search.collect() else {
@@ -2292,6 +2350,7 @@ impl NativeIde {
                 UiAction::BreakpointsChanged(path) => self.sync_breakpoints(path),
                 UiAction::Debug(request) => self.handle_debug_request(request),
                 UiAction::SearchTypes(query) => self.answer_type_search(query),
+                UiAction::FindReferences(request) => self.find_references(request),
                 UiAction::SearchContent(query) => self.answer_content_search(&query),
             }
         }
@@ -2563,6 +2622,7 @@ impl ApplicationHandler for NativeIde {
         changed |= self.collect_type_search();
         changed |= self.advance_search_spinner();
         changed |= self.advance_project_loading();
+        changed |= self.collect_references();
         changed |= self.collect_navigation();
         self.wake_pending_providers();
         self.suspend_idle_languages();

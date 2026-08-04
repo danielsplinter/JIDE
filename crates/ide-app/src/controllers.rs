@@ -196,6 +196,12 @@ pub(super) struct LanguageController {
     pub(super) type_search: SearchController<TypeSearchOutcome>,
     /// A navegação em curso. Ver `navigate_to_definition`.
     pub(super) navigation: SearchController<NavigationOutcome>,
+    /// Os usos de um nome, procurados fora da thread da interface.
+    ///
+    /// Medido no monorepo de referência: 6,8 s para um nome muito usado.
+    /// Na thread da janela isso seria a IDE congelada por sete segundos —
+    /// o defeito que a `25` caçou cinco vezes.
+    pub(super) referencias: SearchController<Vec<ide_domain::Location>>,
     /// Quedas já anunciadas, para não repetir o aviso a cada verificação.
     pub(super) announced_failures: std::collections::HashSet<String>,
     /// Realces pedidos e ainda não entregues.

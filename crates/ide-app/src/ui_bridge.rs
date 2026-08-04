@@ -37,6 +37,7 @@ pub(super) enum UiAction {
     Debug(DebugRequest),
     RenameDocument(RenameDocumentRequest),
     SearchTypes(String),
+    FindReferences(ide_application::NavigationRequest),
     SearchContent(String),
 }
 
@@ -73,6 +74,7 @@ impl From<ApplicationCommand> for UiAction {
             ApplicationCommand::BreakpointsChanged(value) => Self::BreakpointsChanged(value),
             ApplicationCommand::Debug(value) => Self::Debug(value),
             ApplicationCommand::SearchTypes(value) => Self::SearchTypes(value),
+            ApplicationCommand::FindReferences(request) => Self::FindReferences(request),
             ApplicationCommand::SearchContent(value) => Self::SearchContent(value),
         }
     }

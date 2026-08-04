@@ -48,6 +48,11 @@ pub enum ApplicationCommand {
     /// Renomeia o arquivo de um documento aberto, seguindo o tipo.
     RenameDocument(RenameDocumentRequest),
     SearchTypes(String),
+    /// Quem **usa** o nome na posição informada.
+    ///
+    /// Leva o mesmo pedido da navegação porque precisa do mesmo: qual
+    /// documento, que posição, e qual nome está ali.
+    FindReferences(NavigationRequest),
     SearchContent(String),
 }
 

@@ -202,6 +202,12 @@ pub enum EditorAction {
     None,
     /// `Ctrl+Click` sobre o deslocamento informado.
     Navigate(usize),
+    /// `Ctrl+Shift+Click`: quem **usa** o nome, e não onde ele é declarado.
+    ///
+    /// Nasce do mesmo gesto e do mesmo lugar que a navegação porque é a mesma
+    /// pergunta virada do avesso — a definição anda do uso para a declaração, e
+    /// esta anda da declaração para os usos.
+    FindReferences(usize),
     /// Clique na calha, na linha informada.
     ToggleBreakpoint(usize),
     Save,
@@ -507,7 +513,14 @@ impl EditorPane {
         let offset = self.offset_at_point(buffer, point);
         if control && self.capabilities.navigation {
             self.cursor = offset;
-            return EditorAction::Navigate(offset);
+            // O `Shift` decide qual das duas perguntas: com ele, quem usa; sem
+            // ele, onde é declarado. Precisa vir antes, senão a navegação
+            // engole o gesto.
+            return if shift {
+                EditorAction::FindReferences(offset)
+            } else {
+                EditorAction::Navigate(offset)
+            };
         }
         // Com `Shift`, o clique **estende** do que já estava marcado até aqui: a
         // âncora é a que existe, ou o cursor de antes do clique. Fixar uma nova

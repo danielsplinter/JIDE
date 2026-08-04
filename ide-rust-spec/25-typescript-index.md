@@ -645,11 +645,21 @@ antes de mexer**, que é a lição que esta seção inteira registra.
 **A tabela continua na mesa**, com o número certo ao lado: ela vale os 1,4 s da
 varredura, e não os dez segundos que pareciam ser dela.
 
-##### O que falta para chegar às mãos de quem usa
+##### Como se pergunta: `Ctrl+Shift+clique` ✅
 
-O provider responde; a IDE ainda não pergunta. Não há ação nem atalho de "achar
-usos" na interface, e ligá-la é o passo seguinte — com o `SearchController`, que
-já existe e já roda fora da thread da interface.
+O gesto nasce **no mesmo lugar** que o `Ctrl+clique`, e leva o mesmo pedido —
+documento, posição e nome. É a mesma pergunta virada do avesso: a definição anda
+do uso para a declaração, e esta anda da declaração para os usos.
+
+Ligar custou pouco porque o `NavigationRequest` já carregava tudo, e porque a
+lista de usos tem a forma que o painel da busca por conteúdo já mostra. Nada de
+novo na interface: um `EditorAction`, um comando, e o resultado num painel que
+existia.
+
+**E ela roda fora da thread da janela**, no `SearchController`. Não é zelo
+abstrato: são 6,8 s no pior caso medido, e na thread da interface isso seria a
+IDE congelada por sete segundos — o defeito que esta especificação caçou cinco
+vezes.
 
 #### A árvore é reaproveitada entre teclas ✅
 

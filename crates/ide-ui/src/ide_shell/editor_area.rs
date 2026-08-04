@@ -555,6 +555,20 @@ impl IdeShell {
                         }));
                 }
             }
+            EditorAction::FindReferences(offset) => {
+                if let (Some(document_id), Some(token)) = (
+                    self.editor_area.session.active_id(),
+                    self.active_text().and_then(|text| token_at(text, offset)),
+                ) {
+                    self.context.status_message = format!("Procurando usos de {token}…");
+                    self.commands
+                        .push(ApplicationCommand::FindReferences(NavigationRequest {
+                            document_id,
+                            byte_offset: offset,
+                            token,
+                        }));
+                }
+            }
             EditorAction::ToggleBreakpoint(line) => {
                 if let Some(path) = self
                     .editor_area
