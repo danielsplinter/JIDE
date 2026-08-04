@@ -80,14 +80,24 @@ fn espalhada(todos: &[PathBuf]) -> Vec<PathBuf> {
 
 /// As posições logo depois de cada `.` que segue um identificador.
 ///
-/// **Só depois de um nome.** `1.5` é número, `./caminho` é texto, e `...args` é
-/// espalhamento — nenhum dos três é uma pergunta que alguém faria.
+/// **Só depois de um nome.** `1.5` é número, `...args` é espalhamento, e nenhum
+/// dos dois é uma pergunta que alguém faria.
+///
+/// **E nada dentro de aspas.** A primeira versão desta contagem media o ponto de
+/// `'./pagina.html'` e o de `'contato@empresa.com.br'` como se fossem acesso a
+/// membro — e, pior, os classificava como **cadeia**, porque antes deles há um
+/// nome e um ponto. A estatística de "quanto é cadeia" ficou inflada por nomes
+/// de arquivo, que é o defeito de amostra da fase 4 outra vez, com outra roupa.
 fn pontos_de(texto: &str) -> Vec<(TextPosition, bool)> {
     let mut achados = Vec::new();
     for (numero, linha) in texto.lines().enumerate() {
         let caracteres: Vec<char> = linha.chars().collect();
+        let dentro_de_aspas = faixas_de_texto(&caracteres);
         for (indice, caractere) in caracteres.iter().enumerate() {
             if *caractere != '.' || indice == 0 {
+                continue;
+            }
+            if dentro_de_aspas[indice] {
                 continue;
             }
             let anterior = caracteres[indice - 1];
@@ -121,6 +131,42 @@ fn pontos_de(texto: &str) -> Vec<(TextPosition, bool)> {
     achados
 }
 
+/// Quais posições de uma linha estão dentro de aspas.
+///
+/// Aproximado de propósito: uma linha por vez, sem seguir texto que atravesse
+/// linhas. O que se quer é tirar `'./pagina.html'` da contagem, e para isso
+/// basta — e um analisador de verdade aqui seria a gramática, que a medição não
+/// precisa carregar.
+fn faixas_de_texto(caracteres: &[char]) -> Vec<bool> {
+    let mut dentro = vec![false; caracteres.len()];
+    let mut abertura: Option<char> = None;
+    let mut escapado = false;
+    for (indice, caractere) in caracteres.iter().enumerate() {
+        if escapado {
+            escapado = false;
+            dentro[indice] = abertura.is_some();
+            continue;
+        }
+        match abertura {
+            Some(aspa) => {
+                dentro[indice] = true;
+                if *caractere == '\\' {
+                    escapado = true;
+                } else if *caractere == aspa {
+                    abertura = None;
+                }
+            }
+            None => {
+                if matches!(caractere, '\'' | '"' | '`') {
+                    abertura = Some(*caractere);
+                    dentro[indice] = true;
+                }
+            }
+        }
+    }
+    dentro
+}
+
 struct Contagem {
     pontos: usize,
     membros: usize,
@@ -135,6 +181,13 @@ struct Contagem {
     /// de um membro exige resolver o membro — que é um passo além do que a fase
     /// 4 entregou.
     cadeias_sem_resposta: usize,
+    /// Elos que se soube ler, e cujo tipo mora onde o índice não vai.
+    ///
+    /// `this.formBuilder.` com `FormBuilder` vindo de `@angular/forms` é isto:
+    /// o elo funcionou, o tipo foi achado, e ele está em `node_modules` — que a
+    /// fase 1 deixou de fora de propósito. Separá-los do resto é o que impede
+    /// concluir que o elo não funciona quando o que falta é outra coisa.
+    elos_fora_do_alcance: usize,
 }
 
 impl Contagem {
@@ -187,6 +240,7 @@ fn medir(raiz: &Path) -> Contagem {
         nao_sei: 0,
         falhas: 0,
         cadeias_sem_resposta: 0,
+        elos_fora_do_alcance: 0,
     };
     for (numero, arquivo) in amostra.iter().enumerate() {
         let Ok(texto) = std::fs::read_to_string(arquivo) else {
@@ -212,10 +266,16 @@ fn medir(raiz: &Path) -> Contagem {
             })) {
                 Ok(itens) if itens.is_empty() => contagem.vazias += 1,
                 Ok(_) => contagem.membros += 1,
-                Err(LanguageError::Unresolved(_)) => {
+                Err(LanguageError::Unresolved(motivo)) => {
                     contagem.nao_sei += 1;
                     if em_cadeia {
                         contagem.cadeias_sem_resposta += 1;
+                        // Um `Membro` que não vira resposta é diferente de uma
+                        // expressão que não se entendeu: o primeiro é um elo que
+                        // se soube ler e cujo tipo mora fora do alcance.
+                        if motivo.starts_with("não sei onde") {
+                            contagem.elos_fora_do_alcance += 1;
+                        }
                     }
                 }
                 // Qualquer outro erro é defeito, e não "não sei": ele precisa
@@ -252,10 +312,11 @@ fn how_much_of_the_dot_the_index_reaches() {
         inicio.elapsed()
     );
     println!(
-        "  dos {} \"não sei\", {} ({:.0}%) são o segundo elo de uma cadeia",
+        "  dos {} \"não sei\", {} ({:.0}%) são o segundo elo de uma cadeia; {} deles têm o tipo fora do alcance",
         contagem.nao_sei,
         contagem.cadeias_sem_resposta,
-        (contagem.cadeias_sem_resposta as f64) * 100.0 / (contagem.nao_sei.max(1) as f64)
+        (contagem.cadeias_sem_resposta as f64) * 100.0 / (contagem.nao_sei.max(1) as f64),
+        contagem.elos_fora_do_alcance
     );
 
     assert!(contagem.pontos > 0, "a amostra precisa ter pontos");

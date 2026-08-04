@@ -1194,7 +1194,7 @@ genéricos. O ganho não é "1,9 GB a menos"; é: quem só navega, busca e edita
 código com tipos declarados nunca paga por ele, e ninguém paga por ele **antes**
 de precisar.
 
-### Fase 8 — O segundo elo da cadeia ⬜
+### Fase 8 — O segundo elo da cadeia ✅
 
 `this.svc.` — o `this.svc` é alcançável e o que vem depois não. A medição da fase
 7 diz que **um quarto de tudo o que a IDE não responde** está aí: 1 636 pontos no
@@ -1232,10 +1232,70 @@ de retorno, e nada acusaria: um cache incompleto tem a mesma cara de um certo. O
 arquivo passou a se identificar na primeira linha, e um de outro formato é
 **descartado, e não convertido** — a mesma regra que o índice em disco já tinha.
 
-**Critério:** `this.campo.` completa com os membros do tipo do campo, num projeto
-real, sem o analisador subir. A cobertura é medida com `tests/cobertura.rs`, no
-mesmo instrumento e nos mesmos dois projetos, e o número entra aqui ao lado dos
-de agora — 12,8% e 25,8%.
+#### O que faltava no meio do caminho: propriedade de parâmetro
+
+`this.svc.` não respondia nem depois do elo pronto, e a causa não era o elo:
+**parâmetro de construtor com modificador nunca esteve na lista de membros**.
+
+```ts
+constructor(private readonly formBuilder: FormBuilder) {}
+```
+
+É o idioma de injeção de Angular — no projeto de referência, **toda** página
+injeta assim. `svc.` sozinho já funcionava, porque quem resolve o receptor de um
+nome solto olha os parâmetros do construtor. `this.svc.` não, porque essa
+pergunta é pelos **membros da classe**, e nessa lista o `svc` não estava.
+
+Sem modificador não entra: `constructor(x: Foo)` recebe `x` e o esquece quando o
+construtor termina, e oferecê-lo em `this.` seria um nome que não existe.
+
+*Estava escondido desde a fase 4, e nada o denunciava: quem testasse `svc.`
+veria funcionar.* Foi a medição da fase 8 que o apontou, lendo os motivos das
+recusas num projeto real em vez de contá-las.
+
+#### Quanto ela rendeu
+
+| projeto | pontos | sem a fase 8 | com | ganho |
+|---|---|---|---|---|
+| monorepo de biblioteca | 8 192 | 29,2% | **32,5%** | +3,3 pontos, 271 pontos a mais |
+| aplicação | 179 | 28,5% | **28,5%** | **zero** |
+
+**Zero na aplicação, e o motivo é preciso.** O elo passou a funcionar lá também —
+mas 24 dos 51 elos que sobram resolvem para tipos que moram em `node_modules`:
+`this.formBuilder.` acha que `formBuilder` é um `FormBuilder`, e `FormBuilder`
+vem de `@angular/forms`, que a fase 1 deixou de fora de propósito. **O elo
+funcionou; o tipo é que está fora do alcance.** A recusa mudou de "não sei o tipo
+desta expressão" para "não sei onde `FormBuilder` é declarado" — que é uma frase
+melhor, e continua sendo uma recusa.
+
+O que decide o ganho é, então, **de onde vêm os tipos injetados**: num monorepo
+de biblioteca eles são do próprio projeto, e o elo os alcança; numa aplicação são
+do framework, e ele não.
+
+#### E o instrumento estava errado — os números anteriores também
+
+A contagem media **os pontos dentro de aspas**: `'./pagina.html'`,
+`'contato@empresa.com.br'`, `'smtp.gmail.com'`. Cada um virava uma pergunta que
+ninguém faria, e — pior — era classificado como **cadeia**, porque antes dele há
+um nome e um ponto.
+
+Corrigido, a aplicação caiu de 397 para **179** pontos, e a cobertura de base
+subiu de 12,8% para **28,5%**. Não porque o código melhorou: porque metade das
+perguntas nunca deveria ter sido feita.
+
+**Os números da fase 7 e da fase 4 foram medidos com esse instrumento**, e
+portanto estavam baixos pelo mesmo motivo. A direção deles continua valendo — a
+fase 7 rendeu pouco, e isso não muda —, mas as porcentagens absolutas de então
+não são comparáveis com as de agora.
+
+*É a terceira vez que a amostra desta medição está errada: os 400 primeiros
+arquivos de uma varredura em profundidade, na fase 4; o dobro de declarações
+estimado, na fase 7; e agora os pontos dentro de textos. **O instrumento merece o
+mesmo cuidado que o código**, e nas três vezes o defeito só apareceu quando
+alguém olhou o que ele estava contando, e não o número que ele deu.*
+
+**Critério:** cumprido — `this.campo.`, `this.buscar().` e `this.nome.` com
+`nome: string` completam num projeto real, sem o analisador subir.
 
 ### Fase 7 — Os tipos do próprio TypeScript ✅
 
@@ -1407,6 +1467,11 @@ por isso a comparação de então dependia de eu lembrar como tinha contado.
 **A prova de que o instrumento conta o mesmo:** na aplicação ele achou **397**
 pontos, contra os 402 da fase 4. Mesmo projeto, mesma ordem de grandeza, mesma
 regra — cada `.` que segue um nome.
+
+> ⚠️ **E o "mesmo" era o mesmo erro.** A fase 8 descobriu que essa contagem
+> incluía os pontos **dentro de aspas** — `'./pagina.html'` valia como pergunta.
+> Corrigida, a aplicação tem **179** pontos, e não 397. Os números desta seção
+> ficam como foram medidos, e não são comparáveis com os da fase 8; ver lá.
 
 Medido com e sem a biblioteca, **no mesmo instrumento e na mesma amostra**:
 

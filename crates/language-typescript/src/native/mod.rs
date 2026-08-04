@@ -333,6 +333,34 @@ impl ActiveTypeScript {
         achou.then_some(itens)
     }
 
+    /// O tipo de um membro de um tipo. É a fase 8 da `25`.
+    ///
+    /// # O trabalho já estava quase todo feito
+    ///
+    /// `membros_do_tipo` já atravessa módulos, segue herança e cai na biblioteca
+    /// do TypeScript quando o projeto não declara o nome. Os membros que ele
+    /// devolve **já trazem o tipo escrito ao lado** — é o `detail` da fase 4, e
+    /// para método é o tipo de retorno, desde a correção que precedeu esta fase.
+    ///
+    /// O que faltava era ler esse texto como um nome de tipo. `Observable<T>` é
+    /// um `Observable`, `Pedido[]` é um `Array`, `string` é a `interface String`
+    /// — as três regras já existiam, e reusá-las é o que impede uma segunda
+    /// implementação da mesma coisa envelhecer em silêncio.
+    ///
+    /// # O que ele continua não sabendo
+    ///
+    /// O que o genérico **contém**: `Observable<Pedido>` responde com os membros
+    /// de `Observable`, e não com os de `Pedido`. Instanciar genérico é o
+    /// verificador de tipos, recusado pela ADR-025.
+    fn tipo_do_membro(&self, caminho: &Path, texto: &str, tipo: &str, membro: &str) -> Option<String> {
+        let itens = self.membros_do_tipo(caminho, texto, tipo)?;
+        let escrito = itens
+            .into_iter()
+            .find(|item| item.label == membro)?
+            .detail?;
+        members::nome_do_tipo_escrito(&self.parser, &escrito)
+    }
+
     /// Que arquivo declara um nome, visto de outro. É o caminho da fase 3.
     fn arquivo_que_declara(&self, de: &Path, texto: &str, nome: &str) -> Option<PathBuf> {
         let referencias = references::do_texto(&self.parser, texto);
@@ -814,6 +842,18 @@ impl ActiveLanguage for ActiveTypeScript {
         );
         let tipo = match receptor {
             members::Receptor::Tipo(tipo) => tipo,
+            // O segundo elo de uma cadeia: o tipo de quem está antes do primeiro
+            // ponto é conhecido, e o que falta é o tipo do **membro**.
+            members::Receptor::Membro { tipo, membro } => {
+                match self.tipo_do_membro(&caminho, &texto, &tipo, &membro) {
+                    Some(seguinte) => seguinte,
+                    None => {
+                        return Err(LanguageError::Unresolved(format!(
+                            "não sei o tipo de `{membro}` em `{tipo}`"
+                        )));
+                    }
+                }
+            }
             members::Receptor::Desconhecido => {
                 // `Unresolved`, e não `Unavailable`: não saber o tipo de uma
                 // expressão é um limite deste provider, e não a morte dele.

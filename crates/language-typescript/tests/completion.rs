@@ -133,6 +133,128 @@ fn in_a_component_this_and_the_injected_service_complete() {
     let _ = std::fs::remove_dir_all(&raiz);
 }
 
+/// **O critério da fase 8.** `this.campo.` completa com os membros do campo.
+///
+/// É onde estava um quarto de tudo o que a IDE não respondia: em `this.svc.`, o
+/// `this.svc` era alcançável e o resto não. Num componente Angular quase tudo se
+/// acessa por `this.`, e o segundo ponto é o gesto mais comum que existe.
+#[test]
+fn the_second_link_of_a_chain_completes() {
+    let raiz = projeto("segundo-elo");
+    escrever(
+        &raiz.join("src/login.service.ts"),
+        "export class LoginService {\n  entrar(usuario: string) {}\n  sair() {}\n}\n",
+    );
+    escrever(
+        &raiz.join("src/pagina.component.ts"),
+        "import { LoginService } from './login.service';\n\
+         export class PaginaComponent {\n\
+        \x20 private login: LoginService;\n\
+        \x20 abrir() {\n\
+        \x20   this.login.\n\
+        \x20 }\n\
+         }\n",
+    );
+    let ativo = ativado(&raiz);
+    let itens = match completar(
+        ativo.as_ref(),
+        &raiz.join("src/pagina.component.ts"),
+        "this.login.",
+    ) {
+        Ok(itens) => itens,
+        Err(erro) => panic!("`this.login.` precisa completar: {erro}"),
+    };
+    assert!(
+        itens.contains(&"entrar".to_owned()) && itens.contains(&"sair".to_owned()),
+        "os membros do serviço, alcançados pelo segundo elo: {itens:?}"
+    );
+    let _ = std::fs::remove_dir_all(&raiz);
+}
+
+/// **E a chamada também**, que é a outra metade dos elos.
+///
+/// `this.buscar().` só tem resposta porque método passou a guardar o tipo de
+/// retorno — a correção que precedeu esta fase. Sem ela, isto responderia "não
+/// sei" enquanto `this.campo.` respondia, e nada acusaria a metade que faltava.
+#[test]
+fn a_call_is_a_link_too() {
+    let raiz = projeto("elo-chamada");
+    escrever(
+        &raiz.join("src/pedido.ts"),
+        "export class Pedido {\n  total = 0;\n  somar() {}\n}\n",
+    );
+    escrever(
+        &raiz.join("src/pagina.ts"),
+        "import { Pedido } from './pedido';\n\
+         export class Pagina {\n\
+        \x20 buscar(): Pedido { return null!; }\n\
+        \x20 abrir() {\n\
+        \x20   this.buscar().\n\
+        \x20 }\n\
+         }\n",
+    );
+    let ativo = ativado(&raiz);
+    let itens = match completar(ativo.as_ref(), &raiz.join("src/pagina.ts"), "this.buscar().") {
+        Ok(itens) => itens,
+        Err(erro) => panic!("`this.buscar().` precisa completar: {erro}"),
+    };
+    assert!(
+        itens.contains(&"total".to_owned()) && itens.contains(&"somar".to_owned()),
+        "os membros do que o método devolve: {itens:?}"
+    );
+    let _ = std::fs::remove_dir_all(&raiz);
+}
+
+/// **Um campo de tipo da linguagem também**, que é o que faz a fase 7 valer.
+///
+/// `this.nome.` com `nome: string` só vira resposta se as duas coisas
+/// existirem: o elo da cadeia e a `interface String` no índice. Sozinha, nenhuma
+/// das duas responde isto.
+#[test]
+fn a_field_of_a_language_type_completes_through_the_chain() {
+    let raiz = projeto("elo-biblioteca");
+    let lib = raiz.join("node_modules/typescript/lib");
+    escrever(
+        &raiz.join("node_modules/typescript/package.json"),
+        "{\"version\": \"0.0.0-teste\"}",
+    );
+    escrever(
+        &lib.join("lib.es5.d.ts"),
+        "interface String {\n  charAt(i: number): string;\n  trim(): string;\n}\n",
+    );
+    escrever(
+        &lib.join("lib.es2022.full.d.ts"),
+        "/// <reference no-default-lib=\"true\"/>\n/// <reference lib=\"es5\" />\n",
+    );
+    escrever(
+        &raiz.join("tsconfig.json"),
+        "{ \"compilerOptions\": { \"target\": \"ES2022\" } }",
+    );
+    escrever(
+        &raiz.join("src/pagina.ts"),
+        "export class Pagina {\n\
+        \x20 nome: string;\n\
+        \x20 abrir() {\n\
+        \x20   this.nome.\n\
+        \x20 }\n\
+         }\n",
+    );
+    let ativo = ativado(&raiz);
+    assert!(
+        pollster::block_on(ativo.wait_until_indexed(std::time::Duration::from_secs(60))),
+        "a preparação do projeto precisa terminar"
+    );
+    let itens = match completar(ativo.as_ref(), &raiz.join("src/pagina.ts"), "this.nome.") {
+        Ok(itens) => itens,
+        Err(erro) => panic!("`this.nome.` precisa completar: {erro}"),
+    };
+    assert!(
+        itens.contains(&"charAt".to_owned()) && itens.contains(&"trim".to_owned()),
+        "o elo levou até a `interface String`: {itens:?}"
+    );
+    let _ = std::fs::remove_dir_all(&raiz);
+}
+
 /// **A outra metade do critério.** O que ele não sabe, ele diz que não sabe.
 ///
 /// `.pipe(map(x => x.` exige instanciar genéricos e fazer o tipo voltar da

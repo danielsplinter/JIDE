@@ -26,6 +26,23 @@ use super::parser::TypeScriptParser;
 pub(crate) enum Receptor {
     /// O receptor tem este tipo declarado.
     Tipo(String),
+    /// **O segundo elo de uma cadeia:** `this.svc.` ou `this.buscar().`.
+    ///
+    /// Quem está antes do ponto é um **membro** de um tipo que se conhece, e o
+    /// tipo dele está escrito ao lado da declaração desse membro. Achar onde
+    /// esse membro é declarado exige atravessar módulos e herança, e isso é
+    /// conhecimento de projeto: este módulo diz **de quem** e **qual membro**, e
+    /// quem resolve responde.
+    ///
+    /// É a fase 8 da `25`, e ela existe porque um quarto de tudo o que a IDE não
+    /// respondia estava aqui — num componente Angular, quase tudo se acessa por
+    /// `this.`.
+    Membro {
+        /// O tipo de quem está antes do primeiro ponto.
+        tipo: String,
+        /// O nome do membro sob o ponto que se está resolvendo.
+        membro: String,
+    },
     /// Há um ponto, e **não se sabe** o tipo de quem está antes dele.
     Desconhecido,
     /// Não há ponto nenhum aqui: a pergunta não é de acesso a membro.
@@ -43,8 +60,14 @@ pub(crate) enum Receptor {
 /// | `svc.`, campo da classe | a anotação do campo |
 /// | `p.`, com `const p: Pedido` | a anotação da declaração |
 /// | `p.`, com `const p = new Pedido()` | o construtor chamado |
+/// | `this.svc.` | `Membro`: o tipo de `this` e o nome `svc` |
+/// | `this.buscar().` | `Membro`: o tipo de `this` e o nome `buscar` |
 ///
-/// Qualquer outra coisa — resultado de chamada, elemento de vetor, receptor
+/// As duas últimas são a fase 8, e não trazem o tipo pronto: o tipo de um membro
+/// está escrito onde ele é declarado, e achar isso atravessa módulos e herança —
+/// conhecimento de projeto, que não é deste módulo.
+///
+/// Qualquer outra coisa — elemento de vetor, terceiro elo de uma cadeia, receptor
 /// vindo de genérico — devolve `Desconhecido`, e **não** `Nenhum`.
 pub(crate) fn receptor_em(
     parser: &TypeScriptParser,
@@ -89,23 +112,35 @@ fn ate_a_posicao(texto: &str, linha: u32, coluna: u32) -> Option<&str> {
 
 /// O receptor, dado o texto que vem antes do ponto.
 fn receptor_do_texto(parser: &TypeScriptParser, texto: &str, antes: &str) -> Receptor {
+    // `this.buscar().` — o que vem antes do ponto é uma chamada, e o que
+    // interessa é o **nome chamado**: o tipo dele é o que o método devolve, e
+    // isso já está guardado desde a correção que precedeu a fase 8.
+    let antes = sem_a_chamada_final(antes);
     let Some(nome) = ultimo_identificador(antes) else {
-        // Antes do ponto há alguma coisa que não é um nome simples — `)`, `]`,
-        // uma cadeia. **Não sabemos**, e dizer isso é a resposta.
+        // Antes do ponto há alguma coisa que não é um nome simples — `]`, uma
+        // cadeia de chamadas. **Não sabemos**, e dizer isso é a resposta.
         return if antes.trim_end().is_empty() {
             Receptor::Nenhum
         } else {
             Receptor::Desconhecido
         };
     };
-    // O receptor só é um nome simples se o que vem antes dele não for um ponto:
-    // em `a.b.`, o `b` é membro de `a`, e o tipo dele exige saber o de `a`.
-    if antes
+    // Em `a.b.`, o `b` é membro de `a`. O tipo de `a` sai daqui; o de `b` está
+    // escrito onde `b` é declarado, e achar isso é de quem resolve módulos.
+    let base = antes
         .trim_end()
         .strip_suffix(&nome)
-        .is_some_and(|resto| resto.trim_end().ends_with('.'))
-    {
-        return Receptor::Desconhecido;
+        .map(str::trim_end)
+        .and_then(|resto| resto.strip_suffix('.'));
+    if let Some(base) = base {
+        return match receptor_do_texto(parser, texto, base) {
+            Receptor::Tipo(tipo) => Receptor::Membro { tipo, membro: nome },
+            // **Um passo, e não a cadeia inteira.** Em `a.b.c.`, resolver `c`
+            // exigiria o tipo de `b`, que já é resposta desta mesma pergunta —
+            // e cada elo a mais multiplica o custo por uma frequência que a
+            // medição da fase 7 mostrou ser pequena.
+            _ => Receptor::Desconhecido,
+        };
     }
     if nome == "this" {
         return match classe_que_envolve(parser, texto, antes.len()) {
@@ -117,6 +152,74 @@ fn receptor_do_texto(parser: &TypeScriptParser, texto: &str, antes: &str) -> Rec
         Some(tipo) => Receptor::Tipo(tipo),
         None => Receptor::Desconhecido,
     }
+}
+
+/// O texto sem a lista de argumentos que o encerra, se houver uma.
+///
+/// `this.buscar(a, f(b))` vira `this.buscar`. Os parênteses são contados, e não
+/// procurados de trás para frente pelo primeiro que aparecer: um argumento que
+/// seja outra chamada tem parênteses dentro, e cortar no primeiro deixaria
+/// `this.buscar(a, f` — um nome que não existe.
+fn sem_a_chamada_final(texto: &str) -> &str {
+    let cortado = texto.trim_end();
+    if !cortado.ends_with(')') {
+        return texto;
+    }
+    let mut profundidade = 0i32;
+    for (byte, caractere) in cortado.char_indices().rev() {
+        match caractere {
+            ')' => profundidade += 1,
+            '(' => {
+                profundidade -= 1;
+                if profundidade == 0 {
+                    return &cortado[..byte];
+                }
+            }
+            _ => {}
+        }
+    }
+    // Parênteses desequilibrados: o texto está sendo digitado, e não há o que
+    // concluir dele.
+    texto
+}
+
+/// O nome do tipo escrito num texto — o que está ao lado de um membro.
+///
+/// # Por que passa pela gramática em vez de olhar o texto
+///
+/// `Observable<Pedido>` é `Observable`, `Pedido[]` é `Array`, `string` é
+/// `String`. As três regras já existem e já são testadas em [`nome_do_tipo`];
+/// reescrevê-las sobre texto seria uma segunda implementação da mesma coisa,
+/// que envelheceria em silêncio quando uma delas mudasse.
+///
+/// # União só passa quando sobra um tipo só
+///
+/// `Pedido | null` é um `Pedido` para quem vai digitar um ponto. `string |
+/// number` **não é** nenhum dos dois, e responder com os membros do primeiro
+/// seria a resposta errada com a cara da certa — o defeito que esta
+/// especificação já caçou várias vezes. Nesse caso, não se sabe.
+pub(crate) fn nome_do_tipo_escrito(parser: &TypeScriptParser, escrito: &str) -> Option<String> {
+    let uteis: Vec<&str> = escrito
+        .split('|')
+        .map(str::trim)
+        .filter(|parte| !parte.is_empty() && *parte != "null" && *parte != "undefined")
+        .collect();
+    let [unico] = uteis.as_slice() else {
+        return None;
+    };
+    let fonte = format!("let __er: {unico};");
+    let arvore = parser.parse(&fonte, None).ok()?;
+    let bytes = fonte.as_bytes();
+    let mut cursor = arvore.walk();
+    let mut pilha = vec![arvore.root_node()];
+    while let Some(no) = pilha.pop() {
+        if no.kind() == "type_annotation" {
+            return nome_do_tipo(no, bytes);
+        }
+        let filhos: Vec<_> = no.children(&mut cursor).collect();
+        pilha.extend(filhos.into_iter().rev());
+    }
+    None
 }
 
 fn ultimo_identificador(texto: &str) -> Option<String> {
@@ -381,6 +484,56 @@ fn tipo_do_membro(membro: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
         .map(|texto| texto.trim_start_matches(':').trim().to_owned())
 }
 
+/// Os parâmetros de construtor que **também são campos**.
+///
+/// `constructor(private readonly svc: LoginService)` declara um parâmetro e um
+/// campo de uma vez, e é o idioma de injeção de dependência de Angular: no
+/// projeto de referência, **toda** página injeta assim.
+///
+/// # O que separa um parâmetro-campo de um parâmetro comum
+///
+/// O modificador. `constructor(x: Foo)` recebe `x` e o esquece quando o
+/// construtor termina; `constructor(private x: Foo)` guarda. Incluir os dois
+/// faria `this.` oferecer nomes que não existem depois da construção — resposta
+/// errada, e não uma a menos.
+///
+/// **Faltava por inteiro, e a medição da fase 8 é que apontou.** O tipo do
+/// receptor já saía daqui — `svc.` sozinho funcionava, porque quem o resolve
+/// olha os parâmetros do construtor. O que não funcionava era `this.svc.`, que
+/// pergunta pelos **membros da classe** — e nesta lista o `svc` não estava.
+fn propriedades_do_construtor(construtor: tree_sitter::Node, bytes: &[u8]) -> Vec<CompletionItem> {
+    let Some(parametros) = construtor.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+    let mut cursor = parametros.walk();
+    let mut achados = Vec::new();
+    for parametro in parametros.named_children(&mut cursor) {
+        if !matches!(parametro.kind(), "required_parameter" | "optional_parameter") {
+            continue;
+        }
+        let mut interno = parametro.walk();
+        let guarda = parametro.children(&mut interno).any(|filho| {
+            matches!(filho.kind(), "accessibility_modifier" | "override_modifier")
+                || filho.utf8_text(bytes).is_ok_and(|texto| texto == "readonly")
+        });
+        if !guarda {
+            continue;
+        }
+        let Some(nome) = parametro
+            .child_by_field_name("pattern")
+            .and_then(|no| no.utf8_text(bytes).ok())
+        else {
+            continue;
+        };
+        achados.push(CompletionItem {
+            label: nome.to_owned(),
+            detail: tipo_do_membro(parametro, bytes),
+            kind: CompletionKind::Field,
+        });
+    }
+    achados
+}
+
 fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8]) -> Membros {
     let mut membros = Membros::default();
     if let Some(corpo) = tipo.child_by_field_name("body") {
@@ -400,8 +553,11 @@ fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8]) -> Membros {
                 .or(Some(filho))
                 .and_then(|no| no.utf8_text(bytes).ok());
             let Some(nome) = nome else { continue };
-            // O construtor não é membro que se acesse por ponto.
+            // O construtor não é membro que se acesse por ponto — mas os
+            // parâmetros dele podem ser membros, e num código Angular quase
+            // sempre são.
             if nome == "constructor" {
+                membros.itens.extend(propriedades_do_construtor(filho, bytes));
                 continue;
             }
             membros.itens.push(CompletionItem {
@@ -563,14 +719,95 @@ mod tests {
         assert_eq!(receptor_em(&parser(), texto, 1, 9), Receptor::Desconhecido);
     }
 
-    /// Uma cadeia depois do primeiro ponto também é desconhecida.
+    /// **O segundo elo de uma cadeia diz de quem e qual membro.**
     ///
-    /// Em `this.svc.`, o tipo de `svc` viria dos membros de `this` — e isso é um
-    /// passo além do que esta fase entrega.
+    /// Em `this.svc.`, o tipo de `svc` está escrito onde `svc` é declarado, e
+    /// achar isso atravessa módulos e herança. O que este módulo entrega é o
+    /// endereço da pergunta: o tipo de `this`, e o nome `svc`.
     #[test]
-    fn a_chain_past_the_first_dot_is_unknown() {
+    fn the_second_link_of_a_chain_says_whose_and_which() {
         let texto = "class P {\n  m() {\n    this.svc.\n  }\n}\n";
-        assert_eq!(receptor_em(&parser(), texto, 2, 13), Receptor::Desconhecido);
+        assert_eq!(
+            receptor_em(&parser(), texto, 2, 13),
+            Receptor::Membro {
+                tipo: "P".to_owned(),
+                membro: "svc".to_owned()
+            }
+        );
+    }
+
+    /// **E a chamada também**, porque método agora guarda o que devolve.
+    ///
+    /// `this.buscar().` é o outro metade dos elos de cadeia num código Angular.
+    /// Os parênteses são contados, e não procurados de trás para frente: um
+    /// argumento que seja outra chamada tem parênteses dentro.
+    #[test]
+    fn a_call_is_a_link_too() {
+        let simples = "class P {\n  m() {\n    this.buscar().\n  }\n}\n";
+        assert_eq!(
+            receptor_em(&parser(), simples, 2, 18),
+            Receptor::Membro {
+                tipo: "P".to_owned(),
+                membro: "buscar".to_owned()
+            }
+        );
+        let aninhada = "class P {\n  m() {\n    this.buscar(a, f(b)).\n  }\n}\n";
+        assert_eq!(
+            receptor_em(&parser(), aninhada, 2, 25),
+            Receptor::Membro {
+                tipo: "P".to_owned(),
+                membro: "buscar".to_owned()
+            }
+        );
+    }
+
+    /// **Um passo, e não a cadeia inteira.**
+    ///
+    /// `a.b.c.` exigiria o tipo de `b`, que é resposta desta mesma pergunta um
+    /// nível acima. `a.b.c.d.` é raro; `this.campo.` é o dia inteiro.
+    #[test]
+    fn the_third_link_is_still_unknown() {
+        let texto = "class P {\n  m() {\n    this.svc.cliente.\n  }\n}\n";
+        assert_eq!(receptor_em(&parser(), texto, 2, 21), Receptor::Desconhecido);
+    }
+
+    /// Um elo cujo receptor não se conhece continua desconhecido.
+    ///
+    /// Sem isto, `qualquer.coisa.` viraria um endereço de pergunta que ninguém
+    /// pode responder — e a resposta viria vazia, que **afirma** que o tipo não
+    /// tem membros.
+    #[test]
+    fn a_link_on_an_unknown_receiver_stays_unknown() {
+        let texto = "function f() {\n  qualquer.coisa.\n}\n";
+        assert_eq!(receptor_em(&parser(), texto, 1, 17), Receptor::Desconhecido);
+    }
+
+    /// O tipo escrito ao lado de um membro vira o nome de um tipo.
+    ///
+    /// É o que transforma o `detail` de um membro em receptor do elo seguinte.
+    #[test]
+    fn the_written_type_of_a_member_becomes_a_type_name() {
+        let parser = parser();
+        for (escrito, esperado) in [
+            ("Pedido", Some("Pedido")),
+            ("Observable<Pedido>", Some("Observable")),
+            ("Pedido[]", Some("Array")),
+            ("string", Some("String")),
+            // Uma união com `null` continua sendo o tipo que sobra: é o que
+            // quem digita o ponto quer.
+            ("Pedido | null", Some("Pedido")),
+            ("Pedido | undefined", Some("Pedido")),
+            // Duas coisas de verdade não são nenhuma delas, e responder com a
+            // primeira seria a resposta errada com a cara da certa.
+            ("string | number", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                nome_do_tipo_escrito(&parser, escrito).as_deref(),
+                esperado,
+                "`{escrito}`"
+            );
+        }
     }
 
     /// Sem ponto nenhum, a pergunta não é de acesso a membro.
@@ -639,6 +876,39 @@ mod tests {
         assert_eq!(
             buscar.and_then(|item| item.detail.clone()),
             Some("Pedido".to_owned())
+        );
+    }
+
+    /// **Parâmetro de construtor com modificador é membro da classe.**
+    ///
+    /// É o idioma de injeção de Angular, e ele faltava por inteiro: `svc.`
+    /// sozinho funcionava — quem resolve o receptor olha os parâmetros do
+    /// construtor —, mas `this.svc.` não, porque esta lista não o tinha.
+    ///
+    /// Sem modificador não é membro: o parâmetro morre quando o construtor
+    /// termina, e oferecê-lo em `this.` seria um nome que não existe.
+    #[test]
+    fn a_constructor_parameter_with_a_modifier_is_a_field() {
+        let texto = "export class Pagina {\n  \
+                     constructor(private readonly svc: LoginService, publico: Outro) {}\n}\n";
+        let Some(membros) = membros_de(&parser(), texto, "Pagina") else {
+            panic!("a classe precisa ser achada");
+        };
+        let nomes: Vec<_> = membros.itens.iter().map(|item| item.label.as_str()).collect();
+        assert!(nomes.contains(&"svc"), "o injetado é membro: {nomes:?}");
+        assert!(
+            !nomes.contains(&"publico"),
+            "sem modificador não é membro: {nomes:?}"
+        );
+        let tipo = membros
+            .itens
+            .iter()
+            .find(|item| item.label == "svc")
+            .and_then(|item| item.detail.clone());
+        assert_eq!(
+            tipo,
+            Some("LoginService".to_owned()),
+            "o tipo precisa vir junto, senão o elo seguinte não anda"
         );
     }
 
