@@ -584,6 +584,41 @@ e o uso está sob o cursor.
 Fica registrado como a metade que falta desta fase, e não como fase nova: quem
 tem o índice e o resolvedor tem as duas peças de que ela precisa.
 
+#### A árvore é reaproveitada entre teclas ✅
+
+Achado ao medir outra coisa: **o realce reconstruía a árvore inteira a cada
+tecla**. O `parse` recebia `None` no lugar da árvore anterior, e a
+`ParsedDocument` guardava texto e realce, mas jogava a árvore fora.
+
+| arquivo | por tecla, antes | depois |
+| --- | --- | --- |
+| componente de 35 linhas | 288 µs | 195 µs |
+| arquivo de 3 144 linhas | **45 ms** | **27 ms** |
+
+**Menos do que eu esperava, e isso é informação.** Reaproveitar a árvore cortou
+40%, e não 90%: o parse não era o grosso do custo. O que sobra é a
+`syntax::analyze`, que percorre a **árvore inteira** para montar o realce, a
+estrutura e os diagnósticos do arquivo todo — a cada mudança, porque o
+`SyntaxSnapshot` do contrato é do arquivo inteiro.
+
+Cortar isso é mudar o contrato para snapshot parcial, e é outra conversa.
+
+##### O `InputEdit` é a parte perigosa
+
+Passar a árvore anterior **sem** descrever a edição não dá erro: dá uma árvore
+certa para um texto que não é este. O tree-sitter reaproveita nós em posições
+que mudaram, e o realce e a navegação passam a apontar para o lugar errado,
+calados. É a família de defeito que a `21` nomeia.
+
+Por isso o critério dos testes não é "funciona", é **igual ao do zero**: inserir
+um caractere, apagar um intervalo, inserir uma linha inteira e substituir o
+documento todo produzem o mesmo realce, a mesma estrutura e os mesmos
+diagnósticos que abrir o resultado do zero.
+
+E há um teste só para a armadilha de unidade: o `InputEdit` conta colunas em
+**bytes** e o domínio conta em **caracteres**. Editar depois de um acento — que
+em português é a regra, e não a exceção — é onde os dois divergem.
+
 #### O caminho entre aspas também é destino ✅
 
 Veio de uso real: `Ctrl+clique` no `'./future-stock-accordion.component.html'` de

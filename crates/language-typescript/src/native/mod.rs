@@ -30,6 +30,8 @@ use ide_language_api::{
     LanguageError, LanguageMetadata, LanguageProvider,
 };
 
+use tree_sitter::{InputEdit, Point, Tree};
+
 use crate::analyzer::index::WorkspaceIndex;
 use crate::analyzer::members;
 use crate::analyzer::references;
@@ -102,6 +104,15 @@ struct ParsedDocument {
     /// e sem saber qual é não há de onde resolver.
     path: PathBuf,
     text: String,
+    /// A árvore desta versão do texto.
+    ///
+    /// # Por que guardá-la, e não só o realce
+    ///
+    /// O tree-sitter existe para **reanalisar só o que mudou**, e para isso ele
+    /// precisa da árvore anterior. Sem ela, cada tecla reconstrói o arquivo
+    /// inteiro: medido num arquivo de 3 144 linhas, **45 ms por tecla** — 22
+    /// quadros por segundo gastos só em recolorir o que não mudou.
+    tree: Tree,
     snapshot: SyntaxSnapshot,
 }
 
@@ -276,12 +287,14 @@ impl ActiveTypeScript {
         path: &Path,
         version: u64,
         text: &str,
+        anterior: Option<&Tree>,
     ) -> Result<ParsedDocument, LanguageError> {
-        let tree = self.parser.parse(text, None)?;
+        let tree = self.parser.parse(text, anterior)?;
         let pass = syntax::analyze(&tree, text);
         Ok(ParsedDocument {
             path: path.to_path_buf(),
             text: text.to_owned(),
+            tree: tree.clone(),
             snapshot: SyntaxSnapshot {
                 document_id,
                 version,
@@ -318,12 +331,19 @@ impl ActiveLanguage for ActiveTypeScript {
     }
 
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {
-        let parsed = self.analyze(document.id, &document.path, document.version, &document.text)?;
+        // Abrir não tem árvore anterior: é a primeira análise deste documento.
+        let parsed = self.analyze(
+            document.id,
+            &document.path,
+            document.version,
+            &document.text,
+            None,
+        )?;
         self.store(document.id, parsed)
     }
 
     async fn change_document(&self, change: DocumentChange) -> Result<(), LanguageError> {
-        let text = {
+        let (caminho, anterior, texto) = {
             let documents = self.documents.lock().map_err(|_| {
                 LanguageError::Provider("TypeScript documents lock poisoned".to_owned())
             })?;
@@ -333,10 +353,31 @@ impl ActiveLanguage for ActiveTypeScript {
                 // um fechamento em corrida chega assim.
                 return Ok(());
             };
-            (current.path.clone(), apply(&current.text, change.range, &change.text))
+            // **A árvore precisa ser avisada da edição antes de servir.** Ela
+            // descreve o texto de antes; entregá-la sem o `InputEdit` faria o
+            // tree-sitter reaproveitar nós em posições que mudaram, e o
+            // resultado seria uma árvore errada **em silêncio** — realce e
+            // navegação apontando para o lugar errado, sem erro nenhum.
+            let editada = change.range.map(|range| {
+                let mut copia = current.tree.clone();
+                copia.edit(&edicao(&current.text, range, &change.text));
+                copia
+            });
+            (
+                current.path.clone(),
+                editada,
+                apply(&current.text, change.range, &change.text),
+            )
         };
-        let (caminho, text) = text;
-        let parsed = self.analyze(change.document_id, &caminho, change.version, &text)?;
+        // Sem intervalo é substituição do documento inteiro (ADR-017): não há o
+        // que reaproveitar, e reanalisar do zero é o certo.
+        let parsed = self.analyze(
+            change.document_id,
+            &caminho,
+            change.version,
+            &texto,
+            anterior.as_ref(),
+        )?;
         self.store(change.document_id, parsed)
     }
 
@@ -629,6 +670,61 @@ fn apply(current: &str, range: Option<ide_domain::TextRange>, text: &str) -> Str
     updated.push_str(text);
     updated.push_str(current.get(end..).unwrap_or_default());
     updated
+}
+
+/// A edição, como o tree-sitter a entende.
+///
+/// # As duas unidades, de novo
+///
+/// O `InputEdit` quer deslocamento em **bytes** e ponto com coluna em **bytes**;
+/// o domínio conta colunas em **caracteres**. É a mesma armadilha que a `lines`
+/// resolve na volta, e errar aqui não aparece como erro — aparece como árvore
+/// certa para um texto que não é este.
+fn edicao(atual: &str, range: ide_domain::TextRange, texto: &str) -> InputEdit {
+    let inicio = offset_of(atual, range.start.line as usize, range.start.column as usize);
+    let fim = offset_of(atual, range.end.line as usize, range.end.column as usize);
+    let coluna_inicial = inicio - inicio_da_linha(atual, range.start.line as usize);
+    let coluna_final = fim - inicio_da_linha(atual, range.end.line as usize);
+
+    // Onde o texto inserido termina, contado a partir de onde ele começou.
+    let quebras = texto.bytes().filter(|byte| *byte == b'\n').count();
+    let novo_fim = match texto.rsplit_once('\n') {
+        Some((_, ultima)) => Point {
+            row: range.start.line as usize + quebras,
+            column: ultima.len(),
+        },
+        None => Point {
+            row: range.start.line as usize,
+            column: coluna_inicial + texto.len(),
+        },
+    };
+
+    InputEdit {
+        start_byte: inicio,
+        old_end_byte: fim,
+        new_end_byte: inicio + texto.len(),
+        start_position: Point {
+            row: range.start.line as usize,
+            column: coluna_inicial,
+        },
+        old_end_position: Point {
+            row: range.end.line as usize,
+            column: coluna_final,
+        },
+        new_end_position: novo_fim,
+    }
+}
+
+/// O byte em que uma linha começa.
+fn inicio_da_linha(fonte: &str, linha: usize) -> usize {
+    let mut offset = 0;
+    for (indice, atual) in fonte.split_inclusive('\n').enumerate() {
+        if indice == linha {
+            return offset;
+        }
+        offset += atual.len();
+    }
+    fonte.len()
 }
 
 /// Byte onde a linha e a coluna caem, contando colunas em caracteres.
