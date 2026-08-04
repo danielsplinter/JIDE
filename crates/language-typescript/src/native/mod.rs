@@ -22,7 +22,8 @@ use std::{
 use async_trait::async_trait;
 use ide_domain::{
     CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic, DocumentChange, DocumentId,
-    DocumentSnapshot, LanguageId, Location, ProviderId, SemanticSymbol, SyntaxSnapshot, TextRange,
+    DocumentSnapshot, LanguageId, Location, ProviderId, ReferencesRequest, SemanticSymbol,
+    SyntaxSnapshot, TextRange,
 };
 use ide_language_api::{
     ReadinessSignal,
@@ -81,6 +82,7 @@ impl LanguageProvider for TypeScriptLanguageProvider {
             | LanguageCapabilities::DIAGNOSTICS
             | LanguageCapabilities::WORKSPACE_SYMBOLS
             | LanguageCapabilities::DEFINITION
+            | LanguageCapabilities::REFERENCES
             | LanguageCapabilities::COMPLETION
     }
 
@@ -154,6 +156,8 @@ struct ActiveTypeScript {
     /// Ele é do **projeto** — depende do `tsconfig.json` —, e é por isto que
     /// este provider não mora no `analyzer`. Ver a fase 3 da `25`.
     resolver: ModuleResolver,
+    /// A raiz do projeto, para varrer os arquivos que podem usar um nome.
+    raiz: PathBuf,
 }
 
 impl ActiveTypeScript {
@@ -201,6 +205,7 @@ impl ActiveTypeScript {
 
         Ok(Self {
             language_id: LanguageId(TYPESCRIPT_LANGUAGE_ID.to_owned()),
+            raiz: context.workspace_root.clone(),
             parser: TypeScriptParser::new()?,
             documents: Mutex::new(HashMap::new()),
             index,
@@ -301,6 +306,63 @@ impl ActiveTypeScript {
             .parent()?
             .join(literal.replace('/', std::path::MAIN_SEPARATOR_STR));
         candidato.is_file().then_some(candidato)
+    }
+
+    /// Onde um nome é declarado, partindo de onde ele é usado.
+    ///
+    /// É o mesmo caminho da definição, isolado para as referências poderem
+    /// perguntar "de que declaração estamos falando" antes de procurar quem a
+    /// usa.
+    fn declaracao_de(&self, de: &Path, texto: &str, nome: &str) -> Option<(PathBuf, String)> {
+        let aqui = references::do_texto(&self.parser, texto);
+        if aqui.declaracao(nome).is_some() {
+            return Some((de.to_path_buf(), nome.to_owned()));
+        }
+        let (la, _) = aqui.origem(nome)?;
+        let destino = self.arquivo_que_declara(de, texto, nome)?;
+        Some((destino, la))
+    }
+
+    /// Os `.ts` do projeto que **mencionam** o nome.
+    ///
+    /// # Por que mencionar não basta, e por que ainda assim se começa por aí
+    ///
+    /// Ler todo arquivo do projeto e analisá-lo seria caro sem necessidade: a
+    /// esmagadora maioria não fala daquele nome. Procurar o texto primeiro é um
+    /// filtro grosseiro e barato — quem não contém as letras não pode conter o
+    /// identificador.
+    ///
+    /// Quem passa por aqui ainda **não** é referência: é candidato. Quem decide
+    /// é a resolução, logo adiante.
+    fn candidatos(&self, nome: &str) -> Vec<(PathBuf, String)> {
+        let mut achados = Vec::new();
+        let mut pilha = vec![self.raiz.clone()];
+        while let Some(pasta) = pilha.pop() {
+            let Ok(entradas) = std::fs::read_dir(&pasta) else {
+                continue;
+            };
+            for entrada in entradas.flatten() {
+                let caminho = entrada.path();
+                let Some(arquivo) = caminho.file_name().and_then(|nome| nome.to_str()) else {
+                    continue;
+                };
+                if caminho.is_dir() {
+                    if arquivo != "node_modules" && arquivo != "dist" && !arquivo.starts_with('.') {
+                        pilha.push(caminho);
+                    }
+                    continue;
+                }
+                if !arquivo.ends_with(".ts") || arquivo.ends_with(".d.ts") {
+                    continue;
+                }
+                if let Ok(texto) = std::fs::read_to_string(&caminho)
+                    && texto.contains(nome)
+                {
+                    achados.push((caminho, texto));
+                }
+            }
+        }
+        achados
     }
 
     fn analyze(
@@ -688,6 +750,86 @@ impl ActiveLanguage for ActiveTypeScript {
             .get(&document_id)
             .map(|parsed| parsed.snapshot.clone())
             .ok_or_else(|| LanguageError::Provider("documento não está aberto".to_owned()))
+    }
+
+    /// Quem usa o nome sob o cursor, no projeto inteiro.
+    ///
+    /// # O que separa isto de uma busca por texto
+    ///
+    /// A IDE já sabe procurar texto. O que ela não sabia é **de qual declaração**
+    /// cada ocorrência fala: dois módulos podem declarar `LoginService`, e listar
+    /// os dois juntos seria acertar por sorte metade das vezes — a mesma
+    /// armadilha que a definição enfrentou nesta fase.
+    ///
+    /// Então cada arquivo candidato é confirmado por **resolução**: ou ele
+    /// declara o nome e é o arquivo da declaração, ou ele o importa e o
+    /// `import` resolve para lá. Um arquivo que só menciona as letras não entra.
+    ///
+    /// **A confirmação é por arquivo, e não por ocorrência.** Um arquivo que
+    /// importa a declaração certa tem todas as suas ocorrências contadas; se ele
+    /// declarar uma sombra local de mesmo nome num escopo interno, ela entra
+    /// junto. É a imprecisão conhecida, e ela sobra — nunca falta.
+    async fn references(
+        &self,
+        request: ReferencesRequest,
+    ) -> Result<Vec<Location>, LanguageError> {
+        let (caminho, texto) = {
+            let documentos = self
+                .documents
+                .lock()
+                .map_err(|_| LanguageError::Provider("registro de documentos travado".to_owned()))?;
+            let Some(parsed) = documentos.get(&request.document_id) else {
+                return Ok(Vec::new());
+            };
+            (parsed.path.clone(), parsed.text.clone())
+        };
+        let Some(nome) = references::identificador_em(
+            &self.parser,
+            &texto,
+            request.position.line,
+            request.position.column,
+        ) else {
+            return Ok(Vec::new());
+        };
+        let Some((declarante_em, la)) = self.declaracao_de(&caminho, &texto, &nome) else {
+            // Sem saber de qual declaração se fala, listar ocorrências seria
+            // listar homônimos. **Não sei** deixa a pergunta descer para quem
+            // tem tipos.
+            return Err(LanguageError::Unresolved(format!(
+                "não sei de onde vem `{nome}`"
+            )));
+        };
+
+        let mut achadas = Vec::new();
+        for (arquivo, conteudo) in self.candidatos(&la) {
+            // O texto do editor vence o do disco no arquivo que está aberto.
+            let conteudo = if arquivo == caminho { texto.clone() } else { conteudo };
+            let referencias = references::do_texto(&self.parser, &conteudo);
+            let declara_aqui = referencias.declaracao(&la).is_some();
+            let alcanca = if declara_aqui {
+                arquivo == declarante_em
+            } else {
+                self.arquivo_que_declara(&arquivo, &conteudo, &la)
+                    .is_some_and(|destino| destino == declarante_em)
+            };
+            if !alcanca {
+                continue;
+            }
+            for range in references::ocorrencias(&self.parser, &conteudo, &la) {
+                // A própria declaração só entra se quem perguntou quis.
+                if !request.include_declaration
+                    && arquivo == declarante_em
+                    && referencias.declaracao(&la) == Some(range)
+                {
+                    continue;
+                }
+                achadas.push(Location {
+                    path: arquivo.clone(),
+                    range,
+                });
+            }
+        }
+        Ok(achadas)
     }
 
     async fn shutdown(&self) -> Result<(), LanguageError> {

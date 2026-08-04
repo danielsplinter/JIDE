@@ -17,6 +17,7 @@ use std::path::Path;
 
 use ide_domain::{SymbolKind, TextRange};
 
+use super::lines::{LineIndex, node_range};
 use super::parser::TypeScriptParser;
 
 /// O que um arquivo diz sobre nomes que vêm de fora e vão para fora.
@@ -499,4 +500,31 @@ mod tests {
         // responder a uma pergunta que ninguém fez.
         assert_eq!(identificador_em(&parser, texto, 0, 7), None);
     }
+}
+
+/// Onde um identificador aparece num texto.
+///
+/// **Só identificador**, e não texto solto: `Pedido` dentro de um comentário ou
+/// de uma string não é uso, é menção. É o que separa isto de uma busca por
+/// texto — e a busca por texto é o que a IDE já tinha.
+pub(crate) fn ocorrencias(parser: &TypeScriptParser, texto: &str, nome: &str) -> Vec<TextRange> {
+    let Ok(arvore) = parser.parse(texto, None) else {
+        return Vec::new();
+    };
+    let linhas = LineIndex::new(texto);
+    let mut achadas = Vec::new();
+    let mut pilha = vec![arvore.root_node()];
+    while let Some(no) = pilha.pop() {
+        if matches!(
+            no.kind(),
+            "identifier" | "type_identifier" | "property_identifier" | "shorthand_property_identifier"
+        ) && no.utf8_text(texto.as_bytes()).is_ok_and(|texto| texto == nome)
+        {
+            achadas.push(node_range(no, &linhas));
+        }
+        let mut cursor = no.walk();
+        pilha.extend(no.children(&mut cursor));
+    }
+    achadas.sort_by_key(|range| (range.start.line, range.start.column));
+    achadas
 }

@@ -518,7 +518,7 @@ decide para onde cada um aponta.
 Também por isso esta fase **não liga nenhuma capacidade**. Ela entrega uma peça
 correta e conferida; usá-la é a fase 3.
 
-### Fase 3 — Definição ✅, referências ⬜
+### Fase 3 — Definição ✅, referências ✅
 
 `Ctrl+clique` abre a declaração certa, sem tipos e sem processo externo.
 
@@ -574,15 +574,55 @@ promessa vale: o provider **compõe** as duas coisas, e por isso saiu de
 `analyzer/` para um módulo irmão. A análise continua sobre texto; quem alcança
 projeto é quem compõe.
 
-#### O que fica desta fase
+#### Referências, sem a tabela de ocorrências
 
-**Referências ainda não.** Achar quem *usa* um nome pede uma tabela de
-ocorrências — o índice de Java guarda 2,7 milhões delas —, e isso muda o formato
-do arquivo. Definição não precisava, porque ela anda **do uso para a declaração**,
-e o uso está sob o cursor.
+Esta seção previa que achar quem *usa* um nome pediria uma tabela de ocorrências
+— o índice de Java guarda 2,7 milhões delas — e que isso mudaria o formato do
+arquivo. **Não foi preciso**, e vale registrar por quê.
 
-Fica registrado como a metade que falta desta fase, e não como fase nova: quem
-tem o índice e o resolvedor tem as duas peças de que ela precisa.
+A pergunta é feita **por gente**, e não a cada tecla: dá para percorrer o
+projeto na hora. O caminho tem dois passos:
+
+1. **Filtro barato:** os `.ts` cujo texto contém as letras do nome. Quem não as
+   contém não pode conter o identificador, e a esmagadora maioria não contém;
+2. **Confirmação por resolução:** cada candidato só entra se declarar o nome e
+   *ser* o arquivo da declaração, ou se o `import` dele resolver para lá.
+
+**É o segundo passo que separa isto de uma busca por texto**, que a IDE já
+tinha. Dois módulos podem declarar `LoginService`, e listar os usos dos dois
+juntos seria acertar por sorte metade das vezes — a mesma armadilha que decidiu
+a definição nesta fase.
+
+E menção não é uso: o nome dentro de um comentário ou de uma string escreve as
+mesmas letras e não usa nada. As ocorrências saem da **árvore**, e só de nós de
+identificador.
+
+##### A imprecisão conhecida, e de que lado ela erra
+
+A confirmação é **por arquivo**, e não por ocorrência: um arquivo que importa a
+declaração certa tem todas as suas ocorrências contadas. Se ele declarar uma
+sombra local de mesmo nome num escopo interno, ela entra junto.
+
+**Ela sobra, e nunca falta** — que é o lado certo de errar numa lista de usos:
+quem procura vê um a mais e descarta, em vez de concluir que não há.
+
+##### Medido no monorepo de referência
+
+| nome | usos | arquivos | tempo |
+| --- | --- | --- | --- |
+| `FutureStockFacade` | 10 | 5 | 1,5 s |
+| `IconComponent` | 454 | 220 | 9,8 s |
+
+Segundos, e não milissegundos — é o preço de não ter a tabela. Aceitável porque a
+pergunta é rara e explícita, e porque a IDE já sabe rodar trabalho assim fora da
+thread da interface, com giro na tela. **A tabela de ocorrências continua sendo a
+resposta se isso incomodar**, e agora com um número para comparar.
+
+##### O que falta para chegar às mãos de quem usa
+
+O provider responde; a IDE ainda não pergunta. Não há ação nem atalho de "achar
+usos" na interface, e ligá-la é o passo seguinte — com o `SearchController`, que
+já existe e já roda fora da thread da interface.
 
 #### A árvore é reaproveitada entre teclas ✅
 
