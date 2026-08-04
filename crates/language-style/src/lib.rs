@@ -102,6 +102,16 @@ struct Documento {
     snapshot: SyntaxSnapshot,
 }
 
+/// Um arquivo e o sigilo procurado nele — `$` de variável, `%` de placeholder.
+type ChaveDeEscopo = (PathBuf, char);
+
+/// Os nomes que um arquivo põe em escopo.
+///
+/// Compartilhado porque a lista é lida por quem completa e guardada pelo cache
+/// ao mesmo tempo: clonar o vetor a cada tecla desfaria metade do que o cache
+/// economizou.
+type Escopo = std::sync::Arc<Vec<String>>;
+
 struct ActiveStyle {
     language_id: LanguageId,
     /// A raiz do projeto, para o `node_modules` de um especificador nu.
@@ -144,7 +154,7 @@ struct ActiveStyle {
     ///
     /// A chave leva o sigilo porque `$` e `%` percorrem os mesmos arquivos e
     /// colhem coisas diferentes.
-    escopos: Mutex<HashMap<(PathBuf, char), std::sync::Arc<Vec<String>>>>,
+    escopos: Mutex<HashMap<ChaveDeEscopo, Escopo>>,
     parser: Mutex<Parser>,
     documentos: Mutex<HashMap<DocumentId, Documento>>,
 }

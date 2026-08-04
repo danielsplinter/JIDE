@@ -170,6 +170,32 @@ pub(super) struct NavigationOutcome {
     pub(super) failure: Option<String>,
 }
 
+/// O que a completação trouxe, e para qual pergunta.
+///
+/// A janela de inspeção precisa de **duas** perguntas ao host em sequência, e
+/// entre elas há uma decisão que só a tela sabe tomar. Por isso ela aparece aqui
+/// em duas etapas: a primeira volta ao laço de quadros, que decide o alvo e
+/// dispara a segunda. Cada etapa é uma ida à thread; nenhuma é uma espera.
+pub(super) enum CompletionOutcome {
+    /// A lista do editor, com a pergunta que a originou.
+    ///
+    /// A pergunta volta junto porque a resposta pode chegar depois de o cursor
+    /// já ter andado: quem digita `for` recebe três respostas, e as duas
+    /// primeiras já não valem quando chegam. Sem esta comparação a lista
+    /// piscaria com o conteúdo de duas teclas atrás.
+    Editor {
+        pedido: ide_domain::CompletionRequest,
+        items: Result<Vec<ide_domain::CompletionItem>, String>,
+    },
+    /// O receptor sob o cursor, na janela de inspeção. Primeira etapa.
+    AcessoNaInspecao {
+        document_id: DocumentId,
+        access: Result<Option<ide_language_api::MemberAccess>, String>,
+    },
+    /// Os membros do tipo escolhido, na janela de inspeção. Segunda etapa.
+    MembrosNaInspecao(Result<Vec<ide_domain::CompletionItem>, String>),
+}
+
 #[derive(Default)]
 pub(super) struct LanguageController {
     /// O host é compartilhado porque a busca por tipo o consulta de outra thread.
@@ -208,6 +234,20 @@ pub(super) struct LanguageController {
     /// Na thread da janela isso seria a IDE congelada por sete segundos —
     /// o defeito que a `25` caçou cinco vezes.
     pub(super) referencias: SearchController<Vec<ide_domain::Location>>,
+    /// A completação em curso. **Sexta vez do mesmo defeito.**
+    ///
+    /// Ela era feita na chamada, e por isso o ponto congelava a tela: o prazo
+    /// com o analisador é de cinco segundos, e enquanto ele corria nenhum quadro
+    /// era desenhado. As teclas seguintes não sumiam — ficavam na fila da janela
+    /// e apareciam todas de uma vez quando a resposta voltava, que é como quem
+    /// usa descreveu: *"como se eu estivesse digitando algo invisível"*.
+    ///
+    /// Ela escapou das cinco correções anteriores porque sempre respondia
+    /// rápido nos testes: o índice alcança o que está declarado no projeto, em
+    /// milissegundos. Só apareceu quando alguém pediu um tipo do próprio
+    /// TypeScript — `let w: String[]` —, que o índice não tem e o analisador
+    /// responde devagar.
+    pub(super) completion: SearchController<CompletionOutcome>,
     /// Quedas já anunciadas, para não repetir o aviso a cada verificação.
     pub(super) announced_failures: std::collections::HashSet<String>,
     /// Realces pedidos e ainda não entregues.

@@ -970,9 +970,14 @@ que o acione. Se isso for feito, que seja **sem animação no meio da tela**.
 #### Critério
 
 Abrir o monorepo de referência e ver o giro terminar em segundos, e não em
-minuto. Pedir completação com tipo inferido antes de o analisador ficar pronto
-mostra giro **naquele pedido**, e ele pode ser cancelado. Nenhum arquivo perde
-realce, estrutura ou navegação por nome enquanto isso.
+minuto. Nenhum arquivo perde realce, estrutura ou navegação por nome enquanto
+isso.
+
+*Este critério pedia também que um pedido feito antes de o analisador ficar
+pronto mostrasse giro naquele pedido, com cancelamento. A primeira metade foi
+tentada e **retirada** — ver acima. A segunda continua valendo, e continua
+faltando: quem espera merece saber pelo quê e poder desistir. Ela não segura a
+fase, e é a única coisa que sobra dela.*
 
 ### Adiar a abertura no analisador ⛔ Recusado
 
@@ -1147,8 +1152,20 @@ pedido por vez**. Com o analisador montando o projeto, uma abertura ficava
 enfileirada atrás de um pedido com prazo de cinco segundos, e a janela parava a
 cada quadro até ele terminar.
 
-Foi o quinto lugar em que o mesmo defeito apareceu, e o último: agora **nenhuma**
-chamada ao host espera na thread da interface.
+Foi o quinto lugar em que o mesmo defeito apareceu — e a frase escrita aqui na
+época era *"e o último: agora nenhuma chamada ao host espera na thread da
+interface"*. **Ela estava errada, e ficou errada por semanas.**
+
+Faltava a completação, achada na fase 7. Ela escapou das cinco varreduras pelo
+motivo que torna este defeito difícil: **ela sempre respondia rápido**. Enquanto
+o índice alcança o que se pergunta, a resposta vem em milissegundos e nada
+denuncia que a espera é síncrona.
+
+A lição não é "faltou procurar melhor". É que **procurar não bastava**: o que
+denuncia este defeito não é ler o código, é a resposta demorar — e ela só demora
+com um tipo que o índice não tem. Uma guarda que conte `block_on` na thread da
+janela acharia o sexto no dia em que ele foi escrito, e é a única forma de a
+frase acima poder ser dita com segurança.
 
 ##### Subir junto voltou a ser o padrão
 
@@ -1176,7 +1193,146 @@ pedido cedo** numa sessão que mexa em código com genéricos. O ganho não é "
 a menos"; é: quem só navega, busca e edita código com tipos declarados nunca paga
 por ele, e ninguém paga por ele **antes** de precisar.
 
-## O que esta especificação não fará## O que esta especificação não fará
+### Fase 7 — Os tipos do próprio TypeScript ⬜
+
+`let w: String[];` e um ponto. O índice diz que não sabe onde `String` é
+declarado, a pergunta desce para o analisador, e a resposta custa o prazo dele.
+
+**E não se trata de `String`.** Ele foi só o que apareceu primeiro. O índice não
+conhece nenhum tipo que o TypeScript traz — nem `Date`, nem `Promise`, nem
+`Map`, nem `HTMLElement` —, e por isso **todo** ponto sobre algo que não seja
+declarado no próprio projeto desce para o Node. O que esta fase entrega não é um
+tipo a mais: é a biblioteca inteira da linguagem no cache, de uma vez, como
+qualquer IDE da qual se espera que saiba o que `.length` significa.
+
+Nada disso é de ninguém em particular — é do TypeScript, e está no disco, ao lado
+do projeto.
+
+#### De onde eles vêm
+
+De `node_modules/typescript/lib`. São 100 arquivos `lib.*.d.ts`, 3,3 MB de texto,
+e `.d.ts` é TypeScript comum: o extrator da fase 1 os lê sem mudança nenhuma.
+
+Vir do projeto, e não de dentro do executável, é a **ADR-028** outra vez: a versão
+dos tipos é a que o projeto instalou. Um projeto preso ao TypeScript 4 não pode
+receber completação do 5, e embarcar uma cópia seria prometer exatamente isso.
+
+#### Lê-se tudo; o `target` decide só o que se oferece
+
+**São os 100.** O que o TypeScript traz cabe inteiro no cache, e é assim que ele
+deve entrar: 3,3 MB de texto lidos uma vez por versão de TypeScript instalada, e
+gravados como a `20` já grava. Ler por demanda seria pagar disco no meio de uma
+digitação para economizar megabytes que não faltam a ninguém.
+
+E é o que torna barato o que viria depois: trocar o `target`, abrir outro projeto
+com outro `target`, ou o mesmo projeto ter `tsconfig.app.json` e
+`tsconfig.spec.json` com alvos diferentes — como o `j-fis-cloud` tem. Com tudo
+lido, nada disso custa uma releitura.
+
+**O `target` entra na hora de responder, e não na de ler.** `"target": "ES2022"`
+seleciona `lib.es2022.full.d.ts`, que lista os que valem:
+
+```
+/// <reference lib="es2022" />
+/// <reference lib="dom" />
+```
+
+Cada um lista os seus, e seguir a corrente é a regra inteira — `lib.<nome>.d.ts`
+na mesma pasta. Um `"lib"` explícito no `tsconfig` manda mais do que o `target`,
+como manda no compilador. Cada declaração no cache carrega de qual arquivo veio,
+e a resposta mostra só o que está no alcance do projeto.
+
+**Filtrar importa, e não é economia de memória.** Responder sem olhar o alvo
+ofereceria métodos de ES2024 num projeto que compila para ES2022: código que a
+IDE sugere e o build recusa. Uma sugestão errada é pior do que sugestão nenhuma —
+é a mesma regra do grupo 3, e vale aqui com mais força porque o erro só aparece
+na compilação.
+
+*Ler tudo e filtrar na resposta é uma escolha, e o que ela troca é isto: guardar
+uns poucos MB a mais em disco para nunca ter que reler quando o alvo muda. É o
+lado certo da troca porque a leitura é a parte cara, e a memória é a barata.*
+
+#### A parte nova é a fusão
+
+No código de um projeto, um tipo é declarado uma vez. Nos tipos do TypeScript,
+não: `interface Array` é **reaberta em 12 arquivos**, dos quais 8 valem para
+ES2022. `forEach` está no `lib.es5`, `includes` no `lib.es2016.array.include`,
+`at` no `lib.es2022.array`.
+
+O índice hoje toma a primeira declaração de um nome e para. Aqui ele precisa
+**juntar** os membros de todas — e é a única coisa desta fase que muda como o
+índice pensa. O resto é encanamento.
+
+E a fusão não pode valer para o código do projeto: dois módulos que declaram
+`LoginService` são **dois tipos**, e juntá-los seria a mesma armadilha que a fase
+3 evitou nas referências. A fusão vale para o que se declara como `interface` no
+mesmo escopo global, que é o que a linguagem define — e não uma regra nossa.
+
+#### O tamanho, antes de qualquer promessa
+
+Cerca de 3 000 declarações no total, das quais 2 136 vêm do `lib.dom.d.ts`. Lidas
+uma vez e gravadas como a `20` já grava, por versão de TypeScript. Não é uma
+escala nova para este índice: o de Java lida com 26 mil arquivos.
+
+#### O que ela não resolve, e é preciso dizer antes
+
+**Genéricos.** Depois de `w.forEach(x => x.`, o `x` é `T`, e trocar `T` por
+`String` é instanciar genérico — o verificador de tipos, recusado pela ADR-025.
+O ponto sobre a variável responde; o ponto dentro da lambda continua descendo
+para o analisador.
+
+**Fora isso, ela resolve tudo o que o TypeScript declara**, e não um punhado de
+tipos escolhidos a dedo: `string`, `number`, `Array`, `Date`, `Promise`, `Map`,
+`Set`, `RegExp`, `JSON`, `Math`, `Object`, e os 2 136 do DOM — `HTMLElement`,
+`Event`, `Response`, `FormData`. Hoje **todos** descem para o analisador.
+
+Escolher a dedo seria a tabela por biblioteca que a `23` proibiu, e seria pior
+aqui: a lista envelheceria a cada versão do TypeScript, e quem a mantivesse
+decidiria por engano o que quem usa a IDE alcança. Ler o que veio instalado não
+tem essa escolha para fazer.
+
+#### Critério
+
+Num projeto real, `let w: String[];` e um ponto trazem `forEach`, `map` e
+`length` sem o analisador subir — e o mesmo vale para `Date`, `Promise`, `Map` e
+um `HTMLElement`, que é o que prova que a fase não é sobre um tipo. Um projeto
+com `"target": "ES2022"` **não** oferece o que só existe em ES2024, ainda que a
+declaração esteja no cache. E a medição de 14% a 17% da fase 4 é refeita
+no mesmo projeto, com o número novo escrito aqui ao lado do antigo — sem o qual
+esta fase é uma promessa e não um resultado.
+
+### Correções que vieram desta fase
+
+Duas, achadas antes de ela começar, ambas com o mesmo `let w: String[]`.
+
+**A completação esperava na thread da interface.** Ver a fase 5 acima: era o sexto
+lugar, e a frase que dizia não haver um sexto foi corrigida lá. Quem digitava
+depois do ponto via as letras aparecerem todas de uma vez no fim — elas ficavam
+na fila da janela, porque nenhum quadro era desenhado. Agora a tecla posta a
+pergunta e volta.
+
+*E a correção abriu um buraco que só apareceu ao ser pensada:* a resposta do
+ponto chega **vencida** quando a letra seguinte já foi digitada, e descartá-la
+deixava a lista fechada para sempre — a letra não pede nada, porque só a lista
+já aberta dispara o pedido seguinte. A espera síncrona escondia isso abrindo a
+lista antes de a letra ser processada. O que venceu vira pergunta nova, feita de
+onde o cursor está.
+
+**`Pedido[]` dizia `Pedido`, e `Observable<Pedido>` também.** O primeiro era o
+`[]` jogado fora; o segundo era a pilha de visita retirando os filhos ao
+contrário, que chegava ao **argumento** do genérico antes do nome dele — o
+oposto do que a própria documentação da função prometia.
+
+Hoje isso passava despercebido porque nem `Array` nem `Observable` estão no
+índice, e a pergunta descia para o analisador. **A fase 7 é o que os traz para
+dentro** — e no dia em que ela chegasse, `pedidos.` responderia os membros de um
+pedido, e `fluxo.` os do conteúdo do `Observable`. Resposta errada, que é pior do
+que "não sei": a fase teria estreado com um defeito que não seria dela.
+
+É o que este projeto já viu várias vezes por outros nomes — o defeito que dorme
+porque o caminho que o acorda ainda não existe.
+
+## O que esta especificação não fará
 
 - **verificador de tipos**: ADR-025, e reafirmada aqui com o exemplo do `pipe`;
 - **tabela por biblioteca**: proibida pela `23`;

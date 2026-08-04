@@ -199,18 +199,50 @@ fn tipo_declarado(parser: &TypeScriptParser, texto: &str, nome: &str) -> Option<
 /// `Observable<Pedido>` devolve `Observable`, e é o bastante para dizer que o
 /// **receptor** é um `Observable`; o que os métodos dele devolvem é genérico, e
 /// isso o índice não sabe.
+///
+/// # `Pedido[]` é um `Array`, e não um `Pedido`
+///
+/// Descer até o primeiro nome escrito devolvia o tipo do **elemento**, jogando
+/// fora o `[]`: `let w: String[]` dizia `String`. Hoje isso passa despercebido
+/// porque `String` não está no índice e a pergunta desce para o analisador — mas
+/// num projeto que declare o próprio `Pedido`, `pedidos.` ofereceria os membros
+/// de um pedido no lugar de `map`, `filter` e `length`. Resposta errada, que é
+/// pior do que "não sei".
+///
+/// # E a ordem da visita não era a da escrita
+///
+/// A pilha empilhava os filhos na ordem do texto e os retirava do fim, então a
+/// busca chegava ao **último** nome antes do primeiro. Para `Observable<Pedido>`
+/// isso devolvia `Pedido`, o oposto do que esta documentação promete — e num
+/// código Angular, cheio de `Observable<T>` e `Signal<T>`, era o ponto oferecendo
+/// os membros do conteúdo no lugar dos do recipiente. Empilhar ao contrário faz
+/// a retirada seguir a ordem do texto.
 fn nome_do_tipo(no: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
     let mut cursor = no.walk();
     let mut pilha = vec![no];
     while let Some(atual) = pilha.pop() {
+        if let Some(nome) = nome_de_vetor(atual) {
+            return Some(nome);
+        }
         if matches!(atual.kind(), "type_identifier" | "identifier")
             && let Ok(texto) = atual.utf8_text(bytes)
         {
             return Some(texto.to_owned());
         }
-        pilha.extend(atual.children(&mut cursor));
+        let filhos: Vec<_> = atual.children(&mut cursor).collect();
+        pilha.extend(filhos.into_iter().rev());
     }
     None
+}
+
+/// `Array` quando o nó é uma das duas formas de vetor, e nada quando não é.
+///
+/// `T[]` e `ReadonlyArray<T>` já chegam como nome próprio; as duas que não
+/// chegam são a anotação com colchetes e a tupla. Uma tupla não é um `Array` no
+/// verificador de tipos, mas **tem os membros de um**, que é o que esta pergunta
+/// quer saber.
+fn nome_de_vetor(no: tree_sitter::Node) -> Option<String> {
+    matches!(no.kind(), "array_type" | "tuple_type").then(|| "Array".to_owned())
 }
 
 fn construtor_chamado(no: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
@@ -359,6 +391,49 @@ mod tests {
         assert_eq!(
             receptor_em(&parser(), construido, 1, 2),
             Receptor::Tipo("Pedido".to_owned())
+        );
+    }
+
+    /// **`Observable<Pedido>` é um `Observable`, e não um `Pedido`.**
+    ///
+    /// A documentação de `nome_do_tipo` sempre prometeu isto, e o código fazia o
+    /// contrário: a pilha visitava os filhos ao contrário, então o primeiro nome
+    /// encontrado era o **argumento** do genérico. Num código Angular, onde
+    /// `Observable<T>` e `Signal<T>` estão em toda parte, o ponto oferecia os
+    /// membros do conteúdo no lugar dos do recipiente.
+    #[test]
+    fn a_generic_is_its_own_name_and_not_its_argument() {
+        let texto = "const fluxo: Observable<Pedido> = null!;\nfluxo.\n";
+        assert_eq!(
+            receptor_em(&parser(), texto, 1, 6),
+            Receptor::Tipo("Observable".to_owned())
+        );
+    }
+
+    /// **`Pedido[]` é um `Array`, e não um `Pedido`.**
+    ///
+    /// Antes desta correção o `[]` era jogado fora e o receptor virava o tipo do
+    /// elemento. Num projeto que declara `Pedido`, `pedidos.` ofereceria `total`
+    /// e `cliente` no lugar de `map` e `length` — resposta errada, e não uma
+    /// ausência de resposta.
+    #[test]
+    fn an_array_annotation_is_an_array_and_not_its_element() {
+        let anotado = "const pedidos: Pedido[] = [];\npedidos.\n";
+        assert_eq!(
+            receptor_em(&parser(), anotado, 1, 8),
+            Receptor::Tipo("Array".to_owned())
+        );
+        let generico = "const pedidos: Array<Pedido> = [];\npedidos.\n";
+        assert_eq!(
+            receptor_em(&parser(), generico, 1, 8),
+            Receptor::Tipo("Array".to_owned())
+        );
+        // Uma tupla não é um `Array` para o verificador de tipos, mas tem os
+        // membros de um — e é isso que esta pergunta quer saber.
+        let tupla = "const par: [number, string] = [1, ''];\npar.\n";
+        assert_eq!(
+            receptor_em(&parser(), tupla, 1, 4),
+            Receptor::Tipo("Array".to_owned())
         );
     }
 

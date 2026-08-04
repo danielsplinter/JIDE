@@ -9,8 +9,8 @@ use crate::bootstrap::default_goals;
 use crate::bootstrap::{java_source, project_sources, startup_root};
 use crate::bridges::position_at_offset;
 use crate::controllers::{
-    DebugController as AppDebugController, DocumentController, ImportedProject, LanguageController,
-    NavigationOutcome, NativeWindowState, ProjectController, RuntimeState,
+    CompletionOutcome, DebugController as AppDebugController, DocumentController, ImportedProject,
+    LanguageController, NavigationOutcome, NativeWindowState, ProjectController, RuntimeState,
     TaskController as AppTaskController, TypeSearchOutcome, WorkspaceController,
 };
 use crate::ui_bridge::{UiAction, UiBridge};
@@ -1261,52 +1261,46 @@ impl NativeIde {
         }
     }
 
+    /// Pede a lista de completação, fora da thread da interface.
+    ///
+    /// # Por que isto não pode ser síncrono
+    ///
+    /// **É o sexto lugar com o mesmo defeito**, e o mais bem escondido. Os cinco
+    /// anteriores — a busca textual, a busca por tipo, acordar o provider, a
+    /// navegação e abrir um documento — foram achados na fase 5 da `25`. Este
+    /// escapou porque a completação quase sempre responde rápido: o índice
+    /// alcança o que o projeto declara, em milissegundos.
+    ///
+    /// Ele apareceu com `let w: String[]`. `String` é do próprio TypeScript, não
+    /// está no índice, e a pergunta desce para o analisador — cinco segundos de
+    /// prazo, com a tela parada. As teclas seguintes não somem: ficam na fila da
+    /// janela e aparecem juntas quando a resposta volta.
     fn request_completion(&mut self) {
-        let Some(language_host) = &self.languages.host else {
+        let Some(host) = self.languages.host.as_ref().map(Arc::clone) else {
             return;
         };
         // Com a inspeção aberta, a pergunta é sobre um tipo, e não sobre uma
-        // posição num arquivo: ali não existe arquivo.
+        // posição num arquivo: ali não existe arquivo. São duas perguntas ao
+        // host, e entre elas há uma escolha que só a tela sabe fazer — por isso
+        // esta manda a primeira, e o laço de quadros manda a segunda.
         if let Some(shell) = self.ui.shell.as_ref()
             && let Some((text, offset)) = shell.inspection_member_context()
             && let Some(document_id) = shell.active_document()
         {
-            let access = match pollster::block_on(language_host.member_access(
-                language_host.request_context(),
-                document_id,
-                text,
-                offset,
-            )) {
-                Ok(Some(access)) => access,
-                Ok(None) => return,
-                Err(error) => {
-                    if let Some(shell) = self.ui.shell.as_mut() {
-                        shell.set_inspection_message(error.to_string());
-                    }
-                    return;
-                }
-            };
-            let (type_name, prefix) = self
-                .ui
-                .shell
-                .as_ref()
-                .map(|shell| shell.inspection_member_target(&access.receiver, access.prefix))
-                .unwrap_or_default();
-            let answered = pollster::block_on(language_host.type_members(
-                language_host.request_context(),
-                document_id,
-                type_name,
-                prefix,
-            ));
-            if let Some(shell) = self.ui.shell.as_mut() {
-                match answered {
-                    Ok(items) => shell.set_completions(items),
-                    Err(error) => shell.set_inspection_message(error.to_string()),
-                }
-            }
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let _cancel = self.languages.completion.start(receiver);
+            std::thread::spawn(move || {
+                let access =
+                    pollster::block_on(host.member_access(host.request_context(), document_id, text, offset))
+                        .map_err(|error| error.to_string());
+                let _ = sender.send(CompletionOutcome::AcessoNaInspecao {
+                    document_id,
+                    access,
+                });
+            });
             return;
         }
-        let Some(request) = self
+        let Some(pedido) = self
             .ui
             .shell
             .as_ref()
@@ -1314,19 +1308,127 @@ impl NativeIde {
         else {
             return;
         };
-        match pollster::block_on(language_host.completion(language_host.request_context(), request))
-        {
-            Ok(items) => {
-                if let Some(shell) = self.ui.shell.as_mut() {
-                    shell.set_completions(items);
+        self.pedir_completacao_do_editor(pedido);
+    }
+
+    /// Manda a pergunta do editor para a thread, e guarda o canal.
+    ///
+    /// Está separada porque quem pergunta é a tecla **e** o recolhimento: uma
+    /// resposta que venceu vira uma pergunta nova, feita da posição de agora.
+    fn pedir_completacao_do_editor(&mut self, pedido: ide_domain::CompletionRequest) {
+        let Some(host) = self.languages.host.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _cancel = self.languages.completion.start(receiver);
+        let request = pedido.clone();
+        std::thread::spawn(move || {
+            let items = pollster::block_on(host.completion(host.request_context(), request))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(CompletionOutcome::Editor { pedido, items });
+        });
+    }
+
+    /// Recolhe a completação que já chegou, e descarta a que venceu.
+    ///
+    /// **Uma resposta atrasada não pode entrar na tela.** Quem digita `for`
+    /// depois do ponto faz três perguntas, e as duas primeiras chegam quando o
+    /// cursor já andou. Aplicá-las faria a lista piscar com o conteúdo de duas
+    /// teclas atrás — pior do que a espera que esta correção removeu.
+    ///
+    /// A pergunta de agora é a comparação: `completion_request` sai do cursor
+    /// onde ele está, então uma resposta serve exatamente quando a pergunta que
+    /// a gerou continua sendo a que se faria hoje.
+    ///
+    /// # E o que venceu vira pergunta, em vez de virar nada
+    ///
+    /// Descartar e parar por aí deixaria a lista fechada para sempre no caso
+    /// mais comum de todos: quem digita `.` e a letra seguinte sem pausa. A
+    /// resposta do ponto chega vencida, e não haveria quem pedisse de novo — a
+    /// letra não pede, porque só a lista **já aberta** dispara o pedido
+    /// seguinte. Antes isto não aparecia porque a espera síncrona abria a lista
+    /// antes de a letra ser processada; foi a correção que criou o buraco.
+    ///
+    /// Então a resposta vencida vira uma pergunta nova, feita de onde o cursor
+    /// está. Ela converge: quem para de digitar recebe a resposta da própria
+    /// posição, e quem continua faz uma pergunta por tecla, que é o que a lista
+    /// aberta já fazia.
+    fn collect_completion(&mut self) -> bool {
+        let Some(resultado) = self.languages.completion.collect() else {
+            return false;
+        };
+        match resultado {
+            CompletionOutcome::Editor { pedido, items } => {
+                let atual = self
+                    .ui
+                    .shell
+                    .as_ref()
+                    .and_then(IdeShell::completion_request);
+                if atual.as_ref() != Some(&pedido) {
+                    if let Some(atual) = atual {
+                        self.pedir_completacao_do_editor(atual);
+                    }
+                    return false;
+                }
+                match items {
+                    Ok(items) => {
+                        if let Some(shell) = self.ui.shell.as_mut() {
+                            shell.set_completions(items);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(shell) = self.ui.shell.as_mut() {
+                            shell.set_status_message(error);
+                        }
+                    }
                 }
             }
-            Err(error) => {
+            CompletionOutcome::AcessoNaInspecao {
+                document_id,
+                access,
+            } => {
+                let access = match access {
+                    Ok(Some(access)) => access,
+                    Ok(None) => return true,
+                    Err(error) => {
+                        if let Some(shell) = self.ui.shell.as_mut() {
+                            shell.set_inspection_message(error);
+                        }
+                        return true;
+                    }
+                };
+                let Some(host) = self.languages.host.as_ref().map(Arc::clone) else {
+                    return true;
+                };
+                let (type_name, prefix) = self
+                    .ui
+                    .shell
+                    .as_ref()
+                    .map(|shell| shell.inspection_member_target(&access.receiver, access.prefix))
+                    .unwrap_or_default();
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let _cancel = self.languages.completion.start(receiver);
+                std::thread::spawn(move || {
+                    let items = pollster::block_on(host.type_members(
+                        host.request_context(),
+                        document_id,
+                        type_name,
+                        prefix,
+                    ))
+                    .map_err(|error| error.to_string());
+                    let _ = sender.send(CompletionOutcome::MembrosNaInspecao(items));
+                });
+            }
+            CompletionOutcome::MembrosNaInspecao(items) => {
                 if let Some(shell) = self.ui.shell.as_mut() {
-                    shell.set_status_message(error.to_string());
+                    match items {
+                        Ok(items) => shell.set_completions(items),
+                        Err(error) => shell.set_inspection_message(error),
+                    }
                 }
             }
         }
+        true
     }
 
     /// Encontra as instalações do Maven e restaura a escolhida.
@@ -2663,6 +2765,7 @@ impl ApplicationHandler for NativeIde {
         changed |= self.advance_project_loading();
         changed |= self.collect_references();
         changed |= self.collect_navigation();
+        changed |= self.collect_completion();
         self.wake_pending_providers();
         self.suspend_idle_languages();
         self.measure_memory();
@@ -3599,6 +3702,77 @@ mod tests {
                 "{token} deveria levar a {arquivo}, veio: {mensagem}"
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **O ponto não espera pela resposta.**
+    ///
+    /// Era o sexto lugar com o mesmo defeito, e o mais bem escondido: a
+    /// completação era pedida na chamada, com o prazo de cinco segundos do
+    /// analisador, e a tela ficava parada nesse tempo. Quem digitava depois do
+    /// ponto via as letras aparecerem todas de uma vez no fim — elas ficavam na
+    /// fila da janela, porque nenhum quadro era desenhado.
+    ///
+    /// O que se afirma aqui é o que faltava: a tecla **posta** a pergunta e
+    /// volta, e a resposta encontra a tela num quadro seguinte.
+    #[test]
+    fn the_dot_does_not_wait_for_the_answer() {
+        let root = std::env::temp_dir().join(format!("er-ide-completacao-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(std::fs::create_dir_all(&root).is_ok());
+        let alvo = root.join("pedido.ts");
+        let texto = "export class Pedido {\n  total = 0;\n  somar(v: number) {}\n  usar() {\n    this.\n  }\n}\n";
+        assert!(std::fs::write(&alvo, texto).is_ok());
+
+        let language_host = LanguageHost::new(&root);
+        let typescript = typescript_contribution::contribution(
+            Arc::new(NativeProcessSupervisor::default()),
+            &[],
+        );
+        assert!(language_host.register(typescript.provider.clone()).is_ok());
+        let mut ide = NativeIde::default();
+        assert!(ide.languages.contributions.register(typescript).is_ok());
+        ide.languages.host = Some(Arc::new(language_host));
+        ide.ui.shell = Some(test_shell(&root));
+        if let Some(shell) = ide.ui.shell.as_mut() {
+            // Logo depois do `this.`, que é onde a lista deve abrir.
+            shell.show_location(&alvo, texto, 4, 9);
+        }
+        ide.sync_languages();
+
+        let inicio = std::time::Instant::now();
+        ide.request_completion();
+        let gasto = inicio.elapsed();
+
+        assert!(
+            ide.languages.completion.pending.is_some(),
+            "a pergunta ficou pendente em vez de ser esperada"
+        );
+        // Folgado de propósito: o que se afirma é que a tecla não paga a
+        // resposta, e não quanto a máquina que roda o teste é rápida.
+        assert!(
+            gasto < std::time::Duration::from_millis(30),
+            "o ponto custou {gasto:?}, como se ainda esperasse a resposta"
+        );
+
+        // E a resposta chega, ainda que depois — recolhida pelo laço de quadros,
+        // cujo papel o teste faz aqui.
+        let mut esperas = 0;
+        loop {
+            ide.collect_completion();
+            let aberta = ide
+                .ui
+                .shell
+                .as_ref()
+                .is_some_and(ide_ui::IdeShell::completion_open);
+            if aberta {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            esperas += 1;
+            assert!(esperas < 500, "a completação precisa chegar");
+        }
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
