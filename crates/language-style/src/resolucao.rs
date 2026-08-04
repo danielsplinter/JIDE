@@ -12,7 +12,10 @@
 //! `node_modules/@spartacus/styles/scss/_core.scss` é o trabalho. As três formas
 //! saíram de um projeto real, e não de documentação.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+};
 
 /// Quantos arquivos, no máximo, uma completação percorre.
 ///
@@ -21,6 +24,109 @@ use std::path::{Path, PathBuf};
 /// depois; ele corta abrangência, e não corretude — o que falta simplesmente
 /// não é oferecido.
 const TETO: usize = 64;
+
+/// Quantos arquivos, no máximo, a subida percorre.
+///
+/// Mais generoso que o [`TETO`] da descida porque um parcial pode ser agregado
+/// por vários arquivos, e cada um traz o seu escopo.
+const TETO_ACIMA: usize = 128;
+
+/// Quem importa quem, no projeto inteiro.
+///
+/// # Por que este grafo existe, e por que ele aponta para trás
+///
+/// Seguir `@import` enxerga **para baixo**: o que este arquivo trouxe. Mas o
+/// modelo de escopo do `@import` é global — um parcial usa variáveis que **quem
+/// o importou** trouxe, e ele próprio não importa nada.
+///
+/// Medido no projeto de referência: dos 134 `.scss` que usam `$`, 82 não
+/// importam coisa alguma. Eles são agregados por um arquivo acima, e é lá que o
+/// escopo deles nasce. Sem a seta invertida, a completação neles é vazia — e
+/// vazia por olhar para o lado errado.
+#[derive(Debug, Default)]
+pub(crate) struct Grafo {
+    /// Para cada arquivo, quem o importa.
+    quem_importa: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl Grafo {
+    /// Varre o projeto e liga as arestas, uma vez.
+    ///
+    /// **É a varredura inteira, e ela é feita uma vez por ativação.** Uma
+    /// importação acrescentada em outro arquivo enquanto a IDE está aberta só é
+    /// vista na próxima; é edição rara, e o preço de reconstruir a cada
+    /// completação seria pago sempre.
+    pub(crate) fn construir(raiz: &Path) -> Self {
+        let mut quem_importa: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for arquivo in folhas(raiz) {
+            let Ok(texto) = std::fs::read_to_string(&arquivo) else {
+                continue;
+            };
+            for (especificador, _) in importacoes(&texto, true) {
+                if let Some(alvo) = resolver(&especificador, &arquivo, raiz) {
+                    quem_importa.entry(alvo).or_default().push(arquivo.clone());
+                }
+            }
+        }
+        Self { quem_importa }
+    }
+
+    /// Os arquivos de cujo escopo este participa.
+    ///
+    /// Sobe pelas arestas invertidas — quem me importa, e quem importa esse — e
+    /// devolve todos, porque cada nível pode ser onde as variáveis estão.
+    pub(crate) fn ancestrais(&self, arquivo: &Path) -> Vec<PathBuf> {
+        let mut achados = Vec::new();
+        let mut vistos = vec![normalizar(arquivo)];
+        let mut fila = vec![normalizar(arquivo)];
+        while let Some(atual) = fila.pop() {
+            if achados.len() >= TETO_ACIMA {
+                break;
+            }
+            let Some(acima) = self.quem_importa.get(&atual) else {
+                continue;
+            };
+            for pai in acima {
+                if vistos.contains(pai) {
+                    continue;
+                }
+                vistos.push(pai.clone());
+                achados.push(pai.clone());
+                fila.push(pai.clone());
+            }
+        }
+        achados
+    }
+}
+
+/// Os `.scss` do projeto, sem descer no que não é fonte.
+fn folhas(raiz: &Path) -> Vec<PathBuf> {
+    let mut achados = Vec::new();
+    let mut pilha = vec![raiz.to_path_buf()];
+    while let Some(pasta) = pilha.pop() {
+        let Ok(entradas) = std::fs::read_dir(&pasta) else {
+            continue;
+        };
+        for entrada in entradas.flatten() {
+            let caminho = entrada.path();
+            let Some(nome) = caminho.file_name().and_then(|nome| nome.to_str()) else {
+                continue;
+            };
+            if caminho.is_dir() {
+                // `node_modules` fica de fora da **varredura**, e não da
+                // resolução: uma biblioteca instalada é destino de importação, e
+                // não origem de escopo do projeto. Varrê-la custaria dezenas de
+                // milhares de arquivos para nada.
+                if nome != "node_modules" && nome != "dist" && !nome.starts_with('.') {
+                    pilha.push(caminho);
+                }
+            } else if nome.ends_with(".scss") {
+                achados.push(normalizar(&caminho));
+            }
+        }
+    }
+    achados
+}
 
 /// Um arquivo alcançado, e o espaço de nomes que qualifica o que ele declara.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,7 +307,30 @@ fn candidatos(base: &Path, especificador: &str) -> Option<PathBuf> {
         bruto.join("index.scss"),
         bruto.join("_index.scss"),
     ];
-    tentativas.into_iter().find(|caminho| caminho.is_file())
+    tentativas
+        .into_iter()
+        .find(|caminho| caminho.is_file())
+        .map(|caminho| normalizar(&caminho))
+}
+
+/// Tira os `.` e os `..` de um caminho, sem tocar no disco.
+///
+/// `resolver` monta `a/b/../c`, e o grafo compara caminhos por igualdade: sem
+/// isto, o mesmo arquivo entraria duas vezes com nomes diferentes e a subida
+/// não acharia o pai. `canonicalize` resolveria, mas vai ao disco a cada
+/// comparação e devolve o prefixo estendido do Windows.
+fn normalizar(caminho: &Path) -> PathBuf {
+    let mut partes = PathBuf::new();
+    for componente in caminho.components() {
+        match componente {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                partes.pop();
+            }
+            outro => partes.push(outro.as_os_str()),
+        }
+    }
+    partes
 }
 
 #[cfg(test)]

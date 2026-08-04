@@ -1390,15 +1390,73 @@ somado a um `"includePaths": ["./core-libs/styles/scss"]` no `project.json`, que
 Seguir importação enxerga **para baixo**; ali a declaração vem **de cima**. Cobrir
 isso é outro mecanismo, e não um ajuste deste.
 
-#### Nível 1c — Quem importa este arquivo ⬜
+#### Nível 1c — Quem importa este arquivo ✅
 
 O grafo de importação **invertido**: varrer os `.scss` do projeto, saber quem
-importa quem, e oferecer também o que os ancestrais declaram. Resolve os 82, e é
-o que faz o modelo de escopo global do `@import` funcionar.
+importa quem, e oferecer também o que os ancestrais põem em escopo. É o que faz
+o modelo de escopo global do `@import` funcionar — um parcial usa o que quem o
+agregou trouxe, e ele próprio não importa nada.
 
-Some-se a leitura de `stylePreprocessorOptions.includePaths`, que é onde um
-projeto declara caminhos de busca extras — dado de build, e portanto do mesmo
-lugar de onde a `27` já lê o que é o projeto.
+**A subida não vaza espaço de nomes.** Se o agregador trouxe o tema com
+`@use ... as t`, o parcial não enxerga `$cor` sem prefixo: aquele nome só existe
+dentro do agregador. Só o que entrou sem qualificar desce.
+
+**Critério:** um parcial que não importa nada, agregado por um arquivo que traz o
+tema, oferece as variáveis do tema. **Cumprido.**
+
+##### O `includePaths` não era preciso
+
+A fase o previa, e a medição o dispensou: das **900** importações do
+`spartacus-develop`, o resolvedor da 1b já acha **891** — 99%. As 9 restantes
+são casos de borda (`../../sass-true/sass/true`, um caminho interpolado
+`#{$font-url}`, dois arquivos que não existem).
+
+Ler configuração de build para 1% seria trocar acoplamento por quase nada.
+
+##### O que a medição mostrou
+
+No `spartacus-develop`, dos 134 `.scss` que usam `$`:
+
+| | 1b | **1c** |
+| --- | --- | --- |
+| ofereceram | 52 | **120** |
+| não ofereceram | 82 | 14 |
+
+E o tempo, em build otimizado:
+
+| | |
+| --- | --- |
+| primeira chamada, que monta o grafo | 588 ms |
+| mediana | **0 ms** |
+| p90 | 13 ms |
+| pior | 208 ms |
+
+##### Três hipóteses erradas sobre o custo, e o que corrigiu
+
+Vale registrar, porque o padrão é o mesmo da `25`: **medir antes de otimizar**,
+e cada palpite meu estava errado.
+
+| hipótese | efeito medido |
+| --- | --- |
+| é I/O — cachear o conteúdo dos arquivos | 464 → 502 ms, nada |
+| é a dedução linear — usar conjunto ordenado | 502 → 374 ms, pouco |
+| é o build de depuração | 374 → 206 ms, metade |
+| é clonar os nomes — emprestá-los | 206 → 193 ms, pouco |
+
+O que realmente mudou a experiência não foi nenhuma das quatro: foi **olhar a
+distribuição em vez do pior caso**. Mediana zero e p90 de 13 ms dizem que o
+caminho comum já estava bom, e que o número que me incomodava era a cauda.
+
+#### Nível 1d — O escopo como índice ⬜
+
+O que a cauda pede, e é o mesmo desenho que a `20` fez para Java e a `25` para
+TypeScript: **calcular o escopo de cada arquivo uma vez**, e não a cada
+pergunta. A completação vira uma consulta, e não uma travessia.
+
+Aqui o dado é pequeno — 785 arquivos e 1362 variáveis no projeto de referência,
+contra os 103 MB do índice de Java —, então cabe em memória sem o formato em
+disco da `20`. O que ele compra é a cauda de 208 ms virar consulta, e os 588 ms
+da primeira pergunta saírem do caminho de quem digita.
 
 #### Nível 2 — Os nomes das propriedades ✅
 

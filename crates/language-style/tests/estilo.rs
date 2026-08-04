@@ -448,3 +448,57 @@ fn a_bare_specifier_reaches_the_installed_library() {
     let nomes = completar(ativo.as_ref(), id, depois_de(global, "margin: $"), "");
     assert_eq!(nomes, vec!["j-fis-gutter".to_owned()]);
 }
+
+/// **O critério do nível 1c.**
+///
+/// O parcial **não importa nada** e usa `$cor-primaria`. Quem a trouxe foi o
+/// arquivo que o agrega, e é lá que o escopo dele nasce. Sem a seta invertida,
+/// a completação aqui é vazia — e vazia por olhar para o lado errado.
+///
+/// É o arranjo de 82 dos 134 arquivos que usam `$` no projeto de referência.
+#[test]
+fn a_partial_sees_what_its_importer_brought() {
+    let projeto = Projeto::novo("de-cima");
+    projeto.arquivo("src/_tema.scss", "$cor-primaria: #333;\n");
+    let parcial = "  .cartao {\n  color: $\n}\n";
+    let caminho = projeto.arquivo("src/componentes/_cartao.scss", parcial);
+    // O agregador: traz o tema e o parcial, nessa ordem, como um `_index` faz.
+    projeto.arquivo(
+        "src/agregado.scss",
+        "@import './tema';\n@import './componentes/cartao';\n",
+    );
+
+    let ativo = projeto.ativo();
+    let id = abrir_em(ativo.as_ref(), &caminho, parcial);
+    let nomes = completar(ativo.as_ref(), id, depois_de(parcial, "color: $"), "");
+    assert_eq!(
+        nomes,
+        vec!["cor-primaria".to_owned()],
+        "o parcial precisa enxergar o escopo de quem o agrega"
+    );
+}
+
+/// A subida não vaza espaço de nomes.
+///
+/// Se o agregador trouxe o tema com `@use ... as t`, o parcial **não** enxerga
+/// `$cor-primaria` sem prefixo: aquele nome só existe dentro do agregador, e
+/// como `t.$cor-primaria`.
+#[test]
+fn a_namespaced_use_above_does_not_leak_down() {
+    let projeto = Projeto::novo("nao-vaza");
+    projeto.arquivo("src/_tema.scss", "$cor-primaria: #333;\n");
+    let parcial = ".cartao {\n  color: $\n}\n";
+    let caminho = projeto.arquivo("src/componentes/_cartao.scss", parcial);
+    projeto.arquivo(
+        "src/agregado.scss",
+        "@use './tema' as t;\n@import './componentes/cartao';\n",
+    );
+
+    let ativo = projeto.ativo();
+    let id = abrir_em(ativo.as_ref(), &caminho, parcial);
+    let nomes = completar(ativo.as_ref(), id, depois_de(parcial, "color: $"), "");
+    assert!(
+        nomes.is_empty(),
+        "um `@use` com apelido não vaza para quem foi importado: {nomes:?}"
+    );
+}
