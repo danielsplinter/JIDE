@@ -657,7 +657,7 @@ fn run_worker(
                     Err(LanguageHostError::Cancelled)
                 } else {
                     runtime
-                        .block_on(active.syntax(document_id))
+                        .block_on(active.syntax(document_id, None))
                         .map_err(Into::into)
                 };
                 let _ = response.send(result);

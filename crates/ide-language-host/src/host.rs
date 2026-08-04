@@ -1481,7 +1481,11 @@ mod tests {
             }])
         }
 
-        async fn syntax(&self, document_id: DocumentId) -> Result<ide_domain::SyntaxSnapshot, LanguageError> {
+        async fn syntax(
+        &self,
+        document_id: DocumentId,
+        _visible: Option<ide_domain::TextRange>,
+    ) -> Result<ide_domain::SyntaxSnapshot, LanguageError> {
             if self.gone.load(Ordering::Relaxed) {
                 return Err(LanguageError::Unavailable("o processo morreu".to_owned()));
             }

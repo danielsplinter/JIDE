@@ -71,7 +71,7 @@ fn the_provider_declares_typescript_and_answers_for_ts_files() {
 fn the_structure_of_the_file_is_navigable() {
     let ativo = ativo();
     let id = abrir(ativo.as_ref(), PEDIDO);
-    let Ok(snapshot) = pollster::block_on(ativo.syntax(id)) else {
+    let Ok(snapshot) = pollster::block_on(ativo.syntax(id, None)) else {
         panic!("o realce precisa responder");
     };
 
@@ -101,7 +101,7 @@ fn the_structure_of_the_file_is_navigable() {
 fn the_highlight_covers_comment_string_keyword_and_type() {
     let ativo = ativo();
     let id = abrir(ativo.as_ref(), PEDIDO);
-    let Ok(snapshot) = pollster::block_on(ativo.syntax(id)) else {
+    let Ok(snapshot) = pollster::block_on(ativo.syntax(id, None)) else {
         panic!("o realce precisa responder");
     };
     for esperado in [
@@ -126,7 +126,7 @@ fn the_highlight_covers_comment_string_keyword_and_type() {
 fn an_accent_does_not_shift_the_highlight_to_the_right() {
     let ativo = ativo();
     let id = abrir(ativo.as_ref(), "const preço = 1;\nconst depois = 2;\n");
-    let Ok(snapshot) = pollster::block_on(ativo.syntax(id)) else {
+    let Ok(snapshot) = pollster::block_on(ativo.syntax(id, None)) else {
         panic!("o realce precisa responder");
     };
     let numero = snapshot
@@ -152,7 +152,7 @@ fn a_syntax_error_is_reported_and_the_rest_still_answers() {
         "um arquivo que não fecha precisa ser apontado"
     );
     assert!(
-        pollster::block_on(ativo.syntax(id)).is_ok(),
+        pollster::block_on(ativo.syntax(id, None)).is_ok(),
         "erro de sintaxe não pode calar o realce do resto"
     );
 }
@@ -171,7 +171,7 @@ fn typing_updates_the_answer() {
         text: "renomeado".to_owned(),
     };
     assert!(pollster::block_on(ativo.change_document(mudanca)).is_ok());
-    let Ok(snapshot) = pollster::block_on(ativo.syntax(id)) else {
+    let Ok(snapshot) = pollster::block_on(ativo.syntax(id, None)) else {
         panic!("o realce precisa responder depois da mudança");
     };
     assert_eq!(snapshot.version, 2);
@@ -190,7 +190,7 @@ fn closing_the_document_forgets_it() {
     let id = abrir(ativo.as_ref(), PEDIDO);
     assert!(pollster::block_on(ativo.close_document(id)).is_ok());
     assert!(
-        pollster::block_on(ativo.syntax(id)).is_err(),
+        pollster::block_on(ativo.syntax(id, None)).is_err(),
         "documento fechado não pode continuar respondendo"
     );
 }

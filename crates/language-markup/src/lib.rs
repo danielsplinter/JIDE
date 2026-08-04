@@ -179,7 +179,11 @@ impl ActiveLanguage for ActiveMarkup {
         Ok(Vec::new())
     }
 
-    async fn syntax(&self, document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {
+    async fn syntax(
+        &self,
+        document_id: DocumentId,
+        _visible: Option<ide_domain::TextRange>,
+    ) -> Result<SyntaxSnapshot, LanguageError> {
         self.documentos
             .lock()
             .map_err(|_| LanguageError::Provider("documentos de marcação travados".to_owned()))?
@@ -395,7 +399,7 @@ mod tests {
             text: texto.to_owned(),
         };
         assert!(pollster::block_on(ativo.open_document(documento)).is_ok());
-        match pollster::block_on(ativo.syntax(DocumentId(1))) {
+        match pollster::block_on(ativo.syntax(DocumentId(1), None)) {
             Ok(snapshot) => snapshot,
             Err(erro) => panic!("o realce precisa existir: {erro}"),
         }

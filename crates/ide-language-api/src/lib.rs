@@ -7,6 +7,7 @@ use ide_domain::{
     AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
     DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location, ProviderId,
     ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextPosition,
+    TextRange,
 };
 
 /// O cancelamento é do domínio, e não deste contrato.
@@ -191,7 +192,29 @@ pub trait ActiveLanguage: Send + Sync {
     async fn wait_until_indexed(&self, _timeout: std::time::Duration) -> bool {
         true
     }
-    async fn syntax(&self, _document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {
+    /// O realce, a estrutura e os diagnósticos de um documento.
+    ///
+    /// # `visible` é uma dica, e não um recorte obrigatório
+    ///
+    /// Ele diz **o que está na tela**. Uma linguagem pode usá-lo para não
+    /// percorrer o que ninguém vê, e pode ignorá-lo — devolver mais do que se
+    /// pediu é sempre correto, e devolver menos que a faixa pedida não é.
+    ///
+    /// Medido no provider de TypeScript, que é onde isto nasceu: num arquivo de
+    /// 3 144 linhas, montar o realce inteiro custa 22 ms **a cada tecla**, para
+    /// desenhar cerca de cinquenta linhas. São 7 783 realces produzidos para uns
+    /// poucos aparecerem.
+    ///
+    /// **A estrutura e os diagnósticos continuam do arquivo inteiro.** Eles
+    /// alimentam painel e contagem, e não a pintura do texto; recortá-los faria
+    /// a lista de símbolos encolher ao rolar.
+    ///
+    /// `None` pede tudo, e é o que quem não desenha usa.
+    async fn syntax(
+        &self,
+        _document_id: DocumentId,
+        _visible: Option<TextRange>,
+    ) -> Result<SyntaxSnapshot, LanguageError> {
         Err(LanguageError::Unsupported("syntax snapshot".to_owned()))
     }
     async fn semantic(&self, _document_id: DocumentId) -> Result<SemanticSnapshot, LanguageError> {

@@ -40,7 +40,7 @@ fn abrir(ativo: &dyn ActiveLanguage, id: DocumentId, texto: &str) {
 }
 
 fn realce(ativo: &dyn ActiveLanguage, id: DocumentId) -> ide_domain::SyntaxSnapshot {
-    match pollster::block_on(ativo.syntax(id)) {
+    match pollster::block_on(ativo.syntax(id, None)) {
         Ok(snapshot) => snapshot,
         Err(erro) => panic!("o realce precisa responder: {erro}"),
     }

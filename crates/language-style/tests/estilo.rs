@@ -51,7 +51,7 @@ fn a_stylesheet_is_highlighted_and_navigable() {
 }
 ",
     );
-    let Ok(snapshot) = pollster::block_on(ativo.syntax(id)) else {
+    let Ok(snapshot) = pollster::block_on(ativo.syntax(id, None)) else {
         panic!("o realce precisa responder");
     };
     for esperado in [
@@ -107,7 +107,7 @@ fn valid_scss_is_never_accused() {
     );
 
     // E o realce continua vindo: é o que faz o arquivo deixar de ser texto cru.
-    let Ok(snapshot) = pollster::block_on(ativo.syntax(id)) else {
+    let Ok(snapshot) = pollster::block_on(ativo.syntax(id, None)) else {
         panic!("o realce precisa responder");
     };
     assert!(

@@ -370,10 +370,14 @@ impl ActiveLanguage for JavaLanguage {
     }
 
     async fn diagnostics(&self, document_id: DocumentId) -> Result<Vec<Diagnostic>, LanguageError> {
-        Ok(self.syntax(document_id).await?.diagnostics)
+        Ok(self.syntax(document_id, None).await?.diagnostics)
     }
 
-    async fn syntax(&self, document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {
+    async fn syntax(
+        &self,
+        document_id: DocumentId,
+        _visible: Option<ide_domain::TextRange>,
+    ) -> Result<SyntaxSnapshot, LanguageError> {
         self.documents.syntax(document_id)
     }
 
@@ -2513,7 +2517,7 @@ int x;";
         );
         let provider = active();
         assert!(pollster::block_on(provider.open_document(snapshot(texto))).is_ok());
-        let resultado = match pollster::block_on(provider.syntax(DocumentId(1))) {
+        let resultado = match pollster::block_on(provider.syntax(DocumentId(1), None)) {
             Ok(resultado) => resultado,
             Err(error) => panic!("análise falhou: {error}"),
         };
@@ -3381,7 +3385,7 @@ int x;";
             }
         "#;
         assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
-        let syntax = match pollster::block_on(active.syntax(DocumentId(1))) {
+        let syntax = match pollster::block_on(active.syntax(DocumentId(1), None)) {
             Ok(syntax) => syntax,
             Err(error) => panic!("syntax unavailable: {error}"),
         };
@@ -3403,7 +3407,7 @@ int x;";
             }
         "#;
         assert!(pollster::block_on(active.open_document(snapshot(source))).is_ok());
-        let syntax = match pollster::block_on(active.syntax(DocumentId(1))) {
+        let syntax = match pollster::block_on(active.syntax(DocumentId(1), None)) {
             Ok(syntax) => syntax,
             Err(error) => panic!("syntax unavailable: {error}"),
         };
@@ -3458,7 +3462,7 @@ int x;";
             text: String::new(),
         };
         assert!(pollster::block_on(active.change_document(change)).is_ok());
-        let syntax = match pollster::block_on(active.syntax(DocumentId(1))) {
+        let syntax = match pollster::block_on(active.syntax(DocumentId(1), None)) {
             Ok(syntax) => syntax,
             Err(error) => panic!("syntax unavailable: {error}"),
         };

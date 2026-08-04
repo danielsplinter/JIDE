@@ -603,6 +603,51 @@ estrutura e os diagnósticos do arquivo todo — a cada mudança, porque o
 
 Cortar isso é mudar o contrato para snapshot parcial, e é outra conversa.
 
+##### E o resto do custo era `Node::parent()`
+
+Com a árvore reaproveitada, os 27 ms que sobravam foram medidos por partes:
+
+| | |
+| --- | --- |
+| percorrer os 24 514 nós | 6 ms |
+| **classificar** | +14 ms |
+| converter posição e alocar os 7 783 realces | +1,4 ms |
+| montar a estrutura | +5,7 ms |
+
+A leitura óbvia — e a minha — foi que os 14 ms eram das comparações de texto: a
+classificação fazia uma busca de substring mais duas varreduras lineares de 61
+entradas por nó. Trocá-las por uma tabela indexada pelo `kind_id` **não moveu o
+número**: 27,0 ms viraram 26,8 ms.
+
+O custo era `Node::parent()`. O tree-sitter **reconstrói o pai descendo a
+árvore**, e a classificação o chamava para cada identificador. Quem percorre já
+sabe quem é o pai, porque veio dele; passá-lo adiante troca uma reconstrução por
+um argumento.
+
+| | por tecla, 3 144 linhas |
+| --- | --- |
+| antes de tudo | 45 ms |
+| com a árvore reaproveitada | 27 ms |
+| **sem reconstruir o pai** | **13,7 ms** |
+
+A tabela ficou, e vale **0,7 ms** dos 13,7 — medido desligando-a. Pequeno, real,
+e registrado como pequeno para ninguém a confundir com a correção.
+
+##### Cinco hipóteses, e o que ensinaram
+
+O custo do realce foi diagnosticado errado cinco vezes seguidas nesta sessão: era
+o parse, era I/O, era a dedução linear, era a alocação, era a comparação de
+texto. Nenhuma era.
+
+Duas armadilhas de medição valem o registro, porque são o motivo de eu ter
+errado:
+
+- **medir em build de depuração**, que atribuiu metade do custo ao lugar errado;
+- **um baseline que o compilador apaga.** A primeira medição comparou percorrer
+  sem fazer nada contra percorrer classificando; o "sem fazer nada" virou código
+  morto, e a diferença inflou. Quando o baseline passou a **usar** o resultado,
+  a conta mudou.
+
 ##### O `InputEdit` é a parte perigosa
 
 Passar a árvore anterior **sem** descrever a edição não dá erro: dá uma árvore

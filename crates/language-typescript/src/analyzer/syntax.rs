@@ -26,12 +26,12 @@ pub(crate) fn analyze(tree: &Tree, source: &str) -> SyntaxPass {
         diagnostics: Vec::new(),
     };
     let root = tree.root_node();
-    walk(root, &lines, &mut pass);
+    walk(root, None, &lines, &mut pass);
     pass.outline = outline_of(root, &lines);
     pass
 }
 
-fn walk(node: Node<'_>, lines: &LineIndex<'_>, pass: &mut SyntaxPass) {
+fn walk(node: Node<'_>, pai: Option<Node<'_>>, lines: &LineIndex<'_>, pass: &mut SyntaxPass) {
     if node.is_error() || node.is_missing() {
         pass.diagnostics.push(Diagnostic {
             range: node_range(node, lines),
@@ -44,7 +44,7 @@ fn walk(node: Node<'_>, lines: &LineIndex<'_>, pass: &mut SyntaxPass) {
             source: Some("typescript".to_owned()),
         });
     }
-    if let Some(kind) = highlight_kind(node) {
+    if let Some(kind) = highlight_kind(node, pai) {
         pass.highlights.push(SyntaxHighlight {
             range: node_range(node, lines),
             kind,
@@ -52,7 +52,7 @@ fn walk(node: Node<'_>, lines: &LineIndex<'_>, pass: &mut SyntaxPass) {
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        walk(child, lines, pass);
+        walk(child, Some(node), lines, pass);
     }
 }
 
@@ -115,28 +115,95 @@ fn outline_kind(kind: &str) -> Option<OutlineKind> {
     }
 }
 
-fn highlight_kind(node: Node<'_>) -> Option<SyntaxHighlightKind> {
-    let kind = node.kind();
+/// Como um nó é classificado, decidido **uma vez por espécie**.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Classe {
+    /// A espécie basta para saber a cor.
+    Fixa(SyntaxHighlightKind),
+    /// Um identificador: a cor depende de onde ele está.
+    PeloPai,
+    Nenhuma,
+}
+
+/// A cor de cada espécie de nó, indexada pelo número que o tree-sitter dá a ela.
+///
+/// # Por que esta tabela existe
+///
+/// A classificação era feita **por texto**, a cada nó: uma busca de substring
+/// mais duas varreduras lineares de 61 entradas cada. Medido num arquivo de
+/// 3 144 linhas, com 24 514 nós: percorrer a árvore custava 6,5 ms, e
+/// classificá-la **20,9 ms** — cerca de três milhões de comparações de texto por
+/// tecla.
+///
+/// O `kind_id` é um número, e a gramática tem algumas centenas de espécies. A
+/// tabela é montada uma vez, com as mesmas regras escritas em texto — a
+/// legibilidade fica onde estava, e a comparação vira um índice.
+fn tabela() -> &'static [Classe] {
+    static TABELA: std::sync::OnceLock<Vec<Classe>> = std::sync::OnceLock::new();
+    TABELA.get_or_init(|| {
+        let linguagem: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        (0..linguagem.node_kind_count())
+            .map(|id| {
+                let Ok(id) = u16::try_from(id) else {
+                    return Classe::Nenhuma;
+                };
+                linguagem
+                    .node_kind_for_id(id)
+                    .map_or(Classe::Nenhuma, classe_da_especie)
+            })
+            .collect()
+    })
+}
+
+/// A regra, escrita como sempre esteve — e lida uma vez por espécie.
+fn classe_da_especie(kind: &str) -> Classe {
     if kind.contains("comment") {
-        return Some(SyntaxHighlightKind::Comment);
+        return Classe::Fixa(SyntaxHighlightKind::Comment);
     }
     if matches!(
         kind,
         "string" | "string_fragment" | "template_string" | "regex"
     ) {
-        return Some(SyntaxHighlightKind::String);
+        return Classe::Fixa(SyntaxHighlightKind::String);
     }
     if kind == "number" {
-        return Some(SyntaxHighlightKind::Number);
+        return Classe::Fixa(SyntaxHighlightKind::Number);
     }
     if matches!(kind, "type_identifier" | "predefined_type") {
-        return Some(SyntaxHighlightKind::Type);
+        return Classe::Fixa(SyntaxHighlightKind::Type);
     }
-    if matches!(kind, "decorator") {
-        return Some(SyntaxHighlightKind::Annotation);
+    if kind == "decorator" {
+        return Classe::Fixa(SyntaxHighlightKind::Annotation);
     }
     if matches!(kind, "identifier" | "property_identifier") {
-        return node.parent().map(|parent| match parent.kind() {
+        return Classe::PeloPai;
+    }
+    if TYPESCRIPT_KEYWORDS.contains(&kind) {
+        return Classe::Fixa(SyntaxHighlightKind::Keyword);
+    }
+    if TYPESCRIPT_OPERATORS.contains(&kind) {
+        return Classe::Fixa(SyntaxHighlightKind::Operator);
+    }
+    Classe::Nenhuma
+}
+
+/// # Por que o pai vem de fora
+///
+/// `Node::parent()` **não é barato**: o tree-sitter o reconstrói descendo a
+/// árvore, e chamá-lo por identificador custou 14 ms num arquivo de 3 144
+/// linhas — mais do que a travessia inteira, que é 6 ms.
+///
+/// Quem percorre já sabe quem é o pai, porque veio dele. Passá-lo adiante
+/// troca uma reconstrução por um argumento.
+fn highlight_kind(node: Node<'_>, pai: Option<Node<'_>>) -> Option<SyntaxHighlightKind> {
+    match tabela()
+        .get(node.kind_id() as usize)
+        .copied()
+        .unwrap_or(Classe::Nenhuma)
+    {
+        Classe::Fixa(kind) => Some(kind),
+        // Só os identificadores olham em volta, e são a minoria dos nós.
+        Classe::PeloPai => pai.map(|parent| match parent.kind() {
             "function_declaration" | "method_definition" | "method_signature"
             | "call_expression" => SyntaxHighlightKind::Function,
             "public_field_definition" | "property_signature" | "member_expression" => {
@@ -147,15 +214,9 @@ fn highlight_kind(node: Node<'_>) -> Option<SyntaxHighlightKind> {
             // deixaria o uso sem realce — e sem realce a interface não sabe que
             // dali dá para navegar.
             _ => SyntaxHighlightKind::Variable,
-        });
+        }),
+        Classe::Nenhuma => None,
     }
-    if TYPESCRIPT_KEYWORDS.contains(&kind) {
-        return Some(SyntaxHighlightKind::Keyword);
-    }
-    if TYPESCRIPT_OPERATORS.contains(&kind) {
-        return Some(SyntaxHighlightKind::Operator);
-    }
-    None
 }
 
 const TYPESCRIPT_KEYWORDS: &[&str] = &[

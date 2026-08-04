@@ -637,7 +637,11 @@ impl ActiveLanguage for ActiveTypeScript {
             .collect())
     }
 
-    async fn syntax(&self, document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {
+    async fn syntax(
+        &self,
+        document_id: DocumentId,
+        _visible: Option<ide_domain::TextRange>,
+    ) -> Result<SyntaxSnapshot, LanguageError> {
         self.documents
             .lock()
             .map_err(|_| LanguageError::Provider("TypeScript documents lock poisoned".to_owned()))?

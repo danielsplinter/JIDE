@@ -438,7 +438,11 @@ impl ActiveLanguage for ActiveStyle {
             .unwrap_or_default())
     }
 
-    async fn syntax(&self, document_id: DocumentId) -> Result<SyntaxSnapshot, LanguageError> {
+    async fn syntax(
+        &self,
+        document_id: DocumentId,
+        _visible: Option<ide_domain::TextRange>,
+    ) -> Result<SyntaxSnapshot, LanguageError> {
         self.documentos
             .lock()
             .map_err(|_| LanguageError::Provider("documentos de estilo travados".to_owned()))?
