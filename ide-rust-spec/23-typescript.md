@@ -1349,16 +1349,56 @@ personalizadas declaradas**. Elas existem — 30 e 40 — mas moram em
 caso que "o que o próprio arquivo declara" não cobre. Neste projeto, o nível 1
 oferece corretamente nada.
 
-#### Nível 1b — Seguir o `@use` ⬜
+#### Nível 1b — Seguir o `@use` e o `@import` ✅
 
 O que torna o nível 1 útil num projeto de verdade: resolver `@use`, `@import` e
 `@forward`, e trazer o que o arquivo importado declara.
 
-O custo está na **resolução**, e não na extração: parciais com sublinhado
-(`_variables.scss`), arquivo de índice, especificador nu resolvido em
-`node_modules`, e `@use ... as *` contra o prefixo de espaço de nomes. É um
-resolvedor, e o `com_extensao` da `25` já ensinou que essa família de tarefa
-parece pequena e não é.
+O custo está na **resolução**, e não na extração. As quatro formas saíram de
+projeto real, e não de documentação:
+
+| escrito | é o arquivo |
+| --- | --- |
+| `'../styles-config'` | `../_styles-config.scss` |
+| `'./styles/index'` | `./styles/_index.scss` |
+| `'@spartacus/styles/scss/core'` | `node_modules/@spartacus/styles/scss/_core.scss` |
+| `'functions'` | `./_functions.scss`, ao lado |
+
+**`@forward` atravessa, `@use` não**, e isso é a semântica do Sass e não uma
+economia nossa: um módulo não reexporta o que ele próprio `@use`. Seguir em
+profundidade ofereceria nomes que o arquivo não enxerga.
+
+**O espaço de nomes é respeitado.** Com `@use '../tema' as t`, o nome só existe
+como `t.$cor`; digitar `$cor` direto não acha nada, e oferecer sem o prefixo
+daria uma lista que não compila. `@import` e `@use ... as *` entram sem
+qualificar.
+
+**Critério:** o tema declara `$cor-primaria` e o componente o traz por
+`@import`; digitar `$` no componente oferece a variável do tema. **Cumprido.**
+
+##### O que a medição mostrou, e o que ela deixa a descoberto
+
+No `spartacus-develop`, dos 134 `.scss` que usam `$`: **52 passaram a oferecer**,
+82 não. Pior tempo de resposta, **30 ms** — dentro do que uma lista que aparece
+enquanto se digita aguenta.
+
+Os 82 têm uma causa só, e ela é estrutural: **não importam nada**. São parciais
+agregados por um arquivo acima, e usam variáveis que **o importador** trouxe —
+somado a um `"includePaths": ["./core-libs/styles/scss"]` no `project.json`, que
+é caminho de busca do build e não do arquivo.
+
+Seguir importação enxerga **para baixo**; ali a declaração vem **de cima**. Cobrir
+isso é outro mecanismo, e não um ajuste deste.
+
+#### Nível 1c — Quem importa este arquivo ⬜
+
+O grafo de importação **invertido**: varrer os `.scss` do projeto, saber quem
+importa quem, e oferecer também o que os ancestrais declaram. Resolve os 82, e é
+o que faz o modelo de escopo global do `@import` funcionar.
+
+Some-se a leitura de `stylePreprocessorOptions.includePaths`, que é onde um
+projeto declara caminhos de busca extras — dado de build, e portanto do mesmo
+lugar de onde a `27` já lê o que é o projeto.
 
 #### Nível 2 — Os nomes das propriedades ⬜
 

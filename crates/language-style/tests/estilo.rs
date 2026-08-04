@@ -271,3 +271,124 @@ fn plain_css_offers_nothing_and_does_not_fail() {
     let nomes = completar(ativo.as_ref(), id, depois_de(css, "  col"), "col");
     assert!(nomes.is_empty());
 }
+
+/// Um projeto de mentira, com o tema num arquivo e o componente noutro.
+///
+/// É o arranjo que a medição encontrou nos dois projetos de referência:
+/// **as variáveis não moram no arquivo que as usa**.
+struct Projeto(std::path::PathBuf);
+
+impl Projeto {
+    fn novo(nome: &str) -> Self {
+        let raiz = std::env::temp_dir().join(format!("er-ide-tema-{nome}"));
+        let _ = std::fs::remove_dir_all(&raiz);
+        assert!(std::fs::create_dir_all(&raiz).is_ok());
+        Self(raiz)
+    }
+
+    fn arquivo(&self, relativo: &str, conteudo: &str) -> std::path::PathBuf {
+        let destino = self
+            .0
+            .join(relativo.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if let Some(pai) = destino.parent() {
+            assert!(std::fs::create_dir_all(pai).is_ok());
+        }
+        assert!(std::fs::write(&destino, conteudo).is_ok());
+        destino
+    }
+
+    fn ativo(&self) -> Box<dyn ActiveLanguage> {
+        let context = LanguageActivationContext {
+            workspace_root: self.0.clone(),
+            source_roots: Vec::new(),
+            toolchains: Vec::new(),
+        };
+        match pollster::block_on(StyleLanguageProvider::new().activate(context)) {
+            Ok(ativo) => ativo,
+            Err(erro) => panic!("ativação falhou: {erro}"),
+        }
+    }
+}
+
+impl Drop for Projeto {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn abrir_em(ativo: &dyn ActiveLanguage, caminho: &std::path::Path, texto: &str) -> DocumentId {
+    let id = DocumentId(7);
+    assert!(
+        pollster::block_on(ativo.open_document(DocumentSnapshot {
+            id,
+            path: caminho.to_path_buf(),
+            version: 1,
+            text: texto.to_owned(),
+        }))
+        .is_ok()
+    );
+    id
+}
+
+/// **O critério do nível 1b.**
+///
+/// O tema declara `$cor-primaria`; o componente o traz por `@import` e não
+/// declara nada. Digitar `$` no componente oferece a variável do tema.
+#[test]
+fn an_imported_variable_is_offered() {
+    let projeto = Projeto::novo("import");
+    projeto.arquivo("src/_tema.scss", "$cor-primaria: #333;\n$espaco: 8px;\n");
+    let componente = "@import '../tema';\n\n.cartao {\n  color: $\n}\n";
+    let caminho = projeto.arquivo("src/app/cartao.component.scss", componente);
+    let ativo = projeto.ativo();
+    let id = abrir_em(ativo.as_ref(), &caminho, componente);
+
+    let nomes = completar(ativo.as_ref(), id, depois_de(componente, "color: $"), "");
+    assert_eq!(
+        nomes,
+        vec!["cor-primaria".to_owned(), "espaco".to_owned()],
+        "o que o tema declara precisa chegar a quem o importa"
+    );
+}
+
+/// **O espaço de nomes é respeitado, e não é enfeite.**
+///
+/// Com `@use '../tema' as t`, escrever `$cor` não acha nada — o nome só existe
+/// como `t.$cor`. Oferecer sem o prefixo daria uma lista que não compila.
+#[test]
+fn a_namespace_is_required_when_the_use_declares_one() {
+    let projeto = Projeto::novo("espaco");
+    projeto.arquivo("src/_tema.scss", "$cor-primaria: #333;\n");
+    let componente = "@use '../tema' as t;\n\n.cartao {\n  color: t.$\n  border: $\n}\n";
+    let caminho = projeto.arquivo("src/app/cartao.component.scss", componente);
+    let ativo = projeto.ativo();
+    let id = abrir_em(ativo.as_ref(), &caminho, componente);
+
+    let com = completar(ativo.as_ref(), id, depois_de(componente, "color: t.$"), "");
+    assert_eq!(com, vec!["cor-primaria".to_owned()], "com o prefixo, aparece");
+
+    let sem = completar(ativo.as_ref(), id, depois_de(componente, "border: $"), "");
+    assert!(sem.is_empty(), "sem o prefixo, não existe: {sem:?}");
+}
+
+/// Um especificador nu resolve em `node_modules`, que é como uma biblioteca de
+/// design chega ao projeto.
+#[test]
+fn a_bare_specifier_reaches_the_installed_library() {
+    let projeto = Projeto::novo("nu");
+    projeto.arquivo(
+        "node_modules/uma-lib/styles/_variables.scss",
+        "$j-fis-gutter: 8px;\n",
+    );
+    projeto.arquivo(
+        "node_modules/uma-lib/styles/_index.scss",
+        "@forward './variables';\n",
+    );
+    let global = "@use 'uma-lib/styles' as *;\n\nbody {\n  margin: $\n}\n";
+    let caminho = projeto.arquivo("src/styles.scss", global);
+    let ativo = projeto.ativo();
+    let id = abrir_em(ativo.as_ref(), &caminho, global);
+
+    let nomes = completar(ativo.as_ref(), id, depois_de(global, "margin: $"), "");
+    assert_eq!(nomes, vec!["j-fis-gutter".to_owned()]);
+}

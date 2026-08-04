@@ -4,7 +4,13 @@
 #![doc = "próprio, e a `23` os deixou de fora de propósito. O que existe aqui é o"]
 #![doc = "mínimo que faz um arquivo de estilo deixar de ser texto cru."]
 
-use std::{collections::HashMap, sync::Mutex};
+mod resolucao;
+
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use async_trait::async_trait;
 use ide_domain::{
@@ -74,9 +80,9 @@ impl LanguageProvider for StyleLanguageProvider {
 
     async fn activate(
         &self,
-        _context: LanguageActivationContext,
+        context: LanguageActivationContext,
     ) -> Result<Box<dyn ActiveLanguage>, LanguageError> {
-        Ok(Box::new(ActiveStyle::new()?))
+        Ok(Box::new(ActiveStyle::new(context.workspace_root)?))
     }
 }
 
@@ -87,23 +93,32 @@ struct Documento {
     /// Decidido na abertura, pela extensão, e guardado: a mudança não traz o
     /// caminho, e reanalisar precisa da mesma decisão.
     julgar: bool,
+    /// Onde o arquivo está.
+    ///
+    /// Guardado porque `@import '../styles-config'` só quer dizer alguma coisa
+    /// a partir da pasta de quem importa. A mudança não traz o caminho, e sem
+    /// isto ele se perderia na primeira tecla.
+    caminho: PathBuf,
     snapshot: SyntaxSnapshot,
 }
 
 struct ActiveStyle {
     language_id: LanguageId,
+    /// A raiz do projeto, para o `node_modules` de um especificador nu.
+    raiz: PathBuf,
     parser: Mutex<Parser>,
     documentos: Mutex<HashMap<DocumentId, Documento>>,
 }
 
 impl ActiveStyle {
-    fn new() -> Result<Self, LanguageError> {
+    fn new(raiz: PathBuf) -> Result<Self, LanguageError> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_css::LANGUAGE.into())
             .map_err(|erro| LanguageError::Provider(erro.to_string()))?;
         Ok(Self {
             language_id: LanguageId(STYLE_LANGUAGE_ID.to_owned()),
+            raiz,
             parser: Mutex::new(parser),
             documentos: Mutex::new(HashMap::new()),
         })
@@ -115,6 +130,7 @@ impl ActiveStyle {
         version: u64,
         texto: &str,
         julgar: bool,
+        caminho: PathBuf,
     ) -> Result<Documento, LanguageError> {
         let arvore: Tree = self
             .parser
@@ -135,6 +151,7 @@ impl ActiveStyle {
         Ok(Documento {
             texto: texto.to_owned(),
             julgar,
+            caminho,
             snapshot: SyntaxSnapshot {
                 document_id,
                 version,
@@ -155,7 +172,13 @@ impl ActiveLanguage for ActiveStyle {
 
     async fn open_document(&self, document: DocumentSnapshot) -> Result<(), LanguageError> {
         let julgar = julga(&document.path);
-        let analisado = self.analisar(document.id, document.version, &document.text, julgar)?;
+        let analisado = self.analisar(
+            document.id,
+            document.version,
+            &document.text,
+            julgar,
+            document.path.clone(),
+        )?;
         self.documentos
             .lock()
             .map_err(|_| LanguageError::Provider("documentos de estilo travados".to_owned()))?
@@ -164,7 +187,7 @@ impl ActiveLanguage for ActiveStyle {
     }
 
     async fn change_document(&self, change: DocumentChange) -> Result<(), LanguageError> {
-        let (texto, julgar) = {
+        let (texto, julgar, caminho) = {
             let documentos = self
                 .documentos
                 .lock()
@@ -175,9 +198,11 @@ impl ActiveLanguage for ActiveStyle {
             (
                 aplicar(&atual.texto, change.range, &change.text),
                 atual.julgar,
+                atual.caminho.clone(),
             )
         };
-        let analisado = self.analisar(change.document_id, change.version, &texto, julgar)?;
+        let analisado =
+            self.analisar(change.document_id, change.version, &texto, julgar, caminho)?;
         self.documentos
             .lock()
             .map_err(|_| LanguageError::Provider("documentos de estilo travados".to_owned()))?
@@ -211,12 +236,12 @@ impl ActiveLanguage for ActiveStyle {
         &self,
         request: CompletionRequest,
     ) -> Result<Vec<CompletionItem>, LanguageError> {
-        let texto = self
+        let (texto, caminho) = self
             .documentos
             .lock()
             .map_err(|_| LanguageError::Provider("documentos de estilo travados".to_owned()))?
             .get(&request.document_id)
-            .map(|documento| documento.texto.clone())
+            .map(|documento| (documento.texto.clone(), documento.caminho.clone()))
             .ok_or_else(|| LanguageError::Provider("documento não está aberto".to_owned()))?;
 
         let cursor = deslocamento(
@@ -224,13 +249,37 @@ impl ActiveLanguage for ActiveStyle {
             request.position.line as usize,
             request.position.column as usize,
         );
-        let Some(sigilo) = sigilo_antes(&texto, cursor, &request.prefix) else {
+        let inicio = cursor.saturating_sub(request.prefix.len());
+        let Some(sigilo) = sigilo_antes(&texto, inicio) else {
             // Fora de um nome que este arquivo inventa, não há o que oferecer
             // **ainda**: nomes de propriedade são o nível 2, e uma lista vazia
             // diz isso melhor do que um erro.
             return Ok(Vec::new());
         };
-        Ok(declaracoes(&texto, sigilo)
+        // `v.$cor` pergunta pelo módulo `v`; `$cor` pergunta pelo que entrou sem
+        // qualificação. Oferecer um no lugar do outro daria nomes que o arquivo
+        // não enxerga.
+        let espaco = espaco_antes(&texto, inicio.saturating_sub(1));
+
+        let mut nomes = Vec::new();
+        if espaco.is_none() {
+            nomes.extend(declaracoes(&texto, sigilo));
+        }
+        for alcancado in resolucao::alcancados(&caminho, &texto, &self.raiz) {
+            if alcancado.espaco != espaco {
+                continue;
+            }
+            let Ok(conteudo) = std::fs::read_to_string(&alcancado.caminho) else {
+                continue;
+            };
+            for nome in declaracoes(&conteudo, sigilo) {
+                if !nomes.contains(&nome) {
+                    nomes.push(nome);
+                }
+            }
+        }
+        nomes.sort();
+        Ok(nomes
             .into_iter()
             .filter(|nome| nome.starts_with(&request.prefix))
             .map(|nome| CompletionItem {
@@ -419,13 +468,30 @@ fn aplicar(atual: &str, range: Option<TextRange>, texto: &str) -> String {
 /// Olha o caractere imediatamente antes do trecho já digitado: com o cursor em
 /// `$cor|`, o prefixo é `cor` e o que vem antes é `$`. Com o cursor logo depois
 /// do `$`, o prefixo é vazio e o caractere anterior é o próprio `$`.
-fn sigilo_antes(texto: &str, cursor: usize, prefixo: &str) -> Option<char> {
-    let inicio = cursor.checked_sub(prefixo.len())?;
+fn sigilo_antes(texto: &str, inicio: usize) -> Option<char> {
     texto
         .get(..inicio)?
         .chars()
         .next_back()
         .filter(|caractere| matches!(caractere, '$' | '%'))
+}
+
+/// O módulo que qualifica o nome, quando ele vem escrito `v.$cor`.
+///
+/// Devolve `None` para `$cor` escrito direto — que é o que entra por `@import`
+/// e por `@use ... as *`.
+fn espaco_antes(texto: &str, antes_do_sigilo: usize) -> Option<String> {
+    let ate = texto.get(..antes_do_sigilo)?;
+    let sem_ponto = ate.strip_suffix('.')?;
+    let nome = sem_ponto
+        .chars()
+        .rev()
+        .take_while(|caractere| caractere.is_alphanumeric() || *caractere == '-' || *caractere == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    (!nome.is_empty()).then_some(nome)
 }
 
 /// Os nomes que este arquivo declara com um dado sigilo.
