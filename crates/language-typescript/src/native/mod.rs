@@ -113,8 +113,30 @@ struct ParsedDocument {
     /// inteiro: medido num arquivo de 3 144 linhas, **45 ms por tecla** — 22
     /// quadros por segundo gastos só em recolorir o que não mudou.
     tree: Tree,
+    /// Quando a lista de símbolos deste documento foi montada.
+    ///
+    /// Ela acompanha o texto **em repouso**, e não a cada tecla: enquanto as
+    /// mudanças chegam depressa, a lista anterior continua valendo. Ver
+    /// [`INTERVALO_DA_ESTRUTURA`].
+    estrutura_em: std::time::Instant,
     snapshot: SyntaxSnapshot,
 }
+
+/// De quanto em quanto tempo a lista de símbolos é refeita, no máximo.
+///
+/// # Por que tempo, e não "quando a estrutura mudou"
+///
+/// Saber se uma edição mexeu na estrutura custa quase o mesmo que refazê-la: é
+/// preciso percorrer a árvore para descobrir. Adivinhar pelo texto editado —
+/// "tem chave? tem `class`?" — seria heurística, e erraria calada.
+///
+/// O relógio não erra: ela pode ficar até este intervalo atrás do texto, e nunca
+/// mais do que isso. Quem a lê é o painel de símbolos e uma contagem na barra de
+/// estado; nenhum dos dois precisa dela na mesma tecla.
+///
+/// 150 ms é abaixo do que se percebe numa lista lateral, e acima do intervalo
+/// entre teclas de quem digita depressa — que é onde a economia está.
+const INTERVALO_DA_ESTRUTURA: std::time::Duration = std::time::Duration::from_millis(150);
 
 struct ActiveTypeScript {
     language_id: LanguageId,
@@ -288,13 +310,26 @@ impl ActiveTypeScript {
         version: u64,
         text: &str,
         anterior: Option<&Tree>,
+        estrutura_anterior: Option<(&[ide_domain::OutlineItem], std::time::Instant)>,
     ) -> Result<ParsedDocument, LanguageError> {
         let tree = self.parser.parse(text, anterior)?;
-        let pass = syntax::analyze(&tree, text);
+        // A lista anterior vale enquanto for recente. Sem ela — na abertura —
+        // não há o que reaproveitar, e a primeira sempre é montada.
+        let reaproveitar = estrutura_anterior
+            .filter(|(_, em)| em.elapsed() < INTERVALO_DA_ESTRUTURA);
+        let mut pass = syntax::analyze(&tree, text, reaproveitar.is_none());
+        let estrutura_em = match reaproveitar {
+            Some((anterior, em)) => {
+                pass.outline = anterior.to_vec();
+                em
+            }
+            None => std::time::Instant::now(),
+        };
         Ok(ParsedDocument {
             path: path.to_path_buf(),
             text: text.to_owned(),
             tree: tree.clone(),
+            estrutura_em,
             snapshot: SyntaxSnapshot {
                 document_id,
                 version,
@@ -338,12 +373,13 @@ impl ActiveLanguage for ActiveTypeScript {
             document.version,
             &document.text,
             None,
+            None,
         )?;
         self.store(document.id, parsed)
     }
 
     async fn change_document(&self, change: DocumentChange) -> Result<(), LanguageError> {
-        let (caminho, anterior, texto) = {
+        let (caminho, anterior, estrutura, texto) = {
             let documents = self.documents.lock().map_err(|_| {
                 LanguageError::Provider("TypeScript documents lock poisoned".to_owned())
             })?;
@@ -366,6 +402,7 @@ impl ActiveLanguage for ActiveTypeScript {
             (
                 current.path.clone(),
                 editada,
+                Some((current.snapshot.outline.clone(), current.estrutura_em)),
                 apply(&current.text, change.range, &change.text),
             )
         };
@@ -377,6 +414,9 @@ impl ActiveLanguage for ActiveTypeScript {
             change.version,
             &texto,
             anterior.as_ref(),
+            estrutura
+                .as_ref()
+                .map(|(itens, em)| (itens.as_slice(), *em)),
         )?;
         self.store(change.document_id, parsed)
     }

@@ -18,7 +18,15 @@ pub(crate) struct SyntaxPass {
     pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
-pub(crate) fn analyze(tree: &Tree, source: &str) -> SyntaxPass {
+/// # `com_estrutura` existe porque a estrutura tem outro ritmo
+///
+/// O realce muda a cada tecla; a lista de símbolos, não. Medido num arquivo de
+/// 3 144 linhas: montá-la é **35%** do custo de cada tecla, para produzir catorze
+/// itens que quase nunca mudam.
+///
+/// Quem chama com `false` reaproveita a lista anterior. Ver `analyze` no provider
+/// nativo, que decide quando isso vale.
+pub(crate) fn analyze(tree: &Tree, source: &str, com_estrutura: bool) -> SyntaxPass {
     let lines = LineIndex::new(source);
     let mut pass = SyntaxPass {
         highlights: Vec::new(),
@@ -27,7 +35,9 @@ pub(crate) fn analyze(tree: &Tree, source: &str) -> SyntaxPass {
     };
     let root = tree.root_node();
     walk(root, None, &lines, &mut pass);
-    pass.outline = outline_of(root, &lines);
+    if com_estrutura {
+        pass.outline = outline_of(root, &lines);
+    }
     pass
 }
 

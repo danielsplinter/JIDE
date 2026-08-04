@@ -50,6 +50,11 @@ fn realce(ativo: &dyn ActiveLanguage, id: DocumentId) -> ide_domain::SyntaxSnaps
 fn incremental_bate_com_do_zero(antes: &str, range: TextRange, inserido: &str, depois: &str) {
     let ativo = ativado();
     abrir(ativo.as_ref(), DocumentId(1), antes);
+    // **A invariante vale em repouso.** A lista de símbolos acompanha o texto
+    // com atraso de propósito — ela é 35% do custo de cada tecla, e catorze
+    // itens que quase nunca mudam. Esperar é o que faz este teste comparar
+    // maçãs com maçãs, em vez de afirmar que o atraso não existe.
+    std::thread::sleep(std::time::Duration::from_millis(160));
     assert!(
         pollster::block_on(ativo.change_document(DocumentChange {
             document_id: DocumentId(1),
@@ -173,4 +178,72 @@ fn replacing_the_whole_document_matches_a_full_parse() {
     let do_zero = ativado();
     abrir(do_zero.as_ref(), DocumentId(2), novo);
     assert_eq!(incremental.highlights, realce(do_zero.as_ref(), DocumentId(2)).highlights);
+}
+
+/// **A lista de símbolos acompanha o texto em repouso, e não a cada tecla.**
+///
+/// Montá-la é 35% do custo de cada tecla, para produzir catorze itens que quase
+/// nunca mudam. Enquanto as mudanças chegam depressa, a anterior continua
+/// valendo; quando o texto sossega, ela alcança.
+///
+/// O que se afirma aqui não é "ela fica velha": é que ela **alcança**.
+#[test]
+fn the_outline_catches_up_when_typing_settles() {
+    let ativo = ativado();
+    abrir(ativo.as_ref(), DocumentId(1), BASE);
+    let antes = realce(ativo.as_ref(), DocumentId(1)).outline;
+    assert_eq!(antes.len(), 1, "a classe do texto base: {antes:?}");
+
+    // Uma classe nova, escrita de uma vez.
+    let nova = format!("{BASE}export class Cliente {{}}\n");
+    assert!(
+        pollster::block_on(ativo.change_document(DocumentChange {
+            document_id: DocumentId(1),
+            version: 2,
+            range: Some(TextRange {
+                start: TextPosition { line: 7, column: 0 },
+                end: TextPosition { line: 7, column: 0 },
+            }),
+            text: "export class Cliente {}\n".to_owned(),
+        }))
+        .is_ok()
+    );
+
+    // Pode ainda não ter alcançado; o que não pode é nunca alcançar.
+    let limite = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut versao = 3;
+    loop {
+        let agora = realce(ativo.as_ref(), DocumentId(1)).outline;
+        if agora.len() == 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < limite,
+            "a estrutura precisa alcançar o texto: {agora:?}"
+        );
+        // Uma mudança inócua, para dar à análise a chance de refazer a lista.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(
+            pollster::block_on(ativo.change_document(DocumentChange {
+                document_id: DocumentId(1),
+                version: versao,
+                range: Some(TextRange {
+                    start: TextPosition { line: 0, column: 0 },
+                    end: TextPosition { line: 0, column: 0 },
+                }),
+                text: String::new(),
+            }))
+            .is_ok()
+        );
+        versao += 1;
+    }
+    assert!(nova.contains("Cliente"));
+}
+
+/// Abrir monta a lista na hora: não há anterior para reaproveitar.
+#[test]
+fn opening_always_builds_the_outline() {
+    let ativo = ativado();
+    abrir(ativo.as_ref(), DocumentId(1), BASE);
+    assert_eq!(realce(ativo.as_ref(), DocumentId(1)).outline.len(), 1);
 }

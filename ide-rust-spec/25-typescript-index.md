@@ -633,6 +633,49 @@ um argumento.
 A tabela ficou, e vale **0,7 ms** dos 13,7 — medido desligando-a. Pequeno, real,
 e registrado como pequeno para ninguém a confundir com a correção.
 
+##### A estrutura acompanha em repouso
+
+Sobravam 13,7 ms, dos quais a lista de símbolos era **35%** — seis
+milissegundos, a cada tecla, para produzir catorze itens que quase nunca mudam.
+E a árvore era percorrida **duas vezes**: uma pelo realce, outra por ela.
+
+Duas saídas, e a medição escolheu — números da mesma execução, porque entre
+execuções a máquina varia muito:
+
+| arranjo | por tecla |
+| --- | --- |
+| duas travessias, como estava | 20,3 ms |
+| **a lista reaproveitada** | **13,1 ms** |
+| uma travessia só, juntando as duas | 16,1 ms |
+
+**Reaproveitar rende quase o dobro de juntar**, e a diferença é maior do que a
+tabela mostra: o número da travessia única mede só o custo de *reconhecer* a
+declaração, sem remontar o aninhamento, que é o trabalho de verdade.
+
+A razão fica óbvia depois de vista: juntar as passadas continua fazendo o
+trabalho da lista **a cada tecla**; reaproveitar não faz nenhum. E as duas quase
+não se somam — com a lista reaproveitada, a travessia única economizaria num
+caminho que quase não acontece.
+
+**O gatilho é o relógio, e não uma adivinhação.** Saber se uma edição mexeu na
+estrutura custa quase o mesmo que refazê-la: é preciso percorrer a árvore para
+descobrir. Adivinhar pelo texto editado — "tem chave? tem `class`?" — seria
+heurística, e erraria calada. Com o relógio, a lista pode ficar até 150 ms atrás
+do texto, e nunca mais do que isso.
+
+O resultado no caminho real: **13,7 → 9,9 ms** de mediana, com o pior caso em
+20,9 ms, que é quando ela é refeita.
+
+##### E os testes da árvore incremental passaram a esperar
+
+Os três que afirmam "incremental é igual ao do zero" compararam também a lista de
+símbolos, e passaram a falhar — corretamente, porque agora ela tem outro ritmo.
+Eles esperam o repouso antes de comparar.
+
+**A invariante ficou mais forte, e não mais fraca:** ela agora diz que, quando o
+texto sossega, o caminho incremental e o do zero produzem exatamente a mesma
+coisa — realce, estrutura e diagnóstico.
+
 ##### Cinco hipóteses, e o que ensinaram
 
 O custo do realce foi diagnosticado errado cinco vezes seguidas nesta sessão: era
