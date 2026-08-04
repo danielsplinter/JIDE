@@ -1188,10 +1188,42 @@ Cada postura tem o seu teste.
 
 #### E quanto isso economiza, honestamente
 
-Com 14% a 17% dos pontos alcançados pelo índice, **o analisador continua sendo
-pedido cedo** numa sessão que mexa em código com genéricos. O ganho não é "1,9 GB
-a menos"; é: quem só navega, busca e edita código com tipos declarados nunca paga
-por ele, e ninguém paga por ele **antes** de precisar.
+Com 14% a 17% dos pontos alcançados pelo índice — **12,8% a 25,8% depois da fase
+7** —, o analisador continua sendo pedido cedo numa sessão que mexa em código com
+genéricos. O ganho não é "1,9 GB a menos"; é: quem só navega, busca e edita
+código com tipos declarados nunca paga por ele, e ninguém paga por ele **antes**
+de precisar.
+
+### Fase 8 — O segundo elo da cadeia ⬜
+
+`this.svc.` — o `this.svc` é alcançável e o que vem depois não. A medição da fase
+7 diz que **um quarto de tudo o que a IDE não responde** está aí: 1 636 pontos no
+monorepo, 102 na aplicação. Num componente Angular é o gesto mais comum que
+existe.
+
+O que falta é um passo, e um só: achado o tipo do receptor, resolver o **membro**
+sob o ponto seguinte e usar o tipo dele como novo receptor. Os membros já trazem
+o tipo escrito ao lado — é o `detail` que a fase 4 guarda —, e resolver esse nome
+é o caminho que a fase 3 já anda.
+
+**Um passo, e não a cadeia inteira.** `a.b.c.d.` é raro; `this.campo.` é o dia
+inteiro. Cada elo a mais multiplica o custo e some na estatística, e a fase 4 já
+mostrou que estimar quanto rende cada um erra para mais.
+
+**E é ela que faz a fase 7 valer.** Um campo `nome: string` acessado por
+`this.nome.` só vira resposta se as duas coisas existirem: o elo da cadeia e o
+tipo da linguagem. Sozinha, a biblioteca rendeu 2,5 pontos; sozinho, o elo
+esbarraria em `string` e `Observable` sem saber o que são.
+
+**O que precisa ser consertado junto:** método não guarda o tipo de retorno. A
+gramática o põe em `return_type`, e a extração lê `type`, que é o campo de uma
+propriedade. Sem isso, `this.buscar().` nunca terá receptor — e `detail` de
+método também aparece vazio na lista de hoje.
+
+**Critério:** `this.campo.` completa com os membros do tipo do campo, num projeto
+real, sem o analisador subir. A cobertura é medida com `tests/cobertura.rs`, no
+mesmo instrumento e nos mesmos dois projetos, e o número entra aqui ao lado dos
+de agora — 12,8% e 25,8%.
 
 ### Fase 7 — Os tipos do próprio TypeScript ✅
 
@@ -1355,9 +1387,55 @@ projetos compartilham o mesmo arquivo de cache, que é o desenho.
   sinal de prontidão direto; apareceu num teste, que sem isso mediria a corrida
   entre duas threads em vez do que o código faz.
 
-**O que falta para fechar a fase:** refazer a medição de 14% a 17% da fase 4 no
-mesmo projeto e escrever o número novo aqui ao lado do antigo. Sem ele, sabe-se
-que a biblioteca responde, e não **quanto** ela tirou do analisador.
+#### Quanto ela rendeu, e é menos do que eu esperava
+
+O instrumento agora fica no repositório — `tests/cobertura.rs`, com a chave
+`ER_IDE_PROJETO_TS`. O número antigo veio de um arranjo que não foi guardado, e
+por isso a comparação de então dependia de eu lembrar como tinha contado.
+
+**A prova de que o instrumento conta o mesmo:** na aplicação ele achou **397**
+pontos, contra os 402 da fase 4. Mesmo projeto, mesma ordem de grandeza, mesma
+regra — cada `.` que segue um nome.
+
+Medido com e sem a biblioteca, **no mesmo instrumento e na mesma amostra**:
+
+| projeto | pontos | sem a biblioteca | com | ganho |
+|---|---|---|---|---|
+| monorepo de biblioteca | 9 438 | 23,2% | **25,8%** | +2,5 pontos |
+| aplicação | 397 | 12,6% | **12,8%** | +1 ponto de 397 |
+
+**Um ponto em 397.** A fase custou 1 525 tipos, 410 KB de cache e um módulo em
+cada metade da crate, e na aplicação de verdade ela respondeu **um** ponto a
+mais. No monorepo rendeu dez vezes mais — 239 pontos —, e mesmo lá são 2,5
+pontos percentuais.
+
+Está escrito porque é verdade, e porque a fase parecia obviamente boa antes de
+ser medida. É a mesma lição que esta especificação já registrou seis vezes por
+outros nomes: **a estimativa e a medição discordam, e quem manda é a medição.**
+
+#### E a medição disse onde o ponto morre de verdade
+
+O gargalo não é a tabela de tipos: é o **receptor**.
+
+| projeto | "não sei" | dos quais, segundo elo de uma cadeia |
+|---|---|---|
+| monorepo | 7 006 | 1 636 (**23%**) |
+| aplicação | 346 | 102 (**29%**) |
+
+Em `this.svc.buscar`, o `this.svc` é alcançável e o resto não — saber o tipo de
+um membro exige resolver o membro, que é um passo além do que a fase 4 entregou.
+**Um quarto de tudo o que a IDE não responde está aí**, e num componente Angular
+é o gesto mais comum que existe: quase tudo se acessa por `this.`.
+
+E é aqui que esta fase deixa de parecer desperdício: um campo `nome: string`
+acessado por `this.nome.` só vira resposta se **as duas** coisas existirem — o
+elo da cadeia e o tipo da linguagem. A biblioteca sozinha rende pouco porque
+quase ninguém escreve `const nome: string` e usa `nome.` logo abaixo; ela rende
+quando o receptor for alcançável.
+
+*Isso não desfaz o número acima: a fase 7 sozinha entregou 2,5 pontos e 1 ponto.
+O que a medição diz é qual é a próxima fase, e que ela agora tem por que ser
+feita.*
 
 ### Correções que vieram desta fase
 
