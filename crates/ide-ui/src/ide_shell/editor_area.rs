@@ -7,6 +7,12 @@
 use super::*;
 use crate::editor::Posicao;
 
+/// Quantas letras de um nome abrem a lista de completação sozinhas.
+///
+/// Uma letra abriria com o alfabeto inteiro dentro; duas já é um nome
+/// começando, e é onde o VS Code também abre.
+const LETRAS_QUE_ABREM: usize = 2;
+
 impl IdeShell {
     pub const fn focus(&self) -> ShellFocus {
         self.context.focus
@@ -23,6 +29,27 @@ impl IdeShell {
             },
             prefix: identifier_prefix(document.buffer.text(), self.editor_area.pane.cursor()),
         })
+    }
+
+    /// Se o nome sendo escrito **acabou de chegar** ao tamanho que abre a lista.
+    ///
+    /// # Por que duas letras, e por que "acabou de chegar"
+    ///
+    /// Até aqui só o ponto abria a completação, e escrever um nome exigia
+    /// `Ctrl+Espaço` — que ninguém lembra de apertar. Uma letra abriria a lista
+    /// com o alfabeto inteiro dentro; duas já é um nome começando.
+    ///
+    /// **E abre uma vez, e não a cada tecla.** A partir daí quem mantém a lista
+    /// viva é `completion_follow_up`, que refaz o filtro a cada letra. Se
+    /// abrisse sempre que houvesse duas letras ou mais, `Escape` deixaria de
+    /// funcionar: a lista voltaria na tecla seguinte.
+    #[must_use]
+    pub fn completion_opens_now(&self) -> bool {
+        let Some(document) = self.editor_area.session.active() else {
+            return false;
+        };
+        identifier_prefix(document.buffer.text(), self.editor_area.pane.cursor()).chars().count()
+            == LETRAS_QUE_ABREM
     }
 
     pub fn set_completions(&mut self, items: Vec<CompletionItem>) {

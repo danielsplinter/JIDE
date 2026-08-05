@@ -903,8 +903,23 @@ impl ActiveLanguage for ActiveTypeScript {
                     "não sei o tipo desta expressão".to_owned(),
                 ));
             }
-            // Sem ponto, a completação é por nome — e ela não é desta fase.
-            members::Receptor::Nenhum => return Ok(Vec::new()),
+            // **Sem ponto, a completação é por nome — e ela não é deste
+            // provider.** Dizer isso é `Unresolved`; lista vazia seria dizer
+            // que **não há nada ali**, que é falso e cala quem sabe.
+            //
+            // Foi o que aconteceu: escrever `private http: Http` e pedir a
+            // lista não trazia nada, porque o `Ok(vec![])` daqui satisfazia o
+            // host e a pergunta nunca chegava ao analisador — que responde
+            // `HttpClient`, `HttpContext` e mais seis na hora.
+            //
+            // A intenção sempre esteve escrita neste comentário, e o código
+            // dizia outra coisa. É a terceira resposta da `25` outra vez, e
+            // desta vez o erro foi meu, no provider que a inventou.
+            members::Receptor::Nenhum => {
+                return Err(LanguageError::Unresolved(
+                    "completação por nome não é deste provider".to_owned(),
+                ));
+            }
         };
 
         let Some(itens) = self.membros_do_tipo(&caminho, &texto, &tipo, alcance_de(&tipo)) else {

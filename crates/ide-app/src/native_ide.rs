@@ -1389,6 +1389,22 @@ impl NativeIde {
                         }
                     }
                     Err(error) => {
+                        // **A recusa vai para o terminal, e não só para a
+                        // barra.** Na barra ela pisca: a mensagem seguinte a
+                        // substitui antes de alguém conseguir ler, e quem usa só
+                        // sabe dizer que "piscou". Uma falha que não se consegue
+                        // relatar é uma falha que não se conserta.
+                        //
+                        // `eprintln!`, e não `tracing`: esta aplicação não
+                        // instala assinante nenhum, e todo `tracing::warn!` que
+                        // ela já tem escreve no vazio. Descoberto ao tentar usar
+                        // um — e é dívida anotada, não um argumento a favor.
+                        eprintln!(
+                            "[completação] recusada em {}:{} com prefixo {:?}: {error}",
+                            pedido.position.line + 1,
+                            pedido.position.column + 1,
+                            pedido.prefix
+                        );
                         if let Some(shell) = self.ui.shell.as_mut() {
                             shell.set_status_message(error);
                         }
@@ -3344,6 +3360,14 @@ impl ApplicationHandler for NativeIde {
                                 // filtro, e o que não é nome fecha a lista.
                                 completion_requested |= shell.completion_follow_up(&text);
                                 shell.text_input(&text);
+                                // E escrever um nome abre a lista sozinho, sem
+                                // depender de `Ctrl+Espaço` — que ninguém
+                                // lembra de apertar. A pergunta vem **depois**
+                                // do texto entrar: o prefixo precisa incluir a
+                                // letra que acabou de ser digitada.
+                                if shell.text_reaches_editor() {
+                                    completion_requested |= shell.completion_opens_now();
+                                }
                             }
                         }
                     }

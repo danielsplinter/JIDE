@@ -1120,6 +1120,51 @@ fn java_syntax_snapshot_drives_highlighting_and_outline() {
     );
 }
 
+/// **Escrever um nome abre a lista sozinho, na segunda letra.**
+///
+/// Até aqui só o ponto abria a completação, e escrever um nome exigia
+/// `Ctrl+Espaço` — que ninguém lembra de apertar. Foi o que fez `private http:
+/// Http` não oferecer nada.
+///
+/// Abre **uma vez**, e não a cada tecla: a partir daí quem mantém a lista viva é
+/// `completion_follow_up`. Se abrisse sempre que houvesse duas letras ou mais,
+/// `Escape` deixaria de funcionar — a lista voltaria na tecla seguinte.
+#[test]
+fn typing_a_name_opens_the_list_on_the_second_letter() {
+    let mut shell = test_shell();
+    shell.editor_area.session.open_memory("Pagina.ts", "");
+    shell.context.focus = ShellFocus::Editor;
+
+    shell.text_input("H");
+    assert!(
+        !shell.completion_opens_now(),
+        "uma letra abriria a lista com o alfabeto inteiro dentro"
+    );
+    shell.text_input("t");
+    assert!(shell.completion_opens_now(), "duas letras já é um nome");
+    shell.text_input("t");
+    assert!(
+        !shell.completion_opens_now(),
+        "a terceira não reabre: quem mantém a lista viva é o filtro"
+    );
+}
+
+/// O que não é nome não abre lista nenhuma.
+#[test]
+fn punctuation_does_not_open_the_list() {
+    let mut shell = test_shell();
+    shell.editor_area.session.open_memory("Pagina.ts", "");
+    shell.context.focus = ShellFocus::Editor;
+    shell.text_input("ab");
+    assert!(shell.completion_opens_now());
+    shell.text_input("(");
+    assert!(
+        !shell.completion_opens_now(),
+        "um parêntese encerra o nome: {:?}",
+        shell.active_text()
+    );
+}
+
 #[test]
 fn completion_popup_can_apply_selected_item() {
     let mut shell = test_shell();
