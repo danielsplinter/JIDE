@@ -38,7 +38,11 @@ impl IdeShell {
             EXPLORER_TREE_ID,
             explorer_items(&workspace, &[], &HashMap::new()),
         )
-        .with_row_height(EXPLORER_ROW_HEIGHT);
+        .with_row_height(EXPLORER_ROW_HEIGHT)
+        // A barra vertical é do painel, e não da árvore: é ele quem sabe onde
+        // ela cabe ao lado da horizontal e do divisor. Com as duas ligadas
+        // apareciam **duas trilhas** na mesma borda.
+        .with_own_scrollbar(false);
         let mut shell = Self {
             explorer: ExplorerState {
                 workspace_name,

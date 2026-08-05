@@ -150,6 +150,112 @@ fn desligar_e_reabilitar_um_pelo_nome_cala_os_outros() {
     );
 }
 
+/// Uma linguagem que não consegue subir. É o que a falha de ativação produz.
+struct NaoSobe;
+
+#[async_trait::async_trait]
+impl LanguageProvider for NaoSobe {
+    fn metadata(&self) -> ide_language_api::LanguageMetadata {
+        ide_language_api::LanguageMetadata {
+            language_id: ide_domain::LanguageId("naosobe".to_owned()),
+            provider_id: ide_domain::ProviderId("naosobe".to_owned()),
+            display_name: "Não sobe".to_owned(),
+            extensions: vec!["naosobe".to_owned()],
+            api_version: ide_language_api::LANGUAGE_API_VERSION,
+            trigger_characters: Vec::new(),
+        }
+    }
+
+    fn capabilities(&self) -> LanguageCapabilities {
+        LanguageCapabilities::SYNTAX
+    }
+
+    async fn activate(
+        &self,
+        _context: ide_language_api::LanguageActivationContext,
+    ) -> Result<Box<dyn ide_language_api::ActiveLanguage>, ide_language_api::LanguageError> {
+        // O que acontece de verdade quando falta o que a linguagem precisa: sem
+        // `tsconfig`, sem Node, sem JDK.
+        Err(ide_language_api::LanguageError::Provider(
+            "falta o que este projeto não tem".to_owned(),
+        ))
+    }
+}
+
+/// Um provider que **falhou** no projeto anterior volta no projeto novo.
+///
+/// É o caso relatado de uso: abrir um projeto Java derruba o analisador de
+/// TypeScript, porque ali não há o que ele precisa. Trocar para um projeto
+/// Angular encontrava esse analisador ainda morto — `Failed` deixa de ser
+/// candidato para qualquer extensão —, e nenhum `.ts` era realçado até fechar
+/// a IDE.
+///
+/// Dentro de um projeto, guardar a falha é proteção: insistir com quem acabou
+/// de morrer devolveria o documento ao morto. Entre projetos, é o contrário —
+/// a falha era sobre o projeto que saiu.
+#[test]
+fn quem_falhou_no_projeto_anterior_volta_no_projeto_novo() {
+    let host = LanguageHost::new("/antigo");
+    let quebrado: Arc<dyn LanguageProvider> = Arc::new(NaoSobe);
+    success(host.register(quebrado));
+
+    // A falha acontece ao tentar usar: é a ativação que não vai.
+    assert!(
+        pollster::block_on(host.open_document(
+            context(1),
+            documento(1, "/antigo/a.naosobe", "seja o que for"),
+        ))
+        .is_err(),
+        "a ativação precisa falhar para o provider ficar falho"
+    );
+    assert!(
+        host.provider_for_extension("naosobe", LanguageCapabilities::SYNTAX)
+            .is_err(),
+        "provider falho deixa de ser candidato — é o que se quer **dentro** de \
+         um projeto, para o documento não voltar ao morto"
+    );
+
+    // A troca de projeto, como a aplicação a faz.
+    success(host.set_workspace_root("/novo"));
+    success(pollster::block_on(
+        success(host.reset_for_new_project()).shutdown(),
+    ));
+
+    assert!(
+        host.provider_for_extension("naosobe", LanguageCapabilities::SYNTAX)
+            .is_ok(),
+        "no projeto novo ele precisa ser candidato de novo: a falha era sobre \
+         o projeto que saiu"
+    );
+}
+
+/// Trocar de projeto **não** desfaz o que a configuração desligou.
+///
+/// Esquecer a falha do projeto anterior é uma coisa; passar por cima da
+/// escolha de quem configurou a IDE é outra. `Disabled` fica.
+#[test]
+fn a_troca_nao_religa_quem_a_configuracao_desligou() {
+    let host = host_com_duas("/antigo");
+    let typescript = ide_domain::ProviderId(language_typescript::TYPESCRIPT_PROVIDER_ID.to_owned());
+    success(pollster::block_on(host.disable(&typescript)));
+
+    success(host.set_workspace_root("/novo"));
+    success(pollster::block_on(
+        success(host.reset_for_new_project()).shutdown(),
+    ));
+
+    assert!(
+        host.provider_for_extension("ts", LanguageCapabilities::SYNTAX)
+            .is_err(),
+        "quem foi desligado de propósito continua desligado"
+    );
+    assert!(
+        host.provider_for_extension("java", LanguageCapabilities::SYNTAX)
+            .is_ok(),
+        "e o resto continua de pé"
+    );
+}
+
 /// As rotas por extensão sobrevivem à troca.
 ///
 /// `shutdown()` apagava as rotas do provider desabilitado, e sem rota a

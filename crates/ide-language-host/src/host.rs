@@ -311,6 +311,56 @@ impl LanguageHost {
         Ok(WorkersSoltos { workers })
     }
 
+    /// Esquece tudo o que aconteceu com o projeto anterior.
+    ///
+    /// É o que uma troca de projeto pede, e é mais do que
+    /// [`LanguageHost::detach_workers`] faz: além de soltar quem está ativo,
+    /// **devolve ao registro quem falhou**.
+    ///
+    /// # Por que a falha não atravessa a troca
+    ///
+    /// Um provider falha por causa do projeto que estava aberto — sem
+    /// `tsconfig`, sem Node, sem JDK. Um provider `Failed` deixa de ser
+    /// candidato para qualquer extensão e **só volta por `enable`**, de
+    /// propósito: dentro de um projeto, insistir com quem acabou de morrer
+    /// devolveria o documento ao morto.
+    ///
+    /// Entre projetos a razão se inverte. Abrir um projeto Java derruba o
+    /// analisador de TypeScript, porque ali não há o que ele precisa; abrir um
+    /// projeto Angular em seguida encontrava esse analisador ainda morto, e
+    /// nenhum `.ts` era realçado até fechar a IDE. Julgar o projeto novo pelo
+    /// que aconteceu no anterior é o defeito, e não a proteção.
+    ///
+    /// **`Disabled` fica.** Ele é escolha de quem configurou a IDE, e não
+    /// consequência de um projeto — trocar de projeto não desfaz configuração.
+    ///
+    /// As rotas de documento também vão embora: os documentos do projeto
+    /// anterior deixaram de existir, e uma rota que sobrevive a eles aponta
+    /// para um identificador que pode ser reusado.
+    pub fn reset_for_new_project(&self) -> Result<WorkersSoltos, LanguageHostError> {
+        let mut registry = self
+            .registry
+            .lock()
+            .map_err(|_| LanguageHostError::WorkerStopped)?;
+        let workers = registry
+            .providers
+            .values_mut()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    ProviderState::Active | ProviderState::Failed | ProviderState::ShuttingDown
+                )
+            })
+            .filter_map(|entry| {
+                entry.state = ProviderState::Registered;
+                entry.last_error = None;
+                entry.worker.take()
+            })
+            .collect::<Vec<_>>();
+        registry.document_routes.clear();
+        Ok(WorkersSoltos { workers })
+    }
+
     pub fn register(&self, provider: Arc<dyn LanguageProvider>) -> Result<(), LanguageHostError> {
         let mut registry = self
             .registry

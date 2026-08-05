@@ -582,7 +582,14 @@ impl NativeIde {
             tracing::warn!(%error, "a raiz nova não chegou às linguagens");
             return;
         }
-        match language_host.detach_workers() {
+        // `reset_for_new_project`, e não `detach_workers`: além de soltar quem
+        // está ativo, ele devolve ao registro **quem falhou**. Um provider
+        // morre por causa do projeto que estava aberto — abrir um projeto Java
+        // derruba o analisador de TypeScript, porque ali não há o que ele
+        // precisa. Guardar essa morte contra o projeto seguinte era julgar o
+        // novo pelo que aconteceu com o velho, e foi assim que abrir um projeto
+        // Angular depois de um Java não coloria nada.
+        match language_host.reset_for_new_project() {
             Ok(soltos) if !soltos.is_empty() => {
                 // Esperar cada worker morrer é o que congelava a janela: a fila
                 // dele atende um pedido por vez, e o encerramento fica atrás de
@@ -3703,7 +3710,13 @@ impl ApplicationHandler for NativeIde {
             _ => {}
         }
         if let Some(raiz) = projeto_novo {
+            // A mesma sequência da abertura, e na mesma ordem: detectar a
+            // ferramenta, achar o Maven, importar o projeto. O que a abertura
+            // faz e a troca não fizesse ficaria com o valor do projeto
+            // anterior — e cada um desses passos termina registrando algo nas
+            // linguagens, que acabaram de esquecer tudo.
             self.detect_all_toolchains(&raiz);
+            self.detect_maven();
             self.import_project(&raiz);
             // O índice do projeto novo é outro, e os crachás do anterior não
             // valem mais.
