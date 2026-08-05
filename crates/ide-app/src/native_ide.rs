@@ -1273,6 +1273,54 @@ impl NativeIde {
         }
     }
 
+    /// O que uma tecla de texto faz, e se ela pede a lista de completação.
+    ///
+    /// # Por que isto saiu do tratador de eventos
+    ///
+    /// Ficava embutido no `match` da tecla, e por isso **nenhum teste o
+    /// alcançava**: montar um evento de janela exige o winit inteiro. O
+    /// resultado foi um defeito relatado três vezes por quem usa, com os dois
+    /// providers já sondados e respondendo em separado — o que faltava testar
+    /// era justamente isto, e não dava para testar.
+    ///
+    /// São três coisas, nesta ordem, e a ordem importa:
+    ///
+    /// 1. o caractere de disparo da linguagem — o ponto —, perguntado **antes**
+    ///    de o texto entrar, porque quem responde é a posição de antes;
+    /// 2. o filtro da lista já aberta, que a encurta a cada letra e a fecha no
+    ///    que não é nome;
+    /// 3. a abertura por nome, perguntada **depois** de o texto entrar, porque
+    ///    o prefixo precisa incluir a letra recém-digitada.
+    fn text_typed(&mut self, text: &str) -> bool {
+        let disparo = {
+            let Some(shell) = self.ui.shell.as_ref() else {
+                return false;
+            };
+            // Só pergunta quando a tecla é **do editor**. Com a janela de busca
+            // na frente, há documento ativo atrás dela e ele não recebe nada:
+            // digitar um ponto na busca abria o menu de completação sobre uma
+            // janela que não era a do editor.
+            match (
+                shell.text_reaches_editor(),
+                shell.active_document(),
+                self.languages.host.as_ref(),
+            ) {
+                (true, Some(document_id), Some(host)) => {
+                    let triggers = host.trigger_characters(document_id);
+                    text.chars().any(|typed| triggers.contains(&typed))
+                }
+                _ => false,
+            }
+        };
+        let Some(shell) = self.ui.shell.as_mut() else {
+            return false;
+        };
+        let seguindo = shell.completion_follow_up(text);
+        shell.text_input(text);
+        let abrindo = shell.text_reaches_editor() && shell.completion_opens_now();
+        disparo || seguindo || abrindo
+    }
+
     /// Pede a lista de completação, fora da thread da interface.
     ///
     /// # Por que isto não pode ser síncrono
@@ -2866,6 +2914,8 @@ impl ApplicationHandler for NativeIde {
         let iniciado = Instant::now();
         let mut sync_languages = false;
         let mut completion_requested = false;
+        // O texto que a tecla trouxe, tratado depois do `match`.
+        let mut digitado: Option<String> = None;
         let mut direct_commands = Vec::new();
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -3333,41 +3383,13 @@ impl ApplicationHandler for NativeIde {
                             }
                         }
                         _ => {
+                            // O texto é **anotado** e tratado depois do `match`:
+                            // a janela está emprestada aqui, e quem digita mexe
+                            // no shell e pergunta ao host. Ver `text_typed`.
                             if let Some(text) = event.text
                                 && !text.chars().any(char::is_control)
-                                && let Some(shell) = self.ui.shell.as_mut()
                             {
-                                // Alguns caracteres pedem completação sozinhos —
-                                // em Java, o ponto. Quais são é a linguagem
-                                // quem diz; o editor só pergunta.
-                                //
-                                // E só pergunta quando a tecla é **dele**. Com a
-                                // janela de busca na frente, há documento ativo
-                                // atrás dela e ele não está recebendo nada:
-                                // digitar um ponto na busca abria o menu de
-                                // completação sobre uma janela que não era a do
-                                // editor.
-                                if let (true, Some(document_id), Some(host)) = (
-                                    shell.text_reaches_editor(),
-                                    shell.active_document(),
-                                    self.languages.host.as_ref(),
-                                ) {
-                                    let triggers = host.trigger_characters(document_id);
-                                    completion_requested |=
-                                        text.chars().any(|typed| triggers.contains(&typed));
-                                }
-                                // Com a lista aberta, cada letra digitada refaz o
-                                // filtro, e o que não é nome fecha a lista.
-                                completion_requested |= shell.completion_follow_up(&text);
-                                shell.text_input(&text);
-                                // E escrever um nome abre a lista sozinho, sem
-                                // depender de `Ctrl+Espaço` — que ninguém
-                                // lembra de apertar. A pergunta vem **depois**
-                                // do texto entrar: o prefixo precisa incluir a
-                                // letra que acabou de ser digitada.
-                                if shell.text_reaches_editor() {
-                                    completion_requested |= shell.completion_opens_now();
-                                }
+                                digitado = Some(text.to_string());
                             }
                         }
                     }
@@ -3386,6 +3408,13 @@ impl ApplicationHandler for NativeIde {
                 self.runtime.languages_pending = false;
             }
             _ => {}
+        }
+        // A tecla é tratada aqui, e não dentro do `match`: ali a janela está
+        // emprestada, e escrever mexe no shell e pergunta ao host. Ver
+        // `text_typed` — foi tirar isto de dentro do tratador que tornou o
+        // caminho testável.
+        if let Some(texto) = digitado {
+            completion_requested |= self.text_typed(&texto);
         }
         let antes_da_linguagem = iniciado.elapsed();
         if sync_languages {
@@ -3804,15 +3833,13 @@ mod tests {
             );
         }
 
-        // O cursor logo depois de `private c: `, e as duas letras que a IDE
-        // considera início de nome.
+        // O cursor logo depois de `private c: `, e as duas letras digitadas
+        // **pelo caminho da tecla** — que é o que faltava exercitar.
         if let Some(shell) = ide.ui.shell.as_mut() {
             shell.show_location(&arquivo, codigo, 2, 25);
-            shell.text_input("H");
-            assert!(!shell.completion_opens_now(), "uma letra não abre");
-            shell.text_input("t");
-            assert!(shell.completion_opens_now(), "duas letras abrem");
         }
+        assert!(!ide.text_typed("H"), "uma letra não pede a lista");
+        assert!(ide.text_typed("t"), "duas letras pedem a lista");
         ide.sync_languages();
         ide.request_completion();
 
