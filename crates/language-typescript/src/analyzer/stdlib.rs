@@ -45,7 +45,12 @@ use super::{members, parser::TypeScriptParser};
 /// método passou a guardar o tipo de retorno. Sem esta linha, quem já tivesse o
 /// arquivo antigo continuaria lendo o conteúdo velho para sempre, e nada
 /// acusaria: um cache incompleto tem a mesma cara de um cache certo.
-const ASSINATURA: &str = "ERTSLIB2";
+/// *Subiu para 3 quando `static` e `private` deixaram de ser oferecidos: o que
+/// se grava mudou, e a versão do TypeScript — que é a chave do arquivo — não
+/// mudou junto. **É a segunda vez**, e a primeira está escrita acima. Quem
+/// escreve um filtro novo sobre o que entra aqui precisa subir este número no
+/// mesmo commit; a lembrança de que isso existe é o que este comentário compra.*
+const ASSINATURA: &str = "ERTSLIB3";
 
 /// Uma declaração vinda de um arquivo da biblioteca.
 struct Parte {

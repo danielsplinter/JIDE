@@ -598,11 +598,24 @@ fn propriedades_do_construtor(
 ///
 /// Nada aqui é de Angular: a regra é da linguagem, e vale para qualquer
 /// `static`. O que o projeto de referência deu foi o **caso** que a revelou.
+/// # O modificador vem **antes** do nome, e o nome pode ser `static`
+///
+/// A primeira versão perguntava se algum filho do nó tinha o texto `static`, e
+/// escondia `readonly static: boolean` — que o `lib.decorators.d.ts` declara nos
+/// tipos de contexto de decorador, onde `static` é o **nome** do membro.
+///
+/// Um membro escondido não faz ninguém escrever código errado, mas é o mesmo
+/// erro visto do outro lado: confiar num texto onde a gramática já diz qual é o
+/// papel de cada nó.
 fn e_estatico(membro: tree_sitter::Node, bytes: &[u8]) -> bool {
+    let comeco_do_nome = membro
+        .child_by_field_name("name")
+        .map_or(usize::MAX, |nome| nome.start_byte());
     let mut cursor = membro.walk();
-    membro
-        .children(&mut cursor)
-        .any(|filho| filho.utf8_text(bytes).is_ok_and(|texto| texto == "static"))
+    membro.children(&mut cursor).any(|filho| {
+        filho.start_byte() < comeco_do_nome
+            && filho.utf8_text(bytes).is_ok_and(|texto| texto == "static")
+    })
 }
 
 /// Se um membro é escondido de quem olha de fora.
@@ -1047,6 +1060,27 @@ mod tests {
                 "estático não está numa instância: {lista:?}"
             );
         }
+    }
+
+    /// **Um membro chamado `static` não é um membro estático.**
+    ///
+    /// O `lib.decorators.d.ts` do TypeScript declara `readonly static: boolean`
+    /// nos tipos de contexto de decorador. A primeira versão do filtro perguntava
+    /// se algum filho do nó tinha o texto `static` e escondia esse membro — o
+    /// modificador vem **antes** do nome, e a gramática já diz qual é qual.
+    ///
+    /// Achado comparando o cache da biblioteca antes e depois do filtro: 158
+    /// bytes de diferença, e era este membro.
+    #[test]
+    fn a_member_named_static_is_not_a_static_member() {
+        let texto = "interface Contexto {\n  \
+                     readonly static: boolean;\n  \
+                     readonly nome: string;\n}\n";
+        let Some(membros) = membros_de(&parser(), texto, "Contexto", Alcance::DeFora) else {
+            panic!("a interface precisa ser achada");
+        };
+        let nomes: Vec<&str> = membros.itens.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(nomes, vec!["static", "nome"], "veio: {nomes:?}");
     }
 
     /// O parâmetro de construtor privado segue a mesma regra do campo privado.
