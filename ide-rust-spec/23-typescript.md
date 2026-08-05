@@ -1550,6 +1550,65 @@ e a assimetria com TypeScript é o argumento: **o TypeScript exige um verificado
 de tipos, e o CSS exige uma lista.** Pagar um processo por uma lista seria trocar
 10 KB por centenas de megabytes.
 
+### Fase 6 — Completação por nome, e o `import` junto ✅
+
+Escrever um nome não abria lista nenhuma: o único caractere de disparo era o
+ponto, e abrir escrevendo exigia `Ctrl+Espaço`, que ninguém lembra de apertar.
+Duas letras passaram a abrir — **uma vez**, e não a cada tecla, senão o `Escape`
+deixaria de funcionar.
+
+#### O índice dizia "não há nada" onde queria dizer "não é comigo"
+
+Sem ponto, ele devolvia lista vazia. Isso **afirma** que não há completação
+naquela posição, satisfaz o host e cala o analisador — que responde `HttpClient`
+e mais quarenta na hora. A intenção estava escrita no comentário da própria
+linha, e o código dizia outra coisa: é a terceira resposta da `25`, errada no
+provider que a inventou.
+
+#### O analisador só oferece o que está no escopo
+
+E é aí que estava o resto. `private c: Ht` respondia **38 itens com o `import` no
+topo e zero sem ele** — um tipo que ainda não foi importado simplesmente não
+existe para o arquivo.
+
+`includeCompletionsForModuleExports` é o que faz o analisador olhar para fora. É
+a mesma chave que o VS Code liga, e **ela não vale sozinha**: oferecer um nome
+sem trazer o `import` é sugerir código que não compila, que é a família de
+defeito que esta especificação mais persegue. As duas metades andam juntas.
+
+Quem escreve o `import` é o analisador: ele sabe se já existe um do mesmo
+módulo, onde pôr o novo e que aspas o projeto usa. A IDE recebe as trocas de
+texto — `TextEdit`, neutro, porque Java tem a mesma necessidade — e as aplica **de
+trás para frente**, para as posições de uma não deslocarem as seguintes.
+
+*Duas voltas até acertar o pedido de detalhe: ele precisa da **posição** de onde
+a lista foi pedida, e precisa receber de volta o `data` opaco que a entrada
+carrega. Só com o `source`, o analisador responde uma lista vazia — e não se
+interpreta o que é opaco, devolve-se.*
+
+**Critério:** cumprido — `private n: Http` oferece `HttpClient` num arquivo que
+não o importa, e escolhê-lo escreve o `import` no topo.
+
+#### O que o dono do problema descobriu, e o que ele custou
+
+O relato foi `private Http` não completar. **Não era defeito.** Naquela posição,
+`Http` é o **nome do parâmetro** que se está declarando, e não há o que
+completar: o analisador oferece os cinco modificadores que ainda cabem —
+`override`, `private`, `protected`, `public`, `readonly` — e mais nada. O VS Code
+responde igual. Com `private n: Ht`, a mesma linha responde **1 916** itens.
+
+*E a investigação custou quatro rodadas por um erro de instrumento.* Uma sondagem
+procurava a linha do alvo pela primeira que contivesse `Ht` — e a primeira linha
+do arquivo era `import { HttpClient } from …`, que contém `Ht` dentro de
+`HttpClient`. Ela mediu a **linha do import**, onde o analisador naturalmente
+oferece tudo o que o módulo exporta, e a conclusão foi "o slot do nome responde".
+Sobre ela eu procurei defeito no caminho da IDE, mexi no tratador de eventos e
+pedi três execuções a quem usa.
+
+É a quarta vez nesta especificação e na `25` que **o instrumento erra e o código
+paga**. As outras três estão na `25`, e a regra que sobra é a mesma: um
+instrumento afirma tanto quanto o código, e merece a mesma desconfiança.
+
 ## O que fica de fora, e por quê
 
 - **Depurar dentro da IDE**, que era a fase 4 e virou decisão: quem depura
