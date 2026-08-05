@@ -261,40 +261,94 @@ pub(crate) struct ActiveTypeScriptService {
     projetos: Mutex<HashMap<DocumentId, String>>,
 }
 
+/// A linha que o **analisador** tem, numa numeração de base um.
+///
+/// O texto vem do registro deste provider, e não do editor: é justamente a
+/// diferença entre os dois que explicaria uma recusa numa posição que na tela
+/// parece certa.
+fn trecho_da_linha(texto: &str, linha: u32) -> String {
+    texto
+        .lines()
+        .nth((linha.max(1) - 1) as usize)
+        .unwrap_or("<linha fora do texto>")
+        .trim()
+        .chars()
+        .take(60)
+        .collect()
+}
+
+/// Que espécie de erro é uma recusa do analisador.
+///
+/// Separada do serviço porque ela é uma **regra**, e uma regra se testa sem
+/// subir processo nenhum: a versão anterior dependia de um campo do documento
+/// para decidir, e por isso só era exercitada com o `tsserver` de pé.
+fn classificar(detalhe: String, vivo: bool) -> LanguageError {
+    if detalhe.contains("No content available") {
+        return LanguageError::Unresolved(detalhe);
+    }
+    if vivo {
+        LanguageError::Provider(detalhe)
+    } else {
+        LanguageError::Unavailable(detalhe)
+    }
+}
+
 impl ActiveTypeScriptService {
     /// Traduz a falha do analisador para o erro certo do contrato.
     ///
     /// Morto vira `Unavailable`, que faz o host reencaminhar o documento ao
     /// provider nativo. Vivo e recusando vira `Provider`, que é falha deste
     /// pedido e não muda a rota. Ver a fase 3b da `23`.
+    ///
+    /// # `No content available.` nunca é falha
+    ///
+    /// É o que o analisador responde quando o handler **executou e devolveu
+    /// nada** — está escrito assim no `typescript.js`, e não é sobre o arquivo
+    /// estar vazio nem sobre o processo estar mal. Acontece o tempo todo em
+    /// código de verdade: uma posição dentro de um comentário, dentro de um
+    /// texto, ou logo depois de algo que o analisador não conseguiu ligar a
+    /// nada.
+    ///
+    /// Chamar isso de falha do provider põe **"provider failed"** na barra de
+    /// estado de quem só digitou um ponto num lugar sem resposta. `Unresolved`
+    /// diz o que é: não há o que responder aqui, e a pergunta desce para o
+    /// próximo candidato.
+    ///
+    /// *A distinção existia desde a fase 1 da `24`, e valia só para arquivo
+    /// **ancorado** — porque foi num template que ela apareceu. O texto não fala
+    /// de ancoragem, e a regra também não: ela é sobre o que a mensagem
+    /// significa. Ficar presa ao template foi generalizar de menos, e o preço
+    /// apareceu na primeira vez que alguém digitou um ponto num `.ts` sem
+    /// resposta.*
     fn failure(&self, detalhe: String) -> LanguageError {
-        if self.session.is_alive() {
-            LanguageError::Provider(detalhe)
-        } else {
-            LanguageError::Unavailable(detalhe)
-        }
+        classificar(detalhe, self.session.is_alive())
     }
 
-    /// A recusa que quer dizer "aqui eu não sei", e não "eu quebrei".
+    /// A pergunta crua ao analisador, com a recusa ainda sem classificar.
     ///
-    /// # Por que esta distinção precisa existir
-    ///
-    /// `No content available.` é o que o analisador responde quando o handler
-    /// executou e devolveu nada — está no `typescript.js`, e não é sobre o
-    /// arquivo estar vazio. Num arquivo ancorado ela é **comum e correta**: uma
-    /// posição dentro de um contexto que o plugin não resolve — uma variável de
-    /// template vinda de uma diretiva, por exemplo — não tem resposta, e não tem
-    /// mesmo.
-    ///
-    /// Tratar isso como falha do provider faria o host reportar erro onde só
-    /// havia silêncio. `Unresolved` faz a pergunta descer para o próximo
-    /// candidato, que é o que a `04` desenhou e o que a fase 5 da `25`
-    /// construiu.
-    fn silencio_ou_falha(&self, document_id: DocumentId, detalhe: String) -> LanguageError {
-        if self.projeto(document_id).is_some() && detalhe.contains("No content available") {
-            return LanguageError::Unresolved(detalhe);
-        }
-        self.failure(detalhe)
+    /// Separada porque ela é feita **duas vezes**: a segunda depois de reabrir o
+    /// arquivo, para separar silêncio de desencontro. Ver `completion`.
+    async fn pedir_completacao(
+        &self,
+        request: &CompletionRequest,
+        path: &Path,
+        line: u32,
+        offset: u32,
+    ) -> Result<serde_json::Value, String> {
+        self.session
+            .request(
+                "completionInfo",
+                self.com_projeto(
+                    request.document_id,
+                    serde_json::json!({
+                        "file": path_argument(path),
+                        "line": line,
+                        "offset": offset,
+                    }),
+                ),
+                REQUEST_TIMEOUT,
+            )
+            .await
     }
 
     fn documento(&self, document_id: DocumentId) -> Result<(PathBuf, String), LanguageError> {
@@ -625,28 +679,55 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .unwrap_or_default())
     }
 
+    /// # Silêncio pode ser desencontro, e a segunda tentativa separa os dois
+    ///
+    /// `No content available.` quer dizer "o handler executou e devolveu nada".
+    /// Há **duas** razões possíveis, e da nossa ponta elas têm a mesma cara:
+    ///
+    /// - não há mesmo o que responder ali — dentro de um comentário, de um
+    ///   texto, de um lugar que o analisador não ligou a nada;
+    /// - o analisador tem uma cópia do arquivo diferente da nossa, e a posição
+    ///   que mandamos cai noutro lugar do texto **dele**.
+    ///
+    /// A segunda vem das mudanças incrementais: mandamos os bytes que mudaram, e
+    /// uma coordenada errada em qualquer uma delas desencontra as duas cópias
+    /// para sempre — em silêncio, porque o nosso registro continua parecendo
+    /// certo. É a desconfiança que `change_document` já tem quando o intervalo
+    /// não cabe, chegando tarde: aqui já se sabe que a resposta não veio.
+    ///
+    /// Reabrir manda o texto inteiro e desfaz qualquer desencontro. Se a segunda
+    /// pergunta responde, **era desencontro** — e quem perguntou recebe a
+    /// resposta em vez de um silêncio. Se não responde, não havia mesmo o que
+    /// dizer, e a recusa passa a dizer isso com todas as letras.
+    ///
+    /// O custo é uma reabertura na posição que não teria resposta de qualquer
+    /// jeito, e não a cada tecla.
     async fn completion(
         &self,
         request: CompletionRequest,
     ) -> Result<Vec<CompletionItem>, LanguageError> {
         let (path, texto) = self.documento(request.document_id)?;
         let (line, offset) = to_service(&texto, request.position);
-        let resposta = self
-            .session
-            .request(
-                "completionInfo",
-                self.com_projeto(
-                    request.document_id,
-                    serde_json::json!({
-                        "file": path_argument(&path),
-                        "line": line,
-                        "offset": offset,
-                    }),
-                ),
-                REQUEST_TIMEOUT,
-            )
-            .await
-            .map_err(|detalhe| self.silencio_ou_falha(request.document_id, detalhe))?;
+        let resposta = match self.pedir_completacao(&request, &path, line, offset).await {
+            Ok(resposta) => resposta,
+            Err(detalhe) if detalhe.contains("No content available") => {
+                self.abrir(&path, &texto).await?;
+                self.pedir_completacao(&request, &path, line, offset)
+                    .await
+                    .map_err(|segundo| {
+                        self.failure(format!(
+                            "{segundo} (em {line}:{offset}, mesmo depois de reabrir, {:?})",
+                            trecho_da_linha(&texto, line)
+                        ))
+                    })?
+            }
+            Err(detalhe) => {
+                return Err(self.failure(format!(
+                    "{detalhe} (em {line}:{offset}, {:?})",
+                    trecho_da_linha(&texto, line)
+                )));
+            }
+        };
         let entradas = resposta
             .get("entries")
             .and_then(serde_json::Value::as_array)
@@ -686,7 +767,7 @@ impl ActiveLanguage for ActiveTypeScriptService {
                 REQUEST_TIMEOUT,
             )
             .await
-            .map_err(|detalhe| self.silencio_ou_falha(request.document_id, detalhe))?;
+            .map_err(|detalhe| self.failure(detalhe))?;
         Ok(resposta
             .as_array()
             .map(|itens| {
@@ -1141,6 +1222,63 @@ mod tests {
             start: TextPosition { line: inicio.0, column: inicio.1 },
             end: TextPosition { line: fim.0, column: fim.1 },
         }
+    }
+
+    /// **`No content available` é silêncio, e não falha — em qualquer arquivo.**
+    ///
+    /// É o que o analisador responde quando o handler executou e devolveu nada.
+    /// Chamar isso de falha do provider põe "provider failed" na barra de estado
+    /// de quem só digitou um ponto num lugar sem resposta.
+    ///
+    /// A distinção existia e valia **só para arquivo ancorado**, porque foi num
+    /// template que ela apareceu. A regra é sobre o que a mensagem significa, e
+    /// não sobre que arquivo a recebeu.
+    #[test]
+    fn no_content_available_is_silence_and_never_failure() {
+        let vivo = classificar("No content available.".to_owned(), true);
+        assert!(
+            matches!(vivo, LanguageError::Unresolved(_)),
+            "com o processo de pé, é silêncio: {vivo:?}"
+        );
+        let morto = classificar("No content available.".to_owned(), false);
+        assert!(
+            matches!(morto, LanguageError::Unresolved(_)),
+            "e continua sendo silêncio, porque a mensagem diz o que diz: {morto:?}"
+        );
+    }
+
+    /// Uma recusa de verdade continua separando vivo de morto.
+    ///
+    /// `Unavailable` tira a rota do provider e devolve o documento ao nativo;
+    /// `Provider` é falha deste pedido e não muda rota nenhuma. Confundir os
+    /// dois faria um pedido ruim derrubar o analisador, ou um analisador morto
+    /// continuar sendo perguntado.
+    #[test]
+    fn a_real_refusal_still_separates_alive_from_dead() {
+        assert!(matches!(
+            classificar("prazo esgotado".to_owned(), true),
+            LanguageError::Provider(_)
+        ));
+        assert!(matches!(
+            classificar("prazo esgotado".to_owned(), false),
+            LanguageError::Unavailable(_)
+        ));
+    }
+
+    /// A recusa carrega a linha que o **analisador** tem.
+    ///
+    /// É o que permite ver, no relato seguinte, se o texto dele é o mesmo da
+    /// tela — a diferença entre os dois explicaria uma recusa numa posição que
+    /// parecia certa.
+    #[test]
+    fn the_refusal_carries_the_line_the_analyzer_has() {
+        let texto = "primeira\n  const y = lista.map( l => l.\nterceira\n";
+        assert_eq!(trecho_da_linha(texto, 2), "const y = lista.map( l => l.");
+        assert_eq!(trecho_da_linha(texto, 1), "primeira");
+        assert_eq!(trecho_da_linha(texto, 99), "<linha fora do texto>");
+        // Base um, e não zero: é a numeração que o analisador usa, e trocá-la
+        // apontaria sempre para a linha de cima.
+        assert_eq!(trecho_da_linha(texto, 0), "primeira");
     }
 
     /// Um intervalo dentro do texto pode ir por mudança incremental.
