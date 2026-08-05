@@ -1382,6 +1382,14 @@ impl NativeIde {
         let (sender, receiver) = std::sync::mpsc::channel();
         let _cancel = self.languages.completion.start(receiver);
         let request = pedido.clone();
+        if completacao_falante() {
+            eprintln!(
+                "[completação] pedida em {}:{} com prefixo {:?}",
+                pedido.position.line + 1,
+                pedido.position.column + 1,
+                pedido.prefix
+            );
+        }
         std::thread::spawn(move || {
             let items = pollster::block_on(host.completion(host.request_context(), request))
                 .map_err(|error| error.to_string());
@@ -1425,6 +1433,13 @@ impl NativeIde {
                     .as_ref()
                     .and_then(IdeShell::completion_request);
                 if atual.as_ref() != Some(&pedido) {
+                    if completacao_falante() {
+                        eprintln!(
+                            "[completação] resposta vencida: era {:?}, agora é {:?}",
+                            pedido.prefix,
+                            atual.as_ref().map(|pedido| pedido.prefix.clone())
+                        );
+                    }
                     if let Some(atual) = atual {
                         self.pedir_completacao_do_editor(atual);
                     }
@@ -1432,6 +1447,13 @@ impl NativeIde {
                 }
                 match items {
                     Ok(items) => {
+                        if completacao_falante() {
+                            eprintln!(
+                                "[completação] {} itens para o prefixo {:?}",
+                                items.len(),
+                                pedido.prefix
+                            );
+                        }
                         if let Some(shell) = self.ui.shell.as_mut() {
                             shell.set_completions(items);
                         }
@@ -3453,6 +3475,26 @@ impl ApplicationHandler for NativeIde {
 fn perf_enabled() -> bool {
     static LIGADO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *LIGADO.get_or_init(|| std::env::var_os("ERIDE_PERF").is_some())
+}
+
+/// Se a completação deve contar o que faz, em `ERIDE_COMPLETACAO`.
+///
+/// # Por que atrás de uma chave, e por que ela existe
+///
+/// A recusa já vai para o terminal sempre — falha é rara e precisa ser
+/// relatável. **Isto é outra coisa**: o ciclo inteiro, inclusive o que deu
+/// certo, que é o que falta quando o sintoma é "não aconteceu nada".
+///
+/// Sem ele, um pedido que responde uma lista vazia é indistinguível de um
+/// pedido que nunca foi feito — e quem usa só consegue dizer "não abriu". Foi
+/// preciso pedir três vezes que alguém lesse a barra de estado para descobrir
+/// que a informação não estava em lugar nenhum.
+///
+/// Ligado, ele diz três coisas: quando um pedido sai, quando uma resposta chega
+/// vencida, e quantos itens vieram.
+fn completacao_falante() -> bool {
+    static LIGADO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LIGADO.get_or_init(|| std::env::var_os("ERIDE_COMPLETACAO").is_some())
 }
 
 /// Abaixo disto o evento não interessa: o alvo é o que trava, não o ruído.
