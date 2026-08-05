@@ -1028,10 +1028,17 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     );
 
     let line_limits = [
-        // 19: cada linguagem é mais uma linha de `mod` na raiz de composição, e
-        // é exatamente o que ela deve custar. Angular custou a sua, a marcação a
+        // Cada linguagem é mais uma linha de `mod` na raiz de composição, e é
+        // exatamente o que ela deve custar. Angular custou a sua, a marcação a
         // dela, e nada mais.
-        ("crates/ide-app/src/main.rs", 19),
+        //
+        // De 19 para 20: `splash`, a tela de abertura. **Não é linguagem** — é
+        // o primeiro módulo aqui que não vem de uma —, e por isso vale dizer
+        // que o número deixou de contar só linguagens. Ele continua contando a
+        // mesma coisa que sempre contou: quantas peças a raiz precisa declarar
+        // para montar a IDE. Uma peça que não é linguagem deve ser rara, e é
+        // esta guarda que torna a próxima visível.
+        ("crates/ide-app/src/main.rs", 20),
         // 31 desde a fase 2 da decomposição do shell: o módulo `text` reúne
         // funções que viviam duplicadas no shell e no editor. O teto existe para
         // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.
@@ -1041,7 +1048,14 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // **mesma** identidade — mandar caminhos faria a resposta carregar seis
         // vezes mais bytes até o outro lado hashear tudo de novo. Continua
         // sendo `mod` e `pub use`.
-        ("crates/ide-ui/src/lib.rs", 33),
+        // De 33 para 35: o módulo `splash`, com a composição da tela de
+        // abertura. Ela precisa existir aqui e não na aplicação, porque **a
+        // aplicação não desenha**: quem conhece componente é esta crate, e a
+        // outra só tem a janela, a placa e a imagem.
+        //
+        // Duas linhas — um `mod` e um `pub use` —, e continua sendo só isso o
+        // que há neste arquivo.
+        ("crates/ide-ui/src/lib.rs", 35),
         // 18 desde a fase 8 da `12`: a fachada passou a declarar `analyzer`,
         // `build`, `debug` e `toolchain`, e a reexportar o que a raiz de
         // composição consome de cada um. Continua sendo só `mod` e `pub use` —
@@ -1299,7 +1313,12 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// ordem de grandeza da busca por tipo —, e por isso ela está **dentro de
     /// uma thread própria**, como as outras seis. A guarda não sabe distinguir,
     /// e não finge saber; quem olhou fui eu, e é para isso que ela serve.*
-    const TETO: usize = 30;
+    /// *De 30 para 31: criar o renderizador da tela de abertura. É a mesma
+    /// espera que criar o renderizador da janela principal, na mesma função e
+    /// pelo mesmo motivo — a placa não fica pronta de graça —, e ela acontece
+    /// **antes de existir quadro para atrasar**. Nenhum laço de eventos está
+    /// girando ainda; não há o que travar.*
+    const TETO: usize = 31;
 
     assert!(
         chamadas.len() <= TETO,

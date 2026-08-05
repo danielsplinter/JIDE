@@ -36,6 +36,7 @@ ui-text-cosmic.workspace = true
 ui-window-api.workspace = true
 ui-window-winit.workspace = true
 winit.workspace = true
+png = "0.18.1"
 
 [lints]
 workspace = true

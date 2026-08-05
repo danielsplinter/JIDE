@@ -9,6 +9,7 @@ mod menus;
 mod search;
 mod settings;
 mod shell;
+mod splash;
 mod terminal;
 mod text;
 
@@ -25,6 +26,7 @@ pub use ide_shell::IdeShell;
 pub use search::{ContentSearchHit, TypeSearchHit};
 pub use settings::SettingsPage;
 pub use shell::ShellFocus;
+pub use splash::splash_frame;
 
 /// Teto de resultados pedidos à linguagem.
 ///

@@ -39,6 +39,16 @@ use crate::{
 pub(super) struct NativeWindowState {
     pub(super) window: Option<WinitWindow>,
     pub(super) renderer: Option<WgpuRenderer>,
+    /// A tela de abertura, enquanto ela está na tela.
+    ///
+    /// Fica aqui, e não numa variável do arranque, porque **esperar por ela não
+    /// pode bloquear**: uma janela que não processa mensagens por cinco
+    /// segundos é declarada travada pelo sistema, que a troca pela janela
+    /// fantasma dele — com moldura, título e o aviso de "não respondendo".
+    ///
+    /// Guardada aqui, quem conta o tempo é o laço de eventos, que continua
+    /// girando. Soltá-la fecha a janela.
+    pub(super) splash: Option<crate::splash::Splash>,
     pub(super) cursor: Point,
     pub(super) click_tracker: ClickTracker,
     pub(super) control_pressed: bool,

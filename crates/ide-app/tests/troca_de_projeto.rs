@@ -229,6 +229,43 @@ fn quem_falhou_no_projeto_anterior_volta_no_projeto_novo() {
     );
 }
 
+/// Um aquecimento que não vai **não** fecha a porta do provider.
+///
+/// A tela de abertura tenta subir os analisadores externos em paralelo com ela.
+/// Num projeto que não precisa deles, a tentativa falha — e falha é o que põe
+/// um provider fora de serviço até a próxima troca de projeto.
+///
+/// Isso é certo quando ele morreu atendendo; é errado aqui. Antes do
+/// aquecimento, quem acordava o analisador era a primeira pergunta que o índice
+/// não soubesse responder, e essa porta precisa continuar aberta — as
+/// dependências podem ser instaladas no minuto seguinte.
+#[test]
+fn aquecimento_que_falha_devolve_o_provider_ao_registro() {
+    let host = LanguageHost::new("/projeto");
+    let quebrado: Arc<dyn LanguageProvider> = Arc::new(NaoSobe);
+    success(host.register(quebrado));
+    let id = ide_domain::ProviderId("naosobe".to_owned());
+
+    // O aquecimento, como a aplicação o faz: tentar subir e, se não for,
+    // devolver ao registro.
+    assert!(
+        host.activate_provider(&id).is_err(),
+        "o projeto de teste não tem o que este provider precisa"
+    );
+    assert!(
+        host.provider_for_extension("naosobe", LanguageCapabilities::SYNTAX)
+            .is_err(),
+        "sem a devolução, ele ficaria fora de serviço"
+    );
+    success(host.enable(&id));
+
+    assert!(
+        host.provider_for_extension("naosobe", LanguageCapabilities::SYNTAX)
+            .is_ok(),
+        "a porta precisa continuar aberta para a pergunta que vier depois"
+    );
+}
+
 /// Trocar de projeto **não** desfaz o que a configuração desligou.
 ///
 /// Esquecer a falha do projeto anterior é uma coisa; passar por cima da

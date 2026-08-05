@@ -9,6 +9,7 @@ use std::{
 use crate::bootstrap::default_goals;
 use crate::bootstrap::{java_source, project_sources, startup_root};
 use crate::bridges::position_at_offset;
+use crate::splash;
 use crate::controllers::{
     CompletionOutcome, DebugController as AppDebugController, DocumentController, ImportedProject,
     LanguageController, NavigationOutcome, NativeWindowState, ProjectController, RuntimeState,
@@ -128,11 +129,21 @@ impl NativeIde {
             // painel de depuração convivem, e em janela pequena nenhum deles
             // cabe inteiro.
             maximized: true,
+            ..WindowRequest::default()
         };
         let window = WinitWindow::create_hidden(event_loop, WindowId(1), &request)
             .map_err(|error| error.to_string())?;
         let renderer = pollster::block_on(WgpuRenderer::new(window.inner().clone()))
             .map_err(|error| error.to_string())?;
+        // A tela de abertura vem **antes** de tudo o que demora. Daqui até o
+        // `window.show()` lá embaixo há registro de linguagens, varredura de
+        // disco, detecção de ferramenta e importação de projeto — e a janela da
+        // IDE fica oculta o tempo inteiro, sem sinal nenhum de que ela está
+        // subindo. A tela de abertura não acelera nada; ela responde.
+        //
+        // Ela vive nesta variável e morre logo antes de a IDE aparecer: fechar
+        // é soltar a janela, e é por isso que ela é um valor e não um campo.
+        let splash = splash::abrir(event_loop);
         self.runtime.config_path = config_path();
         if let Some(path) = self.runtime.config_path.as_ref() {
             match AppConfig::load(path) {
@@ -320,22 +331,85 @@ impl NativeIde {
         window
             .inner()
             .set_title(&format!("ER IDE — {}", root.display()));
-        window.show();
+        // **A espera pela tela de abertura não é ociosa: ela é o carregamento.**
+        //
+        // Perguntar ao índice que espécie cada arquivo declara é o que ativa as
+        // linguagens do projeto — e uma linguagem cujo analisador é um processo
+        // externo sobe esse processo aqui, atrás da marca. Subir Node no
+        // Windows, com antivírus no caminho, leva segundos; esses segundos ou
+        // passam agora, escondidos, ou passam depois, com a IDE aberta e sem
+        // responder.
+        //
+        // Vem **depois** do `import_project` de propósito: é ele que registra as
+        // raízes de fontes, e registrá-las derruba os workers ativos. Aquecer
+        // antes seria aquecer o que vai ser jogado fora.
         self.window.window = Some(window);
+        // Duas frentes ao mesmo tempo, e as duas fora desta thread: o índice do
+        // projeto, que responde os crachás e ativa as linguagens nativas, e o
+        // analisador externo — o que custa um processo Node.
+        //
+        // Vêm **depois** do `import_project` de propósito: é ele que registra as
+        // raízes de fontes, e registrá-las derruba os workers ativos. Aquecer
+        // antes seria aquecer o que vai ser jogado fora.
+        self.request_declaration_kinds();
+        self.warm_external_analyzers();
+        match splash {
+            // **O arranque acaba aqui, e devolve o controle ao laço.** Quem
+            // conta o tempo da marca é o `about_to_wait`, girando a cada trinta
+            // milissegundos: bloquear aqui deixaria a janela da tela de abertura
+            // sem processar mensagens, e o sistema a trocaria pela janela
+            // fantasma dele — com moldura, título e "não respondendo".
+            Some(splash) => self.window.splash = Some(splash),
+            // Sem tela de abertura, a IDE aparece agora, como antes dela existir.
+            None => self.mostrar_a_ide(),
+        }
         // As abas restauradas já estão abertas, mas ninguém pediu o realce
         // delas. Isso fica para **depois do primeiro quadro**: ativar o provider
         // indexa o JDK e os fontes do projeto, e feito aqui deixava a janela já
         // visível em branco por mais de um segundo. Primeiro a IDE aparece
         // montada; o realce chega no quadro seguinte.
         self.runtime.languages_pending = true;
-        // E o mesmo vale para os crachás do Explorer: perguntar ao índice que
-        // espécie cada arquivo declara é uma varredura, e ela vai para uma
-        // thread própria. Até a resposta chegar, os nomes aparecem sem crachá.
-        self.request_declaration_kinds();
         if let Some(window) = self.window.window.as_ref() {
             window.request_redraw();
         }
         Ok(())
+    }
+
+    /// Mostra a janela da IDE, já desenhada.
+    ///
+    /// Mostrar primeiro e pintar depois dá ao sistema uma janela sem conteúdo,
+    /// e o que ele desenha é a moldura em volta de um retângulo vazio. O
+    /// primeiro quadro vai para a superfície com a janela ainda oculta; quando
+    /// ela aparece, aparece pronta.
+    fn mostrar_a_ide(&mut self) {
+        if let Err(error) = self.render() {
+            tracing::warn!(%error, "o primeiro quadro não foi desenhado antes de mostrar");
+        }
+        if let Some(window) = self.window.window.as_ref() {
+            window.show();
+        }
+    }
+
+    /// Fecha a tela de abertura quando o tempo dela acaba, e abre a IDE.
+    ///
+    /// Chamado a cada volta do laço de eventos. É esta volta que mantém a
+    /// janela da tela de abertura respondendo — foi por não existir que o
+    /// sistema a declarava travada e punha a janela fantasma dele no lugar.
+    ///
+    /// A IDE aparece **antes** de a marca sair: fechá-la primeiro abriria um vão
+    /// em que nenhuma das duas está visível, e o que aparece nesse vão é a área
+    /// de trabalho.
+    fn advance_splash(&mut self) {
+        if !self
+            .window
+            .splash
+            .as_ref()
+            .is_some_and(crate::splash::Splash::terminou)
+        {
+            return;
+        }
+        self.mostrar_a_ide();
+        self.window.splash = None;
     }
 
     fn render(&mut self) -> Result<(), String> {
@@ -964,6 +1038,58 @@ impl NativeIde {
     /// no Windows, com antivírus no caminho, leva o tempo que leva. Feito na
     /// chamada, isso acontecia na thread da interface e a janela parava: é o
     /// mesmo defeito que a busca textual e a busca por tipo já tiveram aqui.
+    /// Sobe os analisadores externos **em paralelo** com a tela de abertura.
+    ///
+    /// # Quem decide se o projeto precisa
+    ///
+    /// O próprio analisador. Perguntar "este projeto é de TypeScript?" aqui
+    /// exigiria que este módulo soubesse o que é um `tsconfig` — e ele não pode
+    /// saber, porque a IDE serve qualquer linguagem. A lista de quem é externo
+    /// vem da raiz de composição, em `alheios`, e a tentativa de subir **é** a
+    /// pergunta: num projeto que não precisa dele, ele responde que não é o caso
+    /// e nenhum processo nasce.
+    ///
+    /// # Por que falhar aqui não pode ser definitivo
+    ///
+    /// Um provider que falha fica fora de serviço até a próxima troca de
+    /// projeto. Isso é certo quando ele morreu atendendo; é errado quando ele
+    /// só não estava pronto ainda — as dependências ainda não instaladas, por
+    /// exemplo. Antes deste aquecimento, quem o acordava era a primeira pergunta
+    /// que o índice não soubesse responder, e essa porta precisa continuar
+    /// aberta. Por isso a falha aqui **devolve o provider ao registro**.
+    fn warm_external_analyzers(&self) {
+        let Some(host) = self.languages.host.as_ref() else {
+            return;
+        };
+        let alheios = self.languages.alheios.clone();
+        if alheios.is_empty() {
+            return;
+        }
+        let host = Arc::clone(host);
+        std::thread::Builder::new()
+            .name("language-warmup".to_owned())
+            .spawn(move || {
+                for provider_id in alheios {
+                    match host.activate_provider(&provider_id) {
+                        Ok(()) => tracing::info!(
+                            provider = provider_id.0,
+                            "analisador externo subiu atrás da tela de abertura"
+                        ),
+                        Err(error) => {
+                            tracing::info!(
+                                provider = provider_id.0,
+                                %error,
+                                "o analisador externo não subiu agora; a primeira \
+                                 pergunta que o índice não souber tenta de novo"
+                            );
+                            let _ = host.enable(&provider_id);
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+
     fn wake_pending_providers(&mut self) {
         let Some(host) = self.languages.host.as_ref() else {
             return;
@@ -3125,6 +3251,9 @@ impl ApplicationHandler for NativeIde {
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             std::time::Instant::now() + std::time::Duration::from_millis(30),
         ));
+        // Antes de tudo: enquanto a marca está na tela, é esta volta que a
+        // mantém respondendo, e é ela que decide quando a IDE aparece.
+        self.advance_splash();
         let mut changed = self.collect_content_search();
         changed |= self.collect_type_search();
         changed |= self.advance_search_spinner();

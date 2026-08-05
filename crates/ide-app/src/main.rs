@@ -7,6 +7,7 @@ mod java_contribution;
 mod markup_contribution;
 mod native_ide;
 mod run;
+mod splash;
 mod style_contribution;
 mod typescript_contribution;
 mod ui_bridge;
