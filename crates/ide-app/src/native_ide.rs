@@ -48,7 +48,6 @@ use ide_workspace::FileNode;
 use language_java::GRADLE_BUILD_SYSTEM_ID;
 #[cfg(test)]
 use language_java::MAVEN_BUILD_SYSTEM_ID;
-use language_java::JAVA_PROVIDER_ID;
 use ui_core::{Modifiers, Point, Size, WindowId};
 use ui_render_api::{FrameInfo, UiRenderer};
 use ui_render_wgpu::WgpuRenderer;
@@ -260,17 +259,17 @@ impl NativeIde {
             .scan(&root)
             .map_err(|error| error.to_string())?;
         let mut shell = IdeShell::from_tree(tree);
-        shell.set_ui_catalog(self.languages.contributions.ui_catalog());
         // Os componentes medem o texto pela mesma fonte que vai desenhá-lo. Quem
         // constrói o mecanismo é a aplicação; a interface só recebe a porta.
-        shell.set_text_metrics(Arc::new(ui_text_cosmic::CosmicTextEngine::new()));
+        self.ui.text_metrics = Some(Arc::new(ui_text_cosmic::CosmicTextEngine::new()));
         // Copiar e colar falam com o sistema, não com uma cópia interna. Sem área
         // de transferência no ambiente a IDE segue funcionando, e é a barra de
         // estado que conta isso quando alguém tenta copiar.
         match ui_clipboard_arboard::SystemClipboard::new() {
-            Ok(clipboard) => shell.set_clipboard(Arc::new(clipboard)),
+            Ok(clipboard) => self.ui.clipboard = Some(Arc::new(clipboard)),
             Err(error) => tracing::warn!(%error, "área de transferência indisponível"),
         }
+        self.equip_shell(&mut shell);
         // As abas do último uso voltam com o projeto: quem reabre a IDE espera
         // continuar de onde parou, e um arquivo que sumiu é ignorado em
         // silêncio, como um projeto inexistente.
@@ -294,25 +293,13 @@ impl NativeIde {
         // A raiz precisa estar registrada **antes** de resolver ferramenta:
         // é ela que decide se vale a sobreposição do projeto ou o padrão.
         self.runtime.workspace_root = Some(root.clone());
-        let secondary = self.tool_home(&java_contribution::language_id(), ToolRole::Secondary);
-        java_contribution::register_build_systems(
-            &mut self.project.build_systems,
-            processes.clone(),
-            secondary,
-        );
-        typescript_contribution::register_build_systems(&mut self.project.build_systems, processes);
+        self.register_build_systems();
         let (tool_sender, tool_events) = mpsc::channel();
         self.tasks.sender = Some(tool_sender);
         self.tasks.events = Some(tool_events);
         self.detect_all_toolchains(&root);
         self.detect_maven();
         self.import_project(&root);
-        if let Some(shell) = self.ui.shell.as_mut() {
-            shell.set_debug_target(
-                &self.runtime.config.debug.host,
-                self.runtime.config.debug.port,
-            );
-        }
         self.debug.session = self
             .languages
             .contributions
@@ -494,45 +481,151 @@ impl NativeIde {
         else {
             return;
         };
-        match self.workspace.scan(&folder) {
-            Ok(tree) => {
-                if let Some(language_host) = &self.languages.host {
-                    if let Err(error) = pollster::block_on(language_host.shutdown())
-                        .and_then(|()| language_host.set_workspace_root(&folder))
-                        .and_then(|()| language_host.set_source_roots(Vec::new()).map(|_| ()))
-                        .and_then(|()| {
-                            language_host.enable(&ProviderId(JAVA_PROVIDER_ID.to_owned()))
-                        })
-                    {
-                        self.runtime.startup_error = Some(error.to_string());
-                        return;
-                    }
-                }
-                self.documents.clear();
-                let mut shell = IdeShell::from_tree(tree);
-                shell.set_ui_catalog(self.languages.contributions.ui_catalog());
-                self.ui.shell = Some(shell);
-                self.publish_event(IdeEvent::WorkspaceOpened {
-                    root: folder.clone(),
-                });
-                self.remember_project(&folder);
-                self.detect_all_toolchains(&folder);
-                self.import_project(&folder);
-                self.sync_languages();
-                if let Some(window) = self.window.window.as_ref() {
-                    window
-                        .inner()
-                        .set_title(&format!("ER IDE — {}", folder.display()));
-                    window.request_redraw();
-                }
-            }
+        self.open_another_project(&folder);
+    }
+
+    /// Troca o projeto aberto sem fechar a IDE.
+    ///
+    /// Separada do diálogo do sistema porque é **aqui** que estava o defeito, e
+    /// uma janela modal não cabe num teste. O que ela faz é o mesmo que abrir a
+    /// IDE faz — e era a distância entre as duas que produzia os defeitos: cada
+    /// coisa que a abertura passou a fazer ao longo do tempo precisava ser
+    /// lembrada aqui de novo, e três delas não foram.
+    fn open_another_project(&mut self, folder: &Path) {
+        let tree = match self.workspace.scan(folder) {
+            Ok(tree) => tree,
             Err(error) => {
-                self.runtime.startup_error = Some(format!(
-                    "failed to open project {}: {error}",
-                    folder.display()
-                ));
+                // Uma pasta que não abre **não pode derrubar a IDE**.
+                // `startup_error` é fatal no `bootstrap`, e o projeto que já
+                // está aberto continua bom: escolher a pasta errada é engano de
+                // um clique, e não motivo para fechar o que se estava fazendo.
+                if let Some(shell) = self.ui.shell.as_mut() {
+                    shell.set_status_message(format!("{} não abriu: {error}", folder.display()));
+                }
+                return;
             }
+        };
+        self.reset_languages_for(folder);
+        self.documents.clear();
+        let mut shell = IdeShell::from_tree(tree);
+        self.equip_shell(&mut shell);
+        self.ui.shell = Some(shell);
+        // A raiz decide qual ferramenta vale — ela ficava na do projeto
+        // anterior, e com ela o `tsconfig`, o JDK e o Maven do outro projeto.
+        self.runtime.workspace_root = Some(folder.to_path_buf());
+        self.documents.remembered = self
+            .ui
+            .shell
+            .as_ref()
+            .map(IdeShell::open_document_paths)
+            .unwrap_or_default();
+        self.publish_event(IdeEvent::WorkspaceOpened {
+            root: folder.to_path_buf(),
+        });
+        self.remember_project(folder);
+        self.register_build_systems();
+        // Detectar ferramenta e importar o projeto rodam processos externos e
+        // **esperam por eles** — o Maven chega a baixar dependências. Na
+        // abertura isso acontece antes de a janela existir, e por isso ninguém
+        // via; aqui a janela está na tela, e o mesmo trabalho é congelamento.
+        // Fica para depois do primeiro quadro, como o realce já fica.
+        self.runtime.project_pending = Some(folder.to_path_buf());
+        self.runtime.languages_pending = true;
+        if let Some(window) = self.window.window.as_ref() {
+            window
+                .inner()
+                .set_title(&format!("ER IDE — {}", folder.display()));
+            window.request_redraw();
         }
+    }
+
+    /// Aponta as linguagens para a raiz nova, sem desligar nenhuma.
+    ///
+    /// # O que estava errado
+    ///
+    /// Antes daqui, trocar de projeto chamava `shutdown()` — que **desabilita**
+    /// cada provider que tinha worker de pé e apaga as rotas dele — e depois
+    /// reabilitava **um**, pelo nome, escrito no código. O resultado: as
+    /// linguagens que estavam em uso eram exatamente as que morriam, ninguém
+    /// respondia o pedido de realce, e o texto abria sem cor.
+    ///
+    /// Era também uma linguagem citada num caminho que vale para todas — e a
+    /// IDE não pode se prender ao que um projeto de teste usa.
+    ///
+    /// # O que ela faz
+    ///
+    /// Solta os workers e devolve cada provider ao **registro**, de onde ele
+    /// sobe sozinho na primeira pergunta, já com a raiz nova. Nenhuma linguagem
+    /// é nomeada, e por isso a próxima também vai funcionar.
+    fn reset_languages_for(&mut self, folder: &Path) {
+        let Some(language_host) = self.languages.host.as_ref().map(Arc::clone) else {
+            return;
+        };
+        if let Err(error) = language_host
+            .set_workspace_root(folder)
+            .and_then(|()| language_host.set_source_roots(Vec::new()).map(|_| ()))
+        {
+            tracing::warn!(%error, "a raiz nova não chegou às linguagens");
+            return;
+        }
+        match language_host.detach_workers() {
+            Ok(soltos) if !soltos.is_empty() => {
+                // Esperar cada worker morrer é o que congelava a janela: a fila
+                // dele atende um pedido por vez, e o encerramento fica atrás de
+                // uma preparação que pode levar dois minutos. Os providers já
+                // voltaram ao registro; o que sobrou aqui é limpeza, e limpeza
+                // não precisa de quem está desenhando.
+                std::thread::spawn(move || {
+                    if let Err(error) = pollster::block_on(soltos.shutdown()) {
+                        tracing::warn!(%error, "worker do projeto anterior não encerrou");
+                    }
+                });
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "não foi possível soltar os workers"),
+        }
+        self.documents.language.clear();
+    }
+
+    /// Põe no shell tudo o que ele precisa da aplicação.
+    ///
+    /// Uma função só, usada pela abertura e pela troca de projeto. Era a
+    /// distância entre as duas que fazia o shell da troca nascer sem medida de
+    /// texto — com o cursor caindo longe do clique — e sem área de
+    /// transferência, com copiar e colar mortos até fechar a IDE.
+    fn equip_shell(&mut self, shell: &mut IdeShell) {
+        shell.set_ui_catalog(self.languages.contributions.ui_catalog());
+        // Clonados por valor, e não por referência: é na passagem que o tipo
+        // concreto vira o objeto de trait que o shell pede.
+        if let Some(metrics) = self.ui.text_metrics.clone() {
+            shell.set_text_metrics(metrics);
+        }
+        if let Some(clipboard) = self.ui.clipboard.clone() {
+            shell.set_clipboard(clipboard);
+        }
+        shell.set_debug_target(
+            &self.runtime.config.debug.host,
+            self.runtime.config.debug.port,
+        );
+    }
+
+    /// Registra os sistemas de build com a ferramenta que a **raiz atual** manda.
+    ///
+    /// Precisa acontecer de novo a cada troca de projeto: o caminho da
+    /// ferramenta secundária é resolvido pela raiz, e o registro ficava com o do
+    /// projeto anterior.
+    fn register_build_systems(&mut self) {
+        let Some(nativo) = self.runtime.processes.clone() else {
+            return;
+        };
+        let processes: Arc<dyn ProcessSupervisor> = nativo;
+        let secondary = self.tool_home(&java_contribution::language_id(), ToolRole::Secondary);
+        java_contribution::register_build_systems(
+            &mut self.project.build_systems,
+            processes.clone(),
+            secondary,
+        );
+        typescript_contribution::register_build_systems(&mut self.project.build_systems, processes);
     }
 
     fn sync_languages(&mut self) {
@@ -2996,6 +3089,9 @@ impl ApplicationHandler for NativeIde {
         let mut completion_requested = false;
         // O texto que a tecla trouxe, tratado depois do `match`.
         let mut digitado: Option<String> = None;
+        // A raiz recém-aberta cuja ferramenta e importação ficaram para depois
+        // deste quadro. Ver `open_another_project`.
+        let mut projeto_novo: Option<PathBuf> = None;
         let mut direct_commands = Vec::new();
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -3486,8 +3582,18 @@ impl ApplicationHandler for NativeIde {
                 // usuário vendo a tela montada em vez de um retângulo vazio.
                 sync_languages |= self.runtime.languages_pending;
                 self.runtime.languages_pending = false;
+                // E pelo mesmo motivo, o projeto recém-trocado só é detectado e
+                // importado agora: a árvore nova já está na tela.
+                projeto_novo = self.runtime.project_pending.take();
             }
             _ => {}
+        }
+        if let Some(raiz) = projeto_novo {
+            self.detect_all_toolchains(&raiz);
+            self.import_project(&raiz);
+            if let Some(window) = self.window.window.as_ref() {
+                window.request_redraw();
+            }
         }
         // A tecla é tratada aqui, e não dentro do `match`: ali a janela está
         // emprestada, e escrever mexe no shell e pergunta ao host. Ver

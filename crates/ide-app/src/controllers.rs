@@ -721,6 +721,17 @@ pub(super) struct RuntimeState {
     /// em branco todo esse tempo. Depois do primeiro quadro, o usuário vê a IDE
     /// montada e o realce chega em seguida.
     pub(super) languages_pending: bool,
+    /// Projeto recém-aberto cuja ferramenta e importação ainda não rodaram.
+    ///
+    /// Pelo mesmo motivo de `languages_pending`, e com um custo maior: detectar
+    /// a ferramenta e importar o projeto rodam processos externos e **esperam
+    /// por eles** — o Maven chega a baixar dependências. Na abertura da IDE isso
+    /// acontece antes de a janela existir, e ninguém vê; ao trocar de projeto,
+    /// com a janela na tela, o mesmo trabalho é congelamento.
+    ///
+    /// Guardar a raiz aqui adia o trabalho para depois do primeiro quadro, e
+    /// quem trocou vê a árvore nova na hora.
+    pub(super) project_pending: Option<PathBuf>,
 }
 
 #[cfg(test)]

@@ -49,6 +49,40 @@ impl Default for LanguageHostConfig {
     }
 }
 
+/// Workers tirados de serviço por [`LanguageHost::detach_workers`], por
+/// encerrar.
+///
+/// Existe para que "tirar de serviço" e "esperar morrer" possam acontecer em
+/// lugares diferentes. Os providers já voltaram ao registro quando isto é
+/// devolvido: quem segura este valor está segurando **limpeza**, e não estado
+/// que alguém esteja esperando.
+///
+/// Largá-lo sem encerrar não corrompe nada — as threads dos workers continuam
+/// vivas até o processo acabar. É desperdício, e por isso o aviso está aqui em
+/// vez de num `Drop` que esconderia a espera dentro de uma chave que fecha.
+pub struct WorkersSoltos {
+    workers: Vec<Arc<ProviderWorker>>,
+}
+
+impl WorkersSoltos {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.workers.is_empty()
+    }
+
+    /// Encerra cada worker solto, um a um.
+    ///
+    /// Pode demorar: a fila de um worker atende um pedido por vez, e o
+    /// encerramento espera a vez dele. É por isso que quem chama escolhe onde
+    /// esperar.
+    pub async fn shutdown(self) -> Result<(), LanguageHostError> {
+        for worker in self.workers {
+            worker.shutdown().await?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderSnapshot {
     pub metadata: LanguageMetadata,
@@ -240,25 +274,41 @@ impl LanguageHost {
     /// não — o provider novo nasce sem nenhum, e quem sincroniza precisa
     /// reabri-los.
     pub async fn reactivate(&self) -> Result<(), LanguageHostError> {
-        let workers = {
-            let mut registry = self
-                .registry
-                .lock()
-                .map_err(|_| LanguageHostError::WorkerStopped)?;
-            registry
-                .providers
-                .values_mut()
-                .filter(|entry| entry.state == ProviderState::Active)
-                .filter_map(|entry| {
-                    entry.state = ProviderState::Registered;
-                    entry.worker.take()
-                })
-                .collect::<Vec<_>>()
-        };
-        for worker in workers {
-            worker.shutdown().await?;
-        }
-        Ok(())
+        self.detach_workers()?.shutdown().await
+    }
+
+    /// Solta os workers ativos e devolve cada provider ao registro, **sem
+    /// esperar nenhum deles morrer**.
+    ///
+    /// É a metade síncrona de [`LanguageHost::reactivate`], e a separação existe
+    /// porque as duas metades têm custos que não se parecem:
+    ///
+    /// - **soltar** é uma troca de estado sob o lock, e é ela que decide o que a
+    ///   próxima pergunta vai encontrar — um provider `Registered` sobe de novo
+    ///   sozinho, com a raiz que estiver valendo. Custa microssegundos;
+    /// - **encerrar** é mandar `Shutdown` pela fila do worker e esperar a thread
+    ///   terminar. A fila atende **um pedido por vez**: se o provider está no
+    ///   meio de preparar um projeto grande, o encerramento fica atrás desse
+    ///   trabalho, e quem espera fica parado junto — foi assim que trocar de
+    ///   projeto congelou a janela por até dois minutos.
+    ///
+    /// Quem troca a raiz precisa da primeira metade agora e da segunda em
+    /// qualquer lugar.
+    pub fn detach_workers(&self) -> Result<WorkersSoltos, LanguageHostError> {
+        let mut registry = self
+            .registry
+            .lock()
+            .map_err(|_| LanguageHostError::WorkerStopped)?;
+        let workers = registry
+            .providers
+            .values_mut()
+            .filter(|entry| entry.state == ProviderState::Active)
+            .filter_map(|entry| {
+                entry.state = ProviderState::Registered;
+                entry.worker.take()
+            })
+            .collect::<Vec<_>>();
+        Ok(WorkersSoltos { workers })
     }
 
     pub fn register(&self, provider: Arc<dyn LanguageProvider>) -> Result<(), LanguageHostError> {

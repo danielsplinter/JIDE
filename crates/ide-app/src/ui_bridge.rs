@@ -83,6 +83,18 @@ impl From<ApplicationCommand> for UiAction {
 #[derive(Default)]
 pub(super) struct UiBridge {
     pub(super) shell: Option<IdeShell>,
+    /// A medida do texto, guardada porque o shell não é eterno.
+    ///
+    /// Trocar de projeto constrói um shell novo, e ele precisa da mesma medida.
+    /// Guardar aqui — em vez de reconstruir — evita varrer as fontes do sistema
+    /// a cada troca, e evita o defeito que veio antes disso: um shell novo sem
+    /// medida nenhuma, com o cursor caindo longe do clique.
+    pub(super) text_metrics: Option<std::sync::Arc<ui_text_cosmic::CosmicTextEngine>>,
+    /// A área de transferência, pelo mesmo motivo.
+    ///
+    /// Sem ela, copiar e colar paravam de funcionar depois da primeira troca de
+    /// projeto, e só voltavam fechando a IDE.
+    pub(super) clipboard: Option<std::sync::Arc<ui_clipboard_arboard::SystemClipboard>>,
     events: EventBus,
     navigation_requests: Vec<NavigationRequest>,
 }

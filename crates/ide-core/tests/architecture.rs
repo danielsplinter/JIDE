@@ -1036,7 +1036,17 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // composição consome de cada um. Continua sendo só `mod` e `pub use` —
         // o teto existe para que nenhuma lógica se instale aqui.
         ("crates/language-java/src/lib.rs", 18),
-        ("crates/ide-language-host/src/lib.rs", 10),
+        // De 10 para 11: o host passou a exportar `WorkersSoltos`, o tipo que
+        // separa "tirar um provider de serviço" de "esperar ele morrer". A
+        // separação existe porque esperar **congelava a janela** ao trocar de
+        // projeto: a fila de um worker atende um pedido por vez, e o
+        // encerramento ficava atrás de uma preparação de até dois minutos.
+        //
+        // A linha nova é `pub use`, e não lógica — continua valendo que nada se
+        // instale aqui. Ela está separada da outra de propósito: juntas passam
+        // de 100 colunas, e o próximo `rustfmt` quebraria a linha e derrubaria
+        // esta guarda por um motivo que não é o dela.
+        ("crates/ide-language-host/src/lib.rs", 11),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
