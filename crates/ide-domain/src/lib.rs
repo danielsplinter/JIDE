@@ -44,6 +44,24 @@ pub struct TextRange {
     pub end: TextPosition,
 }
 
+/// Uma troca de texto num intervalo do documento.
+///
+/// # Por que ela existe, e por que é neutra
+///
+/// Escolher `HttpClient` numa lista de completação não é só escrever o nome: o
+/// arquivo precisa do `import` correspondente, ou o que se sugeriu não compila.
+/// Quem sabe qual `import` escrever, onde pô-lo e se já existe um é a
+/// linguagem; o que a IDE recebe é **onde trocar e por quê**.
+///
+/// Nada aqui é de TypeScript. Java tem a mesma necessidade com os seus
+/// `import`, e qualquer linguagem que ofereça um nome fora do alcance vai
+/// precisar dizer o que mais muda junto.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextEdit {
+    pub range: TextRange,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentSnapshot {
     pub id: DocumentId,

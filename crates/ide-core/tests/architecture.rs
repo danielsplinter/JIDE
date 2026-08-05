@@ -1262,7 +1262,13 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// antes de digitar. É espera de teste, e não de quadro — o teste **é** a
     /// thread que espera. A guarda pegou no dia em que a linha foi escrita, que
     /// é exatamente o que ela existe para fazer.*
-    const TETO: usize = 28;
+    ///
+    /// *De 28 para 29: perguntar à linguagem qual `import` a escolha exige.
+    /// Essa **é** uma espera do caminho de quem usa — falar com um processo —,
+    /// e por isso ela está **dentro de uma thread própria**, como as outras
+    /// cinco. A guarda não sabe distinguir, e não finge saber; quem olhou fui
+    /// eu, e é para isso que ela serve.*
+    const TETO: usize = 29;
 
     assert!(
         chamadas.len() <= TETO,

@@ -309,16 +309,8 @@ pub(crate) struct ActiveTypeScriptService {
 struct Origens {
     line: u32,
     offset: u32,
-    /// Como pedir o detalhe de cada item que **não** estava ao alcance.
-    ///
-    /// Guarda a identificação inteira, e não só o módulo: desde o TypeScript
-    /// 4.3 a entrada carrega um `data` opaco, e o analisador exige receber
-    /// **ele** de volta para reencontrar o item. Só com o `source`, ele responde
-    /// uma lista vazia — verificado, e custou duas voltas.
-    ///
-    /// Guardar o pedaço de JSON como ele veio é o que impede uma terceira: não
-    /// se interpreta o que é opaco, devolve-se.
-    de: HashMap<String, serde_json::Value>,
+    /// Só os itens que **não** estavam ao alcance; os outros não têm origem.
+    de: HashMap<String, String>,
 }
 
 /// As trocas de texto que a ação do analisador pede, **só para este arquivo**.
@@ -867,20 +859,12 @@ impl ActiveLanguage for ActiveTypeScriptService {
             .collect();
         // De onde veio cada item que ainda não está ao alcance, para a escolha
         // poder pedir o `import`. Um item sem `source` já está no escopo.
-        let origens: HashMap<String, serde_json::Value> = servem
+        let origens: HashMap<String, String> = servem
             .iter()
             .filter_map(|entrada| {
                 let nome = entrada.get("name")?.as_str()?.to_owned();
-                // Sem `source` o item já está no escopo, e não pede `import`.
-                let origem = entrada.get("source")?;
-                let mut identificacao = serde_json::json!({
-                    "name": nome,
-                    "source": origem,
-                });
-                if let Some(dados) = entrada.get("data") {
-                    identificacao["data"] = dados.clone();
-                }
-                Some((nome, identificacao))
+                let origem = entrada.get("source")?.as_str()?.to_owned();
+                Some((nome, origem))
             })
             .collect();
         if let Ok(mut registro) = self.origens.lock() {
@@ -928,7 +912,7 @@ impl ActiveLanguage for ActiveTypeScriptService {
                         "file": path_argument(&path),
                         "line": line,
                         "offset": offset,
-                        "entryNames": [origem],
+                        "entryNames": [{ "name": label, "source": origem }],
                     }),
                 ),
                 REQUEST_TIMEOUT,

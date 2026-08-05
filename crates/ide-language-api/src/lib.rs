@@ -6,8 +6,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 use ide_domain::{
     AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
     DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location, ProviderId,
-    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextPosition,
-    TextRange,
+    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextEdit,
+    TextPosition, TextRange,
 };
 
 /// O cancelamento é do domínio, e não deste contrato.
@@ -226,6 +226,29 @@ pub trait ActiveLanguage: Send + Sync {
     ) -> Result<Vec<CompletionItem>, LanguageError> {
         Err(LanguageError::Unsupported("completion".to_owned()))
     }
+
+    /// O que mais muda no arquivo quando este item é escolhido.
+    ///
+    /// # Escrever o nome não basta
+    ///
+    /// Uma lista pode oferecer o que ainda **não está ao alcance** do arquivo —
+    /// um tipo de outro módulo, que precisa de um `import`. Escrever só o nome
+    /// deixaria o arquivo sem compilar, e sugerir código que não compila é a
+    /// família de defeito que esta IDE mais persegue.
+    ///
+    /// Quem sabe qual `import` escrever, onde pô-lo e se já existe um para o
+    /// mesmo módulo é a linguagem; a IDE recebe as trocas e as aplica.
+    ///
+    /// Vazio é a resposta normal: quase todo item já está ao alcance, e não muda
+    /// nada além do nome digitado.
+    async fn completion_edits(
+        &self,
+        _document_id: DocumentId,
+        _label: String,
+    ) -> Result<Vec<TextEdit>, LanguageError> {
+        Ok(Vec::new())
+    }
+
     async fn member_access(
         &self,
         _text: &str,

@@ -2,7 +2,7 @@ use ide_domain::{
     ProviderId,
     AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
     DocumentChange, DocumentId, DocumentSnapshot, Location, ReferencesRequest, SemanticSnapshot,
-    SemanticSymbol, SyntaxSnapshot, TextPosition,
+    SemanticSymbol, SyntaxSnapshot, TextEdit, TextPosition,
 };
 use ide_language_api::{
     ActiveLanguage, LanguageActivationContext, LanguageMetadata, LanguageProvider,
@@ -58,6 +58,16 @@ pub(super) enum WorkerRequest {
         context: LanguageRequestContext,
         request: CompletionRequest,
         response: oneshot::Sender<Result<Vec<CompletionItem>, LanguageHostError>>,
+    },
+    /// O que mais muda no arquivo quando um item da lista é escolhido.
+    ///
+    /// Ver `ActiveLanguage::completion_edits`: um nome de outro módulo precisa
+    /// do `import`, e sem ele a sugestão não compila.
+    CompletionEdits {
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        label: String,
+        response: oneshot::Sender<Result<Vec<TextEdit>, LanguageHostError>>,
     },
     MemberAccess {
         context: LanguageRequestContext,
@@ -400,6 +410,25 @@ impl ProviderWorker {
             .map_err(|_| LanguageHostError::WorkerStopped)?
     }
 
+    pub(super) async fn completion_edits(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        label: String,
+    ) -> Result<Vec<TextEdit>, LanguageHostError> {
+        ensure_not_cancelled(&context)?;
+        let (response, receiver) = oneshot::channel();
+        self.send(WorkerRequest::CompletionEdits {
+            context,
+            document_id,
+            label,
+            response,
+        })?;
+        receiver
+            .await
+            .map_err(|_| LanguageHostError::WorkerStopped)?
+    }
+
     pub(super) async fn member_access(
         &self,
         context: LanguageRequestContext,
@@ -686,6 +715,21 @@ fn run_worker(
                 } else {
                     runtime
                         .block_on(active.completion(request))
+                        .map_err(Into::into)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::CompletionEdits {
+                context,
+                document_id,
+                label,
+                response,
+            } => {
+                let result = if context.cancellation.is_cancelled() {
+                    Err(LanguageHostError::Cancelled)
+                } else {
+                    runtime
+                        .block_on(active.completion_edits(document_id, label))
                         .map_err(Into::into)
                 };
                 let _ = response.send(result);

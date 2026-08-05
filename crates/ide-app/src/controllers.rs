@@ -194,6 +194,10 @@ pub(super) enum CompletionOutcome {
     },
     /// Os membros do tipo escolhido, na janela de inspeção. Segunda etapa.
     MembrosNaInspecao(Result<Vec<ide_domain::CompletionItem>, String>),
+    /// O que mais muda no arquivo por causa do item aceito — o `import`.
+    ///
+    /// Vazio é a resposta normal: quase todo item já está ao alcance.
+    Trocas(Vec<ide_domain::TextEdit>),
 }
 
 #[derive(Default)]

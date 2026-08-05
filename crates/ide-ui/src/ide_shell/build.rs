@@ -73,6 +73,7 @@ impl IdeShell {
                 syntax_spans: HashMap::new(),
                 completion_items: Vec::new(),
                 completion_selected: 0,
+                completacao_aceita: None,
                 history: NavigationHistory::default(),
             },
             terminal: TerminalPanelState {

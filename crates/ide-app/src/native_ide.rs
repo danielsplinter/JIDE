@@ -1321,6 +1321,43 @@ impl NativeIde {
         disparo || seguindo || abrindo
     }
 
+    /// Pergunta o que mais muda no arquivo pelo item que acabou de ser aceito.
+    ///
+    /// # Por que aqui, e por que numa thread
+    ///
+    /// Escolher `HttpClient` numa lista escreve o nome — e deixa o arquivo sem
+    /// o `import`, ou seja, sem compilar. Quem sabe qual `import` escrever é a
+    /// linguagem, e perguntar a ela é falar com um processo: fazer isso no
+    /// quadro seria a sétima vez do defeito que a guarda do `block_on` existe
+    /// para impedir.
+    ///
+    /// A pergunta sai daqui e a resposta é recolhida em `collect_completion`,
+    /// como as outras.
+    fn ask_completion_edits(&mut self) {
+        let Some(label) = self
+            .ui
+            .shell
+            .as_mut()
+            .and_then(IdeShell::completacao_aceita)
+        else {
+            return;
+        };
+        let (Some(host), Some(document_id)) = (
+            self.languages.host.as_ref().map(Arc::clone),
+            self.ui.shell.as_ref().and_then(IdeShell::active_document),
+        ) else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _cancel = self.languages.completion.start(receiver);
+        std::thread::spawn(move || {
+            let trocas =
+                pollster::block_on(host.completion_edits(host.request_context(), document_id, label))
+                    .unwrap_or_default();
+            let _ = sender.send(CompletionOutcome::Trocas(trocas));
+        });
+    }
+
     /// Pede a lista de completação, fora da thread da interface.
     ///
     /// # Por que isto não pode ser síncrono
@@ -1516,6 +1553,23 @@ impl NativeIde {
                     .map_err(|error| error.to_string());
                     let _ = sender.send(CompletionOutcome::MembrosNaInspecao(items));
                 });
+            }
+            CompletionOutcome::Trocas(trocas) => {
+                if trocas.is_empty() {
+                    return false;
+                }
+                if let Some(shell) = self.ui.shell.as_mut() {
+                    shell.aplicar_trocas(&trocas);
+                    shell.set_status_message(format!(
+                        "{} import{} acrescentado{}",
+                        trocas.len(),
+                        if trocas.len() == 1 { "" } else { "s" },
+                        if trocas.len() == 1 { "" } else { "s" }
+                    ));
+                }
+                // O texto mudou por fora da digitação: sem isto, o realce fica
+                // com a cor de antes do `import`.
+                self.sync_languages();
             }
             CompletionOutcome::MembrosNaInspecao(items) => {
                 if let Some(shell) = self.ui.shell.as_mut() {
@@ -2864,6 +2918,10 @@ impl ApplicationHandler for NativeIde {
         changed |= self.collect_references();
         changed |= self.collect_navigation();
         changed |= self.collect_completion();
+        // Aceitar um item escreve o nome; o `import` que ele exige é a pergunta
+        // seguinte, e ela vale a pena mesmo quando a resposta é vazia — que é o
+        // caso de quase todo item.
+        self.ask_completion_edits();
         self.wake_pending_providers();
         self.suspend_idle_languages();
         self.measure_memory();

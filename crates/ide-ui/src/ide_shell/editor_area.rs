@@ -1013,9 +1013,59 @@ impl IdeShell {
             if buffer.replace(start..cursor, &item.label).is_ok() {
                 pane.set_cursor(start + item.label.len());
                 self.context.status_message = format!("Completed {}", item.label);
+                // **Escrever o nome pode não bastar.** Um tipo de outro módulo
+                // precisa do `import`, e quem sabe qual é a linguagem. Aqui só
+                // se anota o que foi escolhido; quem pergunta é a aplicação.
+                self.editor_area.completacao_aceita = Some(item.label.clone());
             }
         }
         self.editor_area.completion_items.clear();
+    }
+
+    /// O item aceito desde a última vez que se perguntou, **e o consome**.
+    ///
+    /// Consome porque a pergunta que vem depois dele — o que mais muda no
+    /// arquivo — só faz sentido uma vez: repeti-la escreveria o mesmo `import`
+    /// a cada quadro.
+    pub fn completacao_aceita(&mut self) -> Option<String> {
+        self.editor_area.completacao_aceita.take()
+    }
+
+    /// Aplica as trocas que a linguagem pediu, de trás para frente.
+    ///
+    /// **A ordem não é capricho.** Cada troca vem com posições do texto de
+    /// antes; aplicar da primeira para a última desloca todas as seguintes.
+    /// De trás para frente, o que já foi aplicado está sempre depois do que
+    /// falta.
+    pub fn aplicar_trocas(&mut self, trocas: &[ide_domain::TextEdit]) {
+        let Some((pane, buffer)) = self.focused_editor() else {
+            return;
+        };
+        let cursor = pane.cursor();
+        let mut ordenadas: Vec<&ide_domain::TextEdit> = trocas.iter().collect();
+        ordenadas.sort_by_key(|troca| (troca.range.start.line, troca.range.start.column));
+        let mut movido = 0usize;
+        for troca in ordenadas.iter().rev() {
+            let texto = buffer.text().to_owned();
+            let inicio = offset_for_line_column(
+                &texto,
+                troca.range.start.line as usize,
+                troca.range.start.column as usize,
+            );
+            let fim = offset_for_line_column(
+                &texto,
+                troca.range.end.line as usize,
+                troca.range.end.column as usize,
+            );
+            if inicio <= fim && buffer.replace(inicio..fim, &troca.text).is_ok() && inicio <= cursor
+            {
+                movido += troca.text.len();
+                movido = movido.saturating_sub(fim - inicio);
+            }
+        }
+        // O `import` entra acima de onde se estava escrevendo, e sem isto o
+        // cursor ficaria tantos caracteres atrás quantos ele acrescentou.
+        pane.set_cursor(cursor + movido);
     }
 
     /// Clique na fileira de abas do editor: escolher uma, ou fechá-la.

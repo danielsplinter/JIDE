@@ -15,7 +15,8 @@ use crate::worker::ProviderWorker;
 use ide_domain::{
     AccessorKind, AccessorPlan, CompletionItem, CompletionRequest, DefinitionRequest, Diagnostic,
     DocumentChange, DocumentId, DocumentSnapshot, LanguageId, Location, ProviderId,
-    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextPosition,
+    ReferencesRequest, RequestId, SemanticSnapshot, SemanticSymbol, SyntaxSnapshot, TextEdit,
+    TextPosition,
 };
 use ide_language_api::LanguageToolchainConfig;
 use ide_language_api::{
@@ -787,6 +788,32 @@ impl LanguageHost {
     ) -> Result<Vec<CompletionItem>, LanguageHostError> {
         let worker = self.worker_for_document(document_id, LanguageCapabilities::COMPLETION)?;
         self.note_result(worker.provider_id(), worker.type_members(context, type_name, prefix).await)
+    }
+
+    /// O que mais muda no arquivo quando um item da lista é escolhido.
+    ///
+    /// **Pergunta a todos os candidatos, e o primeiro que tiver algo responde.**
+    /// Quem ofereceu o item foi um deles, e o host não guarda qual: guardar
+    /// exigiria lembrar de cada lista respondida, e a resposta vazia dos outros
+    /// custa uma ida ao worker que já está de pé.
+    pub async fn completion_edits(
+        &self,
+        context: LanguageRequestContext,
+        document_id: DocumentId,
+        label: String,
+    ) -> Result<Vec<TextEdit>, LanguageHostError> {
+        let candidatos = self.workers_for_document(document_id, LanguageCapabilities::COMPLETION)?;
+        for worker in candidatos {
+            let resposta = worker
+                .completion_edits(context.clone(), document_id, label.clone())
+                .await;
+            if let Ok(trocas) = resposta
+                && !trocas.is_empty()
+            {
+                return Ok(trocas);
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Acessores que faltam ao tipo sob a posição.

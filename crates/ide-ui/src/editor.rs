@@ -50,6 +50,12 @@ pub(super) struct EditorAreaState {
     pub(super) syntax_spans: HashMap<DocumentId, CachedSyntax>,
     pub(super) completion_items: Vec<CompletionItem>,
     pub(super) completion_selected: usize,
+    /// O item escolhido que ainda não foi perguntado à linguagem.
+    ///
+    /// Escrever o nome pode não bastar: um tipo de outro módulo precisa do
+    /// `import`. A interface anota o que foi escolhido; quem pergunta o que mais
+    /// muda é a aplicação, que tem o host.
+    pub(super) completacao_aceita: Option<String>,
     /// Por onde a navegação passou, para poder voltar.
     pub(super) history: NavigationHistory,
 }
