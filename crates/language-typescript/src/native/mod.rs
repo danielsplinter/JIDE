@@ -287,7 +287,13 @@ impl ActiveTypeScript {
     /// quando declara é dele que se está falando. A biblioteca do TypeScript
     /// entra só para os nomes que o projeto não declara — que é a maioria deles,
     /// e é a fase 7 da `25`.
-    fn membros_do_tipo(&self, caminho: &Path, texto: &str, tipo: &str) -> Option<Vec<CompletionItem>> {
+    fn membros_do_tipo(
+        &self,
+        caminho: &Path,
+        texto: &str,
+        tipo: &str,
+        alcance: members::Alcance,
+    ) -> Option<Vec<CompletionItem>> {
         let mut itens: Vec<CompletionItem> = Vec::new();
         let mut vistos: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut fila = vec![(caminho.to_path_buf(), texto.to_owned(), tipo.to_owned(), 0usize)];
@@ -298,7 +304,16 @@ impl ActiveTypeScript {
             if profundidade > 16 || !vistos.insert(format!("{}#{nome}", arquivo.display())) {
                 continue;
             }
-            let Some(membros) = members::membros_de(&self.parser, &conteudo, &nome) else {
+            // **Só o primeiro nível vê o que é privado.** Um `this.` alcança os
+            // próprios privados; o que ele herda, não — `private` de uma classe
+            // base não é acessível na derivada, e é regra da linguagem.
+            let alcance_aqui = if profundidade == 0 {
+                alcance
+            } else {
+                members::Alcance::DeFora
+            };
+            let Some(membros) = members::membros_de(&self.parser, &conteudo, &nome, alcance_aqui)
+            else {
                 // O tipo não está neste arquivo: ele vem de outro módulo, e o
                 // caminho até lá é o mesmo da definição.
                 if let Some(destino) = self.arquivo_que_declara(&arquivo, &conteudo, &nome)
@@ -352,8 +367,15 @@ impl ActiveTypeScript {
     /// O que o genérico **contém**: `Observable<Pedido>` responde com os membros
     /// de `Observable`, e não com os de `Pedido`. Instanciar genérico é o
     /// verificador de tipos, recusado pela ADR-025.
-    fn tipo_do_membro(&self, caminho: &Path, texto: &str, tipo: &str, membro: &str) -> Option<String> {
-        let itens = self.membros_do_tipo(caminho, texto, tipo)?;
+    fn tipo_do_membro(
+        &self,
+        caminho: &Path,
+        texto: &str,
+        tipo: &str,
+        membro: &str,
+        alcance: members::Alcance,
+    ) -> Option<String> {
+        let itens = self.membros_do_tipo(caminho, texto, tipo, alcance)?;
         let escrito = itens
             .into_iter()
             .find(|item| item.label == membro)?
@@ -840,12 +862,30 @@ impl ActiveLanguage for ActiveTypeScript {
             request.position.line,
             request.position.column,
         );
+        // **Quem pergunta de dentro vê o que é privado.** A classe que envolve o
+        // cursor decide isso, e ela é a única coisa que separa `this.` — onde o
+        // privado é legítimo — de `outro.`, onde oferecê-lo é sugerir código que
+        // não compila.
+        let classe = members::classe_em(
+            &self.parser,
+            &texto,
+            request.position.line,
+            request.position.column,
+        );
+        let alcance_de = |tipo: &str| {
+            if classe.as_deref() == Some(tipo) {
+                members::Alcance::Dentro
+            } else {
+                members::Alcance::DeFora
+            }
+        };
         let tipo = match receptor {
             members::Receptor::Tipo(tipo) => tipo,
             // O segundo elo de uma cadeia: o tipo de quem está antes do primeiro
             // ponto é conhecido, e o que falta é o tipo do **membro**.
             members::Receptor::Membro { tipo, membro } => {
-                match self.tipo_do_membro(&caminho, &texto, &tipo, &membro) {
+                let alcance = alcance_de(&tipo);
+                match self.tipo_do_membro(&caminho, &texto, &tipo, &membro, alcance) {
                     Some(seguinte) => seguinte,
                     None => {
                         return Err(LanguageError::Unresolved(format!(
@@ -867,7 +907,7 @@ impl ActiveLanguage for ActiveTypeScript {
             members::Receptor::Nenhum => return Ok(Vec::new()),
         };
 
-        let Some(itens) = self.membros_do_tipo(&caminho, &texto, &tipo) else {
+        let Some(itens) = self.membros_do_tipo(&caminho, &texto, &tipo, alcance_de(&tipo)) else {
             return Err(LanguageError::Unresolved(format!(
                 "não sei onde `{tipo}` é declarado"
             )));

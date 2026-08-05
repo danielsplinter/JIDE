@@ -1291,11 +1291,86 @@ que passa por ele. Nada disso trava a tela — desde a correção do sexto
 `block_on`, a completação não espera na thread da janela —, mas 44 ms por
 pergunta num monorepo é a próxima coisa a medir de perto.
 
-*O conserto óbvio é guardar os membros já extraídos por arquivo: um `.d.ts` de
-dependência não muda enquanto a IDE está aberta. Não foi feito aqui de propósito
-— esta fase mudou uma decisão da fase 1, e misturar isso com uma otimização
-faria duas coisas ao mesmo tempo, o que esta especificação já aprendeu a não
-fazer.*
+### O índice oferecia o que o TypeScript esconde ✅
+
+Perguntando ao analisador **a mesma coisa** que ao índice, ponto a ponto, no
+projeto de referência:
+
+| dos 96 pontos que o índice respondeu | |
+|---|---|
+| idênticos ao que o `tsserver` responderia | 51 |
+| o índice ofereceu **a mais** | **45** |
+| o índice deixou faltar algo | **0** |
+| discordaram | 0 |
+
+**Nunca faltou nada, e em quase metade sobrava.** E o que sobrava era sempre a
+mesma coisa: `ɵfac`, `ɵprov` e `useNonNullable`.
+
+- Os dois primeiros são **`static`** — o compilador do Angular os declara em toda
+  classe que gera. Existem no `.d.ts`, e **não existem na instância** que se tem
+  na mão;
+- o terceiro é **`private`** numa classe que não é a de quem pergunta.
+
+Sugerir qualquer um dos três é sugerir código que **não compila**, e é a família
+de defeito que esta especificação mais persegue: a lista errada tem a mesma cara
+da certa.
+
+**As duas regras são da linguagem, e nenhuma é de Angular** — o que o projeto
+real deu foi o caso que as revelou. `static` não aparece depois de um ponto numa
+instância, e `private` só de dentro da classe que o declara. `this.` continua
+vendo os próprios privados, que era a razão de eles entrarem na fase 4; o que
+mudou é que agora se sabe **de onde** a pergunta vem.
+
+*E o que herda não vê o privado de quem herdou: `private` de uma classe base não
+é acessível na derivada, e só o primeiro nível da cadeia recebe o alcance de
+dentro.*
+
+**A cobertura não mudou** — 53,6% antes e depois. O filtro tira itens de dentro
+das listas, e não listas inteiras: o índice continua alcançando o mesmo, e
+passou a mentir menos.
+
+### Guardar o que já se leu de cada `.d.ts` ⛔ Recusado, medido três vezes
+
+O conserto parecia óbvio: um `.d.ts` de dependência **não muda enquanto a IDE
+está aberta**, e o `forms.d.ts` de 208 KB é lido de novo a cada ponto. Guardar o
+que já se aprendeu dele deveria ser dinheiro no chão.
+
+**Três versões, e as três deixaram o monorepo mais lento.**
+
+| o que se guarda | aplicação (179 pontos) | monorepo (8 192 pontos) |
+|---|---|---|
+| nada — como está hoje | 1,21 s | **345 s** |
+| os membros de todos os tipos do arquivo | **0,86 s** | 471 s |
+| só a árvore analisada | 1,17 s | — |
+| a árvore **e** o resultado de cada nome | 1,13 s | 582 s |
+
+Cada versão foi escrita para consertar o defeito da anterior, e cada uma achou
+uma verdade nova:
+
+- **guardar todos os tipos do arquivo** perde no erro de cache: extrair tudo
+  percorre o arquivo inteiro, enquanto a busca direta **para no primeiro nome**.
+  Quem toca muitos arquivos uma vez só paga mais e não reaproveita;
+- **guardar só a árvore** nunca fica mais lento, e quase não acelera — 1,21 s
+  para 1,17 s. O que revela o que importa: **percorrer a árvore custa tanto
+  quanto analisá-la**;
+- **guardar as duas coisas** deveria ser o melhor dos dois, e foi o pior de
+  todos no monorepo: 582 s. O registro cresce com cada arquivo tocado, e num
+  monorepo são milhares.
+
+**A conclusão é que não há repetição para aproveitar.** Um cache só paga quando
+se pergunta a mesma coisa duas vezes, e no monorepo cada ponto toca um arquivo
+diferente. O ganho de 1,21 s para 0,86 s na aplicação é real e vem justamente
+dali: lá são poucos arquivos, perguntados muitas vezes.
+
+**E há uma ressalva que este número não cobre.** O instrumento varre 400
+arquivos numa passada, que é o **pior caso possível para um cache** e não é o
+que uma pessoa faz: quem edita fica num arquivo e pergunta os mesmos tipos
+muitas vezes — o padrão da aplicação, onde o cache ganhou 29%. Medir isso
+exigiria outro instrumento, que simule uma sessão em vez de uma varredura.
+
+*Fica recusado com os números à vista, e não apagado: quem reencontrar a ideia
+vai achá-la boa de novo, e o que falta para ela não é esforço — é uma medição
+que represente o uso.*
 
 #### Critério
 

@@ -394,12 +394,42 @@ pub(crate) struct Membros {
     pub(crate) herda: Vec<String>,
 }
 
-/// Os membros de um tipo declarado num texto.
+/// Quem está perguntando, do ponto de vista de quem responde.
 ///
-/// Membro privado entra: quem completa dentro da própria classe os vê, e a
-/// alternativa — escondê-los sempre — tira do `this.` metade do que ele tem.
-pub(crate) fn membros_de(parser: &TypeScriptParser, texto: &str, tipo: &str) -> Option<Membros> {
+/// # Por que a lista depende disso
+///
+/// `private` existe para não ser visto de fora. Oferecê-lo a quem está fora é
+/// sugerir código que **não compila** — e é a família de defeito que esta
+/// especificação mais persegue, porque a lista errada tem a mesma cara da certa.
+///
+/// Medido no projeto de referência: em **45 de 96** pontos que o índice
+/// respondia, ele oferecia a mais — e era sempre isto ou um `static`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Alcance {
+    /// O receptor é a própria classe que envolve o cursor: `this.`.
+    Dentro,
+    /// O receptor é outro tipo. Só o que é público.
+    DeFora,
+}
+
+/// Os membros de um tipo declarado num texto.
+pub(crate) fn membros_de(
+    parser: &TypeScriptParser,
+    texto: &str,
+    tipo: &str,
+    alcance: Alcance,
+) -> Option<Membros> {
     let arvore = parser.parse(texto, None).ok()?;
+    membros_na_arvore(&arvore, texto, tipo, alcance)
+}
+
+/// O mesmo, sobre uma árvore que já existe.
+pub(crate) fn membros_na_arvore(
+    arvore: &tree_sitter::Tree,
+    texto: &str,
+    tipo: &str,
+    alcance: Alcance,
+) -> Option<Membros> {
     let bytes = texto.as_bytes();
     let mut cursor = arvore.walk();
     let mut pilha = vec![arvore.root_node()];
@@ -415,11 +445,25 @@ pub(crate) fn membros_de(parser: &TypeScriptParser, texto: &str, tipo: &str) -> 
             .and_then(|nome| nome.utf8_text(bytes).ok())
             .is_some_and(|nome| nome == tipo);
         if corresponde {
-            return Some(colher_membros(no, bytes));
+            return Some(colher_membros(no, bytes, alcance));
         }
         pilha.extend(no.children(&mut cursor));
     }
     None
+}
+
+/// O nome da classe que envolve uma posição, se houver uma.
+///
+/// É o que separa `this.` de `outro.`: quem pergunta de dentro vê o que é
+/// privado, e quem pergunta de fora não.
+pub(crate) fn classe_em(
+    parser: &TypeScriptParser,
+    texto: &str,
+    linha: u32,
+    coluna: u32,
+) -> Option<String> {
+    let recorte = ate_a_posicao(texto, linha, coluna)?;
+    classe_que_envolve(parser, texto, recorte.len())
 }
 
 /// Todos os tipos declarados num texto, com os membros de cada um.
@@ -455,7 +499,9 @@ pub(crate) fn todos_os_tipos(parser: &TypeScriptParser, texto: &str) -> Vec<(Str
                 .child_by_field_name("name")
                 .and_then(|nome| nome.utf8_text(bytes).ok())
         {
-            achados.push((nome.to_owned(), colher_membros(no, bytes)));
+            // A biblioteca é sempre olhada de fora: ninguém edita dentro da
+            // `interface String`.
+            achados.push((nome.to_owned(), colher_membros(no, bytes, Alcance::DeFora)));
         }
         pilha.extend(no.children(&mut cursor));
     }
@@ -501,7 +547,11 @@ fn tipo_do_membro(membro: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
 /// receptor já saía daqui — `svc.` sozinho funcionava, porque quem o resolve
 /// olha os parâmetros do construtor. O que não funcionava era `this.svc.`, que
 /// pergunta pelos **membros da classe** — e nesta lista o `svc` não estava.
-fn propriedades_do_construtor(construtor: tree_sitter::Node, bytes: &[u8]) -> Vec<CompletionItem> {
+fn propriedades_do_construtor(
+    construtor: tree_sitter::Node,
+    bytes: &[u8],
+    alcance: Alcance,
+) -> Vec<CompletionItem> {
     let Some(parametros) = construtor.child_by_field_name("parameters") else {
         return Vec::new();
     };
@@ -519,6 +569,11 @@ fn propriedades_do_construtor(construtor: tree_sitter::Node, bytes: &[u8]) -> Ve
         if !guarda {
             continue;
         }
+        // Um `private svc` guardado pelo construtor é tão privado quanto um
+        // campo escrito à mão: quem olha de fora não o vê.
+        if alcance == Alcance::DeFora && e_escondido(parametro, bytes) {
+            continue;
+        }
         let Some(nome) = parametro
             .child_by_field_name("pattern")
             .and_then(|no| no.utf8_text(bytes).ok())
@@ -534,7 +589,34 @@ fn propriedades_do_construtor(construtor: tree_sitter::Node, bytes: &[u8]) -> Ve
     achados
 }
 
-fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8]) -> Membros {
+/// Se um membro é `static`.
+///
+/// **Estático não aparece depois de um ponto numa instância**, e é o que fazia a
+/// IDE oferecer `ɵfac` e `ɵprov` — os internos que o compilador do Angular
+/// declara em toda classe gerada. Eles existem no `.d.ts`, e não existem no
+/// objeto que se tem na mão.
+///
+/// Nada aqui é de Angular: a regra é da linguagem, e vale para qualquer
+/// `static`. O que o projeto de referência deu foi o **caso** que a revelou.
+fn e_estatico(membro: tree_sitter::Node, bytes: &[u8]) -> bool {
+    let mut cursor = membro.walk();
+    membro
+        .children(&mut cursor)
+        .any(|filho| filho.utf8_text(bytes).is_ok_and(|texto| texto == "static"))
+}
+
+/// Se um membro é escondido de quem olha de fora.
+fn e_escondido(membro: tree_sitter::Node, bytes: &[u8]) -> bool {
+    let mut cursor = membro.walk();
+    membro.children(&mut cursor).any(|filho| {
+        filho.kind() == "accessibility_modifier"
+            && filho
+                .utf8_text(bytes)
+                .is_ok_and(|texto| matches!(texto, "private" | "protected"))
+    })
+}
+
+fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8], alcance: Alcance) -> Membros {
     let mut membros = Membros::default();
     if let Some(corpo) = tipo.child_by_field_name("body") {
         let mut cursor = corpo.walk();
@@ -557,7 +639,15 @@ fn colher_membros(tipo: tree_sitter::Node, bytes: &[u8]) -> Membros {
             // parâmetros dele podem ser membros, e num código Angular quase
             // sempre são.
             if nome == "constructor" {
-                membros.itens.extend(propriedades_do_construtor(filho, bytes));
+                membros
+                    .itens
+                    .extend(propriedades_do_construtor(filho, bytes, alcance));
+                continue;
+            }
+            if e_estatico(filho, bytes) {
+                continue;
+            }
+            if alcance == Alcance::DeFora && e_escondido(filho, bytes) {
                 continue;
             }
             membros.itens.push(CompletionItem {
@@ -821,7 +911,7 @@ mod tests {
     #[test]
     fn the_members_of_a_class_are_its_fields_and_methods() {
         let texto = "export class Pedido {\n  total = 0;\n  cliente: string;\n  somar(v: number) {}\n  constructor() {}\n}\n";
-        let Some(membros) = membros_de(&parser(), texto, "Pedido") else {
+        let Some(membros) = membros_de(&parser(), texto, "Pedido", Alcance::Dentro) else {
             panic!("a classe precisa ser achada");
         };
         let nomes: Vec<_> = membros.itens.iter().map(|item| item.label.as_str()).collect();
@@ -847,7 +937,7 @@ mod tests {
                      nome: string;\n  \
                      buscar(): Pedido {}\n  \
                      salvar(p: Pedido): void {}\n}\n";
-        let Some(membros) = membros_de(&parser(), texto, "Servico") else {
+        let Some(membros) = membros_de(&parser(), texto, "Servico", Alcance::Dentro) else {
             panic!("a classe precisa ser achada");
         };
         let tipo_de = |procurado: &str| -> Option<String> {
@@ -869,7 +959,7 @@ mod tests {
     #[test]
     fn an_interface_method_records_it_too() {
         let texto = "export interface Servico {\n  buscar(): Pedido;\n  nome: string;\n}\n";
-        let Some(membros) = membros_de(&parser(), texto, "Servico") else {
+        let Some(membros) = membros_de(&parser(), texto, "Servico", Alcance::Dentro) else {
             panic!("a interface precisa ser achada");
         };
         let buscar = membros.itens.iter().find(|item| item.label == "buscar");
@@ -891,7 +981,7 @@ mod tests {
     fn a_constructor_parameter_with_a_modifier_is_a_field() {
         let texto = "export class Pagina {\n  \
                      constructor(private readonly svc: LoginService, publico: Outro) {}\n}\n";
-        let Some(membros) = membros_de(&parser(), texto, "Pagina") else {
+        let Some(membros) = membros_de(&parser(), texto, "Pagina", Alcance::Dentro) else {
             panic!("a classe precisa ser achada");
         };
         let nomes: Vec<_> = membros.itens.iter().map(|item| item.label.as_str()).collect();
@@ -912,11 +1002,77 @@ mod tests {
         );
     }
 
+    /// **`static` não aparece depois de um ponto, e `private` só de dentro.**
+    ///
+    /// Medido no projeto de referência: em **45 de 96** pontos que o índice
+    /// respondia, ele oferecia a mais do que o `tsserver` — e era sempre uma
+    /// destas duas coisas. Sugerir `ɵfac`, que o Angular declara `static` em
+    /// toda classe gerada, é sugerir código que não compila.
+    ///
+    /// Nada aqui é de Angular: as duas regras são da linguagem. O que o projeto
+    /// real deu foi o **caso** que as revelou.
+    #[test]
+    fn static_never_shows_and_private_only_from_inside() {
+        let texto = "export class Servico {\n  \
+                     publico = 1;\n  \
+                     private escondido = 2;\n  \
+                     protected herdavel = 3;\n  \
+                     static ɵfac: unknown;\n  \
+                     static criar(): Servico { return null!; }\n}\n";
+        let nomes = |alcance: Alcance| -> Vec<String> {
+            membros_de(&parser(), texto, "Servico", alcance)
+                .map(|membros| membros.itens.into_iter().map(|item| item.label).collect())
+                .unwrap_or_default()
+        };
+
+        let de_fora = nomes(Alcance::DeFora);
+        assert!(de_fora.contains(&"publico".to_owned()), "veio: {de_fora:?}");
+        assert!(
+            !de_fora.contains(&"escondido".to_owned())
+                && !de_fora.contains(&"herdavel".to_owned()),
+            "o que é privado não se vê de fora: {de_fora:?}"
+        );
+
+        let de_dentro = nomes(Alcance::Dentro);
+        assert!(
+            de_dentro.contains(&"escondido".to_owned())
+                && de_dentro.contains(&"herdavel".to_owned()),
+            "de dentro, o privado é legítimo: {de_dentro:?}"
+        );
+
+        // Estático não aparece de lugar nenhum: ele não existe na instância.
+        for lista in [&de_fora, &de_dentro] {
+            assert!(
+                !lista.contains(&"ɵfac".to_owned()) && !lista.contains(&"criar".to_owned()),
+                "estático não está numa instância: {lista:?}"
+            );
+        }
+    }
+
+    /// O parâmetro de construtor privado segue a mesma regra do campo privado.
+    ///
+    /// Era o `useNonNullable` do `FormBuilder` do Angular aparecendo em
+    /// `this.formBuilder.` — privado numa classe que não é a de quem pergunta.
+    #[test]
+    fn a_private_constructor_property_follows_the_same_rule() {
+        let texto = "export class Pagina {\n  \
+                     constructor(private oculto: Svc, public visivel: Svc) {}\n}\n";
+        let nomes = |alcance: Alcance| -> Vec<String> {
+            membros_de(&parser(), texto, "Pagina", alcance)
+                .map(|membros| membros.itens.into_iter().map(|item| item.label).collect())
+                .unwrap_or_default()
+        };
+        let de_fora = nomes(Alcance::DeFora);
+        assert!(de_fora.contains(&"visivel".to_owned()), "veio: {de_fora:?}");
+        assert!(!de_fora.contains(&"oculto".to_owned()), "veio: {de_fora:?}");
+        assert!(nomes(Alcance::Dentro).contains(&"oculto".to_owned()));
+    }
+
     /// O que a classe herda é dito, para quem resolve seguir a cadeia.
     #[test]
     fn what_the_class_inherits_is_reported() {
         let texto = "class Especial extends Base implements Coisa {\n  proprio = 1;\n}\n";
-        let Some(membros) = membros_de(&parser(), texto, "Especial") else {
+        let Some(membros) = membros_de(&parser(), texto, "Especial", Alcance::Dentro) else {
             panic!("a classe precisa ser achada");
         };
         assert!(membros.herda.contains(&"Base".to_owned()));
@@ -927,7 +1083,7 @@ mod tests {
     #[test]
     fn an_interface_has_members_too() {
         let texto = "export interface Resumo {\n  total: number;\n  descrever(): string;\n}\n";
-        let Some(membros) = membros_de(&parser(), texto, "Resumo") else {
+        let Some(membros) = membros_de(&parser(), texto, "Resumo", Alcance::Dentro) else {
             panic!("a interface precisa ser achada");
         };
         let nomes: Vec<_> = membros.itens.iter().map(|item| item.label.as_str()).collect();
