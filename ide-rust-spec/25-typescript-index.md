@@ -1171,9 +1171,22 @@ denuncia que a espera é síncrona.
 
 A lição não é "faltou procurar melhor". É que **procurar não bastava**: o que
 denuncia este defeito não é ler o código, é a resposta demorar — e ela só demora
-com um tipo que o índice não tem. Uma guarda que conte `block_on` na thread da
-janela acharia o sexto no dia em que ele foi escrito, e é a única forma de a
-frase acima poder ser dita com segurança.
+com um tipo que o índice não tem.
+
+**A guarda existe**, em `ide-core/tests/architecture.rs`: ela conta as chamadas
+bloqueantes do crate da aplicação e fixa o teto no número de hoje. Não é a guarda
+que se queria — a precisa, que contasse só o que **não** está numa thread
+própria, já que esperar ali é como os seis foram corrigidos.
+
+*Essa foi escrita, e mediu 21. Consertado um ponto cego — closure passada a um
+`spawn` de outro nome —, mediu 0. Consertado o segundo — o módulo de testes —,
+mediu 4. Casar chaves em cima de texto erra nos dois sentidos, e uma guarda que
+erra calada é pior do que nenhuma: ela dá licença.* A grosseira ficou porque ela
+não sabe dizer quais chamadas são perigosas **e não finge saber**.
+
+O que ela compra não é a resposta certa: é **alguém ter que olhar**. Subir o teto
+é um ato deliberado, e o defeito nunca foi de quem sabia o que estava fazendo —
+foi de ninguém ter olhado.
 
 ##### Subir junto voltou a ser o padrão
 

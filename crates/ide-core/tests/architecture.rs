@@ -1194,3 +1194,78 @@ fn nomeia_uma_pessoa(linha: &str, prefixo: &str) -> bool {
     }
     false
 }
+
+/// **Nada bloqueante no laço que desenha a janela.**
+///
+/// # O defeito que esta guarda existe para não deixar voltar
+///
+/// Ele apareceu **seis vezes** nesta IDE, sempre igual: alguém pede ao host
+/// alguma coisa demorada no mesmo lugar onde a tela é desenhada, e a janela
+/// congela. Foram a busca textual (106 s com o cache frio), a busca por tipo
+/// (30 s esperando o analisador montar o projeto), acordar o provider, a
+/// navegação, abrir um documento e a completação — esta última descoberta por
+/// quem digitava e via as letras aparecerem todas de uma vez no fim.
+///
+/// **As seis foram achadas por alguém esperando, e nenhuma lendo o código.** Não
+/// é falta de atenção: o defeito só se revela quando a resposta demora, e ela
+/// quase sempre é rápida. A completação escapou de cinco varreduras seguidas por
+/// isso, e a fase 5 da `25` chegou a escrever que não havia mais nenhuma.
+///
+/// # Ela conta tudo, e é grosseira de propósito
+///
+/// A guarda que se queria era outra: contar só o que **não** está numa thread
+/// própria, já que esperar ali é justamente como os seis foram corrigidos. Ela
+/// foi escrita, e mediu 21. Consertado um ponto cego — closure passada a um
+/// `spawn` de outro nome —, mediu 0. Consertado o segundo — o módulo de testes
+/// —, mediu 4. **Casar chaves em cima de texto erra nos dois sentidos**, e uma
+/// guarda que erra calada é pior do que nenhuma: ela dá licença.
+///
+/// Então esta conta **toda** chamada bloqueante do crate da aplicação, esteja
+/// onde estiver. É coarse, e é honesta: ela não sabe dizer quais são perigosas,
+/// e não finge saber.
+///
+/// # Como usar quando ela falhar
+///
+/// Ela falha em duas situações, e elas se distinguem em dez segundos:
+///
+/// - **a chamada nova está numa thread própria** — legítimo. Suba o teto no
+///   mesmo commit, e diga na mensagem por que a espera é de lá;
+/// - **a chamada nova está no corpo de um método** que o laço de quadros
+///   alcança — é o defeito. A correção é o `SearchController`: a pergunta vai
+///   para uma thread e o resultado é recolhido no quadro seguinte.
+///
+/// Subir o teto é um ato deliberado, e é isso que se quer: o defeito nunca foi
+/// de quem sabia o que estava fazendo — foi de ninguém ter olhado.
+#[test]
+fn nothing_new_blocks_in_the_application_crate() {
+    let root = workspace_root();
+    let mut chamadas = Vec::new();
+
+    for path in rust_sources(&root.join("crates/ide-app/src")) {
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let relative = path.strip_prefix(&root).unwrap_or(&path);
+        for (numero, linha) in source.lines().enumerate() {
+            if linha.contains("block_on") && !linha.trim_start().starts_with("//") {
+                chamadas.push(format!("{}:{}", relative.display(), numero + 1));
+            }
+        }
+    }
+
+    /// Quantas esperas bloqueantes o crate da aplicação tem hoje.
+    ///
+    /// **O número só desce sozinho.** Ele sobe apenas com alguém decidindo que
+    /// sobe, e essa decisão é o valor inteiro desta guarda.
+    const TETO: usize = 27;
+
+    assert!(
+        chamadas.len() <= TETO,
+        "espera nova no crate da aplicação ({} contra o teto de {TETO}). \
+         Se ela está numa thread própria, suba o teto e diga por quê; \
+         se está no corpo de um método que o laço de quadros alcança, é o \
+         defeito que já apareceu seis vezes — mande a pergunta para uma thread \
+         e recolha o resultado no quadro seguinte: {chamadas:#?}",
+        chamadas.len()
+    );
+}
