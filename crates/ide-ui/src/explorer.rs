@@ -155,54 +155,96 @@ fn compact_package_chain<'a>(
 
 /// Espécie de um nó do Explorer, para o crachá que ele recebe.
 ///
-/// **Neutra por construção.** Pacote sai do caminho, e o resto sai de
-/// `SymbolKind` — que é do domínio, e não de linguagem nenhuma. Uma linguagem
-/// nova que declare classes ganha o mesmo crachá sem tocar aqui.
+/// **Neutra por construção.** Pasta sai da árvore de arquivos; tipo de arquivo
+/// sai da extensão; e classe, interface e enumeração saem de `SymbolKind` — que
+/// é do domínio, e não de linguagem nenhuma. Uma linguagem nova que declare
+/// classes ganha o mesmo crachá sem tocar aqui.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Especie {
-    Pacote,
+    /// Qualquer pasta. **Sempre**, em qualquer projeto.
+    Pasta,
     Classe,
     Interface,
     Enumeracao,
-    /// Nada a dizer: pasta comum, arquivo que não declara tipo, ou tipo que o
-    /// índice ainda não alcançou.
+    TypeScript,
+    /// Arquivo de teste: `.spec.ts`.
+    Teste,
+    Marcacao,
+    FolhaSass,
+    FolhaEstilo,
+    /// Nada a dizer: arquivo que não declara tipo, extensão desconhecida, ou
+    /// tipo que o índice ainda não alcançou.
     Nenhuma,
 }
 
 impl Especie {
-    /// A letra do crachá, e `None` quando ele é um quadrado.
+    /// O texto do crachá, e `None` quando ele é um quadrado.
     const fn letra(self) -> Option<&'static str> {
         match self {
             Self::Classe => Some("C"),
             Self::Interface => Some("I"),
             Self::Enumeracao => Some("E"),
-            Self::Pacote | Self::Nenhuma => None,
+            Self::TypeScript => Some("TS"),
+            Self::Teste => Some("IT"),
+            Self::Marcacao => Some("</>"),
+            Self::FolhaSass => Some("SC"),
+            Self::FolhaEstilo => Some("CS"),
+            Self::Pasta | Self::Nenhuma => None,
         }
     }
 
     /// Qual papel do tema pinta o crachá.
+    ///
+    /// Nenhuma cor está escrita aqui: são papéis, e quem os resolve é o tema —
+    /// inclusive o de alto contraste, que ninguém precisa lembrar de atualizar.
     const fn tom(self) -> IconTint {
         match self {
             // O mesmo azul do tema — o de destaque, e não um azul escrito aqui.
-            Self::Pacote | Self::Classe => IconTint::Accent,
-            Self::Interface => IconTint::Warning,
-            Self::Enumeracao => IconTint::Danger,
+            Self::Pasta | Self::Classe | Self::FolhaEstilo => IconTint::Accent,
+            Self::Interface | Self::Marcacao => IconTint::Warning,
+            Self::Enumeracao | Self::Teste => IconTint::Danger,
+            Self::TypeScript => IconTint::Success,
+            Self::FolhaSass => IconTint::Pink,
             Self::Nenhuma => IconTint::Muted,
         }
     }
 }
 
-fn especie(
-    node: &FileNode,
-    source_root_names: &[String],
-    kinds: &HashMap<u64, SymbolKind>,
-) -> Especie {
+/// A espécie que a **extensão** revela, sem perguntar a ninguém.
+///
+/// Vem antes do índice de propósito, e por duas razões. A primeira é que ela
+/// não custa nada e não espera: aparece no primeiro quadro, enquanto o índice
+/// ainda está subindo. A segunda é que ela é mais específica — `.spec.ts` diz
+/// mais do que "este arquivo declara uma classe".
+///
+/// A ordem entre elas também é por especificidade: `.spec.ts` antes de `.ts`,
+/// senão o teste nunca seria visto como teste.
+fn especie_da_extensao(path: &Path) -> Option<Especie> {
+    let nome = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if nome.ends_with(".spec.ts") {
+        return Some(Especie::Teste);
+    }
+    let extensao = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extensao.as_str() {
+        "ts" => Some(Especie::TypeScript),
+        "html" | "htm" => Some(Especie::Marcacao),
+        "scss" | "sass" => Some(Especie::FolhaSass),
+        "css" => Some(Especie::FolhaEstilo),
+        _ => None,
+    }
+}
+
+fn especie(node: &FileNode, kinds: &HashMap<u64, SymbolKind>) -> Especie {
+    // **Toda pasta ganha a marca**, e não só a que está sob uma raiz de fontes.
+    // Antes o quadrado dependia de a linguagem declarar raízes — e num projeto
+    // sem elas, como um Angular, pasta nenhuma era marcada. A árvore fica
+    // ilegível quando pasta e arquivo se parecem, e isso não depende do tipo do
+    // projeto.
     if node.is_directory {
-        return if is_package(&node.path, source_root_names) {
-            Especie::Pacote
-        } else {
-            Especie::Nenhuma
-        };
+        return Especie::Pasta;
+    }
+    if let Some(especie) = especie_da_extensao(&node.path) {
+        return especie;
     }
     match kinds.get(&id(&node.path)) {
         Some(SymbolKind::Class | SymbolKind::Record) => Especie::Classe,
@@ -228,7 +270,12 @@ const fn nome_id(no: u64) -> WidgetId {
 }
 
 /// Largura reservada ao crachá, para os nomes alinharem entre si.
-const CRACHA: f32 = 16.0;
+///
+/// Cabe o mais largo — `</>`, de três caracteres —, e por isso ela é maior do
+/// que uma letra pede: coluna que muda de largura conforme o crachá faria os
+/// nomes dançarem de linha para linha, e é justamente o alinhamento que torna
+/// uma árvore legível.
+const CRACHA: f32 = 26.0;
 const FONTE: f32 = 14.0;
 
 /// A árvore do Explorer **em nomes**, antes de virar componentes.
@@ -255,7 +302,7 @@ pub(super) fn nomes(
             NoDoExplorer {
                 id: id(&node.path),
                 label,
-                especie: especie(node, source_root_names, kinds),
+                especie: especie(node, kinds),
                 children: nomes(node, source_root_names, kinds),
             }
         })
@@ -285,10 +332,10 @@ fn componentes(nos: Vec<NoDoExplorer>) -> Vec<ComposedTreeItem> {
                         .with_font_size(FONTE)
                         .with_tone(especie.tom()),
                 ),
-                None if especie == Especie::Pacote => {
+                None if especie == Especie::Pasta => {
                     Box::new(Badge::new(cracha_id(identidade), especie.tom()))
                 }
-                // Pasta comum e arquivo sem tipo não ganham marca, mas ganham a
+                // Arquivo de extensão desconhecida não ganha marca, mas ganha a
                 // coluna: sem ela o nome dançaria de linha para linha.
                 None => Box::new(Label::new(cracha_id(identidade), "").with_font_size(FONTE)),
             };

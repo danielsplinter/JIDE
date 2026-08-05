@@ -345,7 +345,7 @@ fn cada_no_recebe_o_cracha_da_especie() {
     let [raiz] = nos.as_slice() else {
         panic!("a cadeia de pacotes precisa virar uma linha só: {:?}", labels(&nos));
     };
-    assert_eq!(raiz.especie, Especie::Pacote, "pasta sob a raiz de fontes é pacote");
+    assert_eq!(raiz.especie, Especie::Pasta, "toda pasta leva a marca");
 
     let por_nome = |nome: &str| {
         raiz.children
@@ -366,6 +366,79 @@ fn cada_no_recebe_o_cracha_da_especie() {
         Some(Especie::Nenhuma),
         "arquivo que não declara tipo não ganha crachá"
     );
+}
+
+/// A extensão dá o crachá sem perguntar a ninguém, e o mais específico ganha.
+#[test]
+fn a_extensao_da_o_cracha_e_o_mais_especifico_ganha() {
+    let projeto = "app/src";
+    let arquivo = |nome: &str| file(&format!("{projeto}/{nome}"));
+    let tree = dir(
+        "app",
+        vec![dir(
+            projeto,
+            vec![
+                arquivo("pedido.ts"),
+                arquivo("pedido.spec.ts"),
+                arquivo("pedido.component.html"),
+                arquivo("estilo.scss"),
+                arquivo("estilo.css"),
+                arquivo("leiame.md"),
+            ],
+        )],
+    );
+
+    // Sem índice nenhum: a extensão não espera o analisador subir.
+    let nos = explorer_nomes(&tree, &[], &HashMap::new());
+    let Some(src) = nos.first().map(|raiz| &raiz.children) else {
+        panic!("a árvore precisa ter a pasta de fontes");
+    };
+    let especie = |nome: &str| {
+        src.iter()
+            .find(|no| no.label == nome)
+            .map(|no| no.especie)
+    };
+    assert_eq!(especie("pedido.ts"), Some(Especie::TypeScript));
+    assert_eq!(
+        especie("pedido.spec.ts"),
+        Some(Especie::Teste),
+        "`.spec.ts` diz mais do que `.ts`, e por isso e decidido antes"
+    );
+    assert_eq!(especie("pedido.component.html"), Some(Especie::Marcacao));
+    assert_eq!(especie("estilo.scss"), Some(Especie::FolhaSass));
+    assert_eq!(especie("estilo.css"), Some(Especie::FolhaEstilo));
+    assert_eq!(
+        especie("leiame.md"),
+        Some(Especie::Nenhuma),
+        "extensão que ninguém reivindica não ganha crachá"
+    );
+}
+
+/// Toda pasta ganha a marca, em qualquer tipo de projeto.
+///
+/// Antes ela dependia de a linguagem declarar raízes de fontes — e num projeto
+/// sem elas, como um Angular, pasta nenhuma era marcada. A árvore fica
+/// ilegível quando pasta e arquivo se parecem, e isso não depende do projeto.
+#[test]
+fn toda_pasta_ganha_a_marca_em_qualquer_projeto() {
+    let tree = dir(
+        "app",
+        vec![
+            dir("app/src", vec![file("app/src/main.ts")]),
+            dir("app/node_modules", Vec::new()),
+        ],
+    );
+    // Lista de raízes **vazia**: é o que um projeto sem convenção de fontes dá.
+    let nos = explorer_nomes(&tree, &[], &HashMap::new());
+    for no in &nos {
+        assert_eq!(
+            no.especie,
+            Especie::Pasta,
+            "a pasta {} precisa da marca mesmo sem raiz de fontes declarada",
+            no.label
+        );
+    }
+    assert!(!nos.is_empty(), "o projeto de teste precisa ter pastas");
 }
 
 /// Sem resposta do índice, nenhum arquivo ganha crachá.
