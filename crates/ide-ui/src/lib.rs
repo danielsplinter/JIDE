@@ -19,6 +19,8 @@ pub use ide_application::{
     NewItemTemplateId, OpenDocumentRequest, SaveDocumentRequest, SettingsSection, TaskDescriptor,
     TaskId, UiContributionCatalog,
 };
+/// A identidade que o Explorer dá a um caminho, para a aplicação usar a mesma.
+pub use explorer::id as explorer_id;
 pub use ide_shell::IdeShell;
 pub use search::{ContentSearchHit, TypeSearchHit};
 pub use settings::SettingsPage;

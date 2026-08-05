@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -42,6 +43,7 @@ use ide_project::{build::ProjectImportRequest, model::ProjectModel};
 use ide_toolchain_api::DetectionContext;
 use ide_ui::{
     ContentSearchHit, DebugView, IdeShell, SettingsPage, TYPE_SEARCH_LIMIT, TypeSearchHit,
+    explorer_id,
 };
 use ide_workspace::FileNode;
 #[cfg(test)]
@@ -66,6 +68,14 @@ const LANGUAGE_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(
 /// O tique da janela é de 30 ms, e perguntar trinta vezes por segundo por algo
 /// que muda em minutos seria trabalho por trabalho.
 const SUSPENSION_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Até quando insistir com o índice pelas espécies do Explorer.
+///
+/// Ele indexa depois de subir, e antes disso responde vazio — vazio que não se
+/// distingue de "este projeto não tem tipos". Noventa segundos é o mesmo fôlego
+/// que a IDE já dá ao giro de carregamento; passado isso, o Explorer fica sem
+/// crachá, que é melhor do que uma thread esperando para sempre.
+const ESPERA_DO_INDICE: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// De quanto em quanto a memória é medida.
 ///
@@ -318,6 +328,10 @@ impl NativeIde {
         // visível em branco por mais de um segundo. Primeiro a IDE aparece
         // montada; o realce chega no quadro seguinte.
         self.runtime.languages_pending = true;
+        // E o mesmo vale para os crachás do Explorer: perguntar ao índice que
+        // espécie cada arquivo declara é uma varredura, e ela vai para uma
+        // thread própria. Até a resposta chegar, os nomes aparecem sem crachá.
+        self.request_declaration_kinds();
         if let Some(window) = self.window.window.as_ref() {
             window.request_redraw();
         }
@@ -643,6 +657,106 @@ impl NativeIde {
             for snapshot in syntax {
                 shell.set_syntax_snapshot(snapshot);
             }
+        }
+        self.collect_declaration_kinds();
+    }
+
+    /// Pergunta ao índice que espécie de tipo cada arquivo declara.
+    ///
+    /// O Explorer só conhece caminho e pasta; classe, interface e enumeração
+    /// exigem saber o que está **dentro** do arquivo. A consulta com filtro
+    /// vazio devolve todo tipo do projeto com o caminho e a espécie — é uma
+    /// varredura do índice, e por isso vai para uma thread própria.
+    ///
+    /// O mapa é chaveado pela mesma identidade que a árvore usa, e não pelo
+    /// caminho: a entrada cai de cerca de duzentos bytes para trinta e dois, e
+    /// é exatamente a chave pela qual a árvore pergunta.
+    fn request_declaration_kinds(&mut self) {
+        let Some(host) = self.languages.host.as_ref().map(Arc::clone) else {
+            return;
+        };
+        // Uma extensão por linguagem viva, como a busca por tipo já faz. A
+        // aplicação não escolhe linguagem: ela pergunta a todas.
+        let extensoes: Vec<String> = self
+            .languages
+            .contributions
+            .iter()
+            .flat_map(|contribution| contribution.descriptor.extensions.clone())
+            .collect();
+        if extensoes.is_empty() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = self.languages.declaration_kinds.start(receiver);
+        std::thread::spawn(move || {
+            let mut mapa: HashMap<u64, ide_domain::SymbolKind> = HashMap::new();
+            // **Um prazo para o laço inteiro, e não um por extensão.** Com um
+            // por extensão, cada linguagem sem tipos no projeto segurava o
+            // envio por noventa segundos, e o mapa só sai no fim: quatro
+            // extensões quietas adiavam o primeiro crachá em seis minutos.
+            let limite = Instant::now() + ESPERA_DO_INDICE;
+            for extensao in extensoes {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let perguntar = || {
+                    let mut contexto = host.request_context();
+                    contexto.cancellation = cancel.clone();
+                    // Sem limite: a pergunta é sobre o projeto inteiro, e um
+                    // limite daria crachá a uns arquivos e não a outros, sem
+                    // critério que alguém pudesse explicar.
+                    //
+                    // `ok()` e não `unwrap_or_default()`: **erro não é vazio**.
+                    // Uma linguagem que não sabe responder por busca de tipo dá
+                    // erro, e insistir com ela seria esperar por uma resposta
+                    // que nunca vem — que é o que segurava o mapa.
+                    pollster::block_on(host.workspace_types(
+                        contexto,
+                        &extensao,
+                        String::new(),
+                        usize::MAX,
+                    ))
+                    .ok()
+                };
+                // **A primeira pergunta é o que sobe o provider**, e a resposta
+                // dela chega antes de o índice existir: vazia. Foi assim que o
+                // crachá nunca apareceu — perguntava-se uma vez, cedo demais, e
+                // não se perguntava de novo.
+                //
+                // Insistir é a saída honesta enquanto `workspace_types` não
+                // souber dizer "ainda não sei": hoje ele responde vazio tanto
+                // para isso quanto para "não há tipos aqui", e os dois se
+                // parecem. É a mesma ambiguidade que a `25` separou no ponto, e
+                // que aqui continua de pé. `preparing()` não serve como sinal —
+                // ele é falso durante a indexação deste provider, e foi medido.
+                //
+                // Só se insiste **enquanto nada foi achado ainda**: depois que
+                // uma linguagem respondeu, o índice está de pé, e o vazio das
+                // outras quer dizer o que parece.
+                let mut achados = perguntar();
+                while achados.as_deref().is_some_and(<[_]>::is_empty)
+                    && mapa.is_empty()
+                    && !cancel.is_cancelled()
+                    && Instant::now() < limite
+                {
+                    std::thread::sleep(Duration::from_millis(100));
+                    achados = perguntar();
+                }
+                for symbol in achados.unwrap_or_default() {
+                    mapa.insert(explorer_id(&symbol.location.path), symbol.kind);
+                }
+            }
+            let _ = sender.send(mapa);
+        });
+    }
+
+    /// Recolhe o mapa pronto e o entrega ao shell.
+    fn collect_declaration_kinds(&mut self) {
+        let Some(mapa) = self.languages.declaration_kinds.collect() else {
+            return;
+        };
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_declaration_kinds(mapa);
         }
     }
 
@@ -3591,6 +3705,9 @@ impl ApplicationHandler for NativeIde {
         if let Some(raiz) = projeto_novo {
             self.detect_all_toolchains(&raiz);
             self.import_project(&raiz);
+            // O índice do projeto novo é outro, e os crachás do anterior não
+            // valem mais.
+            self.request_declaration_kinds();
             if let Some(window) = self.window.window.as_ref() {
                 window.request_redraw();
             }

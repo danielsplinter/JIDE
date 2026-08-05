@@ -26,7 +26,11 @@ impl IdeShell {
     /// usuário tinha aberto — inclusive um arquivo recém-criado lá dentro.
     pub fn replace_workspace_tree(&mut self, workspace: FileNode) {
         self.explorer
-            .replace_workspace(workspace, &self.catalog.source_root_names);
+            .replace_workspace(
+                workspace,
+                &self.catalog.source_root_names,
+                &self.declaration_kinds,
+            );
         self.request_expanded_directories();
         // A `TreeView` guarda os itens dela: reler o disco sem repô-los deixava a
         // árvore desenhando a varredura anterior. `set_roots` preserva expansão e

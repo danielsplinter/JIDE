@@ -757,9 +757,14 @@ fn phase_five_keeps_ui_state_split_by_feature() {
 
     let shell = fs::read_to_string(ui_root.join("ide_shell.rs"))
         .unwrap_or_else(|error| panic!("não foi possível ler ide_shell.rs: {error}"));
+    // De 16 para 17: `declaration_kinds` — que espécie de tipo cada arquivo
+    // declara, para o crachá do Explorer. É estado que **vem de fora**, como o
+    // catálogo ao lado dele: o shell não pergunta ao índice, ele recebe a
+    // resposta pronta da aplicação. Um campo de recepção não é coordenação
+    // nova, e é por isso que o teto sobe em vez de a feature virar módulo.
     assert!(
-        struct_field_count(&shell, "IdeShell") <= 16,
-        "IdeShell deve possuir no máximo 16 campos de coordenação"
+        struct_field_count(&shell, "IdeShell") <= 17,
+        "IdeShell deve possuir no máximo 17 campos de coordenação"
     );
 
     let features = [
@@ -1030,7 +1035,13 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // 31 desde a fase 2 da decomposição do shell: o módulo `text` reúne
         // funções que viviam duplicadas no shell e no editor. O teto existe para
         // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.
-        ("crates/ide-ui/src/lib.rs", 31),
+        // De 31 para 33: a fachada passou a expor `explorer_id`, a identidade
+        // que o Explorer dá a um caminho. Ela sai daqui porque quem monta o
+        // mapa de espécies é a aplicação, e o mapa precisa ser chaveado pela
+        // **mesma** identidade — mandar caminhos faria a resposta carregar seis
+        // vezes mais bytes até o outro lado hashear tudo de novo. Continua
+        // sendo `mod` e `pub use`.
+        ("crates/ide-ui/src/lib.rs", 33),
         // 18 desde a fase 8 da `12`: a fachada passou a declarar `analyzer`,
         // `build`, `debug` e `toolchain`, e a reexportar o que a raiz de
         // composição consome de cada um. Continua sendo só `mod` e `pub use` —
@@ -1077,9 +1088,14 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // padrão das outras seis. Cada janela nova custa um campo aqui, e é isso que
     // a fase 4 da `14` resolve: com as superfícies numa lista só, este número
     // volta a encolher em vez de acompanhar o número de janelas.
+    // O 17º é `declaration_kinds`: que espécie de tipo cada arquivo declara,
+    // para o crachá do Explorer. Não é janela nem coordenação — é **recepção**,
+    // como o catálogo ao lado dele: quem pergunta ao índice é a aplicação, e o
+    // shell só guarda a resposta. Campos assim não crescem com o número de
+    // telas, e por isso não são o que a fase 4 da `14` vem encolher.
     assert_eq!(
         struct_field_count(&shell, "IdeShell"),
-        16,
+        17,
         "IdeShell divergiu da linha final"
     );
 }
@@ -1278,7 +1294,12 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// e por isso ela está **dentro de uma thread própria**, como as outras
     /// cinco. A guarda não sabe distinguir, e não finge saber; quem olhou fui
     /// eu, e é para isso que ela serve.*
-    const TETO: usize = 29;
+    /// *De 29 para 30: perguntar ao índice que espécie cada arquivo declara,
+    /// para o crachá do Explorer. É uma varredura do índice inteiro — a mesma
+    /// ordem de grandeza da busca por tipo —, e por isso ela está **dentro de
+    /// uma thread própria**, como as outras seis. A guarda não sabe distinguir,
+    /// e não finge saber; quem olhou fui eu, e é para isso que ela serve.*
+    const TETO: usize = 30;
 
     assert!(
         chamadas.len() <= TETO,

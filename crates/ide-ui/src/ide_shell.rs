@@ -29,6 +29,8 @@ use crate::editor::{
 use crate::explorer::{
     ExplorerState, id as explorer_id, items as explorer_items, visible_row as visible_tree_row,
 };
+#[cfg(test)]
+use crate::explorer::{Especie, NoDoExplorer, nomes as explorer_nomes};
 use crate::ide_shell::tab_switcher::{AbaAberta, TabSwitcherSurface};
 use crate::ide_shell::type_search::TypeSearchSurface;
 
@@ -60,7 +62,7 @@ use crate::menus::{
 use crate::search::search_display_path;
 use ide_domain::{
     AccessorKind, CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, OutlineItem,
-    SyntaxSnapshot, TextPosition as DomainTextPosition, TextRange as DomainTextRange,
+    SymbolKind, SyntaxSnapshot, TextPosition as DomainTextPosition, TextRange as DomainTextRange,
 };
 use ide_terminal::{GridCell, ShellKind, TerminalKey, TerminalModifiers, TerminalSession};
 use ide_workspace::{EditorSession, FileNode, TextBuffer, rewrite_occurrences};
@@ -68,9 +70,9 @@ use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 #[cfg(test)]
 use ui_components::MenuEntry;
 use ui_components::{
-    Button, ContextMenu, Icon, IconTint, ListView, MenuBar, MenuBarItem, MenuItem, Popup,
-    Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter, StatusBar, TabItem, Tabs,
-    TerminalCell, TerminalCursor, TerminalView, TextInput, TreeView,
+    Button, ComposedTreeView, ContextMenu, Icon, IconTint, ListView, MenuBar, MenuBarItem, MenuItem,
+    Popup, Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter, StatusBar, TabItem, Tabs,
+    TerminalCell, TerminalCursor, TerminalView, TextInput,
 };
 use ui_core::{
     ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
@@ -508,6 +510,20 @@ pub struct IdeShell {
     rename: RenameSurface,
     menu: MenuState,
     catalog: UiContributionCatalog,
+    /// Que espécie de tipo cada arquivo declara, por identidade de nó.
+    ///
+    /// O Explorer só conhece caminho e pasta; classe, interface e enumeração
+    /// exigem saber o que está **dentro** do arquivo, e quem sabe isso é o
+    /// índice. A aplicação pergunta fora da thread da janela e deposita a
+    /// resposta aqui.
+    ///
+    /// Chaveado pela mesma identidade que a árvore usa — o hash do caminho —, e
+    /// não pelo `PathBuf`: a entrada cai de cerca de duzentos bytes para trinta
+    /// e dois, e é exatamente a chave pela qual a árvore pergunta.
+    ///
+    /// Ausente é uma resposta: um arquivo que o índice não alcançou não ganha
+    /// crachá, em vez de ganhar um errado.
+    declaration_kinds: HashMap<u64, SymbolKind>,
     context: ShellContext,
     commands: ShellCommandQueue,
     /// O runtime da tela: a pilha de camadas, o acerto e a entrega.

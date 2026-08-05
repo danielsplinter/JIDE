@@ -367,9 +367,9 @@ impl IdeShell {
         )));
         // A árvore é um componente: recuo, marcador de expansão, virtualização,
         // seleção e deslocamento horizontal pertencem a ela.
-        let tree = self.explorer_tree_for(size);
         let mut tree_paint = self.paint_context();
-        tree.paint(&mut tree_paint);
+        self.place_explorer_tree(size);
+        self.explorer.tree.paint(&mut tree_paint);
         commands.extend(tree_paint.into_commands());
         commands.push(PaintCommand::PopClip);
         commands.extend(self.paint_scrollbar(ScrollTarget::ExplorerHorizontal, size));

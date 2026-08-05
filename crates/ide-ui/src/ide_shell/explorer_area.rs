@@ -94,7 +94,8 @@ impl IdeShell {
             .map(|path| explorer_id(path))
             .collect::<HashSet<_>>();
         if let Some(row) = visible_tree_row(
-            &explorer_items(&self.explorer.workspace, &self.catalog.source_root_names),
+            &self.explorer.workspace,
+            &self.catalog.source_root_names,
             &expanded,
             target,
         ) {
@@ -105,14 +106,26 @@ impl IdeShell {
     }
 
     /// Posiciona a árvore de acordo com as barras de rolagem da janela.
-    pub(super) fn explorer_tree_for(&self, size: Size) -> TreeView {
-        let mut tree = self.explorer.tree.clone();
-        tree.layout(&self.layout_context(), self.explorer_tree_rect(size));
-        tree.set_scroll_offset(Point::new(
+    ///
+    /// Posiciona a **de verdade**, e não uma cópia dela. A cópia existia porque
+    /// esta função recebia `&self`; agora que as linhas são componentes, copiar
+    /// deixou de ser possível — um componente não se duplica. E a cópia nunca
+    /// foi boa ideia: ela morria no fim da chamada levando junto o destaque sob
+    /// o ponteiro, que é a mesma razão pela qual o evento já ia à de verdade.
+    pub(super) fn place_explorer_tree(&mut self, size: Size) {
+        let context = self.layout_context();
+        let bounds = self.explorer_tree_rect(size);
+        let offset = Point::new(
             self.explorer.scroll_x,
             self.explorer.scroll_line as f32 * EXPLORER_ROW_HEIGHT,
-        ));
-        tree
+        );
+        let tree = &mut self.explorer.tree;
+        // O deslocamento **antes** do posicionamento: as células são colocadas
+        // durante ele, e com a ordem trocada elas nasceriam no deslocamento do
+        // quadro anterior. A árvore de rótulos não se importava porque desenhava
+        // o texto já deslocado na hora de pintar; a de componentes se importa.
+        tree.set_scroll_offset(offset);
+        tree.layout(&context, bounds);
     }
 
     /// Entrega o gesto à árvore **de verdade**, e não a uma cópia.
@@ -129,8 +142,8 @@ impl IdeShell {
             self.explorer.scroll_line as f32 * EXPLORER_ROW_HEIGHT,
         );
         let tree = &mut self.explorer.tree;
-        tree.layout(&context, bounds);
         tree.set_scroll_offset(offset);
+        tree.layout(&context, bounds);
         tree.event(
             &mut EventContext::default(),
             &UiEvent::PointerDown(primary_pointer(point)),
@@ -235,7 +248,7 @@ impl IdeShell {
             return;
         }
         self.explorer
-            .rebuild_items(&self.catalog.source_root_names);
+            .rebuild_items(&self.catalog.source_root_names, &self.declaration_kinds);
         self.sync_explorer_tree();
         // A árvore mudou: o documento ativo pode finalmente existir nela.
         self.sync_explorer_to_active();
@@ -243,11 +256,37 @@ impl IdeShell {
 
     /// Guarda os filhos que a aplicação leu para uma pasta expandida.
     fn insert_children_at(&mut self, path: &Path, children: Vec<FileNode>) -> bool {
+        /// Mantém as subárvores já carregadas dos filhos que voltaram vazios.
+        ///
+        /// A leitura de um caminho traz **todos os níveis até ele**, cada um com
+        /// os filhos imediatos — e filho imediato vem sem netos. Trocar a lista
+        /// inteira pela recém-lida apagava o que já estava aberto **nos irmãos**:
+        /// clicar em `resources` esvaziava `java`, e os pacotes que estavam à
+        /// vista sumiam da tela.
+        ///
+        /// Uma leitura rasa do pai diz **quais** entradas existem; ela não diz
+        /// que elas estão vazias por dentro, porque nunca olhou lá. Quem pode
+        /// dizer isso é a leitura da própria pasta, e essa chega como um nível
+        /// só dela.
+        fn preservar_subarvores(antigos: &[FileNode], novos: &mut [FileNode]) {
+            for novo in novos {
+                if !novo.is_directory || !novo.children.is_empty() {
+                    continue;
+                }
+                if let Some(antigo) = antigos
+                    .iter()
+                    .find(|antigo| antigo.is_directory && antigo.path == novo.path)
+                {
+                    novo.children.clone_from(&antigo.children);
+                }
+            }
+        }
         fn inserir(node: &mut FileNode, path: &Path, children: &mut Option<Vec<FileNode>>) -> bool {
             if node.path == path {
-                let Some(filhos) = children.take() else {
+                let Some(mut filhos) = children.take() else {
                     return false;
                 };
+                preservar_subarvores(&node.children, &mut filhos);
                 // Mudou só se o conteúdo é outro. Responder "mudou" por ter
                 // achado o nó faz a reconciliação da seleção pedir a mesma
                 // leitura de novo, e nada garante que esse ciclo termine.
@@ -499,8 +538,8 @@ impl IdeShell {
     ///
     /// A instância persistente nunca passa por `layout` — quem é posicionada é a
     /// cópia usada para desenhar —, e é ela quem conhece a medida.
-    pub(super) fn explorer_content_width(&self, size: Size) -> f32 {
-        self.explorer_tree_for(size).content_size().width
+    pub(super) fn explorer_content_width(&self, _size: Size) -> f32 {
+        self.explorer.tree.content_size().width
     }
 
     pub(super) fn visible_entries(&self) -> Vec<(usize, &FileNode)> {

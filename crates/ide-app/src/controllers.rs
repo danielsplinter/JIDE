@@ -230,6 +230,12 @@ pub(super) struct LanguageController {
     pub(super) alheios: Vec<ide_domain::ProviderId>,
     /// A busca por tipo em curso, que fala com o analisador e não pode esperar.
     pub(super) type_search: SearchController<TypeSearchOutcome>,
+    /// Que espécie de tipo cada arquivo declara, para o crachá do Explorer.
+    ///
+    /// Uma varredura do índice inteiro, e por isso fora da thread da janela.
+    /// Chega quando chegar: até lá o Explorer mostra os nomes sem crachá, que é
+    /// a verdade — ninguém sabia ainda.
+    pub(super) declaration_kinds: SearchController<HashMap<u64, ide_domain::SymbolKind>>,
     /// A navegação em curso. Ver `navigate_to_definition`.
     pub(super) navigation: SearchController<NavigationOutcome>,
     /// Os usos de um nome, procurados fora da thread da interface.

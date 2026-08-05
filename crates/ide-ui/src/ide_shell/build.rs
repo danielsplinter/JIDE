@@ -32,8 +32,13 @@ impl IdeShell {
                     })
             })
             .collect();
-        let explorer_tree = TreeView::new(EXPLORER_TREE_ID, explorer_items(&workspace, &[]))
-            .with_row_height(EXPLORER_ROW_HEIGHT);
+        // Sem espécie nenhuma ainda: o índice não existe no primeiro quadro, e
+        // os crachás chegam quando a aplicação os trouxer.
+        let explorer_tree = ComposedTreeView::new(
+            EXPLORER_TREE_ID,
+            explorer_items(&workspace, &[], &HashMap::new()),
+        )
+        .with_row_height(EXPLORER_ROW_HEIGHT);
         let mut shell = Self {
             explorer: ExplorerState {
                 workspace_name,
@@ -170,6 +175,7 @@ impl IdeShell {
                 ),
             },
             catalog: UiContributionCatalog::default(),
+            declaration_kinds: HashMap::new(),
             context: ShellContext {
                 focus: ShellFocus::None,
                 text_metrics: None,
@@ -280,6 +286,28 @@ impl IdeShell {
         self.explorer.tree.set_roots(explorer_items(
             &self.explorer.workspace,
             &self.catalog.source_root_names,
+            &self.declaration_kinds,
+        ));
+    }
+
+    /// Recebe da aplicação que espécie de tipo cada arquivo declara.
+    ///
+    /// Vem de fora porque quem sabe é o índice, e perguntar ao índice não é
+    /// trabalho de quem desenha. Chega **depois** do primeiro quadro: até lá o
+    /// Explorer mostra os nomes sem crachá, que é a verdade — ninguém sabia
+    /// ainda, e um crachá chutado seria pior do que nenhum.
+    ///
+    /// Sai cedo quando nada mudou: remontar a árvore constrói um componente por
+    /// nó, e a aplicação pode repetir a resposta a cada reindexação.
+    pub fn set_declaration_kinds(&mut self, kinds: HashMap<u64, SymbolKind>) {
+        if self.declaration_kinds == kinds {
+            return;
+        }
+        self.declaration_kinds = kinds;
+        self.explorer.tree.set_roots(explorer_items(
+            &self.explorer.workspace,
+            &self.catalog.source_root_names,
+            &self.declaration_kinds,
         ));
     }
 

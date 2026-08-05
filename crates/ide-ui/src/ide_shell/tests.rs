@@ -13,7 +13,6 @@ use crate::ide_shell::settings::SettingsDialogGeometry;
 use crate::search::{ContentSearchHit, TypeSearchHit};
 use ide_application::{NewItemRequest, NewItemTemplate};
 use ide_domain::{AccessorCandidate, AccessorPlan, Location, SyntaxHighlightKind, ToolRole};
-use ui_components::TreeItem;
 use ui_editor::TokenKind;
 
 fn java_source_roots() -> Vec<String> {
@@ -240,7 +239,7 @@ fn file(path: &str) -> FileNode {
     }
 }
 
-fn labels(items: &[TreeItem]) -> Vec<&str> {
+fn labels(items: &[NoDoExplorer]) -> Vec<&str> {
     items.iter().map(|item| item.label.as_str()).collect()
 }
 
@@ -286,7 +285,7 @@ fn maven_project() -> FileNode {
 /// não são pacotes.
 #[test]
 fn explorer_joins_single_child_java_packages_into_one_row() {
-    let items = explorer_items(&maven_project(), &java_source_roots());
+    let items = explorer_nomes(&maven_project(), &java_source_roots(), &HashMap::new());
     let src = &items[0];
     assert_eq!(labels(&items), vec!["src"]);
     let main = &src.children[0];
@@ -300,11 +299,95 @@ fn explorer_joins_single_child_java_packages_into_one_row() {
     );
 }
 
+/// Cada nó recebe o crachá da espécie dele, e nenhum recebe o do vizinho.
+///
+/// Pacote sai do caminho; classe, interface e enumeração saem do índice, pela
+/// mesma identidade que a árvore usa. Sem resposta do índice não há crachá — é
+/// a verdade, e um chutado seria pior.
+#[test]
+fn cada_no_recebe_o_cracha_da_especie() {
+    use ide_domain::SymbolKind;
+
+    let pacote = Path::new("demo/src/main/java/br/com/exemplo/endpoints");
+    let arquivo = |nome: &str| pacote.join("controller").join(nome);
+    let kinds = HashMap::from([
+        (explorer_id(&arquivo("Pedido.java")), SymbolKind::Class),
+        (explorer_id(&arquivo("Repositorio.java")), SymbolKind::Interface),
+        (explorer_id(&arquivo("Situacao.java")), SymbolKind::Enum),
+        (explorer_id(&arquivo("Dto.java")), SymbolKind::Record),
+    ]);
+
+    let tree = dir(
+        "demo/src/main/java",
+        vec![dir(
+            "demo/src/main/java/br",
+            vec![dir(
+                "demo/src/main/java/br/com",
+                vec![dir(
+                    "demo/src/main/java/br/com/exemplo",
+                    vec![dir(
+                        pacote.to_string_lossy().as_ref(),
+                        vec![
+                            file(arquivo("Pedido.java").to_string_lossy().as_ref()),
+                            file(arquivo("Repositorio.java").to_string_lossy().as_ref()),
+                            file(arquivo("Situacao.java").to_string_lossy().as_ref()),
+                            file(arquivo("Dto.java").to_string_lossy().as_ref()),
+                            file(arquivo("leiame.md").to_string_lossy().as_ref()),
+                        ],
+                    )],
+                )],
+            )],
+        )],
+    );
+
+    let nos = explorer_nomes(&tree, &java_source_roots(), &kinds);
+    // A cadeia inteira comprime numa linha só, e ela é o pacote.
+    let [raiz] = nos.as_slice() else {
+        panic!("a cadeia de pacotes precisa virar uma linha só: {:?}", labels(&nos));
+    };
+    assert_eq!(raiz.especie, Especie::Pacote, "pasta sob a raiz de fontes é pacote");
+
+    let por_nome = |nome: &str| {
+        raiz.children
+            .iter()
+            .find(|no| no.label == nome)
+            .map(|no| no.especie)
+    };
+    assert_eq!(por_nome("Pedido.java"), Some(Especie::Classe));
+    assert_eq!(por_nome("Repositorio.java"), Some(Especie::Interface));
+    assert_eq!(por_nome("Situacao.java"), Some(Especie::Enumeracao));
+    assert_eq!(
+        por_nome("Dto.java"),
+        Some(Especie::Classe),
+        "um `record` é uma classe declarada de outro jeito, e ganha o mesmo C"
+    );
+    assert_eq!(
+        por_nome("leiame.md"),
+        Some(Especie::Nenhuma),
+        "arquivo que não declara tipo não ganha crachá"
+    );
+}
+
+/// Sem resposta do índice, nenhum arquivo ganha crachá.
+#[test]
+fn sem_indice_nao_ha_cracha_chutado() {
+    let nos = explorer_nomes(&maven_project(), &java_source_roots(), &HashMap::new());
+    fn nenhum_tipo(nos: &[NoDoExplorer]) {
+        for no in nos {
+            assert_ne!(no.especie, Especie::Classe, "{}", no.label);
+            assert_ne!(no.especie, Especie::Interface, "{}", no.label);
+            assert_ne!(no.especie, Especie::Enumeracao, "{}", no.label);
+            nenhum_tipo(&no.children);
+        }
+    }
+    nenhum_tipo(&nos);
+}
+
 /// O nó comprimido responde pelo diretório final da cadeia — é assim que o
 /// clique continua resolvendo para um caminho que existe.
 #[test]
 fn a_joined_package_keeps_the_identity_of_the_deepest_directory() {
-    let items = explorer_items(&maven_project(), &java_source_roots());
+    let items = explorer_nomes(&maven_project(), &java_source_roots(), &HashMap::new());
     let package = &items[0].children[0].children[0].children[0];
     assert_eq!(
         package.id,
@@ -327,7 +410,7 @@ fn a_file_beside_the_subdirectory_stops_the_chain() {
         )],
     );
     assert_eq!(
-        labels(&explorer_items(&tree, &java_source_roots())),
+        labels(&explorer_nomes(&tree, &java_source_roots(), &HashMap::new())),
         vec!["br"]
     );
 }
@@ -343,7 +426,7 @@ fn directories_outside_a_source_root_are_left_alone() {
             vec![dir("demo/docs/adr", vec![file("demo/docs/adr/0001.md")])],
         )],
     );
-    let items = explorer_items(&tree, &java_source_roots());
+    let items = explorer_nomes(&tree, &java_source_roots(), &HashMap::new());
     assert_eq!(labels(&items), vec!["docs"]);
     assert_eq!(labels(&items[0].children), vec!["adr"]);
 }
@@ -454,6 +537,111 @@ fn outside_the_source_root_the_menu_offers_a_folder() {
             "alvo {target}"
         );
     }
+}
+
+/// Abrir uma pasta não pode esvaziar a irmã que já estava aberta.
+///
+/// Ler um caminho traz todos os níveis até ele, cada um com os filhos
+/// imediatos — e filho imediato vem sem netos. Trocar a lista inteira pela
+/// recém-lida apagava o que já estava carregado nos irmãos: clicar em
+/// `resources` esvaziava `java`, e os pacotes sumiam da tela.
+#[test]
+fn abrir_uma_pasta_nao_esvazia_a_irma_ja_carregada() {
+    let tree = dir(
+        "demo",
+        vec![dir(
+            "demo/src/main",
+            vec![
+                dir(
+                    "demo/src/main/java",
+                    vec![dir("demo/src/main/java/br", vec![file("demo/src/main/java/br/App.java")])],
+                ),
+                dir("demo/src/main/resources", Vec::new()),
+            ],
+        )],
+    );
+    let mut shell = IdeShell::from_tree(tree);
+
+    // A leitura de `resources` traz os níveis acima dele, e `java` volta raso.
+    shell.insert_path_children(vec![
+        (
+            PathBuf::from("demo/src/main"),
+            vec![
+                dir("demo/src/main/java", Vec::new()),
+                dir("demo/src/main/resources", Vec::new()),
+            ],
+        ),
+        (
+            PathBuf::from("demo/src/main/resources"),
+            vec![file("demo/src/main/resources/application.properties")],
+        ),
+    ]);
+
+    let java = shell
+        .explorer
+        .workspace_tree()
+        .children
+        .iter()
+        .find(|no| no.path == Path::new("demo/src/main"))
+        .and_then(|main| {
+            main.children
+                .iter()
+                .find(|no| no.path == Path::new("demo/src/main/java"))
+        });
+    let Some(java) = java else {
+        panic!("`java` precisa continuar na árvore");
+    };
+    assert!(
+        !java.children.is_empty(),
+        "os pacotes já lidos de `java` não podem sumir porque a irmã foi aberta"
+    );
+}
+
+/// Clicar no triângulo dobra **a pasta clicada**, e não a de antes.
+///
+/// A árvore resolve qual nó recebeu o clique, e o shell age pela resposta dela.
+/// Quando o triângulo abria o nó sem marcá-lo como selecionado, a resposta era o
+/// nó **anterior**: o Explorer expandia a pasta errada, e depois de algumas
+/// navegações havia pastas que simplesmente paravam de abrir.
+#[test]
+fn o_triangulo_dobra_a_pasta_clicada_e_nao_a_anterior() {
+    let tree = dir(
+        "demo",
+        vec![
+            dir("demo/um", vec![file("demo/um/A.java")]),
+            dir("demo/dois", vec![file("demo/dois/B.java")]),
+        ],
+    );
+    let mut shell = IdeShell::from_tree(tree);
+    let size = Size::new(1280.0, 800.0);
+    // Um quadro para a árvore existir posicionada, como na janela.
+    shell.paint(size);
+
+    // O triângulo fica na coluna do recuo, à esquerda do crachá.
+    let triangulo = |linha: usize| {
+        Point::new(
+            ACTIVITY_WIDTH + 12.0,
+            EXPLORER_TOP + linha as f32 * EXPLORER_ROW_HEIGHT + 2.0,
+        )
+    };
+
+    shell.pointer_down(triangulo(0), size);
+    assert!(
+        shell.explorer.expanded.contains(&PathBuf::from("demo/um")),
+        "a primeira pasta precisa abrir"
+    );
+
+    // Com `demo/um` aberta, a linha 2 é `demo/dois`.
+    shell.paint(size);
+    shell.pointer_down(triangulo(2), size);
+    assert!(
+        shell.explorer.expanded.contains(&PathBuf::from("demo/dois")),
+        "a segunda pasta precisa abrir, e não a primeira fechar"
+    );
+    assert!(
+        shell.explorer.expanded.contains(&PathBuf::from("demo/um")),
+        "clicar na segunda não pode mexer na primeira"
+    );
 }
 
 /// O clique secundário abre o menu sobre a linha apontada, e a escolha
@@ -1302,9 +1490,17 @@ fn explorer_horizontal_scrollbar_keeps_long_names_inside_sidebar() {
     });
     let size = Size::new(1280.0, 800.0);
     let track = shell.explorer_horizontal_scrollbar_rect(size);
+    // A largura do conteúdo é **medida** ao posicionar as linhas, e não estimada
+    // por contagem de caracteres: as linhas são componentes, e quem sabe quanto
+    // um rótulo ocupa é a fonte que vai desenhá-lo. Um quadro basta, e é o que a
+    // janela faz antes de qualquer gesto chegar.
+    shell.paint(size);
     // O nome não cabe na largura visível, então há o que rolar.
     let (_, content, viewport, _) = shell.scrollbar_range(ScrollTarget::ExplorerHorizontal, size);
-    assert!(content > viewport);
+    assert!(
+        content > viewport,
+        "o nome longo precisa passar da largura visível: {content} contra {viewport}"
+    );
     shell.pointer_down(
         Point::new(
             track.origin.x + track.size.width - 1.0,
