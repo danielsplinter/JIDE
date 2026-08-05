@@ -51,9 +51,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::layout::{
-    DEBUG_BUTTONS, DebugPanelGeometry, Geometry,
-};
+use crate::layout::{DEBUG_BUTTONS, DebugPanelGeometry, Geometry};
 use crate::menus::{
     MenuState, debug_request as debug_request_for, editor_entries as editor_menu_entries,
     explorer_entries as explorer_menu_entries,
@@ -64,9 +62,7 @@ use ide_domain::{
     AccessorKind, CompletionItem, CompletionRequest, DocumentId, DocumentSnapshot, OutlineItem,
     SyntaxSnapshot, TextPosition as DomainTextPosition, TextRange as DomainTextRange,
 };
-use ide_terminal::{
-    GridCell, ShellKind, TerminalKey, TerminalModifiers, TerminalSession,
-};
+use ide_terminal::{GridCell, ShellKind, TerminalKey, TerminalModifiers, TerminalSession};
 use ide_workspace::{EditorSession, FileNode, TextBuffer, rewrite_occurrences};
 use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 #[cfg(test)]
@@ -77,8 +73,8 @@ use ui_components::{
     TerminalCell, TerminalCursor, TerminalView, TextInput, TreeView,
 };
 use ui_core::{
-    ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton,
-    PointerEvent, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
+    ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
+    Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_editor::{CodeEditor, GutterMark, LineDecoration};
 use ui_host::UiHost;
@@ -644,7 +640,11 @@ impl IdeShell {
     /// O painel de depuração não precisa mais ser subtraído do editor — ele é
     /// irmão do centro na mesma linha, e ocupar lugar já é o que o encolhe.
     fn geometry(&self) -> Geometry {
-        let area = |id| self.host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        let area = |id| {
+            self.host
+                .bounds(id)
+                .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+        };
         let tabs = area(FRAME_TABS_ID);
         let editor = area(FRAME_EDITOR_ID);
         let status = area(FRAME_STATUS_ID);
@@ -780,13 +780,21 @@ impl IdeShell {
 
     /// As faixas do terminal, lidas do arranjo: a saída e a linha de comando.
     fn terminal_bands(&self) -> (Rect, Rect) {
-        let area = |id| self.host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        let area = |id| {
+            self.host
+                .bounds(id)
+                .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+        };
         (area(TERMINAL_OUTPUT_ID), area(TERMINAL_INPUT_ID))
     }
 
     /// O interior do painel de depuração, lido do arranjo.
     fn debug_panel_geometry(&self) -> DebugPanelGeometry {
-        let area = |id| self.host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        let area = |id| {
+            self.host
+                .bounds(id)
+                .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+        };
         DebugPanelGeometry {
             panel: area(FRAME_DEBUG_ID),
             buttons: (0..DEBUG_BUTTONS.len())
@@ -799,8 +807,11 @@ impl IdeShell {
 
     /// As áreas dos três ícones do título, na ordem em que aparecem.
     fn action_button_areas(&self) -> [Rect; 3] {
-        [STOP_BUTTON_ID, RUN_BUTTON_ID, DEBUG_BUTTON_ID]
-            .map(|id| self.host.bounds(id).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)))
+        [STOP_BUTTON_ID, RUN_BUTTON_ID, DEBUG_BUTTON_ID].map(|id| {
+            self.host
+                .bounds(id)
+                .unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0))
+        })
     }
 
     /// Põe na árvore o que muda com o estado da moldura.
@@ -919,23 +930,16 @@ impl IdeShell {
     }
 
     /// A roda dentro da janela. `false` deixa passar para o que está atrás.
-    fn surface_scroll(
-        &mut self,
-        kind: SurfaceKind,
-        point: Point,
-        delta_lines: f32,
-    ) -> bool {
+    fn surface_scroll(&mut self, kind: SurfaceKind, point: Point, delta_lines: f32) -> bool {
         match kind {
             // A janela cobre tudo: a roda ali é da lista dela, e nunca do editor
             // atrás — rolar o que está coberto é mexer no que não se vê.
             SurfaceKind::Rename => {
-                self.rename_pointer_event(
-                    &UiEvent::Scroll(ui_core::ScrollEvent {
-                        position: point,
-                        delta_x: 0.0,
-                        delta_y: delta_lines * generate::ROW_HEIGHT,
-                    }),
-                );
+                self.rename_pointer_event(&UiEvent::Scroll(ui_core::ScrollEvent {
+                    position: point,
+                    delta_x: 0.0,
+                    delta_y: delta_lines * generate::ROW_HEIGHT,
+                }));
                 true
             }
             SurfaceKind::Generate => {
@@ -1378,12 +1382,24 @@ impl IdeShell {
                 return;
             };
             let before = document.buffer.revision();
-            let action = self.editor_area.pane.key(
-                &mut document.buffer,
-                key,
-                modifiers.shift,
-                modifiers.control,
-            );
+            // `Enter` logo depois de um abridor abre o bloco: linha em branco um
+            // nível mais fundo, e o fechamento na linha dele. Fora desse caso a
+            // tecla é do painel como sempre, e a linha nova só herda a
+            // indentação da anterior.
+            let abriu_bloco = key.eq_ignore_ascii_case("enter")
+                && !modifiers.shift
+                && !modifiers.control
+                && self.editor_area.pane.enter_pairing(&mut document.buffer);
+            let action = if abriu_bloco {
+                EditorAction::None
+            } else {
+                self.editor_area.pane.key(
+                    &mut document.buffer,
+                    key,
+                    modifiers.shift,
+                    modifiers.control,
+                )
+            };
             if document.buffer.revision() != before {
                 self.context.status_message = "Modified".to_owned();
             }
@@ -1418,7 +1434,6 @@ fn click_widget(widget: &mut dyn Widget, point: Point) -> EventResult {
     widget.event(&mut context, &UiEvent::PointerUp(pointer))
 }
 
-
 /// Entrega o clique ao anfitrião e devolve o que a fileira de abas decidiu.
 ///
 /// Um clique é pressionar e soltar; a interface da IDE só encaminha o
@@ -1447,8 +1462,8 @@ mod painting;
 mod rename;
 mod settings;
 mod surfaces;
-mod terminal_area;
 mod tab_switcher;
+mod terminal_area;
 mod type_search;
 
 #[cfg(test)]

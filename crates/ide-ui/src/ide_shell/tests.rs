@@ -8,8 +8,8 @@ use ui_core::Color;
 // Tipos que o shell deixou de importar quando as funções puras saíram; os
 // testes continuam falando deles.
 use crate::debugging::DebugVariableView;
-use crate::ide_shell::settings::SettingsDialogGeometry;
 use crate::ide_shell::inspection::InspectionGeometry;
+use crate::ide_shell::settings::SettingsDialogGeometry;
 use crate::search::{ContentSearchHit, TypeSearchHit};
 use ide_application::{NewItemRequest, NewItemTemplate};
 use ide_domain::{AccessorCandidate, AccessorPlan, Location, SyntaxHighlightKind, ToolRole};
@@ -143,7 +143,10 @@ fn the_declared_frame_agrees_with_the_computed_one() {
         editor.origin.y + editor.size.height,
         calculada.editor_bottom
     );
-    assert_eq!(area(FRAME_TERMINAL_ID).size.height, calculada.terminal_height);
+    assert_eq!(
+        area(FRAME_TERMINAL_ID).size.height,
+        calculada.terminal_height
+    );
     assert_eq!(area(FRAME_CENTER_ID).size.width, calculada.editor_width);
     assert_eq!(area(FRAME_ACTIVITY_ID).size.width, ACTIVITY_WIDTH);
     assert_eq!(area(FRAME_SIDEBAR_ID).size.width, shell.sidebar_width(size));
@@ -171,7 +174,10 @@ fn the_layers_are_declared_in_the_order_they_stack() {
         .copied()
         .filter(|id| esperada.contains(id))
         .collect();
-    assert_eq!(camadas, esperada, "as camadas fora da ordem em que se cobrem");
+    assert_eq!(
+        camadas, esperada,
+        "as camadas fora da ordem em que se cobrem"
+    );
 
     // E a moldura vem antes de todas elas, porque é o que elas cobrem.
     let posicao = |procurado: WidgetId| filhos.iter().position(|id| *id == procurado);
@@ -760,8 +766,7 @@ fn the_action_buttons_are_library_widgets_with_accessible_names() {
     let areas = action_areas(&mut shell, Size::new(1_280.0, 800.0));
     let mut context = PaintContext::with_theme(*shell.theme());
     let mut accessibility = ui_api::AccessibilityContext::default();
-    for (button, rect) in shell.action_buttons().into_iter().zip(areas)
-    {
+    for (button, rect) in shell.action_buttons().into_iter().zip(areas) {
         let mut button = button.clone();
         button.layout(&LayoutContext::default(), rect);
         button.paint(&mut context);
@@ -1875,10 +1880,17 @@ fn terminal_wheel_and_scrollbar_change_the_visible_offset() {
             .active_terminal()
             .grid_rows()
             .iter()
-            .map(|linha| linha.iter().map(|celula| celula.character).collect::<String>())
+            .map(|linha| {
+                linha
+                    .iter()
+                    .map(|celula| celula.character)
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
-            .join("
-")
+            .join(
+                "
+",
+            )
     };
     let no_fim = visivel(&shell);
 
@@ -1897,9 +1909,9 @@ fn terminal_wheel_and_scrollbar_change_the_visible_offset() {
         shell
             .paint(size)
             .iter()
-            .filter(|command| {
-                matches!(command, PaintCommand::FillRect(fill) if fill.color == acento)
-            })
+            .filter(
+                |command| matches!(command, PaintCommand::FillRect(fill) if fill.color == acento),
+            )
             .count()
     };
     let rolado = cursores(&mut shell, size);
@@ -1984,10 +1996,7 @@ fn terminal_button_minimizes_and_restores_previous_height() {
     let toggle = Point::new(size.width - 20.0, shell.geometry().editor_bottom + 12.0);
     shell.pointer_down(toggle, size);
     assert!(shell.terminal_minimized());
-    assert_eq!(
-        shell.geometry().terminal_height,
-        TERMINAL_COLLAPSED_HEIGHT
-    );
+    assert_eq!(shell.geometry().terminal_height, TERMINAL_COLLAPSED_HEIGHT);
 
     let restore = Point::new(size.width - 20.0, shell.geometry().editor_bottom + 12.0);
     shell.pointer_down(restore, size);
@@ -2771,9 +2780,7 @@ fn dragging_the_rename_scrollbar_scrolls_the_list() {
 
     // A área da lista é da janela: o teste aponta o gesto por ela, e não por
     // dentro do estado do shell.
-    let lista = {
-        shell.rename.list_area(&shell.host)
-    };
+    let lista = { shell.rename.list_area(&shell.host) };
     let trilha_x = lista.origin.x + lista.size.width - 5.0;
     let topo = lista.origin.y + 4.0;
 
@@ -4422,7 +4429,10 @@ fn opening_the_search_dismisses_the_completion_list() {
         detail: None,
         kind: ide_domain::CompletionKind::Method,
     }]);
-    assert!(shell.completion_open(), "a lista precisa estar aberta antes");
+    assert!(
+        shell.completion_open(),
+        "a lista precisa estar aberta antes"
+    );
 
     shell.open_type_search();
     assert!(
@@ -4794,6 +4804,176 @@ fn backspace_removes_the_selection() {
     assert_eq!(shell.editor_area.pane.cursor(), 1);
 }
 
+/// Abrir um par escreve o fechamento e deixa o cursor entre os dois.
+#[test]
+fn abrir_um_par_escreve_o_fechamento() {
+    let mut shell = shell_editing("");
+    shell.text_input("(");
+    assert_eq!(shell.active_text(), Some("()"));
+    assert_eq!(
+        shell.editor_area.pane.cursor(),
+        1,
+        "o cursor fica entre os dois"
+    );
+}
+
+/// Digitar a linha inteira, fechamento incluído, não duplica nada.
+///
+/// É o critério da fase: quem já tem o hábito de escrever o `)` escreve, e não
+/// pode receber `f(a, b))` por isso.
+#[test]
+fn digitar_o_fechamento_a_mao_nao_duplica() {
+    let mut shell = shell_editing("");
+    for caractere in "f(a, b)".chars() {
+        shell.text_input(&caractere.to_string());
+    }
+    assert_eq!(shell.active_text(), Some("f(a, b)"));
+    assert_eq!(
+        shell.editor_area.pane.cursor(),
+        7,
+        "passar por cima do fechamento leva o cursor para depois dele"
+    );
+}
+
+/// Com trecho marcado, o abridor envolve em vez de apagar.
+#[test]
+fn o_abridor_envolve_o_trecho_marcado() {
+    let mut shell = shell_editing("total");
+    shell.editor_area.pane.set_cursor(5);
+    shell.editor_area.pane.set_selection(Some((0, 5)));
+    shell.text_input("(");
+    assert_eq!(shell.active_text(), Some("(total)"));
+    assert_eq!(
+        shell.editor_area.pane.selection_range(),
+        Some(1..6),
+        "o trecho continua marcado, para envolver de novo"
+    );
+}
+
+/// Apagar o abridor leva o fechamento junto, enquanto os dois estão na linha.
+#[test]
+fn apagar_o_abridor_leva_o_fechamento_da_mesma_linha() {
+    let mut shell = shell_editing("f(a, b)");
+    shell.editor_area.pane.set_cursor(2);
+    shell.key_down("Backspace");
+    assert_eq!(shell.active_text(), Some("fa, b"));
+    assert_eq!(shell.editor_area.pane.cursor(), 1);
+}
+
+/// Depois que o `Enter` separou os dois, o fechamento fica onde está.
+///
+/// Ele deixou de ser o eco de uma tecla e virou o fim de um bloco: levá-lo
+/// junto tiraria o fechamento de um corpo que já tem conteúdo.
+#[test]
+fn o_fechamento_de_outra_linha_nao_vai_junto() {
+    let mut shell = shell_editing("if (x) {\n    faz();\n}");
+    shell.editor_area.pane.set_cursor(8);
+    shell.key_down("Backspace");
+    assert_eq!(shell.active_text(), Some("if (x) \n    faz();\n}"));
+}
+
+/// Escrever uma string inteira, aspas incluídas, não duplica nada.
+#[test]
+fn digitar_a_string_inteira_nao_duplica_a_aspa() {
+    let mut shell = shell_editing("");
+    for caractere in "const a = 'oi';".chars() {
+        shell.text_input(&caractere.to_string());
+    }
+    assert_eq!(shell.active_text(), Some("const a = 'oi';"));
+}
+
+/// O apóstrofo no meio de uma palavra não abre string nenhuma.
+#[test]
+fn o_apostrofo_de_uma_palavra_nao_vira_par() {
+    let mut shell = shell_editing("// don");
+    shell.editor_area.pane.set_cursor(6);
+    shell.text_input("'");
+    assert_eq!(shell.active_text(), Some("// don'"), "e não `// don''`");
+}
+
+/// `Enter` depois de uma aspa não abre bloco: partiria a string no meio.
+#[test]
+fn a_aspa_nao_abre_bloco() {
+    let mut shell = shell_editing("  const a = ");
+    shell.editor_area.pane.set_cursor(12);
+    shell.text_input("'");
+    assert_eq!(shell.active_text(), Some("  const a = ''"));
+
+    shell.key_down("Enter");
+    assert_eq!(
+        shell.active_text(),
+        Some("  const a = '\n  '"),
+        "a linha nova herda a indentação, e não ganha um nível"
+    );
+}
+
+/// Abrir a chave e apertar `Enter` abre o bloco em três linhas.
+///
+/// A linha em branco fica um nível mais fundo que a linha da abertura, o
+/// fechamento volta a alinhar com ela, e o cursor fica no fim da linha em
+/// branco — que é onde se vai escrever.
+#[test]
+fn o_enter_depois_da_chave_abre_o_bloco() {
+    let mut shell = shell_editing("class A {\n  metodo() \n}");
+    shell.editor_area.pane.set_cursor(21);
+    shell.text_input("{");
+    assert_eq!(shell.active_text(), Some("class A {\n  metodo() {}\n}"));
+
+    shell.key_down("Enter");
+    assert_eq!(
+        shell.active_text(),
+        Some("class A {\n  metodo() {\n    \n  }\n}")
+    );
+    assert_eq!(
+        shell.editor_area.pane.cursor(),
+        27,
+        "o cursor fica no fim da linha em branco"
+    );
+}
+
+/// O passo da indentação é o do arquivo, e não o da IDE.
+#[test]
+fn o_passo_da_indentacao_e_o_do_arquivo() {
+    let mut shell = shell_editing("class A {\n    metodo() {}\n}");
+    shell.editor_area.pane.set_cursor(24);
+    shell.key_down("Enter");
+    assert_eq!(
+        shell.active_text(),
+        Some("class A {\n    metodo() {\n        \n    }\n}"),
+        "num arquivo de quatro espaços o degrau é de quatro"
+    );
+
+    let mut tabulado = shell_editing("class A {\n\tmetodo() {}\n}");
+    tabulado.editor_area.pane.set_cursor(21);
+    tabulado.key_down("Enter");
+    assert_eq!(
+        tabulado.active_text(),
+        Some("class A {\n\tmetodo() {\n\t\t\n\t}\n}"),
+        "num arquivo tabulado o degrau é uma tabulação"
+    );
+}
+
+/// Sem o fechamento encostado, o `Enter` só abre a linha indentada.
+#[test]
+fn sem_o_fechamento_encostado_o_enter_so_indenta() {
+    let mut shell = shell_editing("class A {\n  metodo() {\n}");
+    shell.editor_area.pane.set_cursor(22);
+    shell.key_down("Enter");
+    assert_eq!(
+        shell.active_text(),
+        Some("class A {\n  metodo() {\n    \n}")
+    );
+}
+
+/// Fora de um abridor, `Enter` continua herdando a indentação da linha.
+#[test]
+fn fora_do_par_o_enter_continua_como_era() {
+    let mut shell = shell_editing("class A {\n  faz();\n}");
+    shell.editor_area.pane.set_cursor(18);
+    shell.key_down("Enter");
+    assert_eq!(shell.active_text(), Some("class A {\n  faz();\n  \n}"));
+}
+
 /// Salvar grava o conteúdo da aba e limpa a marca de modificado.
 #[test]
 fn saving_writes_the_active_tab_to_disk() {
@@ -4949,10 +5129,7 @@ fn clicking_a_field_moves_the_cursor_before_typing() {
     let package = NewItemSurface::field_area(&shell.host, true);
     // Clique antes do primeiro caractere leva o cursor para o começo.
     shell.pointer_down(
-        Point::new(
-            package.origin.x + 1.0,
-            package.origin.y + 8.0,
-        ),
+        Point::new(package.origin.x + 1.0, package.origin.y + 8.0),
         size,
     );
     shell.text_input("dev.");
@@ -5334,7 +5511,11 @@ fn holding_control_and_tabbing_walks_the_open_tabs() {
             .active()
             .map(|documento| documento.path.clone())
     };
-    assert_eq!(ativo(&shell), Some(terceiro.clone()), "a última aberta é a ativa");
+    assert_eq!(
+        ativo(&shell),
+        Some(terceiro.clone()),
+        "a última aberta é a ativa"
+    );
 
     let ctrl = Modifiers {
         control: true,
@@ -5606,7 +5787,11 @@ fn searching_for_what_is_not_there_marks_nothing() {
     assert!(shell.search_hits().is_empty());
     shell.editor_area.pane.set_cursor(3);
     assert!(!shell.go_to_next_search_hit(), "sem ocorrencia, nao anda");
-    assert_eq!(shell.editor_area.pane.cursor(), 3, "e o cursor fica onde estava");
+    assert_eq!(
+        shell.editor_area.pane.cursor(),
+        3,
+        "e o cursor fica onde estava"
+    );
 }
 
 /// Quanto custa uma tecla na barra de busca, num arquivo grande.
@@ -5767,7 +5952,10 @@ fn clicking_the_editor_unfocuses_the_search_without_closing_it() {
 
     // `Ctrl+F` com a barra aberta e sem foco devolve o foco, e não fecha.
     shell.toggle_search();
-    assert!(shell.search_is_open(), "voltar para a busca nao pode fecha-la");
+    assert!(
+        shell.search_is_open(),
+        "voltar para a busca nao pode fecha-la"
+    );
     shell.text_input("!");
     assert!(
         shell.search_hits().is_empty(),
@@ -5827,5 +6015,9 @@ fn clicking_inside_the_search_bar_focuses_it_instead_of_the_code() {
     for letra in ["n", "o", "m", "e"] {
         shell.text_input(letra);
     }
-    assert_eq!(shell.search_hits().len(), 3, "digitar depois do clique e busca");
+    assert_eq!(
+        shell.search_hits().len(),
+        3,
+        "digitar depois do clique e busca"
+    );
 }

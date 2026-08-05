@@ -48,7 +48,9 @@ impl IdeShell {
         let Some(document) = self.editor_area.session.active() else {
             return false;
         };
-        identifier_prefix(document.buffer.text(), self.editor_area.pane.cursor()).chars().count()
+        identifier_prefix(document.buffer.text(), self.editor_area.pane.cursor())
+            .chars()
+            .count()
             == LETRAS_QUE_ABREM
     }
 
@@ -481,7 +483,10 @@ impl IdeShell {
             return false;
         };
         let texto = document.buffer.text().to_owned();
-        self.editor_area.pane.go_to_next_search_hit(&texto).is_some()
+        self.editor_area
+            .pane
+            .go_to_next_search_hit(&texto)
+            .is_some()
     }
 
     /// A área que o arranjo deu à barra de busca.
@@ -546,8 +551,7 @@ impl IdeShell {
     /// Pede à aplicação o arquivo do passo, na linha e coluna de onde se saiu.
     fn abrir_posicao(&mut self, destino: &Posicao) {
         self.commands.push(ApplicationCommand::OpenDocument(
-            OpenDocumentRequest::new(destino.caminho.clone())
-                .at(destino.linha, destino.coluna),
+            OpenDocumentRequest::new(destino.caminho.clone()).at(destino.linha, destino.coluna),
         ));
     }
 
@@ -945,7 +949,18 @@ impl IdeShell {
         let Some(document) = self.editor_area.session.active_mut() else {
             return;
         };
-        if self.editor_area.pane.insert(&mut document.buffer, text) {
+        // `insert_pairing`, e não `insert`: escrever código é o único lugar da
+        // IDE onde abrir um parêntese pede o fechamento. A caixa de busca e o
+        // rascunho da inspeção continuam escrevendo o que se digita.
+        //
+        // A revisão diz se o texto mudou, e a resposta do painel não: passar por
+        // cima de um `)` que já estava lá é movimento do cursor, e anunciar
+        // "Modified" ali seria dizer que o arquivo mudou quando ele não mudou.
+        let before = document.buffer.revision();
+        self.editor_area
+            .pane
+            .insert_pairing(&mut document.buffer, text);
+        if document.buffer.revision() != before {
             self.context.status_message = "Modified".to_owned();
         }
     }
@@ -956,9 +971,15 @@ impl IdeShell {
             return;
         };
         let before = document.buffer.revision();
-        self.editor_area
+        if !self
+            .editor_area
             .pane
-            .key(&mut document.buffer, "backspace", false, false);
+            .backspace_pairing(&mut document.buffer)
+        {
+            self.editor_area
+                .pane
+                .key(&mut document.buffer, "backspace", false, false);
+        }
         if document.buffer.revision() != before {
             self.context.status_message = "Modified".to_owned();
         }

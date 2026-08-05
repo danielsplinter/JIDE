@@ -10,6 +10,8 @@
 //! assim a janela principal continua editando o documento aberto enquanto uma
 //! segunda tela edita um rascunho, sem cópia nem sincronização entre os dois.
 
+mod pares;
+
 use crate::text::{
     byte_at_column, line_column, next_boundary, offset_for_line_column, previous_boundary,
 };
@@ -982,6 +984,133 @@ impl EditorPane {
         false
     }
 
+    /// Escreve o que foi digitado **fechando o par** que ele abre.
+    ///
+    /// É a porta que o editor de arquivos usa no lugar de `insert`, e não a
+    /// própria `insert`: um painel de uma linha só — a expressão da inspeção, a
+    /// caixa de busca — não quer parêntese fechando sozinho.
+    ///
+    /// O par entra numa escrita só, e não em duas, porque desfazer é sobre
+    /// gestos: quem digitou `(` fez um gesto, e `Ctrl+Z` devolve o gesto
+    /// inteiro. Duas escritas deixariam o `)` órfão no meio do caminho.
+    pub fn insert_pairing(&mut self, buffer: &mut TextBuffer, text: &str) -> bool {
+        // Com ocorrências marcadas, cada marca é um cursor e o par teria de
+        // nascer em todas: é outra pergunta, e não a desta fase.
+        if self.multi.is_some() {
+            return self.insert(buffer, text);
+        }
+        let cursor = self.cursor.min(buffer.text().len());
+        match pares::ao_digitar(buffer.text(), cursor, self.selection_range(), text) {
+            pares::Digitacao::Fecha(abre, fecha) => {
+                let mut par = String::with_capacity(abre.len_utf8() + fecha.len_utf8());
+                par.push(abre);
+                par.push(fecha);
+                if !self.insert(buffer, &par) {
+                    return false;
+                }
+                self.cursor = self.cursor.saturating_sub(fecha.len_utf8());
+                true
+            }
+            pares::Digitacao::Pula(fecha) => {
+                // Nada muda no texto, e por isso nada entra no histórico: passar
+                // por cima de um caractere é movimento, não edição.
+                self.cursor = cursor + fecha.len_utf8();
+                self.selection = None;
+                true
+            }
+            pares::Digitacao::Envolve(abre, fecha) => self.envolve(buffer, abre, fecha),
+            pares::Digitacao::Normal => self.insert(buffer, text),
+        }
+    }
+
+    /// Põe o par em volta do trecho marcado, mantendo-o marcado.
+    fn envolve(&mut self, buffer: &mut TextBuffer, abre: char, fecha: char) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        let Some(dentro) = buffer.text().get(range.clone()).map(str::to_owned) else {
+            return false;
+        };
+        self.remember(buffer);
+        let mut envolvido =
+            String::with_capacity(dentro.len() + abre.len_utf8() + fecha.len_utf8());
+        envolvido.push(abre);
+        envolvido.push_str(&dentro);
+        envolvido.push(fecha);
+        let inicio = range.start;
+        if buffer.replace(range, &envolvido).is_err() {
+            return false;
+        }
+        // O trecho continua marcado, deslocado pelo abridor: envolver de novo é
+        // o gesto seguinte mais comum, e perder a marca custaria remarcá-la.
+        let dentro_inicio = inicio + abre.len_utf8();
+        let dentro_fim = dentro_inicio + dentro.len();
+        self.selection = Some((dentro_inicio, dentro_fim));
+        self.cursor = dentro_fim;
+        true
+    }
+
+    /// `Enter` logo depois de um abridor. `false` quando não havia par.
+    ///
+    /// Escreve a linha em branco um nível mais fundo que a linha da abertura, e
+    /// — quando o fechamento está encostado no cursor — leva o fechamento para a
+    /// linha dele, alinhado com quem o abriu. O cursor fica no fim da linha em
+    /// branco, que é onde se vai escrever.
+    ///
+    /// Deixar o `}` grudado no cursor obrigaria a arrumá-lo à mão toda vez, que
+    /// é o trabalho que isto existe para tirar.
+    pub fn enter_pairing(&mut self, buffer: &mut TextBuffer) -> bool {
+        if self.multi.is_some() || self.selection_range().is_some() {
+            return false;
+        }
+        let cursor = self.cursor.min(buffer.text().len());
+        let Some(linha) = pares::ao_abrir_linha(buffer.text(), cursor) else {
+            return false;
+        };
+        // Um arquivo novo, sem nenhuma linha indentada, não tem o que dizer — e
+        // aí sim é palpite, sobre um arquivo onde ele não contradiz nada.
+        let passo = pares::passo_de(buffer.text()).unwrap_or_else(|| " ".repeat(INDENT_WIDTH));
+        let dentro = format!("{}{passo}", linha.abertura);
+        let escrito = if linha.fechamento_junto {
+            format!("\n{dentro}\n{}", linha.abertura)
+        } else {
+            format!("\n{dentro}")
+        };
+        if !self.insert(buffer, &escrito) {
+            return false;
+        }
+        // Uma escrita só, e o cursor recuado até o fim da linha em branco: as
+        // três linhas nasceram de um `Enter`, e desfazer devolve o `Enter`.
+        self.cursor = cursor + "\n".len() + dentro.len();
+        true
+    }
+
+    /// `Backspace` que leva o fechamento junto. `false` quando não havia par.
+    ///
+    /// Devolver `false` em vez de apagar assim mesmo é o que deixa o
+    /// `Backspace` comum inteiro onde ele está: aqui só mora o caso do par.
+    pub fn backspace_pairing(&mut self, buffer: &mut TextBuffer) -> bool {
+        if self.multi.is_some() || self.selection_range().is_some() {
+            return false;
+        }
+        let cursor = self.cursor.min(buffer.text().len());
+        let Some((abertura, fechamento)) = pares::a_apagar(buffer.text(), cursor) else {
+            return false;
+        };
+        self.remember(buffer);
+        // O fechamento primeiro: apagá-lo não move o abridor, que está antes.
+        if buffer.replace(fechamento, "").is_err() {
+            return false;
+        }
+        let inicio = abertura.start;
+        if buffer.replace(abertura, "").is_err() {
+            return false;
+        }
+        self.cursor = inicio;
+        self.selection = None;
+        true
+    }
+
     /// Apaga o trecho marcado. Devolve `true` quando havia algo para apagar.
     pub fn delete_selection(&mut self, buffer: &mut TextBuffer) -> bool {
         let Some(range) = self.selection_range() else {
@@ -1742,6 +1871,27 @@ mod tests {
             full.secondary_pointer_down(point),
             EditorAction::ContextMenu(point)
         );
+    }
+
+    /// Desfazer devolve o par inteiro: ele foi um gesto só.
+    #[test]
+    fn desfazer_devolve_o_par_inteiro() {
+        let (mut pane, _) = pane(EditorCapabilities::plain());
+        let mut buffer = TextBuffer::new("f");
+        pane.set_cursor(1);
+        pane.insert_pairing(&mut buffer, "(");
+        assert_eq!(buffer.text(), "f()");
+
+        pane.key(&mut buffer, "z", false, true);
+        assert_eq!(buffer.text(), "f", "e não `f(`, com o fechamento órfão");
+
+        // Apagar o par também é um gesto só, e volta inteiro.
+        let mut outro = TextBuffer::new("f(a)");
+        pane.set_cursor(2);
+        assert!(pane.backspace_pairing(&mut outro));
+        assert_eq!(outro.text(), "fa");
+        pane.key(&mut outro, "z", false, true);
+        assert_eq!(outro.text(), "f(a)");
     }
 
     /// `Ctrl+Z` volta uma ação por vez, até o teto de dez.
