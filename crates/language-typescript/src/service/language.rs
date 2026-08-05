@@ -893,6 +893,20 @@ impl ActiveLanguage for ActiveTypeScriptService {
                 },
             );
         }
+        // **Quem respondeu, e o que ele tinha antes do filtro.** Sem isto, uma
+        // lista vazia na tela não distingue três coisas: o analisador não foi
+        // perguntado, ele não tinha nada, ou o nosso filtro de prefixo comeu
+        // tudo. Ver `ERIDE_COMPLETACAO` no `ide-app` — é a mesma chave.
+        if std::env::var_os("ERIDE_COMPLETACAO").is_some() {
+            eprintln!(
+                "[analisador] {}:{} → {} entradas, {} depois do prefixo {:?}",
+                line,
+                offset,
+                entradas.len(),
+                servem.len(),
+                request.prefix
+            );
+        }
         Ok(servem.into_iter().filter_map(completion_from).collect())
     }
 
