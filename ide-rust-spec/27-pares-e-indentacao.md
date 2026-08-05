@@ -147,7 +147,17 @@ classe inteiramente tabulada perder para duas chaves.
 E fora de um abridor nada mudou: `Enter` continua herdando a indentação da linha
 anterior, que já era do editor da biblioteca.
 
-## Fase 3 — Não fechar dentro de texto nem de comentário ⬜
+## Fase 3 — Não fechar dentro de texto nem de comentário ⛔ Dispensada
+
+**Dispensada por quem usa a IDE**, depois de ver o que ela custa: o fechamento
+sobrando dentro de uma string incomoda e não quebra nada, e a fase inteira
+existia só para isso.
+
+*Fica escrita porque uma fase apagada volta como ideia nova.* Quem a reabrir vai
+reencontrar o desenho pronto — e a razão de ela não ter sido feita, que é o que
+uma lista de tarefas perde.
+
+O que ela seria:
 
 `'(' + valor` não pede fechamento. Um `(` dentro de uma string ou de um
 comentário é um caractere, e não um par.
@@ -168,6 +178,23 @@ que já serve.
 **Critério:** digitar `(` dentro de uma string não escreve `)`. Num arquivo sem
 realce disponível, o par fecha — degradar para o comportamento da fase 1 é
 melhor do que degradar para nenhum.
+
+### O que dispensá-la deixa em pé
+
+- **um `(` digitado dentro de uma string ou de um comentário fecha**, e quem
+  escreveu apaga o que sobrou;
+- **a aspa dentro de uma string já começada** continua decidida só pela simetria
+  da fase 4: sob o cursor, passa por cima; fora dele, abre um par;
+- **o primeiro caractere depois de abrir uma aspa** nunca teria acertado mesmo,
+  porque o realce chega uma revisão atrás — a fase 3 não consertaria esse caso,
+  e é bom que isso esteja dito antes de alguém tentar.
+
+Nada disso quebra código: o compilador continua sendo quem valida, e um
+parêntese sobrando aparece na hora, na tela.
+
+**O que faria reabrir:** um relato de que apagar o que sobrou atrapalha mais do
+que o par ajuda. Foi o mesmo critério que decidiu fazer as fases 1 e 2 — o
+incômodo de quem digita, e não a completude da lista.
 
 ## Fase 4 — Aspas ✅
 
