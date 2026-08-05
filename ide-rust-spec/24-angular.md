@@ -361,6 +361,22 @@ desperdiçada na **abertura**, que roda fora da thread da interface, tem prazo
 longo e já mostra o giro na tela. Aquecendo em `1:1`, a pergunta de verdade caiu
 para 0,06 s.
 
+> **O aquecimento passou a valer para todo arquivo, e não só para o template.**
+> Ele nasceu aqui porque foi aqui que os 22,9 s apareceram, e ficou preso ao
+> arquivo ancorado por isso — mas o custo é do analisador montar **um arquivo**,
+> e não do plugin de template.
+>
+> Medido no `j-fis-cloud`, com o mesmo formato e três ordens de grandeza menor:
+> a primeira pergunta num `.ts` custava **2,2 s** e as seguintes **2 ms**.
+> Ligado o aquecimento, ela caiu para **38 ms**, e abrir cada arquivo seguinte
+> passou a custar **75 a 89 ms** — porque o caro é montar o **projeto**, e isso
+> acontece uma vez.
+>
+> Foi o que fez `this.pesquisaCampos.map(l => l.` parecer não funcionar: o
+> índice diz que não sabe o tipo de `l` — instanciar genérico é o verificador de
+> tipos, recusado pela ADR-025 —, a pergunta desce para o analisador, e ele
+> respondia certo **2,2 s depois**, quando ninguém estava mais olhando.
+
 **`No content available` num template é comum, e é correto.** A segunda execução
 caiu num `{{ model. }}` de um `ng-template` com `let-model`, cujo contexto vem de
 uma diretiva e que o serviço legitimamente não resolve. Tratar isso como falha do

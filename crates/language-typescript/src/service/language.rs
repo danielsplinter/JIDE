@@ -410,15 +410,17 @@ impl ActiveTypeScriptService {
         (!configurado.contains("inferredProject")).then_some(configurado)
     }
 
-    /// Faz a primeira pergunta sobre um arquivo ancorado, e joga fora a
-    /// resposta.
+    /// Faz a primeira pergunta sobre um arquivo, e joga fora a resposta.
     ///
     /// # Por que uma pergunta desperdiçada é a correção certa
     ///
-    /// Medido no monorepo de referência: a **primeira** completude dentro de um
-    /// template custa 22,9 s, e todas as seguintes custam 0,01 s. O plugin monta
-    /// o programa de verificação do template na primeira pergunta, e depois só
-    /// consulta o que montou.
+    /// O analisador monta as estruturas de um arquivo na **primeira** pergunta
+    /// sobre ele, e depois só consulta o que montou. Medido:
+    ///
+    /// | o que | primeira | seguintes |
+    /// | --- | --- | --- |
+    /// | template de Angular, monorepo | 22,9 s | 0,01 s |
+    /// | `.ts` de uma aplicação | 2,2 s | 0,002 s |
     ///
     /// Sem isto, quem paga é a primeira completude de quem digita — e ela tem
     /// prazo de cinco segundos, de propósito, porque uma lista que aparecesse
@@ -426,11 +428,27 @@ impl ActiveTypeScriptService {
     /// completude falhar por prazo justamente na primeira vez, que é quando ela
     /// mais parece quebrada.
     ///
-    /// Aqui o custo cai na **abertura**, que roda fora da thread da interface,
-    /// tem o prazo longo e já mostra o giro na tela. A posição perguntada é o
-    /// começo do arquivo: aquece igual, e não exige saber onde o cursor vai
-    /// estar. Verificado — aquecendo em `1:1`, a pergunta de verdade caiu para
-    /// 0,06 s.
+    /// Aqui o custo cai na **abertura**, que roda fora da thread da interface e
+    /// tem o prazo longo. A posição perguntada é o começo do arquivo: aquece
+    /// igual, e não exige saber onde o cursor vai estar.
+    ///
+    /// # E vale para todo arquivo, e não só para o template
+    ///
+    /// Começou valendo só para o ancorado, porque foi ali que os 22,9 s
+    /// apareceram. O `.ts` comum tem o mesmo formato de custo, três ordens de
+    /// grandeza menor — e 2,2 s continua sendo tempo demais para a primeira
+    /// tecla de quem escreve `l.` dentro de uma lambda, que é o pedido que só o
+    /// analisador responde.
+    ///
+    /// **O que se aquece é o arquivo, e não um tipo.** Medido: uma variável
+    /// escrita depois de o arquivo estar quente, de um tipo que não aparecia
+    /// nele, custou 31 ms — e 1,8 ms na segunda pergunta. Quem edita não volta a
+    /// pagar; o analisador atualiza o que montou.
+    ///
+    /// **E aquecer nunca piora.** Uma pergunta feita durante o aquecimento fica
+    /// na fila atrás dele — que é o mesmo trabalho —, e a resposta chega no
+    /// instante em que chegaria sem ele. O que muda é quem espera: a abertura do
+    /// arquivo, e não a primeira tecla.
     ///
     /// Falhar aqui não é erro: significa que a primeira pergunta de verdade vai
     /// pagar o custo, que é exatamente o que acontecia antes.
@@ -518,14 +536,11 @@ impl ActiveLanguage for ActiveTypeScriptService {
             }
         }
         self.abrir(&document.path, &document.text).await?;
-        let ancorado = self.e_ancorado(&document.path);
         self.documentos
             .lock()
             .map_err(|_| LanguageError::Provider("registro de documentos travado".to_owned()))?
             .insert(document.id, (document.path, document.text));
-        if ancorado {
-            self.aquecer(document.id).await;
-        }
+        self.aquecer(document.id).await;
         Ok(())
     }
 
