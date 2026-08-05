@@ -1609,6 +1609,67 @@ pedi três execuções a quem usa.
 paga**. As outras três estão na `25`, e a regra que sobra é a mesma: um
 instrumento afirma tanto quanto o código, e merece a mesma desconfiança.
 
+### Fase 7 — Sugerir um nome onde a sintaxe ainda não o espera ⬜
+
+A fase 6 fecha dizendo que `private Http` não completa **e está certo**: ali
+`Http` é um nome sendo declarado. Está certo pelas regras do analisador, e é
+exatamente o que o VS Code faz.
+
+**E é uma escolha, não uma verdade.** Quem usa a IDE levantou a outra:
+
+> quem lida com validação da sintaxe é o compilador, não a sugestão
+
+O argumento é bom. Digitar `Htt` em qualquer lugar e receber `HttpClient` com o
+`import` junto ajuda a escrever; se o resultado não couber ali, quem reclama é a
+compilação, que reclama de qualquer jeito e reclama melhor. Uma lista que se cala
+por causa da posição transfere para quem digita um trabalho que a ferramenta
+faria.
+
+Esta fase adota essa posição. Ela **vai além do VS Code**, de propósito, e é a
+primeira vez nesta especificação que isso acontece — o que exige dizer o preço
+junto.
+
+#### Por que não é ligar uma chave
+
+O analisador escolhe o que oferecer **pelo contexto sintático**, e num slot de
+nome ele responde os cinco modificadores. Não há preferência que mude isso: é
+decisão dele, e é a mesma que o VS Code herda. Medido: 5 entradas em
+`constructor(private Ht`, 1 916 em `constructor(private n: Ht`.
+
+Então os nomes têm de vir de outro lugar — e já vêm. O índice responde busca por
+nome em **4 ms**, e o `navto` do analisador cobre o que está nas dependências.
+As duas capacidades existem desde a fase 1 da `25`.
+
+#### O `import` é a peça nova, e é outro caminho
+
+O que a fase 6 construiu **não serve aqui**. Ele pede o detalhe de uma entrada
+que o analisador ofereceu, devolvendo o `data` opaco que ela carrega — e um nome
+vindo do índice não tem entrada nenhuma.
+
+O caminho para esse caso é o da lâmpada do VS Code: escrever o nome, e então
+pedir a **correção** para o nome não resolvido. É plausível, é o mesmo mecanismo
+que já resolve `Cannot find name`, e **não está verificado**: uma sondagem
+devolveu zero diagnósticos, mas ela não esperou o projeto montar, e por isso não
+prova nada. Confirmar isso é o primeiro passo da fase, e não um detalhe dela.
+
+#### O risco, dito antes
+
+Num slot onde cabem cinco modificadores, oferecer 1 916 tipos **enterra os
+cinco**. Uma lista que atrapalha quem sabe o que quer é pior do que uma lista que
+falta a quem não sabe.
+
+A defesa não é oferecer menos: é **ordenar**. O que a sintaxe espera ali vem
+primeiro, e o resto vem abaixo — e isso é trabalho de interface, não de
+linguagem. Sem essa metade, a fase piora o caso comum para melhorar o raro.
+
+#### Critério
+
+Digitar `Htt` numa posição onde o analisador não oferece nada mostra
+`HttpClient`, e escolhê-lo escreve o `import`. Na mesma posição, os
+modificadores válidos continuam **no topo** da lista. E `this.` continua
+respondendo o que respondia: esta fase acrescenta onde havia silêncio, e não
+mexe onde já havia resposta.
+
 ## O que fica de fora, e por quê
 
 - **Depurar dentro da IDE**, que era a fase 4 e virou decisão: quem depura
