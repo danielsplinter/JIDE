@@ -3741,6 +3741,103 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **Escrever um nome abre a lista, com os dois providers no caminho.**
+    ///
+    /// # Por que este teste é no `ide-app`, e não na crate da linguagem
+    ///
+    /// Os dois providers já foram sondados em separado, e os dois respondem:
+    /// o nativo diz `Unresolved` — "não é comigo" — e o analisador devolve
+    /// `HttpClient` e companhia. Mesmo assim, `private http: Http` não
+    /// completava na tela.
+    ///
+    /// **O que faltava testar era o caminho**: a tecla, o disparo na segunda
+    /// letra, o roteamento do host entre os dois candidatos, e o recolhimento
+    /// da resposta no quadro seguinte. Nenhuma peça sozinha explicava a falha,
+    /// e é essa a razão de o teste morar aqui.
+    ///
+    /// ```text
+    /// ER_IDE_PROJETO_TS=C:/caminho/do/projeto cargo test --release -p ide-app -- --ignored --nocapture escrever_um_nome
+    /// ```
+    #[test]
+    #[ignore = "exige ER_IDE_PROJETO_TS com node_modules instalado"]
+    fn typing_a_name_opens_the_list_through_both_providers() {
+        let Ok(raiz) = std::env::var("ER_IDE_PROJETO_TS") else {
+            panic!("aponte ER_IDE_PROJETO_TS para um projeto TypeScript");
+        };
+        let raiz = PathBuf::from(raiz);
+        let arquivo = raiz.join("src/app/er-teste-nome.ts");
+        let codigo = "import { HttpClient } from '@angular/common/http';\n\
+                      export class Pagina {\n  constructor(private c: ) {}\n}\n";
+        assert!(std::fs::write(&arquivo, codigo).is_ok());
+
+        let processos = Arc::new(NativeProcessSupervisor::default());
+        let language_host = LanguageHost::new(&raiz);
+        let typescript = typescript_contribution::contribution(processos.clone(), &[]);
+        assert!(language_host.register(typescript.provider.clone()).is_ok());
+        assert!(
+            language_host
+                .register(typescript_contribution::service_provider(processos, Vec::new()))
+                .is_ok()
+        );
+        assert!(
+            language_host
+                .configure_selection(
+                    ide_domain::LanguageId("typescript".to_owned()),
+                    typescript_contribution::selection(),
+                )
+                .is_ok()
+        );
+        let mut ide = NativeIde::default();
+        assert!(ide.languages.contributions.register(typescript).is_ok());
+        ide.languages.host = Some(Arc::new(language_host));
+        ide.ui.shell = Some(test_shell(&raiz));
+        let _ = match ide.ui.shell.as_mut() {
+            Some(shell) => open_test_document(shell, &arquivo),
+            None => panic!("shell de teste ausente"),
+        };
+        ide.sync_languages();
+        if let Some(host) = &ide.languages.host {
+            assert!(
+                pollster::block_on(host.wait_until_indexed(std::time::Duration::from_secs(300)))
+                    .unwrap_or(false),
+                "o projeto precisa ficar pronto"
+            );
+        }
+
+        // O cursor logo depois de `private c: `, e as duas letras que a IDE
+        // considera início de nome.
+        if let Some(shell) = ide.ui.shell.as_mut() {
+            shell.show_location(&arquivo, codigo, 2, 25);
+            shell.text_input("H");
+            assert!(!shell.completion_opens_now(), "uma letra não abre");
+            shell.text_input("t");
+            assert!(shell.completion_opens_now(), "duas letras abrem");
+        }
+        ide.sync_languages();
+        ide.request_completion();
+
+        let mut esperas = 0;
+        loop {
+            ide.collect_completion();
+            if ide
+                .ui
+                .shell
+                .as_ref()
+                .is_some_and(ide_ui::IdeShell::completion_open)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            esperas += 1;
+            assert!(
+                esperas < 400,
+                "a lista precisa abrir escrevendo um nome; \
+                 os dois providers respondem em separado, e o caminho é que falhava"
+            );
+        }
+        let _ = std::fs::remove_file(&arquivo);
+    }
+
     /// **O ponto não espera pela resposta.**
     ///
     /// Era o sexto lugar com o mesmo defeito, e o mais bem escondido: a
