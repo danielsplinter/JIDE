@@ -506,7 +506,7 @@ fn declare_frame(host: &mut UiHost) {
         SEARCH_POPUP_TERMINAL_ID,
         LayoutStyle {
             width: Some(SEARCH_BOX_TERMINAL_WIDTH),
-            height: Some(TERMINAL_TAB_HEIGHT - 6.0),
+            height: Some(TERMINAL_TAB_HEIGHT - 4.0),
             ..LayoutStyle::default()
         },
     );

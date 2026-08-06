@@ -532,10 +532,13 @@ impl IdeShell {
             // clique cairia numa faixa e o desenho apareceria na outra.
             let (popup_id, input_id) = self.search_widget_ids();
             let caixa = self.host.bounds(popup_id).unwrap_or_default();
-            let mut surface = Popup::new(popup_id).with_padding(6.0);
+            // A folga é menor na fileira das abas: ali a caixa tem a altura da
+            // fileira, e seis pontos de cada lado não deixariam texto nenhum.
+            let folga = if self.context.busca_no_terminal { 2.0 } else { 6.0 };
+            let mut surface = Popup::new(popup_id).with_padding(folga);
             surface.set_content_size(Size::new(
-                (caixa.size.width - 12.0).max(0.0),
-                (caixa.size.height - 12.0).max(0.0),
+                (caixa.size.width - folga * 2.0).max(0.0),
+                (caixa.size.height - folga * 2.0).max(0.0),
             ));
             surface.layout(
                 &self.layout_context(),
