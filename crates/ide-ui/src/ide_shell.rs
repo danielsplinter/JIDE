@@ -38,7 +38,7 @@ use crate::settings::SettingsPage;
 use crate::shell::{ShellCommandQueue, ShellFocus};
 use crate::terminal::{
     ScrollTarget, TerminalPanelState, TerminalSelection, TerminalTab, TextPosition,
-    ordered_selection, selection_columns,
+    selection_columns,
 };
 use ide_application::{
     ApplicationCommand, DebugRequest, FileOccurrences, NavigationRequest, OpenDocumentRequest,

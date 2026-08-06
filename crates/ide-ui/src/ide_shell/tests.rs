@@ -7267,3 +7267,49 @@ fn cada_ponto_da_janela_tem_um_alvo_so() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// O que se copia do terminal é o que está na tela, célula por célula.
+///
+/// A leitura vinha de `lines()`, uma lista acumulada à parte, enquanto o que
+/// aparece vem de `grid_rows()`. Duas fontes para a mesma tela — e os números da
+/// seleção são da **viewport**, então lidos contra a lista acumulada apontavam
+/// para o começo do histórico.
+#[test]
+fn o_terminal_copia_o_que_esta_na_grade() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let grade = shell.active_terminal().grid_rows();
+    let Some(primeira) = grade.first() else {
+        panic!("a grade precisa ter linhas");
+    };
+    let largura = primeira.len();
+    assert!(largura > 4, "a grade precisa ter colunas");
+
+    // Marca as quatro primeiras células da primeira linha visível.
+    shell.set_terminal_selection_for_test(
+        TextPosition { line: 0, column: 0 },
+        TextPosition { line: 0, column: 4 },
+    );
+    let esperado: String = primeira.iter().take(4).map(|celula| celula.character).collect();
+    assert_eq!(
+        shell.selected_terminal_text(),
+        esperado.trim_end(),
+        "o copiado sai das mesmas células que o desenho lê"
+    );
+
+    // Até o fim da linha, os espaços de preenchimento da grade não vêm junto.
+    shell.set_terminal_selection_for_test(
+        TextPosition { line: 0, column: 0 },
+        TextPosition {
+            line: 0,
+            column: largura,
+        },
+    );
+    let copiado = shell.selected_terminal_text();
+    assert_eq!(
+        copiado,
+        copiado.trim_end(),
+        "a cauda de espaços da grade retangular não é conteúdo"
+    );
+    let _ = size;
+}

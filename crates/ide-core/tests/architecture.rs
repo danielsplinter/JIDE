@@ -1198,7 +1198,11 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // subir exige alguém decidindo que sobe, e escrevendo por quê — como as
         // linhas acima fazem.
         ("crates/ide-app/src/native_ide.rs", 5_389),
-        ("crates/ide-ui/src/ide_shell/tests.rs", 7_269),
+        // De 7 269 para 7 315: o teste que a fase 4 da `18` pedia — o copiado do
+        // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
+        // primeira adição depois de nascer**, que é o que ela existe para fazer:
+        // o número subiu porque alguém decidiu que sobe, e não sozinho.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 7_315),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))

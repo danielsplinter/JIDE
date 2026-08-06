@@ -248,38 +248,61 @@ impl IdeShell {
         }
     }
 
+    /// O texto marcado, **lido da grade** — a mesma fonte que a tela desenha.
+    ///
+    /// # Por que isto importa
+    ///
+    /// Antes daqui ele era lido de `lines()`, uma lista de linhas acumulada à
+    /// parte, enquanto o que aparece vem de `grid_rows()`, a viewport do
+    /// emulador. Duas fontes para a mesma tela: quando a grade quebra linha,
+    /// preenche ou rola, elas divergem — e quem marcava uma coisa colava outra.
+    ///
+    /// Pior, os números da seleção são **da viewport**: a linha 0 é a primeira
+    /// que se vê, e não a primeira que já saiu. Lidos contra a lista acumulada,
+    /// eles apontavam para o começo do histórico.
+    ///
+    /// A pergunta "que colunas desta linha estão marcadas" é a mesma do desenho,
+    /// e agora é a mesma função que responde nos dois lugares. É o que impede o
+    /// marcado e o copiado de discordarem de novo.
+    ///
+    /// # Os espaços do fim
+    ///
+    /// A grade é retangular: toda linha tem a largura inteira, preenchida com
+    /// espaço. Marcar até o fim traria essa cauda junto, e colá-la num editor
+    /// deixaria espaços que ninguém digitou. Ela sai — só quando a marca alcança
+    /// o fim da linha, porque aí os espaços são preenchimento, e não conteúdo.
+    /// Marca um trecho da grade, para o teste não depender de arrastar o mouse.
+    #[cfg(test)]
+    pub(super) fn set_terminal_selection_for_test(
+        &mut self,
+        anchor: TextPosition,
+        focus: TextPosition,
+    ) {
+        self.terminal.selection = Some(TerminalSelection { anchor, focus });
+    }
+
     pub fn selected_terminal_text(&self) -> String {
-        let Some(selection) = self.terminal.selection else {
+        if self.terminal.selection.is_none() {
             return String::new();
-        };
-        let (start, end) = ordered_selection(selection);
+        }
         self.active_terminal()
-            .lines()
+            .grid_rows()
+            .iter()
             .enumerate()
-            .filter_map(|(line_index, line)| {
-                if line_index < start.line || line_index > end.line {
-                    return None;
-                }
-                let from = if line_index == start.line {
-                    start.column
+            .filter_map(|(numero, linha)| {
+                let texto: String = linha.iter().map(|celula| celula.character).collect();
+                let (inicio, fim) = selection_columns(self.terminal.selection, numero, &texto)?;
+                let trecho: String = texto.chars().skip(inicio).take(fim - inicio).collect();
+                let ate_o_fim = fim >= texto.chars().count();
+                Some(if ate_o_fim {
+                    trecho.trim_end().to_owned()
                 } else {
-                    0
-                };
-                let to = if line_index == end.line {
-                    end.column
-                } else {
-                    line.text.chars().count()
-                };
-                Some(
-                    line.text
-                        .chars()
-                        .skip(from)
-                        .take(to.saturating_sub(from))
-                        .collect::<String>(),
-                )
+                    trecho
+                })
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("
+")
     }
 
     /// O botão que recolhe e restaura o painel de terminais.
