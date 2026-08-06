@@ -771,6 +771,10 @@ impl NativeIde {
             Err(error) => tracing::warn!(%error, "não foi possível soltar os workers"),
         }
         self.documents.language.clear();
+        // E tudo o que esta camada guardava por documento vai junto: a sessão
+        // nova recomeça os identificadores do zero, e o que sobrasse aqui
+        // passaria a falar do arquivo errado. Ver `forget_previous_project`.
+        self.languages.forget_previous_project();
     }
 
     /// Põe no shell tudo o que ele precisa da aplicação.

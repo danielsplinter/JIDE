@@ -281,6 +281,42 @@ pub(super) struct LanguageController {
 }
 
 impl LanguageController {
+    /// Esquece tudo o que era sobre o projeto anterior.
+    ///
+    /// # Por que isto é necessário
+    ///
+    /// Trocar de projeto constrói um `IdeShell` novo, e com ele uma
+    /// `EditorSession` nova — cujo contador de documentos **recomeça do zero**.
+    /// O primeiro arquivo do projeto novo recebe o mesmo `DocumentId` que o
+    /// primeiro arquivo do projeto anterior tinha, e na mesma versão 1.
+    ///
+    /// Tudo o que esta camada guarda por `DocumentId` passa então a falar do
+    /// documento errado:
+    ///
+    /// - um realce pedido lá atrás chega **depois** da troca, com identidade e
+    ///   versão que o documento novo aceita, e pinta o arquivo novo com o que
+    ///   foi analisado no arquivo velho — ou o apaga, se aquela análise não
+    ///   tinha achado nada;
+    /// - `reoffered` diz que o documento já foi reoferecido ao analisador que
+    ///   subiu depois, e o do projeto novo nunca é oferecido a ninguém;
+    /// - a queda anunciada no projeto anterior cala o aviso da queda no novo,
+    ///   e quem usa fica sem cor e sem explicação.
+    ///
+    /// As buscas em curso vão junto pelo mesmo motivo: elas carregam
+    /// `DocumentId` e caminhos do projeto que saiu.
+    pub(super) fn forget_previous_project(&mut self) {
+        self.pending_syntax.clear();
+        self.reoffered.clear();
+        self.announced_failures.clear();
+        self.preparing_since = None;
+        self.reclamou_do_giro = false;
+        self.type_search.cancel_pending();
+        self.declaration_kinds.cancel_pending();
+        self.navigation.cancel_pending();
+        self.referencias.cancel_pending();
+        self.completion.cancel_pending();
+    }
+
     /// Recolhe os realces que já chegaram do provider, sem esperar por nenhum.
     ///
     /// A análise roda na thread do provider desde sempre; o que a punha no meio
@@ -687,6 +723,19 @@ impl<T> SearchController<T> {
         token
     }
 
+    /// Desiste do que estiver em curso, sem começar nada.
+    ///
+    /// `start` só cancela porque outro pedido chega no lugar. Trocar de projeto
+    /// não traz pedido nenhum: a pergunta era sobre o projeto que saiu, e a
+    /// resposta dela não serve para o que entrou.
+    pub(super) fn cancel_pending(&mut self) {
+        if let Some(token) = self.cancel.take() {
+            token.cancel();
+        }
+        self.pending = None;
+        self.started = None;
+    }
+
     /// Onde o giro está, de 0 a 1, ou `None` se nada roda.
     ///
     /// Uma volta por segundo: rápido o bastante para se ler como espera ativa,
@@ -765,6 +814,54 @@ mod tests {
             version,
             text: String::new(),
         }
+    }
+
+    /// O realce pedido no projeto anterior não pinta o documento novo.
+    ///
+    /// A sessão do projeto novo recomeça os identificadores do zero: o primeiro
+    /// arquivo aberto recebe `DocumentId(1)` na versão 1, exatamente como o
+    /// primeiro arquivo do projeto que saiu. Um realce pedido lá atrás e chegado
+    /// agora seria aceito pelo documento errado — e um `.ts` amanheceria pintado
+    /// com o que se analisou num `.java`, ou sem cor nenhuma, se aquela análise
+    /// não tivesse achado nada.
+    #[test]
+    fn a_troca_de_projeto_esquece_o_realce_pedido_no_anterior() {
+        let mut linguagens = LanguageController::default();
+        let (envio, receptor) = oneshot::channel();
+        linguagens.pending_syntax.push(receptor);
+        linguagens.reoffered.insert(DocumentId(1));
+        linguagens
+            .announced_failures
+            .insert("analisador.qualquer".to_owned());
+        assert_eq!(linguagens.pending_syntax(), 1);
+
+        linguagens.forget_previous_project();
+
+        assert_eq!(linguagens.pending_syntax(), 0);
+        assert!(
+            envio
+                .send(Ok(SyntaxSnapshot {
+                    document_id: DocumentId(1),
+                    version: 1,
+                    outline: Vec::new(),
+                    highlights: Vec::new(),
+                    imports: Vec::new(),
+                    diagnostics: Vec::new(),
+                }))
+                .is_err(),
+            "o realce do projeto anterior não pode ter mais a quem ser entregue"
+        );
+        assert!(linguagens.collect_syntax().is_empty());
+        assert!(
+            !linguagens.reoffered.contains(&DocumentId(1)),
+            "o documento do projeto novo precisa poder ser reoferecido ao \
+             analisador, e a marca era do documento de outro projeto"
+        );
+        assert!(
+            linguagens.announced_failures.is_empty(),
+            "a queda anunciada era sobre o projeto que saiu; calar o aviso do \
+             projeto novo deixa quem usa sem cor e sem explicação"
+        );
     }
 
     /// Uma busca nova cancela a anterior.
