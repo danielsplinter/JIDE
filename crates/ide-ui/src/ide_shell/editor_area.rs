@@ -161,7 +161,13 @@ impl IdeShell {
             })
             .collect();
         let mut tabs = Tabs::new(EDITOR_TABS_ID, items).with_tab_width(TAB_WIDTH);
-        if let Some(active) = self.editor_area.session.active_id() {
+        // A aba acesa é a **deste lado**, e não o documento ativo da sessão.
+        //
+        // `session.active` segue o lado com foco, e com o mesmo arquivo aberto
+        // dos dois lados a faixa da esquerda acendia a aba dele quando o clique
+        // tinha sido na direita: parecia que o editor da esquerda é que havia
+        // recebido o gesto.
+        if let Some(active) = self.left_active_document() {
             tabs.set_active_id(active.0);
         }
         tabs

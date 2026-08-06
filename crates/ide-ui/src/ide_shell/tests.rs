@@ -6782,5 +6782,15 @@ fn o_ponteiro_leva_o_foco_para_o_painel_da_direita() {
     };
     assert_eq!(divisao.ativa, novo, "a aba nova é do painel apontado");
     assert!(divisao.abas.contains(&novo));
+
+    // E a faixa da esquerda continua acesa no arquivo **dela**. Com o mesmo
+    // arquivo aberto dos dois lados, ela acendia a aba do documento ativo da
+    // sessão — que é o do lado com foco —, e parecia que o editor da esquerda
+    // tinha recebido o clique que foi na direita.
+    assert_eq!(
+        shell.left_active_document(),
+        Some(documento),
+        "a faixa da esquerda acende a aba do lado dela"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

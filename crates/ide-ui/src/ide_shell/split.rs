@@ -235,6 +235,18 @@ impl IdeShell {
         self.context.focus = ShellFocus::Editor;
     }
 
+    /// O documento que o lado **esquerdo** mostra.
+    ///
+    /// Sem divisão é o ativo da sessão. Com a direita em foco, o ativo da sessão
+    /// é o dela: perguntar por ele aqui acenderia, na faixa da esquerda, a aba
+    /// de um arquivo que quem clicou abriu do outro lado.
+    pub(super) fn left_active_document(&self) -> Option<DocumentId> {
+        match self.editor_area.divisao.as_ref() {
+            Some(divisao) if divisao.focado => Some(divisao.ativa_da_esquerda),
+            _ => self.editor_area.session.active_id(),
+        }
+    }
+
     /// A área do lado que **não** tem o foco — a do painel que a divisão guarda.
     pub(super) fn other_editor_rect(&self, size: Size) -> Option<Rect> {
         if self.split_focado() {
