@@ -743,11 +743,21 @@ impl IdeShell {
         }
         let text = self.active_text()?;
         let geo = self.geometry();
-        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        // A lista nasce dentro do painel da frente, e não da área do editor
+        // inteira: dividida a tela, o cursor está numa das colunas, e uma lista
+        // ancorada na borda esquerda da área apareceria sobre o outro editor —
+        // longe do que se estava digitando.
+        let area = self.editor_view_rect(size);
+        let editor_x = area.origin.x;
+        // O limite da direita é o da coluna, e não o da janela, pelo mesmo
+        // motivo: transbordar para o painel vizinho é cobrir o texto de quem não
+        // pediu nada.
+        let limite = (area.origin.x + area.size.width - (COMPLETION_POPUP_WIDTH + COMPLETION_POPUP_PADDING * 2.0))
+            .max(editor_x + EDITOR_GUTTER);
         let (line, column) = line_column(text, self.editor_area.pane.cursor());
         Some(Point::new(
             (editor_x + EDITOR_GUTTER + column as f32 * EDITOR_CHAR_WIDTH)
-                .min(size.width - 270.0)
+                .min(limite)
                 .max(editor_x + EDITOR_GUTTER),
             (geo.content_top
                 + 36.0

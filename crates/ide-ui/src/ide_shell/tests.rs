@@ -6968,3 +6968,51 @@ fn o_clique_no_editor_da_direita_move_o_cursor_dele() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A lista de completação nasce dentro do painel que tem o foco.
+///
+/// Ela era ancorada na borda esquerda da área do editor. Dividida a tela, o
+/// cursor está numa das colunas e a lista aparecia sobre a outra — longe do que
+/// se estava digitando, e por cima do texto de quem não pediu nada.
+#[test]
+fn a_completacao_nasce_no_painel_com_foco() {
+    let root = std::env::temp_dir().join(format!("er-ide-comp-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido {\n    int total;\n}\n").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let size = Size::new(1280.0, 800.0);
+    shell.dividir_a_direita(documento);
+    let _ = shell.paint(size);
+    shell.context.focus = ShellFocus::Editor;
+    shell.set_completions(vec![CompletionItem {
+        label: "total".to_owned(),
+        detail: None,
+        kind: ide_domain::CompletionKind::Field,
+    }]);
+
+    let Some(direita) = shell.right_editor_rect(size) else {
+        panic!("a coluna da direita precisa ter área");
+    };
+    let Some(ancora) = shell.completion_anchor(size) else {
+        panic!("com itens e foco no editor, a lista tem âncora");
+    };
+    assert!(
+        ancora.x >= direita.origin.x,
+        "a lista nasce dentro do painel com foco: {ancora:?} contra {direita:?}"
+    );
+    assert!(
+        ancora.x + COMPLETION_POPUP_WIDTH <= direita.origin.x + direita.size.width + 0.01,
+        "e não transborda para o painel vizinho"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
