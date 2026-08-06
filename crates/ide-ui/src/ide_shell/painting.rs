@@ -348,7 +348,7 @@ impl IdeShell {
         let mut recolher = Button::icon(TERMINAL_TOGGLE_ID, icone, nome);
         recolher.layout(
             &self.layout_context(),
-            Rect::new(size.width - 30.0, geo.editor_bottom + 4.0, 22.0, 22.0),
+            self.terminal_toggle_rect(size),
         );
         let mut recolher_paint = self.paint_context();
         recolher.paint(&mut recolher_paint);

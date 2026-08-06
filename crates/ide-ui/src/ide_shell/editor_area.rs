@@ -352,41 +352,22 @@ impl IdeShell {
     }
 
     /// Entrega o clique à barra cuja trilha o contém.
-    pub(super) fn scrollbar_pointer_down(&mut self, point: Point, size: Size) -> bool {
-        for target in [
-            ScrollTarget::Terminal,
-            ScrollTarget::Editor,
-            ScrollTarget::EditorHorizontal,
-            ScrollTarget::ExplorerHorizontal,
-            ScrollTarget::ExplorerVertical,
-        ] {
-            if target == ScrollTarget::Terminal && self.terminal.minimized {
-                continue;
-            }
-            // A barra lateral do editor só existe quando há linha passando da
-            // área. Sem esta guarda ela tomaria o clique da borda do terminal,
-            // que fica na mesma altura, sem sequer estar desenhada.
-            if target == ScrollTarget::EditorHorizontal && !self.editor_scrolls_sideways(size) {
-                continue;
-            }
-            let (track, ..) = self.scrollbar_range(target, size);
-            if !track.contains(point) {
-                continue;
-            }
-            self.sync_scrollbar(target, size);
-            let handled = self.scrollbar_mut(target).event(
-                &mut EventContext::default(),
-                &UiEvent::PointerDown(primary_pointer(point)),
-            );
-            if matches!(handled, EventResult::Handled) {
-                self.apply_scrollbar(target);
-                self.context.scrollbar_drag = Some(target);
-            }
-            // A trilha consome o clique mesmo sem indicador: ali não há
-            // conteúdo para reagir embaixo.
-            return true;
+    /// Pega a trilha em que o clique caiu, para o arrasto começar.
+    ///
+    /// Qual trilha é já foi decidido pelo roteamento: aqui só se agarra. Antes
+    /// esta função procurava a trilha **e** agarrava, e a procura acontecia de
+    /// novo em cada tratador da fila — cinco áreas perguntando "é meu?" sobre o
+    /// mesmo ponto. Ver `routing`.
+    pub(super) fn scrollbar_grab(&mut self, target: ScrollTarget, point: Point, size: Size) {
+        self.sync_scrollbar(target, size);
+        let handled = self.scrollbar_mut(target).event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        if matches!(handled, EventResult::Handled) {
+            self.apply_scrollbar(target);
+            self.context.scrollbar_drag = Some(target);
         }
-        false
     }
 
     pub(super) fn editor_view_rect(&self, size: Size) -> Rect {

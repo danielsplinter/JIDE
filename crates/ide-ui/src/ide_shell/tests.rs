@@ -7172,3 +7172,71 @@ fn a_barra_de_atividades_tem_dois_botoes() {
     assert_eq!(shell.sidebar_width(size), largura_com_painel);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Um ponto resolve para **um** alvo, e a precedência é afirmável.
+///
+/// Antes o roteamento era uma fila de treze `if tratador(ponto) { return }`, e
+/// cada tratador decidia se o ponto era dele **depois** de já ter agido. Aqui a
+/// pergunta é separada da ação: dá para afirmar quem pega cada ponto sem simular
+/// gesto nenhum e sem efeito colateral.
+#[test]
+fn cada_ponto_da_janela_tem_um_alvo_so() {
+    let root = std::env::temp_dir().join(format!("er-ide-alvos-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido {}").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+
+    let geo = shell.geometry();
+    let editor_x = ACTIVITY_WIDTH + shell.sidebar_width(size);
+    assert_eq!(shell.alvo_do_ponto(Point::new(200.0, 10.0), size), Alvo::Topo);
+    assert_eq!(
+        shell.alvo_do_ponto(Point::new(20.0, 300.0), size),
+        Alvo::Atividades
+    );
+    assert_eq!(
+        shell.alvo_do_ponto(Point::new(editor_x + 100.0, TITLE_HEIGHT + 10.0), size),
+        Alvo::Abas
+    );
+    assert_eq!(
+        shell.alvo_do_ponto(Point::new(ACTIVITY_WIDTH + 40.0, EXPLORER_TOP + 40.0), size),
+        Alvo::Explorer
+    );
+    assert_eq!(
+        shell.alvo_do_ponto(Point::new(editor_x + 200.0, geo.content_top + 60.0), size),
+        Alvo::Editor
+    );
+    assert_eq!(
+        shell.alvo_do_ponto(Point::new(editor_x + 200.0, geo.editor_bottom + 40.0), size),
+        Alvo::Terminal
+    );
+
+    // Dividido, a coluna da direita responde por si — e o clique no Explorer
+    // continua sendo do Explorer, que é onde o defeito antigo morava.
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    shell.dividir_a_direita(documento);
+    let _ = shell.paint(size);
+    let Some(direita) = shell.right_editor_rect(size) else {
+        panic!("a coluna da direita precisa ter área");
+    };
+    assert_eq!(
+        shell.alvo_do_ponto(Point::new(direita.origin.x + 40.0, direita.origin.y + 40.0), size),
+        Alvo::EditorDaDireita
+    );
+    assert_eq!(
+        shell.alvo_do_ponto(Point::new(ACTIVITY_WIDTH + 40.0, EXPLORER_TOP + 40.0), size),
+        Alvo::Explorer,
+        "o clique no Explorer nunca é da área dividida"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

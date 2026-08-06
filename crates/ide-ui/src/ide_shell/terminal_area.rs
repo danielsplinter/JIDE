@@ -283,10 +283,17 @@ impl IdeShell {
     }
 
     /// O botão que recolhe e restaura o painel de terminais.
+    /// Onde fica o botão de recolher e mostrar o terminal.
+    ///
+    /// Fora do tratador porque quem roteia o clique precisa da mesma área: com
+    /// a conta em dois lugares, o roteador manda o gesto para um lugar e o
+    /// desenho põe o botão em outro.
+    pub(super) fn terminal_toggle_rect(&self, size: Size) -> Rect {
+        Rect::new(size.width - 30.0, self.geometry().editor_bottom + 4.0, 22.0, 22.0)
+    }
+
     pub(super) fn terminal_toggle_pointer_down(&mut self, point: Point, size: Size) -> bool {
-        let geometry = self.geometry();
-        let toggle = Rect::new(size.width - 30.0, geometry.editor_bottom + 4.0, 22.0, 22.0);
-        if !toggle.contains(point) {
+        if !self.terminal_toggle_rect(size).contains(point) {
             return false;
         }
         if self.terminal.minimized {

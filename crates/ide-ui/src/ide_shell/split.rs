@@ -534,12 +534,10 @@ impl IdeShell {
             }
         }
         if abas.contains(point) {
-            self.marcar_clique(true);
             self.split_tabs_pointer_down(point, size);
             return true;
         }
         if texto.contains(point) {
-            self.marcar_clique(true);
             self.focar_a_direita();
             // **E o clique segue adiante**, para o mesmo caminho que trata o
             // clique no editor de sempre. Ele já opera sobre o painel da frente
@@ -561,16 +559,32 @@ impl IdeShell {
             .left_column(size)
             .is_some_and(|coluna| coluna.contains(point))
         {
-            self.marcar_clique(false);
             self.focar_a_esquerda();
         }
         false
     }
 
-    /// Registra de que lado foi o último clique dentro da área dividida.
-    fn marcar_clique(&mut self, na_direita: bool) {
+    /// Registra de que lado da área dividida foi o clique.
+    ///
+    /// Chamado pelo roteamento, e não por um tratador: **qualquer** clique
+    /// dentro de uma das colunas conta, inclusive os que vão para o editor de
+    /// sempre, e nenhum clique de fora delas conta. Enquanto isto vivia dentro
+    /// do tratador da divisão, o ramo final dele tratava "não caiu na direita"
+    /// como "caiu na esquerda" — e o clique no Explorer roubava o lado que ia
+    /// receber o arquivo.
+    pub(super) fn marcar_lado_do_clique(&mut self, point: Point, size: Size) {
+        let direita = self
+            .right_column(size)
+            .is_some_and(|coluna| coluna.contains(point));
+        let esquerda = self
+            .left_column(size)
+            .is_some_and(|coluna| coluna.contains(point));
         if let Some(divisao) = self.editor_area.divisao.as_mut() {
-            divisao.clicado = na_direita;
+            if direita {
+                divisao.clicado = true;
+            } else if esquerda {
+                divisao.clicado = false;
+            }
         }
     }
 

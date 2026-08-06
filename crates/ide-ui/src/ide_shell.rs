@@ -75,6 +75,7 @@ use ui_components::{
     TabItem, Tabs,
     TerminalCell, TerminalCursor, TerminalView, TextInput,
 };
+use routing::Alvo;
 use ui_core::{
     ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
     Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
@@ -1113,45 +1114,60 @@ impl IdeShell {
             self.context.focus = ShellFocus::Search;
             return;
         }
-        if point.y < TITLE_HEIGHT && self.action_buttons_pointer_down(point) {
+        // O menu aberto é do mesmo tipo do menu de contexto: enquanto ele está
+        // na tela, o clique é dele onde quer que caia. As listas descem sobre o
+        // conteúdo, e é assim que se escolhe um item.
+        if self.menu.bar.open_menu().is_some() && self.menu_bar_pointer_down(point, size) {
             return;
         }
-        if self.menu_bar_pointer_down(point, size) {
-            return;
+        // **Daqui em diante o ponto decide sozinho de quem é o gesto.** Um alvo
+        // só é resolvido, e só o tratador dele é chamado: nenhum deles vê um
+        // clique que não é seu. Ver `routing`.
+        let alvo = self.alvo_do_ponto(point, size);
+        // De que lado da área dividida foi o clique: a pergunta é do roteamento
+        // porque vale para qualquer alvo dentro das colunas, e para nenhum fora
+        // delas. Ver `marcar_lado_do_clique`.
+        if matches!(alvo, Alvo::Editor | Alvo::EditorDaDireita | Alvo::Abas) {
+            self.marcar_lado_do_clique(point, size);
         }
-        if point.y < TITLE_HEIGHT {
-            return;
+        match alvo {
+            Alvo::Topo => {
+                if !self.action_buttons_pointer_down(point) {
+                    self.menu_bar_pointer_down(point, size);
+                }
+            }
+            Alvo::Atividades => {
+                self.activity_pointer_down(point, size);
+            }
+            Alvo::RecolherTerminal => {
+                self.terminal_toggle_pointer_down(point, size);
+            }
+            Alvo::Barra(alvo) => self.scrollbar_grab(alvo, point, size),
+            Alvo::Divisor => {
+                self.splitter_pointer_down(point, size);
+            }
+            Alvo::DivisaDosEditores | Alvo::EditorDaDireita => {
+                if !self.split_pointer_down(point, size) {
+                    self.editor_pointer_down(point, size, control, shift);
+                }
+            }
+            Alvo::Abas => {
+                if !self.split_pointer_down(point, size) {
+                    self.editor_tabs_pointer_down(point, size);
+                }
+            }
+            Alvo::Explorer => {
+                self.explorer_pointer_down(point, size);
+            }
+            Alvo::Depuracao => {
+                self.debug_panel_area_pointer_down(point, size);
+            }
+            Alvo::Editor => {
+                self.editor_pointer_down(point, size, control, shift);
+            }
+            Alvo::Terminal => self.terminal_area_pointer_down(point, size),
+            Alvo::Nenhum => {}
         }
-        if self.activity_pointer_down(point, size) {
-            return;
-        }
-        if self.terminal_toggle_pointer_down(point, size) {
-            return;
-        }
-        if self.scrollbar_pointer_down(point, size) {
-            return;
-        }
-        if self.splitter_pointer_down(point, size) {
-            return;
-        }
-        // A divisão vem antes das abas e do texto: dividida, a área tem duas de
-        // cada, e é a coluna em que o ponto caiu que decide de quem é o gesto.
-        if self.split_pointer_down(point, size) {
-            return;
-        }
-        if self.editor_tabs_pointer_down(point, size) {
-            return;
-        }
-        if self.explorer_pointer_down(point, size) {
-            return;
-        }
-        if self.debug_panel_area_pointer_down(point, size) {
-            return;
-        }
-        if self.editor_pointer_down(point, size, control, shift) {
-            return;
-        }
-        self.terminal_area_pointer_down(point, size);
     }
 
     pub fn pointer_move(&mut self, point: Point, size: Size) -> bool {
@@ -1523,6 +1539,7 @@ mod menu_bar;
 mod new_item;
 mod painting;
 mod rename;
+mod routing;
 mod settings;
 mod split;
 mod surfaces;
