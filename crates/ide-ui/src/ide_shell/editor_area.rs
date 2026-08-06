@@ -299,11 +299,15 @@ impl IdeShell {
     /// disputariam o mesmo clique.
     pub(super) fn editor_horizontal_scrollbar_rect(&self, size: Size) -> Rect {
         let geo = self.geometry();
-        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        // A trilha é a do **painel da frente**, e não a da área inteira. Com a
+        // área dividida, uma trilha do tamanho dos dois painéis é larga demais
+        // para o texto de um só: a barra concluía que não havia o que rolar e
+        // sumia dos dois lados. Ver a `28`.
+        let area = self.editor_view_rect(size);
         Rect::new(
-            editor_x,
+            area.origin.x,
             geo.editor_bottom - 10.0,
-            (geo.editor_width - 10.0).max(0.0),
+            (area.size.width - 10.0).max(0.0),
             10.0,
         )
     }
@@ -675,9 +679,11 @@ impl IdeShell {
 
     pub(super) fn editor_scrollbar_rect(&self, size: Size) -> Rect {
         let geo = self.geometry();
-        let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        // Rente à borda direita do painel da frente, pelo mesmo motivo da barra
+        // de baixo: dividida a área, a borda da direita não é mais a da janela.
+        let area = self.editor_view_rect(size);
         Rect::new(
-            editor_x + geo.editor_width - 10.0,
+            area.origin.x + area.size.width - 10.0,
             geo.content_top,
             10.0,
             geo.editor_height,

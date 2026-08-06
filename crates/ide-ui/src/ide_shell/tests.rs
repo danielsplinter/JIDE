@@ -6865,3 +6865,55 @@ fn o_arquivo_novo_abre_no_painel_com_foco() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Dividida a área, a barra horizontal continua aparecendo.
+///
+/// A trilha dela era a da área inteira. Com dois painéis, uma trilha do tamanho
+/// dos dois é larga demais para o texto de um só: a barra concluía que não havia
+/// o que rolar e sumia dos **dois** lados, mesmo com linhas passando da borda.
+#[test]
+fn a_barra_horizontal_sobrevive_a_divisao() {
+    let root = std::env::temp_dir().join(format!("er-ide-barra-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Longo.java");
+    let linha = format!("class Longo {{ // {} }}", "x".repeat(400));
+    assert!(std::fs::write(&arquivo, linha).is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    assert!(
+        shell.editor_scrolls_sideways(size),
+        "a linha longa precisa passar da borda antes da divisão"
+    );
+
+    shell.dividir_a_direita(documento);
+    let _ = shell.paint(size);
+
+    assert!(
+        shell.editor_scrolls_sideways(size),
+        "com metade da largura, ela passa ainda mais"
+    );
+    let trilha = shell.editor_horizontal_scrollbar_rect(size);
+    let coluna = match shell.right_editor_rect(size) {
+        Some(coluna) => coluna,
+        None => panic!("a coluna da direita precisa ter área"),
+    };
+    assert!(
+        trilha.size.width <= coluna.size.width,
+        "a trilha é a do painel da frente, e não a dos dois: {trilha:?}"
+    );
+    assert!(
+        trilha.origin.x >= coluna.origin.x - 0.01,
+        "e ela começa onde o painel da frente começa"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
