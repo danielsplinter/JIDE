@@ -796,9 +796,16 @@ fn phase_five_keeps_ui_state_split_by_feature() {
     // catálogo ao lado dele: o shell não pergunta ao índice, ele recebe a
     // resposta pronta da aplicação. Um campo de recepção não é coordenação
     // nova, e é por isso que o teto sobe em vez de a feature virar módulo.
+    // De 17 para 18: o menu de contexto virou superfície, como as outras. Ele
+    // servia três áreas — a árvore, o texto e as abas — e morava dentro do
+    // estado do Explorer, com um campo por alvo ao lado dele; o estado da árvore
+    // tinha passado a carregar `DocumentId`, que é identidade de outra área. O
+    // campo novo aqui é o mesmo tipo de campo que `generate`, `rename` e
+    // `new_item`: uma superfície, e não coordenação nova. **Quatro campos
+    // saíram** do Explorer para um entrar aqui.
     assert!(
-        struct_field_count(&shell, "IdeShell") <= 17,
-        "IdeShell deve possuir no máximo 17 campos de coordenação"
+        struct_field_count(&shell, "IdeShell") <= 18,
+        "IdeShell deve possuir no máximo 18 campos de coordenação"
     );
 
     let features = [
@@ -1146,9 +1153,13 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // como o catálogo ao lado dele: quem pergunta ao índice é a aplicação, e o
     // shell só guarda a resposta. Campos assim não crescem com o número de
     // telas, e por isso não são o que a fase 4 da `14` vem encolher.
+    // O 18º é o menu de contexto, que virou superfície como as outras sete. Ele
+    // não é janela nova: é uma que já existia e morava no estado do Explorer,
+    // arrastando junto três campos de alvo — inclusive um `DocumentId`, que é
+    // identidade de outra área. Quatro campos saíram de lá para um entrar aqui.
     assert_eq!(
         struct_field_count(&shell, "IdeShell"),
-        17,
+        18,
         "IdeShell divergiu da linha final"
     );
 }

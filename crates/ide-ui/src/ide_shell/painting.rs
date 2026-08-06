@@ -615,8 +615,8 @@ impl IdeShell {
         }
         // O menu de contexto é desenhado por último: ele cobre tudo, inclusive
         // o painel de onde foi aberto.
-        if self.explorer.context_menu.is_open() {
-            let mut menu = self.explorer.context_menu.clone();
+        if self.context_menu.is_open() {
+            let mut menu = self.context_menu.menu.clone();
             menu.layout(
                 &self.layout_context(),
                 Rect::new(0.0, 0.0, size.width, size.height),

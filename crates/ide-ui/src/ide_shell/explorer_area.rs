@@ -494,8 +494,7 @@ impl IdeShell {
     /// houver menu para as outras áreas, abrir um vazio prometeria ações que
     /// não existem.
     pub fn secondary_pointer_down(&mut self, point: Point, size: Size) {
-        self.explorer.context_menu.close();
-        self.explorer.context_menu_target = None;
+        self.context_menu.close();
         // O clique secundário nunca escolhe da lista, então ele só a dispensa.
         self.clear_completions();
         if self.settings.is_open() {
@@ -516,16 +515,20 @@ impl IdeShell {
         {
             self.context.focus = ShellFocus::Editor;
             let dentro_de_tipo = self.cursor_inside_type(point, size);
-            self.explorer.context_menu.set_entries(editor_menu_entries(
+            self.context_menu.menu.set_entries(editor_menu_entries(
                 self.editor_area.pane.selection_range().is_some(),
                 self.debug_panel.view.attached,
                 dentro_de_tipo,
             ));
-            self.explorer.context_menu.layout(
+            self.context_menu.menu.layout(
                 &self.layout_context(),
                 Rect::new(0.0, 0.0, size.width, size.height),
             );
-            self.explorer.context_menu.open_at(point);
+            self.context_menu.menu.open_at(point);
+            // O alvo é o editor: as ações daqui falam do cursor e da seleção, e
+            // por isso não carregam caminho nenhum. Dizer isso é melhor do que
+            // deixar o alvo vazio — vazio quer dizer "não há menu aberto".
+            self.context_menu.alvo = Some(AlvoDoMenu::Editor);
             return;
         }
         if point.x < ACTIVITY_WIDTH || point.x >= editor_x || point.y < EXPLORER_TOP {
@@ -542,7 +545,7 @@ impl IdeShell {
         self.explorer.tree.set_selected(Some(explorer_id(&path)));
         // O arquivo clicado, quando foi um: `target` abaixo é a pasta, porque é
         // nela que a criação acontece, mas renomear fala do arquivo.
-        self.explorer.context_menu_file = (!is_directory).then(|| path.clone());
+        let arquivo = (!is_directory).then(|| path.clone());
         // O alvo é o diretório: clicando em um arquivo, é na pasta dele que a
         // criação acontece.
         let target = if is_directory {
@@ -550,24 +553,25 @@ impl IdeShell {
         } else {
             path.parent().map(Path::to_path_buf).unwrap_or(path)
         };
-        self.explorer
-            .context_menu
-            .set_entries(explorer_menu_entries(
-                &target,
-                &self.catalog.source_root_names,
-                &self.catalog.new_item_templates,
-                !is_directory,
-            ));
-        self.explorer.context_menu.layout(
+        self.context_menu.menu.set_entries(explorer_menu_entries(
+            &target,
+            &self.catalog.source_root_names,
+            &self.catalog.new_item_templates,
+            !is_directory,
+        ));
+        self.context_menu.menu.layout(
             &self.layout_context(),
             Rect::new(0.0, 0.0, size.width, size.height),
         );
-        self.explorer.context_menu.open_at(point);
-        self.explorer.context_menu_target = Some(target);
+        self.context_menu.menu.open_at(point);
+        self.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+            pasta: target,
+            arquivo,
+        });
     }
 
     pub fn context_menu_open(&self) -> bool {
-        self.explorer.context_menu.is_open()
+        self.context_menu.is_open()
     }
 
     /// Entrega o evento ao menu aberto e trata o comando escolhido.
@@ -575,20 +579,20 @@ impl IdeShell {
     /// Devolve `true` quando o menu consumiu o evento — é o sinal de que o
     /// clique ou a tecla não devem seguir para o que está embaixo dele.
     pub(super) fn context_menu_event(&mut self, event: &UiEvent, size: Size) -> bool {
-        if !self.explorer.context_menu.is_open() {
+        if !self.context_menu.is_open() {
             return false;
         }
-        self.explorer.context_menu.layout(
+        self.context_menu.menu.layout(
             &self.layout_context(),
             Rect::new(0.0, 0.0, size.width, size.height),
         );
         let mut context = EventContext::default();
-        let result = self.explorer.context_menu.event(&mut context, event);
+        let result = self.context_menu.menu.event(&mut context, event);
         if let EventResult::Action(WidgetAction::Command(command)) = &result {
-            self.run_explorer_command(&command.0);
+            self.run_context_command(&command.0);
         }
-        if !self.explorer.context_menu.is_open() {
-            self.explorer.context_menu_target = None;
+        if !self.context_menu.is_open() {
+            self.context_menu.alvo = None;
         }
         result != EventResult::Ignored
     }
@@ -598,11 +602,11 @@ impl IdeShell {
     /// Separado do caminho do ponteiro porque navegar por teclado não depende
     /// de onde o menu foi desenhado, e assim não precisa do tamanho da janela.
     pub(super) fn context_menu_key(&mut self, key: &str, modifiers: Modifiers) -> bool {
-        if !self.explorer.context_menu.is_open() {
+        if !self.context_menu.is_open() {
             return false;
         }
         let mut context = EventContext::default();
-        let result = self.explorer.context_menu.event(
+        let result = self.context_menu.menu.event(
             &mut context,
             &UiEvent::KeyDown(KeyEvent {
                 logical_key: key.to_owned(),
@@ -611,18 +615,23 @@ impl IdeShell {
             }),
         );
         if let EventResult::Action(WidgetAction::Command(command)) = &result {
-            self.run_explorer_command(&command.0);
+            self.run_context_command(&command.0);
         }
-        if !self.explorer.context_menu.is_open() {
-            self.explorer.context_menu_target = None;
+        if !self.context_menu.is_open() {
+            self.context_menu.alvo = None;
         }
         result != EventResult::Ignored
     }
 
-    pub(super) fn run_explorer_command(&mut self, command: &str) {
+    /// Executa o comando que o menu de contexto devolveu.
+    ///
+    /// Chamava-se `run_explorer_command` e tratava `editor.copy`, `editor.paste`
+    /// e `editor.split.right`: quem procurava onde o Copiar era tratado não
+    /// olhava no Explorer. O menu é de três áreas, e o nome agora diz isso.
+    pub(super) fn run_context_command(&mut self, command: &str) {
         match command {
             "editor.split.right" => {
-                if let Some(documento) = self.explorer.context_menu_tab.take() {
+                if let Some(documento) = self.context_menu.take_aba() {
                     self.dividir_a_direita(documento);
                 }
                 return;
@@ -659,11 +668,11 @@ impl IdeShell {
             }
             _ => {}
         }
-        let Some(target) = self.explorer.context_menu_target.clone() else {
+        let Some(target) = self.context_menu.pasta().cloned() else {
             return;
         };
         if command == "explorer.rename" {
-            if let Some(arquivo) = self.explorer.context_menu_file.clone() {
+            if let Some(arquivo) = self.context_menu.arquivo().cloned() {
                 self.request_rename(arquivo);
             }
             return;

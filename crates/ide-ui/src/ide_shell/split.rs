@@ -389,15 +389,13 @@ impl IdeShell {
         let Some(documento) = self.tab_at(point, size) else {
             return;
         };
-        self.explorer.context_menu_tab = Some(documento);
-        self.explorer
-            .context_menu
-            .set_entries(crate::menus::tab_entries());
-        self.explorer.context_menu.layout(
+        self.context_menu.alvo = Some(AlvoDoMenu::Aba(documento));
+        self.context_menu.menu.set_entries(crate::menus::tab_entries());
+        self.context_menu.menu.layout(
             &self.layout_context(),
             Rect::new(0.0, 0.0, size.width, size.height),
         );
-        self.explorer.context_menu.open_at(point);
+        self.context_menu.menu.open_at(point);
     }
 
     /// Qual documento está sob o ponteiro, em qualquer uma das faixas de abas.

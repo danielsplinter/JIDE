@@ -75,6 +75,7 @@ use ui_components::{
     TabItem, Tabs,
     TerminalCell, TerminalCursor, TerminalView, TextInput,
 };
+use context_menu::{AlvoDoMenu, ContextMenuSurface};
 use routing::Alvo;
 use ui_core::{
     ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
@@ -519,6 +520,8 @@ pub struct IdeShell {
     new_item: NewItemSurface,
     rename: RenameSurface,
     menu: MenuState,
+    /// O menu de contexto das três áreas que o têm. Ver `context_menu`.
+    context_menu: ContextMenuSurface,
     catalog: UiContributionCatalog,
     /// Que espécie de tipo cada arquivo declara, por identidade de nó.
     ///
@@ -1187,7 +1190,7 @@ impl IdeShell {
             return realce_mudou;
         }
         // Com o menu aberto, o destaque acompanha o ponteiro dentro dele.
-        if self.explorer.context_menu.is_open() {
+        if self.context_menu.is_open() {
             return self.context_menu_event(&UiEvent::PointerMove(primary_pointer(point)), size);
         }
         if let Some(surface) = self.open_surface()
@@ -1529,6 +1532,7 @@ fn tab_action(host: &mut UiHost, point: Point) -> Option<WidgetAction> {
 }
 
 mod build;
+mod context_menu;
 mod debug_area;
 mod documents;
 mod editor_area;

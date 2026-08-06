@@ -48,10 +48,6 @@ impl IdeShell {
                 workspace_name,
                 workspace,
                 tree: explorer_tree,
-                context_menu: ContextMenu::new(EXPLORER_CONTEXT_MENU_ID, Vec::new()),
-                context_menu_target: None,
-                context_menu_file: None,
-                context_menu_tab: None,
                 expanded,
                 // A varredura de abertura já trouxe os filhos da raiz.
                 requested: std::iter::once(raiz_lida).collect(),
@@ -145,6 +141,7 @@ impl IdeShell {
             generate: GenerateSurface::default(),
             new_item: NewItemSurface::default(),
             rename: RenameSurface::default(),
+            context_menu: ContextMenuSurface::default(),
             menu: MenuState {
                 recents: Vec::new(),
                 bar: MenuBar::new(

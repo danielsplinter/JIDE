@@ -884,11 +884,11 @@ fn the_secondary_click_on_the_explorer_opens_the_menu_for_that_row() {
     shell.secondary_pointer_down(row, size);
     assert!(shell.context_menu_open());
     assert_eq!(
-        shell.explorer.context_menu_target,
+        shell.context_menu.pasta().cloned(),
         Some(PathBuf::from("demo/src"))
     );
     assert_eq!(
-        entry_labels(shell.explorer.context_menu.entries()),
+        entry_labels(shell.context_menu.menu.entries()),
         vec!["Nova pasta"]
     );
 }
@@ -917,13 +917,13 @@ fn a_file_hands_the_menu_over_to_its_directory() {
         size,
     );
     assert_eq!(
-        shell.explorer.context_menu_target,
+        shell.context_menu.pasta().cloned(),
         Some(PathBuf::from("demo/src/main/java"))
     );
     // A criação é na pasta do arquivo; renomear é do arquivo clicado, e por
     // isso as duas coisas convivem no mesmo menu.
     assert_eq!(
-        entry_labels(shell.explorer.context_menu.entries()),
+        entry_labels(shell.context_menu.menu.entries()),
         vec![
             "Novo pacote",
             "—",
@@ -934,7 +934,7 @@ fn a_file_hands_the_menu_over_to_its_directory() {
         ]
     );
     assert_eq!(
-        shell.explorer.context_menu_file,
+        shell.context_menu.arquivo().cloned(),
         Some(PathBuf::from("demo/src/main/java/App.java")),
         "renomear precisa do arquivo, e não da pasta"
     );
@@ -2841,8 +2841,11 @@ fn shell_with_package() -> IdeShell {
 #[test]
 fn the_new_item_dialog_opens_with_the_clicked_package() {
     let mut shell = shell_with_package();
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-    shell.run_explorer_command("explorer.new.java.class");
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
+    shell.run_context_command("explorer.new.java.class");
     assert!(shell.new_item_dialog_open());
     assert_eq!(NewItemSurface::values(&shell.host), ("br.com", ""));
 }
@@ -2851,13 +2854,16 @@ fn the_new_item_dialog_opens_with_the_clicked_package() {
 #[test]
 fn the_three_menu_actions_share_one_window() {
     let mut shell = shell_with_package();
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
     for (command, title) in [
         ("explorer.new.java.package", "Novo pacote"),
         ("explorer.new.java.class", "Nova classe"),
         ("explorer.new.java.interface", "Nova interface"),
     ] {
-        shell.run_explorer_command(command);
+        shell.run_context_command(command);
         assert_eq!(shell.new_item.title(), Some(title));
         assert_eq!(NewItemSurface::values(&shell.host).0, "br.com");
     }
@@ -2867,8 +2873,11 @@ fn the_three_menu_actions_share_one_window() {
 #[test]
 fn enter_with_only_the_package_asks_for_the_package() {
     let mut shell = shell_with_package();
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-    shell.run_explorer_command("explorer.new.java.package");
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
+    shell.run_context_command("explorer.new.java.package");
     // O foco começa no pacote, com o cursor no fim do que veio preenchido.
     shell.text_input(".exemplo");
     shell.key_down("Enter");
@@ -3806,7 +3815,7 @@ fn the_editor_context_menu_offers_copy_and_paste() {
     let size = Size::new(1280.0, 800.0);
     shell.secondary_pointer_down(editor_column(&shell, size, 2), size);
     assert!(shell.context_menu_open());
-    let entries = shell.explorer.context_menu.entries();
+    let entries = shell.context_menu.menu.entries();
     assert_eq!(entry_labels(entries), vec!["Copiar", "Colar"]);
     let copy_enabled = |entries: &[MenuEntry]| match &entries[0] {
         MenuEntry::Item(item) => item.enabled,
@@ -3816,7 +3825,7 @@ fn the_editor_context_menu_offers_copy_and_paste() {
 
     shell.editor_area.pane.set_selection(Some((0, 5)));
     shell.secondary_pointer_down(editor_column(&shell, size, 2), size);
-    assert!(copy_enabled(shell.explorer.context_menu.entries()));
+    assert!(copy_enabled(shell.context_menu.menu.entries()));
 }
 
 /// O objeto inspecionado: um `Pedido` com um campo simples e outro objeto.
@@ -5025,14 +5034,14 @@ fn inspect_only_appears_while_debugging() {
     shell.editor_area.pane.set_selection(Some((4, 9)));
     shell.secondary_pointer_down(editor_column(&shell, size, 6), size);
     assert_eq!(
-        entry_labels(shell.explorer.context_menu.entries()),
+        entry_labels(shell.context_menu.menu.entries()),
         vec!["Copiar", "Colar"]
     );
 
     shell.debug_panel.view.attached = true;
     shell.secondary_pointer_down(editor_column(&shell, size, 6), size);
     assert_eq!(
-        entry_labels(shell.explorer.context_menu.entries()),
+        entry_labels(shell.context_menu.menu.entries()),
         vec!["Copiar", "Colar", "—", "Inspecionar"]
     );
 }
@@ -5043,7 +5052,7 @@ fn inspecting_asks_to_evaluate_the_selected_text() {
     let mut shell = shell_editing("int total = 10;");
     shell.debug_panel.view.attached = true;
     shell.editor_area.pane.set_selection(Some((4, 9)));
-    shell.run_explorer_command("debug.inspect");
+    shell.run_context_command("debug.inspect");
     assert_eq!(
         shell.take_debug_requests(),
         vec![DebugRequest::Evaluate("total".to_owned())]
@@ -5058,14 +5067,14 @@ fn inspecting_without_a_selection_asks_nothing() {
     let size = Size::new(1280.0, 800.0);
     shell.debug_panel.view.attached = true;
     shell.secondary_pointer_down(editor_column(&shell, size, 6), size);
-    let entries = shell.explorer.context_menu.entries();
+    let entries = shell.context_menu.menu.entries();
     let enabled = match &entries[3] {
         MenuEntry::Item(item) => item.enabled,
         MenuEntry::Separator | MenuEntry::Submenu { .. } => true,
     };
     assert!(!enabled, "sem seleção não há o que inspecionar");
 
-    shell.run_explorer_command("debug.inspect");
+    shell.run_context_command("debug.inspect");
     assert!(shell.take_debug_requests().is_empty());
 }
 
@@ -5581,8 +5590,11 @@ fn the_file_menu_saves_the_active_tab() {
 fn the_new_item_dialog_opens_centered() {
     let mut shell = shell_with_package();
     let size = Size::new(1280.0, 800.0);
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-    shell.run_explorer_command("explorer.new.java.class");
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
+    shell.run_context_command("explorer.new.java.class");
     // O painel do `ModalHost` é o retângulo de superfície desenhado sobre o
     // véu, do tamanho declarado para a janela.
     let surface = shell.context.theme.colors.surface;
@@ -5651,8 +5663,11 @@ fn reloading_the_workspace_shows_what_was_created() {
 fn clicking_a_field_moves_the_cursor_before_typing() {
     let mut shell = shell_with_package();
     let size = Size::new(1_000.0, 700.0);
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-    shell.run_explorer_command("explorer.new.java.package");
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
+    shell.run_context_command("explorer.new.java.package");
     // A área vem do arranjo, e o arranjo acontece no quadro: sem desenhar um,
     // a janela recém-aberta ainda não tem onde cada campo fica.
     let _ = shell.paint(size);
@@ -5674,8 +5689,11 @@ fn clicking_a_field_moves_the_cursor_before_typing() {
 #[test]
 fn enter_with_a_name_asks_for_the_type_inside_the_package() {
     let mut shell = shell_with_package();
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-    shell.run_explorer_command("explorer.new.java.interface");
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
+    shell.run_context_command("explorer.new.java.interface");
     // Ao criar um tipo o foco já está no nome.
     shell.text_input("Repositorio");
     shell.key_down("Enter");
@@ -5694,8 +5712,11 @@ fn enter_with_a_name_asks_for_the_type_inside_the_package() {
 #[test]
 fn tab_moves_between_the_two_fields() {
     let mut shell = shell_with_package();
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-    shell.run_explorer_command("explorer.new.java.class");
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
+    shell.run_context_command("explorer.new.java.class");
     shell.key_down("Tab");
     shell.text_input(".exemplo");
     shell.key_down("Tab");
@@ -5716,8 +5737,11 @@ fn tab_moves_between_the_two_fields() {
 #[test]
 fn a_type_without_a_name_is_refused_without_closing() {
     let mut shell = shell_with_package();
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-    shell.run_explorer_command("explorer.new.java.class");
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
+    shell.run_context_command("explorer.new.java.class");
     shell.key_down("Enter");
     assert_eq!(shell.take_new_item_request(), None);
     assert!(shell.new_item_dialog_open());
@@ -5728,8 +5752,11 @@ fn a_type_without_a_name_is_refused_without_closing() {
 #[test]
 fn escape_closes_the_new_item_dialog_without_creating() {
     let mut shell = shell_with_package();
-    shell.explorer.context_menu_target = Some(PathBuf::from("demo/src/main/java/br/com"));
-    shell.run_explorer_command("explorer.new.java.class");
+    shell.context_menu.alvo = Some(AlvoDoMenu::Explorer {
+        pasta: PathBuf::from("demo/src/main/java/br/com"),
+        arquivo: None,
+    });
+    shell.run_context_command("explorer.new.java.class");
     shell.escape();
     assert!(!shell.new_item_dialog_open());
     assert_eq!(shell.take_new_item_request(), None);
@@ -6583,7 +6610,7 @@ fn dividir_a_direita_abre_dois_editores_sobre_o_mesmo_texto() {
     );
     shell.secondary_pointer_down(aba, size);
     assert!(shell.context_menu_open(), "o menu da aba deveria abrir");
-    shell.run_explorer_command("editor.split.right");
+    shell.run_context_command("editor.split.right");
     // Escolher pelo menu o fecha; aqui o comando foi chamado direto, e o menu
     // aberto engoliria os gestos seguintes.
     shell.key_down("Escape");
