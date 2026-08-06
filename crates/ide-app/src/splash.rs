@@ -90,7 +90,7 @@ pub(super) struct Splash {
     aberta_em: Instant,
 }
 
-impl Drop for Splash {jh
+impl Drop for Splash {
     /// Sumir **antes** de morrer.
     ///
     /// Fechar uma janela é um processo com quadros no meio: o sistema pode
