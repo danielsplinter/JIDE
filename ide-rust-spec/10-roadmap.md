@@ -416,14 +416,23 @@ funcionalidade essencial da IDE pode depender deles.
 - [ ] processo isolado;
 - [ ] API versionada.
 
-## Fase 9 — Segunda linguagem
+## Fase 9 — Outras linguagens
 
-Escolher uma linguagem com modelo diferente de Java para validar a arquitetura.
+Uma linguagem com modelo diferente de Java valida a arquitetura: é o que prova
+que os contratos centrais servem a quem não se parece com quem os originou.
 
-Sugestões:
+- [x] **TypeScript**, para projetos frontend — feito. Ver as `23`, `24` e `25`.
+      Entrou sem alterar contrato central nenhum, e o que precisou nascer neutro
+      nasceu neutro: `TextEdit` e `completion_edits` falam de "o que mais muda no
+      arquivo", e não de `import`;
+- [ ] Python, para interpretar/runtime;
+- [ ] Rust, para integração com Cargo.
 
-- Python, para interpretar/runtime;
-- Rust, para integração com Cargo;
-- TypeScript, para projetos frontend.
+**A fase continua aberta.** A primeira travessia mostrou que dá; ela não mostra
+que dará para uma linguagem interpretada, que não compila, nem para uma cujo
+gerenciador de pacotes é também o sistema de build. Cada uma delas cobra uma
+parte diferente dos mesmos contratos.
 
-A segunda linguagem deve ser adicionada sem alterar contratos centrais.
+Toda linguagem nova entra sob a mesma regra: **sem alterar contratos centrais**,
+e sem que o núcleo passe a saber o nome dela. A guarda de neutralidade é o que
+cobra isso, e ela já pegou o `explorer_node_id` por conter `node_`.
