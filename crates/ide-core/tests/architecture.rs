@@ -1038,7 +1038,7 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // mesma coisa que sempre contou: quantas peças a raiz precisa declarar
         // para montar a IDE. Uma peça que não é linguagem deve ser rara, e é
         // esta guarda que torna a próxima visível.
-        ("crates/ide-app/src/main.rs", 20),
+        ("crates/ide-app/src/main.rs", 24),
         // 31 desde a fase 2 da decomposição do shell: o módulo `text` reúne
         // funções que viviam duplicadas no shell e no editor. O teto existe para
         // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.
@@ -1056,6 +1056,11 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // Duas linhas — um `mod` e um `pub use` —, e continua sendo só isso o
         // que há neste arquivo.
         ("crates/ide-ui/src/lib.rs", 35),
+        // De 20 para 24: a raiz de composição ganhou um atributo de crate — o
+        // subsistema da janela, ligado pela feature `producao` — e as três
+        // linhas que dizem o que ele faz. Atributo de crate não cabe em outro
+        // arquivo: ele **é** do arquivo raiz. Continua não havendo lógica aqui,
+        // que é o que este teto protege.
         // 18 desde a fase 8 da `12`: a fachada passou a declarar `analyzer`,
         // `build`, `debug` e `toolchain`, e a reexportar o que a raiz de
         // composição consome de cada um. Continua sendo só `mod` e `pub use` —

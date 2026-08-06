@@ -1,6 +1,4 @@
-//! A IDE, montada aqui: linguagens, ferramentas, janela e laço de eventos.
-//!
-//! Com a feature `producao`, a janela sobe sem o console atrás dela. Sem ela —
+//! Com a feature `producao`, a janela sobe sem o console atrás dela; sem ela —
 //! o padrão —, o console fica, e é nele que o `tracing` aparece.
 #![cfg_attr(feature = "producao", windows_subsystem = "windows")]
 
