@@ -61,6 +61,19 @@ impl IdeShell {
         self.terminal.splitter.is_dragging()
     }
 
+    /// Se o ponteiro está sobre o divisor do terminal — ou arrastando-o.
+    ///
+    /// Minimizado não há divisor: o painel está encostado no rodapé, e não há o
+    /// que arrastar. Ver `sidebar_divider_hover`, que responde o mesmo pela
+    /// lateral.
+    #[must_use]
+    pub fn terminal_divider_hover(&self, point: Point, size: Size) -> bool {
+        if self.terminal.minimized {
+            return false;
+        }
+        self.terminal_resizing() || self.terminal_splitter_for(size).hit_area().contains(point)
+    }
+
     pub fn active_terminal_lines(&self) -> impl Iterator<Item = &str> {
         self.terminal.active_lines()
     }

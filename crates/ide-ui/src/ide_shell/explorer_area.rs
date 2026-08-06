@@ -30,6 +30,19 @@ impl IdeShell {
         self.explorer.splitter.is_dragging()
     }
 
+    /// Se o ponteiro está sobre o divisor da lateral — ou arrastando-o.
+    ///
+    /// É o que a janela pergunta para trocar o desenho do ponteiro. **Sobre**,
+    /// e não só arrastando: era assim antes, e um divisor que só anuncia que se
+    /// move depois que alguém o moveu não anuncia nada.
+    ///
+    /// A resposta inclui o arrasto em curso porque num arrasto rápido o ponteiro
+    /// sai da frente da linha, e a seta piscaria de volta no meio do gesto.
+    #[must_use]
+    pub fn sidebar_divider_hover(&self, point: Point, size: Size) -> bool {
+        self.sidebar_resizing() || self.sidebar_splitter_for(size).hit_area().contains(point)
+    }
+
     /// Área da árvore de arquivos.
     pub(super) fn explorer_tree_rect(&self, size: Size) -> Rect {
         let geo = self.geometry();

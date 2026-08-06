@@ -7064,3 +7064,34 @@ fn a_divisa_dos_editores_pede_a_seta_de_redimensionar() {
     assert!(shell.split_divider_hover(Point::new(sobre.x + 200.0, sobre.y), size));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Os três divisores anunciam que se movem antes de alguém os mover.
+///
+/// Só respondiam durante o arrasto, e um divisor que se anuncia depois de já ter
+/// sido movido não anuncia nada: para descobrir que a linha se arrasta era
+/// preciso arrastá-la por acidente.
+#[test]
+fn os_divisores_pedem_a_seta_antes_do_arrasto() {
+    let root = std::env::temp_dir().join(format!("er-ide-setas-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let Ok(shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let size = Size::new(1280.0, 800.0);
+
+    // A lateral: a linha entre o Explorer e o editor.
+    let lateral = shell.sidebar_splitter_for(size);
+    let sobre_a_lateral = Point::new(lateral.line().origin.x, 300.0);
+    assert!(!shell.sidebar_resizing(), "ninguém está arrastando nada");
+    assert!(shell.sidebar_divider_hover(sobre_a_lateral, size));
+    assert!(!shell.sidebar_divider_hover(Point::new(sobre_a_lateral.x + 80.0, 300.0), size));
+
+    // O terminal: a linha entre o editor e o painel de baixo.
+    let terminal = shell.terminal_splitter_for(size);
+    let sobre_o_terminal = Point::new(700.0, terminal.line().origin.y);
+    assert!(!shell.terminal_resizing());
+    assert!(shell.terminal_divider_hover(sobre_o_terminal, size));
+    assert!(!shell.terminal_divider_hover(Point::new(700.0, sobre_o_terminal.y - 80.0), size));
+    let _ = std::fs::remove_dir_all(&root);
+}

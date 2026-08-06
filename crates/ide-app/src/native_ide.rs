@@ -3584,21 +3584,19 @@ impl ApplicationHandler for NativeIde {
                 let redraw = self.ui.shell.as_mut().is_some_and(|shell| {
                     shell.pointer_move(self.window.cursor, window.logical_size())
                 });
-                let resizing = self
+                // **Sobre o divisor, e não só arrastando.** Um divisor que só
+                // anuncia que se move depois que alguém o moveu não anuncia
+                // nada. Os três respondem a mesma pergunta; o que muda é a seta.
+                let (cursor, logico) = (self.window.cursor, window.logical_size());
+                let horizontal = self.ui.shell.as_ref().is_some_and(|shell| {
+                    shell.sidebar_divider_hover(cursor, logico)
+                        || shell.split_divider_hover(cursor, logico)
+                });
+                let vertical = self
                     .ui
                     .shell
                     .as_ref()
-                    .is_some_and(IdeShell::terminal_resizing);
-                let sidebar_resizing = self
-                    .ui
-                    .shell
-                    .as_ref()
-                    .is_some_and(IdeShell::sidebar_resizing)
-                    // A divisa dos dois editores redimensiona na horizontal,
-                    // como a da lateral: é a mesma seta.
-                    || self.ui.shell.as_ref().is_some_and(|shell| {
-                        shell.split_divider_hover(self.window.cursor, window.logical_size())
-                    });
+                    .is_some_and(|shell| shell.terminal_divider_hover(cursor, logico));
                 let navigation_hover = self.ui.shell.as_ref().is_some_and(|shell| {
                     shell.navigation_hover(
                         self.window.cursor,
@@ -3606,9 +3604,9 @@ impl ApplicationHandler for NativeIde {
                         self.window.control_pressed,
                     )
                 });
-                window.inner().set_cursor(if sidebar_resizing {
+                window.inner().set_cursor(if horizontal {
                     CursorIcon::EwResize
-                } else if resizing {
+                } else if vertical {
                     CursorIcon::NsResize
                 } else if navigation_hover {
                     CursorIcon::Pointer
@@ -3726,24 +3724,22 @@ impl ApplicationHandler for NativeIde {
                         self.window.control_pressed,
                     )
                 });
-                let resizing = self
+                // **Sobre o divisor, e não só arrastando.** Um divisor que só
+                // anuncia que se move depois que alguém o moveu não anuncia
+                // nada. Os três respondem a mesma pergunta; o que muda é a seta.
+                let (cursor, logico) = (self.window.cursor, window.logical_size());
+                let horizontal = self.ui.shell.as_ref().is_some_and(|shell| {
+                    shell.sidebar_divider_hover(cursor, logico)
+                        || shell.split_divider_hover(cursor, logico)
+                });
+                let vertical = self
                     .ui
                     .shell
                     .as_ref()
-                    .is_some_and(IdeShell::terminal_resizing);
-                let sidebar_resizing = self
-                    .ui
-                    .shell
-                    .as_ref()
-                    .is_some_and(IdeShell::sidebar_resizing)
-                    // A divisa dos dois editores redimensiona na horizontal,
-                    // como a da lateral: é a mesma seta.
-                    || self.ui.shell.as_ref().is_some_and(|shell| {
-                        shell.split_divider_hover(self.window.cursor, window.logical_size())
-                    });
-                window.inner().set_cursor(if sidebar_resizing {
+                    .is_some_and(|shell| shell.terminal_divider_hover(cursor, logico));
+                window.inner().set_cursor(if horizontal {
                     CursorIcon::EwResize
-                } else if resizing {
+                } else if vertical {
                     CursorIcon::NsResize
                 } else if navigation_hover {
                     CursorIcon::Pointer
