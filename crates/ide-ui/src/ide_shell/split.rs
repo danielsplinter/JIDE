@@ -128,10 +128,10 @@ impl IdeShell {
         Some(Self::editor_rect(esquerda, &self.geometry()))
     }
 
-    /// A largura que sobra para a faixa de abas da esquerda.
-    pub(super) fn left_tabs_width(&self, size: Size) -> Option<f32> {
+    /// A faixa de abas da esquerda, quando há divisão.
+    pub(super) fn left_tabs_rect(&self, size: Size) -> Option<Rect> {
         let (esquerda, _) = self.split_columns(size)?;
-        Some(esquerda.size.width)
+        Some(Self::tabs_rect(esquerda))
     }
 
     /// A área de texto da direita.

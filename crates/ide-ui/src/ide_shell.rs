@@ -863,15 +863,6 @@ impl IdeShell {
                 ..LayoutStyle::default()
             },
         );
-        // Dividida, a faixa de abas da esquerda para onde a coluna dela para: sem
-        // isto ela atravessaria a divisa e cobriria as abas da direita.
-        self.host.set_style(
-            EDITOR_TABS_ID,
-            LayoutStyle {
-                width: self.left_tabs_width(size),
-                ..LayoutStyle::default()
-            },
-        );
         let quadros = self.debug_panel.view.frames.len().clamp(1, 8) as f32;
         self.host.set_style(
             DEBUG_FRAMES_ID,
@@ -1245,6 +1236,14 @@ impl IdeShell {
         self.terminal
             .splitter
             .event(&mut EventContext::default(), &event);
+        // A divisa dos dois editores também: sem o soltar ela continuaria em
+        // arrasto para sempre, e o ponteiro ficaria preso nela sem ninguém estar
+        // segurando o botão.
+        if let Some(divisao) = self.editor_area.divisao.as_mut() {
+            let _ = divisao
+                .painel
+                .event(&mut EventContext::default(), &event);
+        }
         // A barra também precisa saber que o gesto acabou: ela é quem guarda o
         // ponto da pegada.
         if let Some(target) = self.context.scrollbar_drag.take() {

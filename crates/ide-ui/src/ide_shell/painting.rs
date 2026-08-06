@@ -386,11 +386,20 @@ impl IdeShell {
         // título, ponto de alterado e botão de fechar pertencem a ele. A
         // instância é a do anfitrião — a mesma que recebeu o gesto —, e por isso
         // a aba sob o ponteiro se destaca.
+        // Dividida, a faixa da esquerda para na divisa: o nó dela ocupa a faixa
+        // inteira, e sem o corte ela seguiria por baixo das abas da direita.
+        let corte_das_abas = self.left_tabs_rect(size);
+        if let Some(rect) = corte_das_abas {
+            commands.push(PaintCommand::PushClip(rect));
+        }
         let mut tabs_paint = self.paint_context();
         if let Some(tabs) = self.host.widget(EDITOR_TABS_ID) {
             tabs.paint(&mut tabs_paint);
         }
         commands.extend(tabs_paint.into_commands());
+        if corte_das_abas.is_some() {
+            commands.push(PaintCommand::PopClip);
+        }
         commands.push(PaintCommand::PushClip(Rect::new(
             editor_x,
             geo.content_top,

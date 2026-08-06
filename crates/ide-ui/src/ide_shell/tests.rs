@@ -6594,17 +6594,24 @@ fn dividir_a_direita_abre_dois_editores_sobre_o_mesmo_texto() {
         Some(documento),
         "o documento dividido continua sendo o ativo"
     );
+    // As duas faixas de abas continuam na tela, cada uma na coluna dela. A da
+    // esquerda sumiu uma vez por ter recebido uma largura sem crescimento, e a
+    // tela ficou com o editor dividido e nenhuma aba do lado esquerdo.
+    let (Some(esquerda), Some(direita)) = (shell.left_tabs_rect(size), shell.right_tabs_rect(size))
+    else {
+        panic!("as duas faixas precisam ter área");
+    };
     let desenhado = shell.paint(size);
-    let nomes = desenhado
-        .iter()
-        .filter(|comando| {
-            matches!(comando, PaintCommand::DrawText(texto) if texto.text.contains("Pedido.java"))
+    let nome_em = |faixa: Rect| {
+        desenhado.iter().any(|comando| {
+            matches!(comando, PaintCommand::DrawText(texto)
+                if texto.text.contains("Pedido.java")
+                    && texto.origin.x >= faixa.origin.x
+                    && texto.origin.x < faixa.origin.x + faixa.size.width)
         })
-        .count();
-    assert!(
-        nomes >= 2,
-        "as duas faixas de abas precisam mostrar o arquivo, e vieram {nomes}"
-    );
+    };
+    assert!(nome_em(esquerda), "a faixa da esquerda precisa mostrar o arquivo");
+    assert!(nome_em(direita), "a faixa da direita precisa mostrar o arquivo");
 
     // O texto é um só: escrever de um lado vale para o outro.
     shell.context.focus = ShellFocus::Editor;
@@ -6640,6 +6647,58 @@ fn dividir_a_direita_abre_dois_editores_sobre_o_mesmo_texto() {
             .divisao
             .as_ref()
             .map(|divisao| divisao.abas.clone())
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+
+/// Soltar o botão encerra o arrasto da divisa.
+///
+/// Sem o soltar chegando ao painel, ele continuava em arrasto para sempre: o
+/// ponteiro ficava preso na divisa, e mexer o mouse — sem nenhum botão apertado —
+/// continuava movendo os dois editores.
+#[test]
+fn soltar_o_botao_solta_a_divisa_dos_dois_editores() {
+    let root = std::env::temp_dir().join(format!("er-ide-divisa-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido {}").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let size = Size::new(1280.0, 800.0);
+    shell.dividir_a_direita(documento);
+
+    let Some(painel) = shell.split_panel_for(size) else {
+        panic!("a divisão precisa existir");
+    };
+    let divisa = painel.divider();
+    let meio = Point::new(
+        divisa.origin.x + divisa.size.width / 2.0,
+        divisa.origin.y + 40.0,
+    );
+    shell.pointer_down(meio, size);
+    shell.pointer_move(Point::new(meio.x + 120.0, meio.y), size);
+    let arrastado = shell
+        .split_panel_for(size)
+        .map_or(0.0, |painel| painel.ratio());
+    shell.pointer_up();
+
+    // Solto, o movimento seguinte não move mais nada.
+    shell.pointer_move(Point::new(meio.x + 400.0, meio.y), size);
+    assert_eq!(
+        shell
+            .split_panel_for(size)
+            .map_or(0.0, |painel| painel.ratio()),
+        arrastado,
+        "sem o botão apertado a divisa não pode mais seguir o ponteiro"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
