@@ -305,6 +305,11 @@ Validação da fase: testes arquiteturais e do provider falso,
 **Estado: concluída em 02/08/2026.** Levantamento sobre 19 crates; o workspace
 terminou com 14.
 
+> **Os números desta fase são de 02/08/2026 e não descrevem o presente.** Hoje
+> são 18 crates, e as quatro que entraram depois — TypeScript, Angular, marcação
+> e folhas de estilo — são exatamente o preço que esta fase declarou: uma por
+> linguagem. O que ela mediu continua valendo; o total, não.
+
 #### Por que o critério muda
 
 As fases 1 a 7 consolidaram por **camada**. Esta consolida por **linguagem**, e a

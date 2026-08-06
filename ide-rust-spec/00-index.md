@@ -61,7 +61,7 @@ Este é um requisito arquitetural obrigatório.
 - [09 — Estrutura inicial do workspace Rust](09-rust-workspace.md)
 - [10 — Roadmap](10-roadmap.md)
 - [11 — Decisões arquiteturais](11-architecture-decisions.md)
-- [12 — Consolidação de crates e módulos](12-crate-consolidation.md) — **completa**: a fase 8 fez de Java uma crate por linguagem, o workspace caiu de 19 para 14 crates, e a próxima linguagem custa uma
+- [12 — Consolidação de crates e módulos](12-crate-consolidation.md) — **completa**: a fase 8 fez de Java uma crate por linguagem, o workspace caiu de 19 para 14 crates, e a próxima linguagem custa uma. **Hoje são 18 crates**, e a diferença é o preço declarado: TypeScript, Angular, marcação e folhas de estilo entraram uma crate cada, como o desenho previa
 - [13 — Desacoplamento da aplicação e da apresentação](13-application-ui-decoupling.md)
 - [14 — Decomposição do `ide_shell`](14-ide-shell-decomposition.md)
 - [15 — Adoção do runtime de eventos da ERLibUi](15-event-runtime-adoption.md)

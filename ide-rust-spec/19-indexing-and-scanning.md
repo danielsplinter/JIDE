@@ -18,6 +18,10 @@ acrescenta a varredura, que é de outro subsistema.
 
 ## O que o teto realmente é
 
+> **Escrito antes da fase 3, que tirou o teto.** O diagnóstico abaixo é o que
+> justificou a ordem das fases, e por isso fica; o presente dele acabou quando a
+> fase 2 tirou a indexação do caminho de quem digita. Não há mais teto de 600.
+
 O teto de 600 caminhos parece a causa e é o **sintoma**. Ele existe porque a
 indexação bloqueia: sem ele, um monorepo travaria a IDE por minutos.
 

@@ -130,6 +130,69 @@ fn nenhum_processo_filho_abre_janela_de_console() {
     );
 }
 
+/// A documentação não pode afirmar um presente que o código desmente.
+///
+/// # Por que uma guarda para texto
+///
+/// Uma conferência manual achou três afirmações falsas na `26`: "não há teto
+/// para ele" — havia, desde o dia anterior —, e os tetos das fachadas citados
+/// como 31 e 10 quando eram 35 e 11. Nenhuma foi escrita de má-fé; elas
+/// **envelheceram**, e nada as conferia. Documentação que envelhece é pior do
+/// que documentação nenhuma: ela é lida como verdade.
+///
+/// # Presente, e não história
+///
+/// "O workspace caiu de 19 para 14 crates" é o registro de uma fase, e continua
+/// verdadeiro para sempre. O que envelhece é a frase sobre **agora**, e é só
+/// dela que esta guarda trata: o índice precisa dizer `hoje são N crates`, e o
+/// N precisa bater.
+///
+/// A forma é fixa de propósito. Ela é o contrato entre o texto e a guarda — sem
+/// uma frase que a guarda saiba achar, a conferência volta a depender de alguém
+/// lembrar.
+///
+/// # O que ela não cobre
+///
+/// Prosa. "O analisador continua sem alcançar projeto" é afirmação sobre
+/// desenho, e quem confere é gente. Esta pega o que é aritmética, e não finge
+/// pegar o resto.
+#[test]
+fn a_documentacao_nao_afirma_presente_que_o_codigo_desmente() {
+    let root = workspace_root();
+    let crates = fs::read_dir(root.join("crates"))
+        .unwrap_or_else(|error| panic!("não foi possível listar as crates: {error}"))
+        .filter_map(Result::ok)
+        .filter(|entrada| entrada.path().is_dir())
+        .count();
+    let indice = root.join("ide-rust-spec/00-index.md");
+    let texto = fs::read_to_string(&indice)
+        .unwrap_or_else(|error| panic!("não foi possível ler o índice: {error}"));
+    let Some(afirmado) = presente_afirmado(&texto, "crates") else {
+        panic!(
+            "o índice precisa dizer `hoje são N crates`: é a frase que esta              guarda confere, e sem ela o número volta a envelhecer calado"
+        );
+    };
+    assert_eq!(
+        afirmado, crates,
+        "o índice diz que hoje são {afirmado} crates, e são {crates}"
+    );
+}
+
+/// O número da frase `hoje são N <palavra>`, quando ela existe.
+fn presente_afirmado(texto: &str, palavra: &str) -> Option<usize> {
+    let limpo = |termo: &str| {
+        termo
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase()
+    };
+    let termos: Vec<String> = texto.split_whitespace().map(limpo).collect();
+    termos.windows(4).find_map(|janela| {
+        (janela[0] == "hoje" && janela[1] == "são" && janela[3] == palavra)
+            .then(|| janela[2].parse().ok())
+            .flatten()
+    })
+}
+
 #[test]
 fn ui_dependencies_are_relative_centralized_and_versioned() {
     let root = workspace_root();

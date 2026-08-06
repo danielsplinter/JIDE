@@ -173,7 +173,11 @@ geometrias; eventos são encaminhados à feature proprietária.
 
 Meta estrutural:
 
-- `IdeShell` com no máximo 15 campos de coordenação;
+- `IdeShell` com no máximo 15 campos de coordenação — **hoje são 18**, e a
+  guarda os permite: 16 pela troca de abas, 17 pela recepção dos crachás e 18
+  pelo menu de contexto virar superfície. Cada subida tem o motivo escrito ao
+  lado dela em `architecture.rs`, e a fase 4 da `14` é o que faz este número
+  voltar a encolher em vez de acompanhar o número de telas;
 - nenhuma feature com mais de 20 campos sem uma justificativa documentada;
 - `ide-ui/src/lib.rs` com no máximo 1.500 linhas;
 - nenhum módulo extraído acessando todos os estados da shell.
