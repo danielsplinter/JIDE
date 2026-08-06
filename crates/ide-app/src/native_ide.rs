@@ -652,13 +652,37 @@ impl NativeIde {
     ///
     /// `None` para uma pasta que não é projeto de ninguém.
     fn detected_language(&self, root: &Path) -> Option<String> {
-        let (_, descriptor) = pollster::block_on(self.project.build_systems.detect(root))
-            .ok()
-            .flatten()?;
+        let build_system = self.detected_build_system(root)?;
         self.languages
             .contributions
-            .language_for_build_system(&descriptor.build_system.0)
+            .language_for_build_system(&build_system)
             .map(|descriptor| descriptor.language_id.0.clone())
+    }
+
+    /// O sistema de build da raiz, ou o da pasta que ela apenas embrulha.
+    ///
+    /// **Descer é necessário**: quem clona um repositório dentro de uma pasta de
+    /// mesmo nome abre `.../camel-main`, e o `pom.xml` está em
+    /// `.../camel-main/camel-main`. Procurar só na raiz não achava manifesto
+    /// nenhum, e o projeto caía em "Outras" — foi assim que um projeto Java
+    /// deixou de ser reconhecido como Java.
+    ///
+    /// A condição é a mesma que a árvore já usa para mostrar o conteúdo em vez
+    /// da porta seguinte: "um filho só, e ele é pasta". Nada aqui sabe o que é
+    /// um projeto de linguagem nenhuma.
+    fn detected_build_system(&self, root: &Path) -> Option<String> {
+        let mut atual = root.to_path_buf();
+        for _ in 0..ide_workspace::PROFUNDIDADE_DA_CADEIA {
+            if let Some((_, descriptor)) =
+                pollster::block_on(self.project.build_systems.detect(&atual))
+                    .ok()
+                    .flatten()
+            {
+                return Some(descriptor.build_system.0);
+            }
+            atual = self.workspace.service.only_child_directory(&atual)?;
+        }
+        None
     }
 
     /// Abre outra janela da IDE sobre o mesmo projeto.
@@ -4824,6 +4848,24 @@ mod tests {
             ide.detected_language(&qualquer),
             None,
             "uma pasta que não é projeto de ninguém não recebe linguagem inventada"
+        );
+
+        // O formato de quem clona um repositório dentro de uma pasta de mesmo
+        // nome: a raiz aberta não tem manifesto, e o projeto começa um nível
+        // abaixo. Foi assim que um projeto Java deixou de ser reconhecido.
+        let embrulho = raiz.join("embrulho");
+        assert!(std::fs::create_dir_all(embrulho.join("camel")).is_ok());
+        assert!(
+            std::fs::write(
+                embrulho.join("camel").join("pom.xml"),
+                "<project><artifactId>camel</artifactId></project>",
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            ide.detected_language(&embrulho).as_deref(),
+            Some(java_contribution::JAVA_LANGUAGE_ID),
+            "a pasta que só embrulha o projeto responde pelo que há dentro dela"
         );
         let _ = std::fs::remove_dir_all(&raiz);
     }

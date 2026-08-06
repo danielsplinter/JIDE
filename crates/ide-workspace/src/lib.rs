@@ -35,7 +35,7 @@ impl Default for WorkspaceService {
 /// Uma cadeia de pacotes real tem meia dúzia de elos. O teto não existe para
 /// ela: existe para o caso em que uma ligação simbólica aponta para cima e a
 /// descida deixaria de ter fim.
-const PROFUNDIDADE_DA_CADEIA: usize = 32;
+pub const PROFUNDIDADE_DA_CADEIA: usize = 32;
 
 impl WorkspaceService {
     #[must_use]
@@ -151,6 +151,22 @@ impl WorkspaceService {
             niveis.push((caminho, netos));
         }
         niveis
+    }
+
+    /// A única pasta dentro desta, quando é tudo o que há dentro dela.
+    ///
+    /// Mesma condição estrutural da descida da árvore: "um filho só, e ele é
+    /// pasta". É a forma de quem clona um repositório dentro de uma pasta de
+    /// mesmo nome — a raiz aberta não tem manifesto nenhum, e o projeto começa
+    /// um nível abaixo. A árvore já mostra o conteúdo do fim da cadeia; quem
+    /// procura algo na raiz precisa descer pelo mesmo caminho.
+    #[must_use]
+    pub fn only_child_directory(&self, directory: &Path) -> Option<PathBuf> {
+        let filhos = tree::children_of(self.filesystem.as_ref(), directory).ok()?;
+        let [unico] = filhos.as_slice() else {
+            return None;
+        };
+        unico.is_directory.then(|| unico.path.clone())
     }
 
     /// Os filhos de uma pasta, para quando ela é expandida.
