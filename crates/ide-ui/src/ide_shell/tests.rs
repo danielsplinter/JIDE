@@ -7135,6 +7135,36 @@ fn a_barra_de_atividades_tem_dois_botoes() {
         "o editor fica com a largura que era do painel"
     );
 
+    // Nada do painel sobra na tela: nem trilha de rolagem, nem a linha do
+    // divisor — que descia até o rodapé e cruzava o terminal.
+    let desenhado = shell.paint(size);
+    let editor = shell.editor_view_rect(size);
+    // Tudo o que ainda é legítimo depois de recolher fica na borda direita do
+    // editor: as barras de rolagem dele. Antes dessa borda não pode sobrar
+    // nenhuma linha vertical.
+    let borda_direita = editor.origin.x + editor.size.width - 20.0;
+    let restos = desenhado
+        .iter()
+        .filter(|comando| match comando {
+            // Uma faixa **estreita e alta** encostada na barra de atividades:
+            // é o formato de uma trilha de rolagem e o de uma linha de divisor.
+            // O editor também começa ali agora, mas ele é largo — é a largura
+            // que separa um do outro.
+            PaintCommand::FillRect(fill) => {
+                fill.rect.origin.x >= ACTIVITY_WIDTH - 12.0
+                    && fill.rect.origin.x < borda_direita
+                    && fill.rect.size.width > 0.0
+                    && fill.rect.size.width <= 12.0
+                    && fill.rect.size.height > TAB_HEIGHT
+            }
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        restos, 0,
+        "com o painel recolhido nada dele pode continuar sendo desenhado"
+    );
+
     // E o mesmo botão o traz de volta, com a largura que ele tinha.
     shell.pointer_down(clique, size);
     let _ = shell.paint(size);

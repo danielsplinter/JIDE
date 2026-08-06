@@ -353,25 +353,34 @@ impl IdeShell {
         let mut recolher_paint = self.paint_context();
         recolher.paint(&mut recolher_paint);
         commands.extend(recolher_paint.into_commands());
-        commands.push(PaintCommand::PushClip(Rect::new(
-            ACTIVITY_WIDTH,
-            EXPLORER_TOP - EXPLORER_ROW_HEIGHT,
-            self.sidebar_width(size),
-            (geo.content_bottom - EXPLORER_TOP + EXPLORER_ROW_HEIGHT - 12.0).max(0.0),
-        )));
-        // A árvore é um componente: recuo, marcador de expansão, virtualização,
-        // seleção e deslocamento horizontal pertencem a ela.
-        let mut tree_paint = self.paint_context();
-        self.place_explorer_tree(size);
-        self.explorer.tree.paint(&mut tree_paint);
-        commands.extend(tree_paint.into_commands());
-        commands.push(PaintCommand::PopClip);
-        commands.extend(self.paint_scrollbar(ScrollTarget::ExplorerHorizontal, size));
-        commands.extend(self.paint_scrollbar(ScrollTarget::ExplorerVertical, size));
+        // Recolhido o painel, nada dele se desenha: nem a árvore, nem as barras
+        // de rolagem dela, nem o divisor. Antes daqui sobravam uma trilha
+        // vertical encostada na barra de atividades e uma linha que descia do
+        // topo até o rodapé, atravessando o editor e o terminal — restos de um
+        // painel que não está mais na tela.
+        if !self.sidebar_collapsed() {
+            commands.push(PaintCommand::PushClip(Rect::new(
+                ACTIVITY_WIDTH,
+                EXPLORER_TOP - EXPLORER_ROW_HEIGHT,
+                self.sidebar_width(size),
+                (geo.content_bottom - EXPLORER_TOP + EXPLORER_ROW_HEIGHT - 12.0).max(0.0),
+            )));
+            // A árvore é um componente: recuo, marcador de expansão,
+            // virtualização, seleção e deslocamento horizontal pertencem a ela.
+            let mut tree_paint = self.paint_context();
+            self.place_explorer_tree(size);
+            self.explorer.tree.paint(&mut tree_paint);
+            commands.extend(tree_paint.into_commands());
+            commands.push(PaintCommand::PopClip);
+            commands.extend(self.paint_scrollbar(ScrollTarget::ExplorerHorizontal, size));
+            commands.extend(self.paint_scrollbar(ScrollTarget::ExplorerVertical, size));
+        }
         // Os divisores se desenham: a linha é a mesma borda de antes, mas agora
         // ela se destaca sob o ponteiro, que é o que revela que dá para arrastar.
         let mut splitters = self.paint_context();
-        self.sidebar_splitter_for(size).paint(&mut splitters);
+        if !self.sidebar_collapsed() {
+            self.sidebar_splitter_for(size).paint(&mut splitters);
+        }
         if !self.terminal.minimized {
             self.terminal_splitter_for(size).paint(&mut splitters);
         }
