@@ -6917,3 +6917,54 @@ fn a_barra_horizontal_sobrevive_a_divisao() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Clicar no editor da direita move o cursor **dele**.
+///
+/// O clique era entregue ao painel guardado na divisão — que, depois da troca de
+/// foco, é o do outro lado. O cursor ia parar no editor da esquerda, e clicar no
+/// da direita não movia nada.
+#[test]
+fn o_clique_no_editor_da_direita_move_o_cursor_dele() {
+    let root = std::env::temp_dir().join(format!("er-ide-cursor-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido {\n    int total;\n    int itens;\n}\n").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let size = Size::new(1280.0, 800.0);
+    shell.dividir_a_direita(documento);
+    let _ = shell.paint(size);
+
+    let Some(direita) = shell.right_editor_rect(size) else {
+        panic!("a coluna da direita precisa ter área");
+    };
+    // Terceira linha do texto, bem dentro da coluna da direita.
+    let alvo = Point::new(
+        direita.origin.x + 80.0,
+        direita.origin.y + EDITOR_LINE_HEIGHT * 2.5,
+    );
+    shell.pointer_move(alvo, size);
+    shell.pointer_down(alvo, size);
+
+    let Some(divisao) = shell.editor_area.divisao.as_ref() else {
+        panic!("a divisão precisa existir");
+    };
+    assert!(
+        shell.editor_area.pane.cursor() > 0,
+        "o cursor do painel apontado precisa ter ido para o ponto clicado"
+    );
+    assert_eq!(
+        divisao.pane.cursor(),
+        0,
+        "o cursor do outro painel não pode andar"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

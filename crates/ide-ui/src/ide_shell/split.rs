@@ -530,16 +530,16 @@ impl IdeShell {
         if texto.contains(point) {
             self.marcar_clique(true);
             self.focar_a_direita();
-            // O clique no texto é do painel: cursor, âncora e calha são dele.
-            let texto = self
-                .editor_area
-                .session
-                .document(self.editor_area.divisao.as_ref().map_or(DocumentId(0), |d| d.ativa))
-                .map(|documento| documento.buffer.clone());
-            if let (Some(buffer), Some(divisao)) = (texto, self.editor_area.divisao.as_mut()) {
-                let _ = divisao.pane.pointer_down(&buffer, point, false, false);
-            }
-            return true;
+            // **E o clique segue adiante**, para o mesmo caminho que trata o
+            // clique no editor de sempre. Ele já opera sobre o painel da frente
+            // e sobre a área dele, e a essa altura os dois são os deste lado.
+            //
+            // Antes daqui o clique era entregue ao painel guardado na divisão —
+            // que, depois da troca de foco, é o do **outro** lado. O cursor ia
+            // parar no editor da esquerda, e clicar no da direita não movia
+            // nada. Um caminho só para os dois painéis é o que impede isso de
+            // voltar.
+            return false;
         }
         // **Só dentro da coluna da esquerda.** Este caminho recebe todo clique da
         // janela — o do Explorer, o do terminal, o da barra de menus —, e tratar
