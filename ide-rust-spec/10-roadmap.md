@@ -426,12 +426,24 @@ que os contratos centrais servem a quem não se parece com quem os originou.
       nasceu neutro: `TextEdit` e `completion_edits` falam de "o que mais muda no
       arquivo", e não de `import`;
 - [ ] Python, para interpretar/runtime;
-- [ ] Rust, para integração com Cargo.
+- [ ] Rust, para integração com Cargo;
+- [ ] PHP, para projeto sem compilação e com pacotes por Composer;
+- [ ] C, para build sem gerenciador de pacotes central — `make`, CMake, e um
+      compilador que a IDE não instala;
+- [ ] Ruby, para tipagem dinâmica de verdade, em que o índice não tem declaração
+      para se apoiar.
+
+**A lista não é fechada.** Ela é o que se enxerga hoje, e não um limite: qualquer
+linguagem entra pela mesma porta, e o que decide quais vêm primeiro é o uso, e
+não esta ordem. Uma linguagem que não está aqui não precisa de permissão nova —
+precisa de uma contribuição, como as que já existem.
 
 **A fase continua aberta.** A primeira travessia mostrou que dá; ela não mostra
 que dará para uma linguagem interpretada, que não compila, nem para uma cujo
-gerenciador de pacotes é também o sistema de build. Cada uma delas cobra uma
-parte diferente dos mesmos contratos.
+gerenciador de pacotes é também o sistema de build, nem para uma sem declaração
+de tipo em que o índice possa se apoiar. Cada uma delas cobra uma parte
+diferente dos mesmos contratos, e é isso que faz a lista valer mais do que o
+número de linguagens que ela tem.
 
 Toda linguagem nova entra sob a mesma regra: **sem alterar contratos centrais**,
 e sem que o núcleo passe a saber o nome dela. A guarda de neutralidade é o que
