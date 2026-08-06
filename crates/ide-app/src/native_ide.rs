@@ -344,15 +344,9 @@ impl NativeIde {
         // raízes de fontes, e registrá-las derruba os workers ativos. Aquecer
         // antes seria aquecer o que vai ser jogado fora.
         self.window.window = Some(window);
-        // Duas frentes ao mesmo tempo, e as duas fora desta thread: o índice do
-        // projeto, que responde os crachás e ativa as linguagens nativas, e o
-        // analisador externo — o que custa um processo Node.
-        //
-        // Vêm **depois** do `import_project` de propósito: é ele que registra as
-        // raízes de fontes, e registrá-las derruba os workers ativos. Aquecer
-        // antes seria aquecer o que vai ser jogado fora.
-        self.request_declaration_kinds();
-        self.warm_external_analyzers();
+        // As linguagens do projeto sobem agora, atrás da marca — a mesma
+        // preparação que a troca de projeto faz, pela mesma função.
+        self.prepare_project_languages();
         match splash {
             // **O arranque acaba aqui, e devolve o controle ao laço.** Quem
             // conta o tempo da marca é o `about_to_wait`, girando a cada trinta
@@ -734,12 +728,33 @@ impl NativeIde {
         let syntax = self
             .languages
             .synchronize_documents(&mut self.documents, &snapshots);
-        if let Some(shell) = self.ui.shell.as_mut() {
-            for snapshot in syntax {
-                shell.set_syntax_snapshot(snapshot);
-            }
-        }
+        self.install_syntax(syntax);
         self.collect_declaration_kinds();
+    }
+
+    /// Entrega ao shell o realce que chegou. `true` quando chegou alguma coisa.
+    ///
+    /// Um lugar só, e não dois: instalar realce acontecia aqui e no laço de
+    /// quadros, e nenhum dos dois dizia nada. Quando alguém relata que o código
+    /// não fica colorido, a diferença entre "não foi pedido", "não voltou" e
+    /// "voltou vazio" é toda a diagnose — e ela não existia em lugar nenhum.
+    fn install_syntax(&mut self, snapshots: Vec<ide_domain::SyntaxSnapshot>) -> bool {
+        if snapshots.is_empty() {
+            return false;
+        }
+        let Some(shell) = self.ui.shell.as_mut() else {
+            return false;
+        };
+        for snapshot in snapshots {
+            tracing::debug!(
+                document_id = snapshot.document_id.0,
+                version = snapshot.version,
+                realces = snapshot.highlights.len(),
+                "realce instalado"
+            );
+            shell.set_syntax_snapshot(snapshot);
+        }
+        true
     }
 
     /// Pergunta ao índice que espécie de tipo cada arquivo declara.
@@ -1057,6 +1072,28 @@ impl NativeIde {
     /// exemplo. Antes deste aquecimento, quem o acordava era a primeira pergunta
     /// que o índice não soubesse responder, e essa porta precisa continuar
     /// aberta. Por isso a falha aqui **devolve o provider ao registro**.
+    /// Põe as linguagens do projeto de pé, em duas frentes e fora desta thread.
+    ///
+    /// Uma função só, e chamada **pelos dois caminhos** — abrir a IDE e trocar
+    /// de projeto pelo menu. Eram dois trechos parecidos, e o da troca não
+    /// aquecia o analisador externo: abrir um projeto Angular depois de um Java
+    /// deixava o Node para a primeira pergunta que o índice não soubesse, com
+    /// os segundos de subida acontecendo com a IDE aberta na frente de quem
+    /// esperava.
+    ///
+    /// # Ordem
+    ///
+    /// Só vale **depois** do `import_project`: é ele que registra as raízes de
+    /// fontes, e registrá-las derruba os workers ativos. Aquecer antes é
+    /// aquecer o que vai ser jogado fora.
+    fn prepare_project_languages(&mut self) {
+        // O índice do projeto, que responde os crachás e ativa as linguagens
+        // nativas...
+        self.request_declaration_kinds();
+        // ...e o analisador externo, o que custa um processo Node.
+        self.warm_external_analyzers();
+    }
+
     fn warm_external_analyzers(&self) {
         let Some(host) = self.languages.host.as_ref() else {
             return;
@@ -3271,14 +3308,7 @@ impl ApplicationHandler for NativeIde {
         // O realce vem da thread do provider e chega quando fica pronto: é aqui
         // que ele encontra a tela, sem que a tecla tenha esperado por ele.
         let realces = self.languages.collect_syntax();
-        if !realces.is_empty() {
-            if let Some(shell) = self.ui.shell.as_mut() {
-                for snapshot in realces {
-                    shell.set_syntax_snapshot(snapshot);
-                }
-            }
-            changed = true;
-        }
+        changed |= self.install_syntax(realces);
         if let Some(events) = &self.tasks.events {
             while let Ok(event) = events.try_recv() {
                 if let Some(shell) = self.ui.shell.as_mut() {
@@ -3847,9 +3877,11 @@ impl ApplicationHandler for NativeIde {
             self.detect_all_toolchains(&raiz);
             self.detect_maven();
             self.import_project(&raiz);
-            // O índice do projeto novo é outro, e os crachás do anterior não
-            // valem mais.
-            self.request_declaration_kinds();
+            // O projeto novo tem outras linguagens, e as do anterior acabaram
+            // de ser esquecidas. A mesma preparação da abertura, pela mesma
+            // função: era aqui que o analisador externo ficava de fora, e o
+            // Node só subia na primeira pergunta que o índice não soubesse.
+            self.prepare_project_languages();
             if let Some(window) = self.window.window.as_ref() {
                 window.request_redraw();
             }

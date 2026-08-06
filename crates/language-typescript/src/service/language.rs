@@ -264,8 +264,123 @@ impl TypeScriptServiceProvider {
                 );
             }
         }
+        servico.aquecer_o_projeto(&context.workspace_root).await;
         Ok(servico)
     }
+}
+
+#[cfg(test)]
+mod aquecimento {
+    use super::primeiro_fonte;
+    use std::fs;
+
+    fn projeto(nome: &str) -> std::path::PathBuf {
+        let raiz = std::env::temp_dir().join(format!(
+            "er-ide-aquecimento-{}-{nome}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&raiz);
+        assert!(fs::create_dir_all(raiz.join("src/app")).is_ok());
+        assert!(fs::create_dir_all(raiz.join("node_modules/rxjs")).is_ok());
+        raiz
+    }
+
+    /// Acha o primeiro fonte, e não entra em `node_modules`.
+    ///
+    /// Uma dependência tem milhares de `.ts`, e o primeiro deles montaria o
+    /// projeto **da dependência** — que não é o que ninguém quer ver.
+    #[test]
+    fn o_aquecimento_acha_um_fonte_do_projeto_e_ignora_dependencia() {
+        let raiz = projeto("comum");
+        assert!(fs::write(raiz.join("node_modules/rxjs/index.ts"), "export {};").is_ok());
+        assert!(fs::write(raiz.join("src/app/app.component.ts"), "export class App {}").is_ok());
+
+        let achado = primeiro_fonte(&raiz);
+        assert_eq!(
+            achado,
+            Some(raiz.join("src").join("app").join("app.component.ts")),
+            "o fonte do projeto vem antes, e a dependência não entra"
+        );
+
+        let _ = fs::remove_dir_all(&raiz);
+    }
+
+    /// Declaração não serve: ela descreve tipos, não é um programa a montar.
+    #[test]
+    fn uma_declaracao_nao_serve_de_aquecimento() {
+        let raiz = projeto("declaracao");
+        assert!(fs::write(raiz.join("src/tipos.d.ts"), "export declare const a: number;").is_ok());
+        assert_eq!(primeiro_fonte(&raiz), None);
+
+        assert!(fs::write(raiz.join("src/main.ts"), "console.log(1);").is_ok());
+        assert_eq!(primeiro_fonte(&raiz), Some(raiz.join("src").join("main.ts")));
+
+        let _ = fs::remove_dir_all(&raiz);
+    }
+
+    /// Projeto sem código não trava a subida: ele só não aquece.
+    #[test]
+    fn projeto_sem_codigo_nao_aquece_e_nao_falha() {
+        let raiz = projeto("vazio");
+        assert_eq!(primeiro_fonte(&raiz), None);
+        let _ = fs::remove_dir_all(&raiz);
+    }
+}
+
+/// Quantos diretórios a procura pelo arquivo de aquecimento visita.
+///
+/// Num projeto de verdade o primeiro `.ts` aparece nas primeiras pastas. O
+/// limite existe para a árvore que não tem nenhum: sem ele, aquecer varreria o
+/// projeto inteiro para não achar nada.
+const PASTAS_ATE_DESISTIR: usize = 2_000;
+
+/// O primeiro arquivo de código do projeto, para dar ao analisador o que montar.
+///
+/// Em largura, e não em profundidade: `src/main.ts` está a dois passos da raiz,
+/// e descer o primeiro galho até o fim antes de olhar o segundo acharia o mesmo
+/// arquivo muito mais tarde.
+///
+/// Declarações (`.d.ts`) não servem: elas descrevem tipos e não pertencem a um
+/// programa que o analisador precise montar.
+fn primeiro_fonte(root: &Path) -> Option<PathBuf> {
+    let mut fila = std::collections::VecDeque::from([root.to_path_buf()]);
+    let mut visitadas = 0_usize;
+    while let Some(pasta) = fila.pop_front() {
+        visitadas += 1;
+        if visitadas > PASTAS_ATE_DESISTIR {
+            return None;
+        }
+        let Ok(entradas) = std::fs::read_dir(&pasta) else {
+            continue;
+        };
+        let mut subpastas = Vec::new();
+        for entrada in entradas.flatten() {
+            let caminho = entrada.path();
+            let Some(nome) = caminho
+                .file_name()
+                .and_then(|nome| nome.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if entrada.file_type().is_ok_and(|tipo| tipo.is_dir()) {
+                // O que não é fonte do projeto: dependências, saída de build e o
+                // que o versionador guarda.
+                if !matches!(
+                    nome.as_str(),
+                    "node_modules" | "dist" | "out" | ".git" | ".angular"
+                ) {
+                    subpastas.push(caminho);
+                }
+                continue;
+            }
+            if nome.ends_with(".ts") && !nome.ends_with(".d.ts") {
+                return Some(caminho);
+            }
+        }
+        fila.extend(subpastas);
+    }
+    None
 }
 
 pub(crate) struct ActiveTypeScriptService {
@@ -493,6 +608,50 @@ impl ActiveTypeScriptService {
             .lock()
             .map(|registro| registro.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Dá ao analisador **um** arquivo, para o projeto começar a montar agora.
+    ///
+    /// # Por que subir o processo não basta
+    ///
+    /// O `tsserver` não carrega projeto nenhum enquanto não houver arquivo
+    /// aberto. Lançar o processo custa milissegundos; montar o programa de um
+    /// monorepo custa dezenas de segundos — e sem isto esses segundos só
+    /// começavam a passar quando alguém abrisse o primeiro `.ts`, com a IDE já
+    /// na tela e o cursor esperando.
+    ///
+    /// Um arquivo basta: o que se monta é o **projeto** dele, e é o projeto que
+    /// interessa. Qual arquivo é indiferente, e por isso o primeiro serve.
+    ///
+    /// # Ele fica aberto, e é de propósito
+    ///
+    /// Fechá-lo faria o analisador soltar o projeto que acabou de montar. Ele
+    /// não aparece em lugar nenhum da IDE: quem o fecharia é a sincronização de
+    /// documentos, e ela não sabe dele — este arquivo é do analisador, não da
+    /// tela.
+    ///
+    /// Falhar aqui não impede nada: sem aquecimento, o projeto monta na
+    /// primeira pergunta, que é o que acontecia antes.
+    async fn aquecer_o_projeto(&self, root: &Path) {
+        let Some(arquivo) = primeiro_fonte(root) else {
+            tracing::info!(
+                raiz = %root.display(),
+                "nenhum arquivo de código para aquecer o analisador"
+            );
+            return;
+        };
+        let Ok(texto) = std::fs::read_to_string(&arquivo) else {
+            return;
+        };
+        match self.abrir(&arquivo, &texto).await {
+            Ok(()) => tracing::info!(
+                arquivo = %arquivo.display(),
+                "projeto do analisador começou a montar"
+            ),
+            Err(erro) => {
+                tracing::warn!(%erro, "o arquivo de aquecimento não abriu no analisador");
+            }
+        }
     }
 
     async fn abrir(&self, path: &Path, texto: &str) -> Result<(), LanguageError> {
