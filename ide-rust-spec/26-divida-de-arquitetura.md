@@ -34,7 +34,7 @@ mente por omissão:
 - **a guarda do `block_on` nasceu nesta sessão**, e já pegou duas adições no dia
   em que foram escritas. Ela é o oposto de dívida: é linha nova onde não havia.
 
-## Dívida 1 — `native_ide.rs`, 4 680 linhas ⬜
+## Dívida 1 — `native_ide.rs`, 4 680 linhas 🟨
 
 É o objeto-deus deste código. As `14` e `15` já registraram que ele deveria ser
 decomposto, e nesta sessão ele cresceu de novo: a completação assíncrona, as
@@ -56,6 +56,15 @@ deliberado. É pequeno, e é o único desta lista que cabe em meia hora.
 
 **Critério:** uma guarda com o teto de linhas de `native_ide.rs`, e o número
 descendo — não subindo — a cada decomposição.
+
+**O primeiro passo foi dado.** O teto existe, em 5 389 linhas — o arquivo tinha
+4 680 quando esta dívida foi escrita, e cresceu 709 desde então **sem que nada
+avisasse**, que é exatamente o que a guarda vem impedir. O mesmo teto foi posto
+em `ide_shell/tests.rs`, com 7 269 linhas, pelo mesmo motivo.
+
+A dívida continua aberta: o teto não decompõe nada. Ele só faz o crescimento
+parar de ser silencioso, e o número agora só pode descer sem alguém assinar
+embaixo.
 
 ## Dívida 2 — o teto de `block_on` subiu duas vezes no mesmo dia ⬜
 

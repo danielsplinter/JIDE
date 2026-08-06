@@ -1118,6 +1118,24 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // de 100 colunas, e o próximo `rustfmt` quebraria a linha e derrubaria
         // esta guarda por um motivo que não é o dela.
         ("crates/ide-language-host/src/lib.rs", 11),
+        // **Os dois que mais crescem, e que até aqui cresciam sem trava.**
+        //
+        // Os quatro tetos acima são de fachadas: eles existem para que nenhuma
+        // lógica se instale ali, e o número deles é pequeno porque uma fachada é
+        // pequena. Os dois abaixo são o oposto — arquivos grandes, com o número
+        // de hoje —, e o teto não diz que o tamanho está bom. Diz que ele parou
+        // de crescer em silêncio.
+        //
+        // `native_ide.rs` é o objeto-deus desta base, e a dívida 1 da `26` já o
+        // registrava; nesta sessão ele cresceu 312 linhas sem que ninguém fosse
+        // avisado. `tests.rs` cobre o shell inteiro em 195 testes, e é onde já
+        // aconteceu de eu editar o teste errado por não achar o certo.
+        //
+        // **O número desce, e não sobe.** Cada decomposição futura baixa o teto;
+        // subir exige alguém decidindo que sobe, e escrevendo por quê — como as
+        // linhas acima fazem.
+        ("crates/ide-app/src/native_ide.rs", 5_389),
+        ("crates/ide-ui/src/ide_shell/tests.rs", 7_269),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
