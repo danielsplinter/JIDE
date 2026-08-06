@@ -257,7 +257,7 @@ impl IdeShell {
     /// Chega pronta de fora: quem sabe onde a lista mora e o que dela ainda
     /// existe é a aplicação. A tela só a apresenta — e guarda a ordem, porque é
     /// por ela que o clique volta a virar caminho.
-    pub fn set_recent_projects(&mut self, recents: Vec<PathBuf>) {
+    pub fn set_recent_projects(&mut self, recents: Vec<RecentProject>) {
         if self.menu.recents == recents {
             return;
         }

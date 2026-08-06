@@ -58,15 +58,16 @@ impl IdeShell {
                 // A posição volta a ser caminho aqui, contra a mesma lista que
                 // montou o menu. Uma posição sem caminho não vira comando: é o
                 // que sobra de um menu montado antes da lista encolher.
-                if let Some(path) = command
+                if let Some(recente) = command
                     .0
                     .strip_prefix(crate::menus::RECENTE)
                     .and_then(|posicao| posicao.parse::<usize>().ok())
                     .and_then(|posicao| self.menu.recents.get(posicao))
                 {
+                    let path = recente.path.clone();
                     self.context.status_message = format!("Abrindo {}", path.display());
                     self.commands
-                        .push(ApplicationCommand::OpenRecentProject(path.clone()));
+                        .push(ApplicationCommand::OpenRecentProject(path));
                 }
                 return true;
             }

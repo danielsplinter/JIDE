@@ -12,8 +12,9 @@ pub use commands::{
 };
 pub use contributions::{
     ContributionError, ContributionRegistry, LanguageContribution, LanguageDescriptor,
-    NewItemTemplate, SettingsSection, TaskController, TaskControllerError, TaskDescriptor,
-    TaskExecutionContext, TaskExecutionError, TaskExecutionResult, TaskExecutor, TaskId,
+    NewItemTemplate, RecentProject, SettingsSection, TaskController, TaskControllerError,
+    TaskDescriptor, TaskExecutionContext, TaskExecutionError, TaskExecutionResult, TaskExecutor,
+    TaskId,
     TaskRegistry, ToolchainRegistry, ToolchainSelection, UiContributionCatalog,
 };
 pub use events::{EventBus, IdeEvent, PublishError};

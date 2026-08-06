@@ -24,6 +24,17 @@ pub struct LanguageDescriptor {
     /// A aplicação usa estes dados para construir escopos e a UI para
     /// apresentar pacotes, sem conhecer convenções de uma linguagem concreta.
     pub source_root_names: Vec<String>,
+    /// Identificadores dos sistemas de build que esta linguagem contribui.
+    ///
+    /// É o que permite dizer **em que linguagem um projeto foi reconhecido**
+    /// sem a aplicação saber o nome de nenhuma: a detecção devolve o sistema de
+    /// build que reconheceu a pasta, e quem o registrou diz de quem ele é. A
+    /// alternativa seria uma tabela de manifestos escrita fora das
+    /// contribuições, e ela envelheceria a cada linguagem nova.
+    ///
+    /// Vazio é legítimo: uma linguagem que não traz projeto próprio — marcação,
+    /// folhas de estilo — não reconhece pasta nenhuma sozinha.
+    pub build_systems: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -93,6 +104,22 @@ pub struct SettingsSection {
     /// saber o que é: é o que a mantém neutra.
     #[allow(clippy::struct_field_names)]
     pub secondary_caption: Option<String>,
+}
+
+/// Um projeto recente, como a aplicação o entrega à tela.
+///
+/// A linguagem vem pronta e como **nome de exibição**: quem sabe em que
+/// linguagem um projeto foi reconhecido é a aplicação, e traduzir identificador
+/// em nome é trabalho de quem os registrou. Ausente quando a IDE não reconheceu
+/// projeto nenhum ali — e é o que separa "ainda não sei" de um grupo inventado.
+///
+/// Mora aqui, ao lado do catálogo, pelo mesmo motivo que ele: é dado de
+/// apresentação que a aplicação monta e a tela desenha, sem nenhuma das duas
+/// precisar saber o nome de linguagem nenhuma.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecentProject {
+    pub path: PathBuf,
+    pub language: Option<String>,
 }
 
 /// Dados de apresentação agregados das contribuições registradas.
@@ -203,6 +230,24 @@ impl ContributionRegistry {
                 .any(|section| section.id == section_id)
                 .then(|| contribution.descriptor.language_id.clone())
         })
+    }
+
+    /// Qual linguagem contribuiu este sistema de build.
+    ///
+    /// É por aqui que a aplicação diz em que linguagem um projeto foi
+    /// reconhecido sem saber o nome de nenhuma: a detecção devolve o sistema de
+    /// build, e a resposta vem de quem o registrou.
+    #[must_use]
+    pub fn language_for_build_system(&self, build_system: &str) -> Option<&LanguageDescriptor> {
+        self.contributions
+            .values()
+            .map(|contribution| &contribution.descriptor)
+            .find(|descriptor| {
+                descriptor
+                    .build_systems
+                    .iter()
+                    .any(|declarado| declarado == build_system)
+            })
     }
 
     #[must_use]
@@ -653,6 +698,7 @@ mod tests {
                 display_name: language.to_owned(),
                 extensions: vec![language.to_owned()],
                 source_root_names: vec![language.to_owned()],
+                build_systems: vec![format!("{language}.build")],
             },
             Arc::new(FakeProvider { language_id }),
         );

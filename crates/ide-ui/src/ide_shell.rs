@@ -42,7 +42,7 @@ use crate::terminal::{
 };
 use ide_application::{
     ApplicationCommand, DebugRequest, FileOccurrences, NavigationRequest, OpenDocumentRequest,
-    RenameDocumentRequest, SaveDocumentRequest, TaskId, UiContributionCatalog,
+    RecentProject, RenameDocumentRequest, SaveDocumentRequest, TaskId, UiContributionCatalog,
 };
 #[cfg(test)]
 use ide_application::{NewItemTemplateId, SettingsSection, TaskDescriptor};

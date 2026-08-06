@@ -91,6 +91,10 @@ pub fn contribution(
             // `ProjectModel` a lê (ADR-027). Um nome de convenção aqui seria uma
             // segunda origem para a mesma pergunta.
             source_root_names: Vec::new(),
+            // O mesmo que `register_build_systems` registra: é por ele que uma
+            // pasta detectada vira um projeto **desta** linguagem para quem
+            // monta a lista de recentes.
+            build_systems: vec![language_typescript::NPM_BUILD_SYSTEM_ID.to_owned()],
         },
         provider,
     );

@@ -137,6 +137,8 @@ fn application_contracts_accept_a_fake_language_without_java_dependencies() {
             display_name: "Fake".to_owned(),
             extensions: vec!["fake".to_owned()],
             source_root_names: vec!["fake".to_owned()],
+            // Esta linguagem nao reconhece pasta nenhuma sozinha.
+            build_systems: Vec::new(),
         },
         Arc::new(FakeProvider {
             activations: Arc::clone(&activations),

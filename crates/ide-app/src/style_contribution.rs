@@ -27,6 +27,8 @@ pub fn contribution() -> LanguageContribution {
             // Uma folha de estilo não tem raiz própria: ela mora onde o código
             // que a usa mora, e quem declara isso é o projeto da linguagem.
             source_root_names: Vec::new(),
+            // Esta linguagem nao reconhece pasta nenhuma sozinha.
+            build_systems: Vec::new(),
         },
         provider,
     )

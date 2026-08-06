@@ -208,6 +208,13 @@ pub fn contribution(processes: Arc<dyn ProcessSupervisor>) -> LanguageContributi
             // por uma tarde inteira.
             extensions: provider.metadata().extensions,
             source_root_names: vec!["java".to_owned()],
+            // Os mesmos que `register_build_systems` registra: é por eles que
+            // uma pasta detectada vira um projeto **desta** linguagem para quem
+            // monta a lista de recentes.
+            build_systems: vec![
+                language_java::GRADLE_BUILD_SYSTEM_ID.to_owned(),
+                language_java::MAVEN_BUILD_SYSTEM_ID.to_owned(),
+            ],
         },
         provider,
     );

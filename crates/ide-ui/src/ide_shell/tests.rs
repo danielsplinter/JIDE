@@ -5480,7 +5480,11 @@ fn o_movimento_do_ponteiro_chega_a_barra_de_menus() {
     assert!(shell.pointer_move(Point::new(600.0, 400.0), size));
 
     // Com o menu aberto, apontar "Recentes" abre a lista ao lado sem clique.
-    shell.set_recent_projects(vec![std::path::PathBuf::from("/tmp/loja")]);
+    // Sem linguagem conhecida o projeto fica solto, e é uma linha só.
+    shell.set_recent_projects(vec![RecentProject {
+        path: std::path::PathBuf::from("/tmp/loja"),
+        language: None,
+    }]);
     shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
     shell.pointer_move(Point::new(100.0, TITLE_HEIGHT + 42.0), size);
     let desenhado = shell.paint(size);
@@ -5493,22 +5497,33 @@ fn o_movimento_do_ponteiro_chega_a_barra_de_menus() {
     );
 }
 
-/// Escolher um projeto em "Arquivo → Recentes" pede a abertura dele.
+/// Escolher um projeto em "Arquivo → Recentes → linguagem" pede a abertura.
 ///
 /// A posição clicada volta a ser caminho aqui dentro; a aplicação recebe o
-/// caminho pronto, e não um índice que ela teria de reinterpretar.
+/// caminho pronto, e não um índice que ela teria de reinterpretar. O caminho
+/// atravessa os três níveis do menu: a barra, os recentes e a linguagem.
 #[test]
 fn um_recente_escolhido_no_menu_pede_o_projeto() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let primeiro = std::path::PathBuf::from("/tmp/loja");
     let segundo = std::path::PathBuf::from("/tmp/portal");
-    shell.set_recent_projects(vec![primeiro, segundo.clone()]);
+    shell.set_recent_projects(vec![
+        RecentProject {
+            path: primeiro,
+            language: Some("TypeScript".to_owned()),
+        },
+        RecentProject {
+            path: segundo.clone(),
+            language: Some("TypeScript".to_owned()),
+        },
+    ]);
 
-    // Arquivo → Recentes → o segundo da lista de dentro.
+    // Arquivo → Recentes → TypeScript → o segundo projeto do grupo.
     shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
     shell.pointer_down(Point::new(100.0, TITLE_HEIGHT + 42.0), size);
-    shell.pointer_down(Point::new(420.0, TITLE_HEIGHT + 63.0), size);
+    shell.pointer_down(Point::new(420.0, TITLE_HEIGHT + 42.0), size);
+    shell.pointer_down(Point::new(700.0, TITLE_HEIGHT + 63.0), size);
 
     let commands = shell.drain_application_commands();
     assert!(

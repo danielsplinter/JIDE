@@ -17,8 +17,8 @@ pub use debugging::{DebugFrameView, DebugVariableView, DebugView};
 pub use editor::{EditorAction, EditorCapabilities, EditorPane};
 pub use ide_application::{
     ApplicationCommand, DebugRequest, NavigationRequest, NewItemRequest, NewItemTemplate,
-    NewItemTemplateId, OpenDocumentRequest, SaveDocumentRequest, SettingsSection, TaskDescriptor,
-    TaskId, UiContributionCatalog,
+    NewItemTemplateId, OpenDocumentRequest, RecentProject, SaveDocumentRequest, SettingsSection,
+    TaskDescriptor, TaskId, UiContributionCatalog,
 };
 /// A identidade que o Explorer dá a um caminho, para a aplicação usar a mesma.
 pub use explorer::id as explorer_id;

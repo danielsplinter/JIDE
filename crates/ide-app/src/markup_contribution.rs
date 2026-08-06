@@ -36,6 +36,8 @@ pub fn contribution() -> LanguageContribution {
             // código que o usa mora, e quem declara isso é o projeto da
             // linguagem.
             source_root_names: Vec::new(),
+            // Esta linguagem nao reconhece pasta nenhuma sozinha.
+            build_systems: Vec::new(),
         },
         provider,
     )

@@ -264,7 +264,23 @@ pub struct WorkspaceConfig {
     /// que reabrir sozinho, o outro oferece uma escolha. Guardar só o último
     /// obrigaria quem alterna entre dois projetos a procurar a pasta toda vez.
     #[serde(default)]
-    pub recent_paths: Vec<PathBuf>,
+    pub recent_projects: Vec<RecentProject>,
+}
+
+/// Um projeto na lista de recentes, e a linguagem em que ele foi reconhecido.
+///
+/// A linguagem vem junto porque é por ela que o menu agrupa. Ela é **opcional**:
+/// uma pasta aberta sem projeto reconhecido continua sendo um recente legítimo,
+/// e inventar uma linguagem para ela seria mentir sobre o que a IDE sabe.
+///
+/// O identificador é guardado, e não o nome de exibição: quem traduz um para o
+/// outro é a linguagem que se registrou, e um arquivo de configuração escrito
+/// hoje precisa continuar sendo lido quando esse nome mudar.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecentProject {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Quantos projetos a lista de recentes guarda.
@@ -292,10 +308,25 @@ impl WorkspaceConfig {
     /// **Sobe em vez de repetir**: reabrir um projeto que já estava na lista o
     /// move para o topo, e não acrescenta uma segunda linha igual. Uma lista com
     /// o mesmo caminho três vezes desperdiça o pouco espaço que ela tem.
-    pub fn remember_recent(&mut self, path: &Path) {
-        self.recent_paths.retain(|antigo| antigo != path);
-        self.recent_paths.insert(0, path.to_path_buf());
-        self.recent_paths.truncate(RECENTES);
+    ///
+    /// A linguagem chega depois do caminho — ela só se sabe quando o projeto é
+    /// importado —, e por isso `None` **não apaga** a que já estava guardada:
+    /// registrar a abertura não pode desclassificar um projeto já conhecido.
+    pub fn remember_recent(&mut self, path: &Path, language: Option<String>) {
+        let anterior = self
+            .recent_projects
+            .iter()
+            .position(|recente| recente.path == path)
+            .map(|posicao| self.recent_projects.remove(posicao));
+        let language = language.or_else(|| anterior.and_then(|recente| recente.language));
+        self.recent_projects.insert(
+            0,
+            RecentProject {
+                path: path.to_path_buf(),
+                language,
+            },
+        );
+        self.recent_projects.truncate(RECENTES);
     }
 
     /// Os recentes que ainda existem como diretório.
@@ -304,10 +335,10 @@ impl WorkspaceConfig {
     /// arquivo — ela pode voltar —, mas não é oferecida: um item de menu que
     /// não abre nada é pior do que um item a menos.
     #[must_use]
-    pub fn resolved_recent_paths(&self) -> Vec<PathBuf> {
-        self.recent_paths
+    pub fn resolved_recent_projects(&self) -> Vec<RecentProject> {
+        self.recent_projects
             .iter()
-            .filter(|path| path.is_dir())
+            .filter(|recente| recente.path.is_dir())
             .cloned()
             .collect()
     }
@@ -364,7 +395,15 @@ impl AppConfig {
     }
 
     /// Registra o projeto aberto e grava a configuração.
-    pub fn remember_workspace(&mut self, root: &Path, path: &Path) -> Result<(), ConfigError> {
+    ///
+    /// A linguagem é a em que o projeto foi reconhecido, quando já se sabe. Ver
+    /// `WorkspaceConfig::remember_recent`.
+    pub fn remember_workspace(
+        &mut self,
+        root: &Path,
+        language: Option<String>,
+        path: &Path,
+    ) -> Result<(), ConfigError> {
         // Trocar de projeto descarta as abas do anterior. Sem isso elas
         // passariam a valer para a nova raiz, e voltar ao projeto antigo
         // reabriria arquivos de outro.
@@ -373,7 +412,7 @@ impl AppConfig {
             self.workspace.active_document = None;
         }
         self.workspace.last_path = Some(root.to_path_buf());
-        self.workspace.remember_recent(root);
+        self.workspace.remember_recent(root, language);
         self.save(path)
     }
 
@@ -704,22 +743,43 @@ mod tests {
 
         let mut config = AppConfig::default();
         for projeto in &projetos {
-            assert!(config.remember_workspace(projeto, &file).is_ok());
+            assert!(
+                config
+                    .remember_workspace(projeto, Some("java".to_owned()), &file)
+                    .is_ok()
+            );
         }
-        assert!(config.remember_workspace(&projetos[0], &file).is_ok());
+        // A reabertura não sabe a linguagem — ela só se sabe depois de importar
+        // — e não pode desclassificar o projeto por causa disso.
+        assert!(
+            config
+                .remember_workspace(&projetos[0], None, &file)
+                .is_ok()
+        );
 
         let reloaded = match AppConfig::load(&file) {
             Ok(config) => config,
             Err(error) => panic!("releitura falhou: {error}"),
         };
+        let caminhos: Vec<_> = reloaded
+            .workspace
+            .recent_projects
+            .iter()
+            .map(|recente| recente.path.clone())
+            .collect();
         assert_eq!(
-            reloaded.workspace.recent_paths,
+            caminhos,
             vec![
                 projetos[0].clone(),
                 projetos[2].clone(),
                 projetos[1].clone()
             ],
             "o reaberto sobe ao topo e não aparece duas vezes"
+        );
+        assert_eq!(
+            reloaded.workspace.recent_projects[0].language.as_deref(),
+            Some("java"),
+            "a linguagem já conhecida sobrevive a uma reabertura que não a soube"
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -732,16 +792,24 @@ mod tests {
         for indice in 0..RECENTES + 4 {
             config
                 .workspace
-                .remember_recent(&root.join(format!("projeto-{indice}")));
+                .remember_recent(&root.join(format!("projeto-{indice}")), None);
         }
-        assert_eq!(config.workspace.recent_paths.len(), RECENTES);
+        assert_eq!(config.workspace.recent_projects.len(), RECENTES);
 
         let presente = root.join("presente");
         assert!(fs::create_dir_all(&presente).is_ok());
-        config.workspace.remember_recent(&presente);
+        config
+            .workspace
+            .remember_recent(&presente, Some("typescript".to_owned()));
+        let oferecidos: Vec<_> = config
+            .workspace
+            .resolved_recent_projects()
+            .into_iter()
+            .map(|recente| (recente.path, recente.language))
+            .collect();
         assert_eq!(
-            config.workspace.resolved_recent_paths(),
-            vec![presente],
+            oferecidos,
+            vec![(presente, Some("typescript".to_owned()))],
             "só o que ainda é pasta chega ao menu"
         );
         let _ = fs::remove_dir_all(&root);
@@ -762,7 +830,7 @@ mod tests {
         let file = root.join("config").join("config.toml");
 
         let mut config = AppConfig::default();
-        assert!(config.remember_workspace(&project, &file).is_ok());
+        assert!(config.remember_workspace(&project, None, &file).is_ok());
         let open = vec![first.clone(), second.clone(), removed.clone()];
         assert!(
             config
@@ -799,7 +867,7 @@ mod tests {
         let file = root.join("config").join("config.toml");
 
         let mut config = AppConfig::default();
-        assert!(config.remember_workspace(&first_project, &file).is_ok());
+        assert!(config.remember_workspace(&first_project, None, &file).is_ok());
         assert!(
             config
                 .remember_documents(std::slice::from_ref(&document), Some(&document), &file)
@@ -815,7 +883,7 @@ mod tests {
 
         // Abrir o segundo projeto descarta as abas do primeiro, para que voltar
         // ao primeiro não traga arquivos que não são dele.
-        assert!(config.remember_workspace(&second_project, &file).is_ok());
+        assert!(config.remember_workspace(&second_project, None, &file).is_ok());
         assert!(config.workspace.open_documents.is_empty());
         assert!(
             config
@@ -833,7 +901,7 @@ mod tests {
         let file = root.join("config").join("config.toml");
 
         let mut config = AppConfig::default();
-        assert!(config.remember_workspace(&project, &file).is_ok());
+        assert!(config.remember_workspace(&project, None, &file).is_ok());
         assert!(file.is_file(), "o diretório de configuração é criado");
 
         let reloaded = match AppConfig::load(&file) {
@@ -886,7 +954,7 @@ mod tests {
         assert!(fs::create_dir_all(&project).is_ok());
         let file = root.join("config.toml");
         let mut config = AppConfig::default();
-        assert!(config.remember_workspace(&project, &file).is_ok());
+        assert!(config.remember_workspace(&project, None, &file).is_ok());
         assert!(fs::remove_dir_all(&project).is_ok());
 
         let reloaded = match AppConfig::load(&file) {

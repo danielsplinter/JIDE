@@ -603,10 +603,46 @@ impl NativeIde {
     /// também quando um recente se revela ausente: nos dois casos o menu montado
     /// deixou de descrever o que existe.
     fn publish_recent_projects(&mut self) {
-        let recentes = self.runtime.config.workspace.resolved_recent_paths();
+        // O identificador vira nome de exibição aqui: no arquivo fica o que não
+        // muda, e na tela o que se lê. Uma linguagem que deixou de ser
+        // registrada perde o nome, e o projeto dela fica solto em vez de sumir.
+        let recentes = self
+            .runtime
+            .config
+            .workspace
+            .resolved_recent_projects()
+            .into_iter()
+            .map(|recente| ide_ui::RecentProject {
+                language: recente.language.and_then(|id| {
+                    self.languages
+                        .contributions
+                        .get(&LanguageId(id))
+                        .map(|contribuicao| contribuicao.descriptor.display_name.clone())
+                }),
+                path: recente.path,
+            })
+            .collect();
         if let Some(shell) = self.ui.shell.as_mut() {
             shell.set_recent_projects(recentes);
         }
+    }
+
+    /// Em que linguagem o projeto aberto foi reconhecido.
+    ///
+    /// Sai do sistema de build detectado, e não de uma tabela de manifestos: a
+    /// aplicação não sabe o nome de linguagem nenhuma, e quem diz de quem é o
+    /// `pom.xml` ou o `package.json` é a contribuição que registrou aquele
+    /// sistema de build.
+    ///
+    /// `None` enquanto o projeto não foi importado — a importação acontece
+    /// depois do primeiro quadro — e para uma pasta que não é projeto de
+    /// ninguém.
+    fn detected_language(&self) -> Option<String> {
+        let importado = self.project.imported.as_ref()?;
+        self.languages
+            .contributions
+            .language_for_build_system(&importado.descriptor.build_system.0)
+            .map(|descriptor| descriptor.language_id.0.clone())
     }
 
     /// Abre outra janela da IDE sobre o mesmo projeto.
@@ -2770,6 +2806,13 @@ impl NativeIde {
                     shell.set_project_summary(Some(summary.clone()));
                     shell.set_status_message(format!("Projeto importado: {summary}"));
                 }
+                // **A linguagem só se sabe agora.** A abertura registra o
+                // recente antes disto — ela acontece antes do primeiro quadro, e
+                // importar roda processo externo —, então ali o projeto entra na
+                // lista sem linguagem. Registrar de novo é o que o põe embaixo
+                // da porta certa; a ordem da lista não muda, ele já está no topo.
+                let raiz = root.to_path_buf();
+                self.remember_project(&raiz);
                 self.publish_event(event);
             }
             Err(error) => {
@@ -2842,7 +2885,12 @@ impl NativeIde {
         let Some(path) = self.runtime.config_path.clone() else {
             return;
         };
-        if let Err(error) = self.runtime.config.remember_workspace(root, &path) {
+        let linguagem = self.detected_language();
+        if let Err(error) = self
+            .runtime
+            .config
+            .remember_workspace(root, linguagem, &path)
+        {
             tracing::warn!(%error, path = %path.display(), "configuração não pôde ser gravada");
             if let Some(shell) = self.ui.shell.as_mut() {
                 shell.set_status_message(format!("Configuração não pôde ser gravada: {error}"));
@@ -4766,7 +4814,7 @@ mod tests {
         open_test_document(&mut shell, &second);
 
         let mut config = AppConfig::default();
-        assert!(config.remember_workspace(&project, &config_file).is_ok());
+        assert!(config.remember_workspace(&project, None, &config_file).is_ok());
         assert!(
             config
                 .remember_documents(
