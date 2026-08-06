@@ -1214,7 +1214,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // De 7 405 para 7 434: onde a busca do terminal mora — na fileira das
         // abas, antes do botão de recolher. Posição de coisa na tela se afirma
         // por área, e não por olho.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 7_434),
+        //
+        // De 7 434 para 7 499: as duas buscas são independentes — a do arquivo e
+        // a da saída ficam abertas ao mesmo tempo, cada uma com o seu texto, e
+        // `Esc` fecha só a que tem o foco. Sessenta e cinco linhas de um teste
+        // novo, porque o defeito era exatamente a convivência.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 7_499),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))

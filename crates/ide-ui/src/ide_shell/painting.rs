@@ -57,6 +57,51 @@ impl IdeShell {
         self.context.text_metrics = Some(metrics);
     }
 
+    /// Desenha uma caixa de busca: a do arquivo ou a da saída.
+    ///
+    /// Uma função para as duas porque **são o mesmo componente** — um `Popup`
+    /// com um `TextInput` dentro. O que muda entre elas é o nó da moldura de
+    /// onde sai a área, o texto que mostram e quem tem o foco.
+    #[allow(clippy::too_many_arguments, reason = "são os cinco pontos em que as duas diferem")]
+    fn paint_search_box(
+        &self,
+        popup_id: WidgetId,
+        input_id: WidgetId,
+        texto: &str,
+        convite: &str,
+        folga: f32,
+        focada: bool,
+        size: Size,
+    ) -> Vec<PaintCommand> {
+        // A área vem do arranjo, e não de uma conta aqui: é o que faz o clique e
+        // o desenho concordarem sem ninguém repetir coordenada. Ver ADR-020.
+        let caixa = self.host.bounds(popup_id).unwrap_or_default();
+        let mut surface = Popup::new(popup_id).with_padding(folga);
+        surface.set_content_size(Size::new(
+            (caixa.size.width - folga * 2.0).max(0.0),
+            (caixa.size.height - folga * 2.0).max(0.0),
+        ));
+        surface.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        surface.open_at(caixa.origin);
+        let mut pintura = self.paint_context();
+        surface.paint(&mut pintura);
+        if let Some(content) = surface.content_rect() {
+            let mut field = TextInput::new(input_id, texto).with_placeholder(convite);
+            // O campo mostra o cursor quando **ele** tem o foco. A caixa continua
+            // na tela depois de um clique fora dela, e ali o cursor que pisca é
+            // o de quem recebeu o clique.
+            if focada {
+                field.event(&mut EventContext::default(), &UiEvent::FocusGained);
+            }
+            field.layout(&self.layout_context(), content);
+            field.paint(&mut pintura);
+        }
+        pintura.into_commands()
+    }
+
     /// Contexto de pintura com a medição disponível, quando houver.
     pub(super) fn paint_context(&self) -> PaintContext {
         let context = PaintContext::with_theme(self.context.theme);
@@ -527,43 +572,32 @@ impl IdeShell {
             // A área vem do arranjo, e não de uma conta aqui: é o que faz o
             // clique e o desenho concordarem sem ninguém repetir coordenada.
             // Ver ADR-020.
-            // Os nós são dois — um por área —, e o componente é o mesmo. Qual
-            // deles vale sai do alvo, num lugar só: com a escolha repetida, o
-            // clique cairia numa faixa e o desenho apareceria na outra.
-            let (popup_id, input_id) = self.search_widget_ids();
-            let caixa = self.host.bounds(popup_id).unwrap_or_default();
-            // A folga é menor na fileira das abas: ali a caixa tem a altura da
-            // fileira, e seis pontos de cada lado não deixariam texto nenhum.
-            let folga = if self.context.busca_no_terminal { 2.0 } else { 6.0 };
-            let mut surface = Popup::new(popup_id).with_padding(folga);
-            surface.set_content_size(Size::new(
-                (caixa.size.width - folga * 2.0).max(0.0),
-                (caixa.size.height - folga * 2.0).max(0.0),
+            commands.extend(self.paint_search_box(
+                SEARCH_POPUP_ID,
+                SEARCH_INPUT_ID,
+                &self.editor_area.search_query,
+                "Buscar no arquivo",
+                6.0,
+                self.context.focus == ShellFocus::Search,
+                size,
             ));
-            surface.layout(
-                &self.layout_context(),
-                Rect::new(0.0, 0.0, size.width, size.height),
-            );
-            surface.open_at(caixa.origin);
-            let mut search_paint = self.paint_context();
-            surface.paint(&mut search_paint);
-            if let Some(content) = surface.content_rect() {
-                let mut field = TextInput::new(input_id, &self.editor_area.search_query)
-                    .with_placeholder(if self.context.busca_no_terminal {
-                        "Buscar na saída"
-                    } else {
-                        "Buscar no arquivo"
-                    });
-                // O campo mostra o cursor quando **ele** tem o foco. A barra
-                // continua na tela depois de um clique no editor, e ali o cursor
-                // que pisca é o do código.
-                if self.context.focus == ShellFocus::Search {
-                    field.event(&mut EventContext::default(), &UiEvent::FocusGained);
-                }
-                field.layout(&self.layout_context(), content);
-                field.paint(&mut search_paint);
-            }
-            commands.extend(search_paint.into_commands());
+        }
+        // A caixa da saída é outra janela, e aparece por conta própria: as duas
+        // podem estar na tela ao mesmo tempo.
+        if let Some(texto) = self.terminal.busca.as_ref().map(|busca| busca.texto.clone())
+            && !self.terminal.minimized
+        {
+            commands.extend(self.paint_search_box(
+                SEARCH_POPUP_TERMINAL_ID,
+                SEARCH_INPUT_TERMINAL_ID,
+                &texto,
+                "Buscar na saída",
+                // Na fileira das abas a caixa tem a altura da fileira, e seis
+                // pontos de cada lado não deixariam texto nenhum.
+                2.0,
+                self.context.focus == ShellFocus::SearchTerminal,
+                size,
+            ));
         }
         let position = self
             .active_text()

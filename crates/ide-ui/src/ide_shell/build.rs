@@ -178,7 +178,6 @@ impl IdeShell {
             declaration_kinds: HashMap::new(),
             context: ShellContext {
                 focus: ShellFocus::None,
-                busca_no_terminal: false,
                 text_metrics: None,
                 clipboard: None,
                 theme: Theme::default(),

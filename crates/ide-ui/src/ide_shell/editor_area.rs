@@ -442,11 +442,17 @@ impl IdeShell {
     /// Fechar apaga o que se procurava **e** as marcas: destaque que sobrevive à
     /// janela vira sujeira na tela, sem nada que diga de onde veio.
     pub fn toggle_search(&mut self) {
+        // **Duas janelas, duas buscas.** Com o foco no terminal, o `Ctrl+F` é da
+        // saída; nas outras áreas, do arquivo. Uma não fecha nem retoma a outra:
+        // dá para procurar `erro` na saída e `Pedido` no código ao mesmo tempo.
+        if matches!(
+            self.context.focus,
+            ShellFocus::Terminal | ShellFocus::SearchTerminal
+        ) {
+            self.toggle_terminal_search();
+            return;
+        }
         if !self.editor_area.search_open {
-            // **O alvo é decidido aqui, pelo foco de então.** Depois de aberta,
-            // a barra não muda de assunto: clicar no código com a busca da saída
-            // aberta trocaria o que ela procura no meio, e ninguém pediu isso.
-            self.context.busca_no_terminal = self.context.focus == ShellFocus::Terminal;
             self.editor_area.search_open = true;
             self.context.focus = ShellFocus::Search;
         } else if self.context.focus == ShellFocus::Search {
@@ -465,8 +471,6 @@ impl IdeShell {
     pub(super) fn close_search(&mut self) {
         self.editor_area.search_open = false;
         self.editor_area.search_query.clear();
-        self.terminal.busca = None;
-        self.context.busca_no_terminal = false;
         if self.context.focus == ShellFocus::Search {
             self.context.focus = ShellFocus::Editor;
         }
@@ -477,10 +481,6 @@ impl IdeShell {
     /// Chamado a cada tecla: procurar é sobre o texto **atual**, e uma marca de
     /// duas letras atrás apontaria para outro lugar.
     pub(super) fn refresh_search_hits(&mut self) {
-        if self.context.busca_no_terminal {
-            self.refresh_terminal_search();
-            return;
-        }
         // O destaque acompanha a **barra**, e não o foco: clicar no editor não
         // pode apagar o que se estava procurando.
         let procurado = if self.editor_area.search_open {
@@ -521,16 +521,14 @@ impl IdeShell {
             .is_some()
     }
 
-    /// Que par de nós a barra de busca usa agora: o do editor ou o do terminal.
+    /// O par de nós da barra de busca **do arquivo**.
     ///
-    /// Um lugar só para a pergunta, usado pela pintura e pelo teste de acerto —
-    /// é a mesma regra do botão da barra de atividades e da divisa dos editores.
+    /// A da saída tem o par dela, em [`IdeShell::terminal_search_widget_ids`]:
+    /// são duas caixas, e cada uma ocupa o seu lugar na moldura ao mesmo tempo
+    /// que a outra. Um par só, escolhido por foco, era o que fazia uma fechar a
+    /// outra.
     pub(super) const fn search_widget_ids(&self) -> (WidgetId, WidgetId) {
-        if self.context.busca_no_terminal {
-            (SEARCH_POPUP_TERMINAL_ID, SEARCH_INPUT_TERMINAL_ID)
-        } else {
-            (SEARCH_POPUP_ID, SEARCH_INPUT_ID)
-        }
+        (SEARCH_POPUP_ID, SEARCH_INPUT_ID)
     }
 
     /// A área que o arranjo deu à barra de busca.

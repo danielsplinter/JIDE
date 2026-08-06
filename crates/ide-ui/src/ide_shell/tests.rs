@@ -7343,20 +7343,21 @@ fn a_busca_no_terminal_usa_a_mesma_barra_e_procura_na_saida() {
     let size = Size::new(1280.0, 800.0);
     let _ = shell.paint(size);
 
-    // Sem foco no terminal, `Ctrl+F` continua sendo a busca do arquivo.
+    // Sem foco no terminal, `Ctrl+F` é a busca do arquivo.
     shell.context.focus = ShellFocus::Editor;
     shell.toggle_search();
-    assert!(!shell.context.busca_no_terminal);
+    assert!(shell.editor_area.search_open);
+    assert!(shell.terminal.busca.is_none());
     shell.escape();
 
-    // Com o foco no terminal, a mesma tecla procura na saída.
+    // Com o foco no terminal, a mesma tecla abre a busca da saída.
     shell.context.focus = ShellFocus::Terminal;
     shell.toggle_search();
     assert!(
-        shell.context.busca_no_terminal,
-        "o alvo sai do foco de quem abriu a barra"
+        shell.terminal.busca.is_some(),
+        "o Ctrl+F do terminal abre a busca dele"
     );
-    assert_eq!(shell.context.focus, ShellFocus::Search);
+    assert_eq!(shell.context.focus, ShellFocus::SearchTerminal);
 
     // O que se digita procura na grade: o prompt do shell tem o caminho do
     // projeto, e é o que há na tela num terminal recém-aberto.
@@ -7398,10 +7399,74 @@ fn a_busca_no_terminal_usa_a_mesma_barra_e_procura_na_saida() {
         );
     }
 
-    // Fechar limpa os dois: o alvo e o que foi achado.
+    // Fechar larga a busca da saída e devolve o foco ao terminal.
     shell.escape();
     assert!(shell.terminal.busca.is_none());
-    assert!(!shell.context.busca_no_terminal);
+    assert_eq!(shell.context.focus, ShellFocus::Terminal);
+}
+
+/// As duas buscas são janelas independentes.
+///
+/// Elas dividiam um estado só, e abrir uma fechava a outra: com a caixa do
+/// arquivo na tela, o `Ctrl+F` do terminal não abria nada. Quem procura `erro` na
+/// saída pode estar procurando `Pedido` no código, e uma caixa não pode apagar o
+/// texto da outra.
+#[test]
+fn as_duas_buscas_convivem_sem_se_atrapalhar() {
+    let root = std::env::temp_dir().join(format!("er-ide-duas-buscas-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido { int total; }").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+
+    // A do arquivo primeiro.
+    shell.context.focus = ShellFocus::Editor;
+    shell.toggle_search();
+    shell.text_input("total");
+    assert_eq!(shell.editor_area.search_query, "total");
+
+    // E a da saída, sem fechar a outra.
+    shell.context.focus = ShellFocus::Terminal;
+    shell.toggle_search();
+    assert!(
+        shell.editor_area.search_open,
+        "abrir a busca da saída não pode fechar a do arquivo"
+    );
+    shell.text_input("PS");
+    assert_eq!(
+        shell.editor_area.search_query, "total",
+        "o que se digita numa caixa não entra na outra"
+    );
+    assert_eq!(
+        shell.terminal.busca.as_ref().map(|busca| busca.texto.as_str()),
+        Some("PS")
+    );
+
+    // As duas aparecem na tela ao mesmo tempo.
+    let desenhado = shell.paint(size);
+    let escrito = |texto: &str| {
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+    };
+    assert!(escrito("total") && escrito("PS"), "as duas caixas na tela");
+
+    // `Esc` fecha só a que tem o foco.
+    shell.escape();
+    assert!(shell.terminal.busca.is_none());
+    assert!(
+        shell.editor_area.search_open,
+        "largar a busca da saída não larga a do arquivo"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A busca do terminal mora na fileira das abas, antes do botão de recolher.
@@ -7419,7 +7484,7 @@ fn a_busca_do_terminal_fica_na_fileira_das_abas() {
     shell.toggle_search();
     let _ = shell.paint(size);
 
-    let caixa = shell.search_box_area();
+    let caixa = shell.terminal_search_box_area();
     let recolher = shell.terminal_toggle_rect(size);
     let (saida, _) = shell.terminal_bands_for_test();
     assert!(caixa.size.width > 0.0, "a caixa precisa ter área");

@@ -313,21 +313,75 @@ impl IdeShell {
     /// linhas de oitenta colunas. **Não foi medido**, e é a primeira coisa a
     /// olhar se digitar aqui parecer pesado.
     pub(super) fn refresh_terminal_search(&mut self) {
-        let procurado = self.editor_area.search_query.clone();
-        if !self.editor_area.search_open || procurado.trim().is_empty() {
-            self.terminal.busca = None;
+        let Some(procurado) = self.terminal.busca.as_ref().map(|busca| busca.texto.clone()) else {
             return;
-        }
-        let ativo = self.terminal.active;
-        let onde_estava = self.terminal.tabs[ativo].scroll_line;
-        let achados = self.terminal.tabs[ativo]
-            .session
-            .find_all(&procurado, onde_estava);
+        };
+        let achados = if procurado.trim().is_empty() {
+            Vec::new()
+        } else {
+            let ativo = self.terminal.active;
+            let onde_estava = self.terminal.tabs[ativo].scroll_line;
+            self.terminal.tabs[ativo]
+                .session
+                .find_all(&procurado, onde_estava)
+        };
         // A primeira ocorrência já nasce em foco: quem procurou quer ver alguma,
         // e exigir um `Enter` para a primeira seria pedir duas vezes.
         let atual = (!achados.is_empty()).then_some(0);
-        self.terminal.busca = Some(BuscaNoTerminal { achados, atual });
+        if let Some(busca) = self.terminal.busca.as_mut() {
+            busca.achados = achados;
+            busca.atual = atual;
+        }
         self.reveal_terminal_match();
+    }
+
+    /// Abre ou fecha a busca da saída. É o `Ctrl+F` com o foco no terminal.
+    ///
+    /// **Independente da busca do editor.** As duas podem estar abertas ao mesmo
+    /// tempo, cada uma com o seu texto: são duas janelas, e uma não fala pela
+    /// outra.
+    pub fn toggle_terminal_search(&mut self) {
+        match self.terminal.busca {
+            None => {
+                self.terminal.busca = Some(BuscaNoTerminal {
+                    texto: String::new(),
+                    achados: Vec::new(),
+                    atual: None,
+                });
+                self.context.focus = ShellFocus::SearchTerminal;
+            }
+            // Aberta e com o foco: fecha, como no editor.
+            Some(_) if self.context.focus == ShellFocus::SearchTerminal => {
+                self.close_terminal_search();
+            }
+            // Aberta e sem o foco — houve um clique na saída. Aqui o `Ctrl+F`
+            // devolve o foco em vez de fechar, que é o que o editor já faz.
+            Some(_) => self.context.focus = ShellFocus::SearchTerminal,
+        }
+    }
+
+    /// Fecha a busca da saída e apaga o que ela tinha marcado.
+    pub(super) fn close_terminal_search(&mut self) {
+        self.terminal.busca = None;
+        if self.context.focus == ShellFocus::SearchTerminal {
+            self.context.focus = ShellFocus::Terminal;
+        }
+    }
+
+    /// O que se digita na caixa de busca da saída.
+    pub(super) fn type_in_terminal_search(&mut self, texto: &str) {
+        if let Some(busca) = self.terminal.busca.as_mut() {
+            busca.texto.push_str(texto);
+        }
+        self.refresh_terminal_search();
+    }
+
+    /// `Backspace` na caixa de busca da saída.
+    pub(super) fn backspace_in_terminal_search(&mut self) {
+        if let Some(busca) = self.terminal.busca.as_mut() {
+            busca.texto.pop();
+        }
+        self.refresh_terminal_search();
     }
 
     /// Anda entre as ocorrências da saída, dando a volta nas duas pontas.
@@ -406,6 +460,21 @@ impl IdeShell {
         absoluto
             .is_file()
             .then(|| (absoluto, link.linha - 1, link.coluna - 1))
+    }
+
+    /// O par de nós da barra de busca **da saída**.
+    ///
+    /// Gêmeo do do arquivo, e nunca o mesmo: as duas caixas convivem na tela.
+    pub(super) const fn terminal_search_widget_ids(&self) -> (WidgetId, WidgetId) {
+        (SEARCH_POPUP_TERMINAL_ID, SEARCH_INPUT_TERMINAL_ID)
+    }
+
+    /// A área que o arranjo deu à barra de busca da saída.
+    #[must_use]
+    pub fn terminal_search_box_area(&self) -> Rect {
+        self.host
+            .bounds(self.terminal_search_widget_ids().0)
+            .unwrap_or_default()
     }
 
     /// Onde fica o botão de recolher e mostrar o terminal.

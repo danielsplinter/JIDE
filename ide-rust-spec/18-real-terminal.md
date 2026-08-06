@@ -246,18 +246,29 @@ até lá. Hoje não há como apontar para uma célula.
 **Critério:** procurar um texto na saída destaca as ocorrências e leva a vista
 até a escolhida, inclusive no que já rolou para o histórico.
 
-**Feita.** `Ctrl+F` com o foco no terminal abre **a mesma barra** do editor — o
-alvo é decidido ali, pelo foco de então, e não muda depois. O que se digita
-procura na saída inteira; `Enter` e `Shift+Enter` andam entre as ocorrências,
-dando a volta nas duas pontas; `Esc` fecha e limpa.
+**Feita.** `Ctrl+F` com o foco no terminal abre a caixa de busca **da saída**,
+na fileira das abas, antes do botão que recolhe o painel. O que se digita procura
+na saída inteira; `Enter` e `Shift+Enter` andam entre as ocorrências, dando a
+volta nas duas pontas; `Esc` fecha e limpa.
 
-Três coisas que a implementação obrigou a resolver:
+**Ela é uma janela, e a do arquivo é outra.** Nasceram como uma só, com o alvo
+escolhido pelo foco de quem apertou a tecla — e o resultado foi que a caixa do
+arquivo aberta impedia o `Ctrl+F` do terminal, e vice-versa. Não era limitação
+de tela: quem procura `erro` na saída pode estar procurando `Pedido` no código, e
+uma caixa apagava o texto da outra. Hoje cada uma tem o seu par de nós na
+moldura, o seu texto e o seu foco; as duas aparecem ao mesmo tempo, e o `Esc`
+fecha só a que está com o cursor.
+
+Quatro coisas que a implementação obrigou a resolver:
 
 - **o motor lê a janela visível, e só ela.** A varredura passeia a viewport pelo
   histórico e a devolve ao lugar. Procurar na lista que a IDE acumula à parte
   seria a segunda fonte que já fez o copiado divergir do marcado;
 - **cada janela da varredura é posicionada a partir do fim**, e não da anterior.
   Rolar de uma para a outra acumulava erro: 57 ocorrências onde havia 40;
+- **o componente de campo de texto desenhava em alturas fixas.** Na fileira das
+  abas a caixa é baixa, e o texto saía dela por baixo. O conserto é da ERLibUi, e
+  não daqui: `TextInput` passou a centrar texto e cursor na altura que recebe;
 - **as ocorrências e a seleção são duas listas** no componente. Elas coexistem —
   quem procura pode ter marcado algo antes —, e a atual se distingue das outras,
   senão ir até a próxima levaria a vista a um lugar onde tudo tem a mesma cor.

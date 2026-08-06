@@ -40,6 +40,12 @@ pub(super) struct TerminalTab {
 /// terminal: as ocorrências vêm em **linha absoluta** do histórico, e é por elas
 /// que a rolagem anda.
 pub(super) struct BuscaNoTerminal {
+    /// O que se está procurando aqui.
+    ///
+    /// **Próprio, e não compartilhado com o editor.** São duas janelas: quem
+    /// procura `erro` na saída pode estar procurando `Pedido` no arquivo, e uma
+    /// caixa não pode apagar o texto da outra.
+    pub(super) texto: String,
     pub(super) achados: Vec<TerminalMatch>,
     /// Qual das ocorrências está em foco. Sem nenhuma, não há para onde rolar.
     pub(super) atual: Option<usize>,

@@ -9,6 +9,12 @@ pub enum ShellFocus {
     Explorer,
     Editor,
     Search,
+    /// A caixa de busca **do terminal**, que é outra janela.
+    ///
+    /// Um valor próprio, e não um alvo guardado à parte: as duas caixas podem
+    /// estar abertas ao mesmo tempo, e o teclado precisa saber em qual das duas
+    /// está — foi por elas dividirem um estado só que abrir uma fechava a outra.
+    SearchTerminal,
     Terminal,
 }
 

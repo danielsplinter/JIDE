@@ -253,12 +253,6 @@ const SURFACE_LAYER_BASE: WidgetId = WidgetId(10_210);
 /// Serviços e estado visual compartilhados apenas pelo coordenador.
 struct ShellContext {
     focus: ShellFocus,
-    /// Se a barra de busca aberta procura na **saída do terminal**.
-    ///
-    /// A barra é uma só, e o que muda é o alvo. Ele é decidido no `Ctrl+F` pelo
-    /// foco de então e não muda depois: clicar no código com a busca do terminal
-    /// aberta não pode trocar o que ela procura no meio.
-    busca_no_terminal: bool,
     text_metrics: Option<Arc<dyn TextMetrics>>,
     clipboard: Option<Arc<dyn ClipboardService>>,
     theme: Theme,
@@ -835,7 +829,7 @@ impl IdeShell {
                 // Cada faixa aparece quando a busca é da área dela. As duas
                 // nunca estão na tela ao mesmo tempo: a barra é uma, e o alvo
                 // diz onde ela mora.
-                hidden: !self.editor_area.search_open || self.context.busca_no_terminal,
+                hidden: !self.editor_area.search_open,
                 ..LayoutStyle::default()
             },
         );
@@ -847,9 +841,7 @@ impl IdeShell {
                 cross_align: CrossAlign::Center,
                 width: Some(SEARCH_BOX_TERMINAL_WIDTH + TERMINAL_TOGGLE_ROOM),
                 padding: EdgeInsets::only(0.0, TERMINAL_TOGGLE_ROOM, 0.0, 0.0),
-                hidden: !self.editor_area.search_open
-                    || !self.context.busca_no_terminal
-                    || self.terminal.minimized,
+                hidden: self.terminal.busca.is_none() || self.terminal.minimized,
                 ..LayoutStyle::default()
             },
         );
@@ -1150,6 +1142,12 @@ impl IdeShell {
         {
             return;
         }
+        // `Esc` fecha **a busca que tem o foco**, e não as duas: com as duas
+        // abertas, largar a da saída não pode largar a do arquivo junto.
+        if self.context.focus == ShellFocus::SearchTerminal {
+            self.close_terminal_search();
+            return;
+        }
         if self.editor_area.search_open {
             self.close_search();
             // As marcas saem com a busca. Deixá-las para trás encheria a tela de
@@ -1195,6 +1193,15 @@ impl IdeShell {
         // A barra de busca está sobre o código: sem perguntar ao anfitrião, o
         // clique nela atravessaria e moveria o cursor do editor. Quem diz que o
         // ponto caiu ali é a área declarada, e não uma conta repetida aqui.
+        if self.terminal.busca.is_some()
+            && self
+                .host
+                .hit_test(point)
+                .any(|id| id == SEARCH_POPUP_TERMINAL_ID || id == SEARCH_INPUT_TERMINAL_ID)
+        {
+            self.context.focus = ShellFocus::SearchTerminal;
+            return;
+        }
         let (popup_da_busca, campo_da_busca) = self.search_widget_ids();
         if self.editor_area.search_open
             && self
@@ -1458,6 +1465,7 @@ impl IdeShell {
                 self.editor_area.search_query.push_str(text);
                 self.refresh_search_hits();
             }
+            ShellFocus::SearchTerminal => self.type_in_terminal_search(text),
             // O texto digitado vai ao shell caractere a caractere; o eco dele
             // é que aparece na grade. A IDE não guarda linha de comando.
             ShellFocus::Terminal => {
@@ -1536,15 +1544,19 @@ impl IdeShell {
             // editor. O resto do texto entra por `text_input`, e as setas
             // continuam sendo do editor.
             if key.eq_ignore_ascii_case("enter") {
-                // A mesma tecla, e o alvo decide quem anda: o cursor no arquivo,
-                // ou a vista na saída do terminal.
-                if self.context.busca_no_terminal {
-                    self.step_terminal_search(!modifiers.shift);
-                } else if modifiers.shift {
+                if modifiers.shift {
                     self.go_to_previous_search_hit();
                 } else {
                     self.go_to_next_search_hit();
                 }
+            }
+        } else if self.context.focus == ShellFocus::SearchTerminal {
+            // A mesma convenção da caixa do editor, na janela do terminal:
+            // `Enter` anda, `Shift+Enter` volta, e `Backspace` apaga.
+            if key.eq_ignore_ascii_case("enter") {
+                self.step_terminal_search(!modifiers.shift);
+            } else if key.eq_ignore_ascii_case("backspace") {
+                self.backspace_in_terminal_search();
             }
         } else if self.context.focus == ShellFocus::Terminal {
             // Seta, `Tab`, `Enter`, `Ctrl+C`: todas vão ao shell, e é ele quem
