@@ -259,6 +259,24 @@ editor, naquela posição.
 tem consequência hoje, porque as outras duas são recursos ausentes e ela é uma
 divergência entre o que se vê e o que se copia.
 
+### Conferido em 06/08/2026
+
+Todas as três continuam pendentes, e a primeira continua sendo a única com
+consequência:
+
+- **seleção por célula:** não feita. `selected_terminal_text` continua lendo
+  `lines()`, a lista acumulada à parte, enquanto o que está na tela vem de
+  `grid_rows()`. `selection_columns` — a função que a fase 3 quase matou em
+  silêncio — segue viva e em uso na pintura. **A divergência entre o que se vê e
+  o que se copia está de pé**, e é a única das três que já custa algo a quem usa;
+- **busca na saída:** não existe nada em `terminal_area.rs` que procure texto;
+- **links clicáveis:** idem. Nenhum reconhecimento de `Arquivo.java:42:7` na
+  saída.
+
+E o que a fase 3 deixou como limpeza continua lá: `input()`, `input_mut()`,
+`prompt()` e `submit()` seguem no `ide-terminal`, sem consumidor na interface —
+só o `run()` programático os usa. Continua sendo limpeza, e não fase.
+
 ## Riscos
 
 - **Windows.** O ConPTY já emite sequências de escape por conta própria, inclusive
