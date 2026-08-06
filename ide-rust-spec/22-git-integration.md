@@ -430,6 +430,185 @@ retorno da chamada.
 `ide-git` executa o que lhe pedem sem perguntar — perguntar é da camada que tem
 usuário na frente.
 
+## O gerenciador
+
+Até aqui esta especificação descreve o que a IDE **sabe** do Git. Esta seção
+descreve o que ela **mostra**: uma tela só, com o trabalho inteiro dentro, em vez
+de um pedaço em cada canto da janela.
+
+Ela é desenho de tela, e por isso obedece à regra que já está em "o que não
+muda": **a IDE não desenha e não arranja**. Tudo aqui é composição de componentes
+da ERLibUi, e o que faltar de componente é pedido lá — não desenhado aqui.
+
+### Onde ele começa: o terceiro botão da barra de atividades
+
+A faixa estreita da esquerda tem dois botões, a lupa e o que recolhe o Explorer,
+montados a cada quadro a partir do estado. O do Git é o terceiro, e não é
+diferente deles em nada: um `Button::icon` com comando `activity.git`.
+
+**O ícone vem da biblioteca.** `Icon` é um enum fechado na ERLibUi — `Play`,
+`Stop`, `Bug`, `Search`, `Panels`, `ChevronUp`, `ChevronDown` —, e um ícone é
+desenho. Entra lá um `Icon::Branch`, ao lado dos outros; não entra aqui uma
+imagem que a aplicação carregue, porque isso seria a IDE decidindo traço.
+
+### A janela
+
+Clicar abre a janela do gerenciador. Ela é uma **camada sobreposta**: declarada
+por último, cobrindo o conteúdo e recebendo o gesto antes dele — o mecanismo é o
+da `09` da ERLibUi, o mesmo que o diálogo de gerar código e a inspeção do
+depurador já usam pelo `ModalHost`.
+
+Começar pelo `ModalHost` é o barato: ele já traz a camada, o véu, o painel
+centrado e o `Esc` que fecha. **E há uma pergunta que pode derrubá-lo**, que fica
+registrada agora em vez de aparecer como surpresa na fase 1: a diferença de um
+arquivo abre **no editor**, e o editor está atrás do véu. Ou o gerenciador dá
+lugar quando a diferença abre, ou ele deixa de ser modal. A escolha se faz quando
+a fase 1 existir e alguém tiver as duas coisas na frente; o conteúdo da janela não
+muda por causa dela, e é isso que torna adiar barato.
+
+Dentro, a janela é uma divisão horizontal: navegação à esquerda, trabalho à
+direita, com a divisa arrastável — `SplitPane`, como a divisão do editor da `28`.
+
+### O painel da esquerda: quatro nós
+
+Quatro nós no mesmo nível, e o que cada um abre:
+
+| nó | o que lista |
+|---|---|
+| `branches` | as branches locais |
+| `tags` | as tags |
+| `remotes` | as branches remotas, por remoto |
+| `stashes` | os stashes guardados |
+
+**Isto é uma árvore, e não uma lista.** O pedido dizia lista composta, e a
+diferença não é de nome: `ComposedList` não tem nó, não tem filho e não tem
+expansão. O que está descrito — quatro raízes que abrem e fecham, com itens
+dentro — é a `ComposedTreeView`, e o motivo de a distinção importar está no
+`set_roots` dela: expansão e seleção são preservadas **por identidade de nó**.
+Um `fetch` refaz a lista de referências; sem isso, ele fecharia as branches que
+estavam abertas na tela toda vez que chegasse.
+
+Composta, e não a `TreeView` simples, porque a linha carrega mais que um rótulo:
+a branch atual leva marca, uma branch local mostra quantos commits está à frente
+e atrás do upstream, e as ações de cada linha são células. Quem monta as células
+é a IDE — é o padrão da árvore do Explorer, e é o mesmo aqui.
+
+**A hierarquia dentro de cada nó é rasa na primeira versão.** `feature/x` e
+`feature/y` aparecem como dois itens, e não como uma pasta `feature` com dois
+filhos. Agrupar por `/` é conveniência, e conveniência se acrescenta depois sem
+mudar nada do que está aqui.
+
+### A busca das branches
+
+Acima da árvore, uma caixa de busca **no mesmo padrão da do editor** — a mesma
+função de desenho, com a folga e a largura deste lugar.
+
+**Ela é a terceira caixa, e é independente das outras duas.** Isso não é detalhe
+de conforto: a busca do arquivo e a da saída do terminal nasceram dividindo um
+estado só, com o alvo escolhido pelo foco de quem apertou `Ctrl+F`, e o resultado
+foi uma impedindo a outra de abrir. Custou uma correção inteira. A do gerenciador
+nasce com o texto dela, o par de nós dela e o foco dela; nenhuma das três olha
+para o estado das outras.
+
+Ela **filtra o que já está carregado** e não pergunta nada ao Git. Texto vazio
+mostra tudo; texto não vazio esconde o que não casa, e esconde o nó que ficou sem
+filho — um `tags` aberto e vazio depois de digitar diz que não há tag nenhuma, o
+que é mentira.
+
+### O lado direito: duas abas
+
+`Tabs` da biblioteca, com `status` e `history`.
+
+#### A aba `history`: uma tabela
+
+Cinco colunas: **Nó**, **Description**, **Date**, **Author**, **Hash**.
+
+A coluna `Nó` é o grafo — o ponto do commit e os traços que o ligam aos pais. Ela
+divide a mesma regra do ícone: **a IDE calcula, a biblioteca desenha**. Qual
+faixa cada commit ocupa, e de onde para onde vai cada traço, sai do histórico, e
+isso é conta e não desenho; o traço na tela é da ERLibUi, como célula que a IDE
+põe na coluna. Sem essa divisão, o grafo seria a primeira coisa que a IDE
+desenharia por conta própria.
+
+As outras quatro são texto. `Hash` aparece abreviada, e o que se copia é a
+inteira — quem copia hash vai colar num comando.
+
+**A tabela é virtualizada e o histórico vem por páginas.** Um repositório de
+verdade tem dezenas de milhares de commits, e carregar o `log` inteiro para
+mostrar quarenta linhas é o oposto do que a `19` e a `20` fizeram no índice.
+
+**Critério:** o histórico de um repositório grande abre no mesmo tempo que o de
+um pequeno, e rolar até o fim não trava.
+
+#### A aba `status`: três painéis empilhados
+
+Empilhados na vertical, com as divisas arrastáveis — dois `SplitPane` verticais,
+que é como três painéis se empilham com o que a biblioteca tem.
+
+Os três, e o que separa um do outro:
+
+1. **preparados** — o que está no índice e entra no próximo commit;
+2. **alterados** — o que mudou na árvore de trabalho e não está preparado;
+3. **não rastreados** — o que o Git ainda não conhece.
+
+*A divisão dos três é a do `RepositoryStatus`, e não uma invenção da tela*: é
+exatamente a distinção que `--porcelain=v2` devolve, e é a que decide o que
+`stage` e `discard` fazem em cada linha. Se ela estiver errada, está errada antes
+da tela.
+
+Cada painel é uma **lista composta**: a linha tem o estado, o caminho e as ações
+daquele lugar — preparar, despreparar, descartar —, e ação em linha é célula.
+
+Clicar num arquivo mostra a diferença dele. Onde, é a pergunta da janela que
+ficou registrada acima.
+
+### O que o gerenciador não faz
+
+Ele não fala com o Git. Emite `GitRequest` pelo barramento, como o painel de
+build, e lê o `RepositoryStatus` que já está guardado — a mesma leitura que a
+barra de estado e o Explorer fazem. Quatro telas perguntando por conta própria
+seriam quatro varreduras do repositório, e é o que a seção "um `status` só" já
+recusou.
+
+E ele não confirma nada por si: `Discard` e `Push { force: true }` perdem
+trabalho, e a confirmação é da aplicação — o gerenciador é aplicação, e por isso é
+ele quem pergunta.
+
+### O que a ERLibUi precisa ganhar
+
+Três coisas, e nenhuma delas é lógica de Git:
+
+- **`Icon::Branch`**, no enum de ícones;
+- **`ComposedTable`**, que não existe. A lista composta e a árvore composta já
+  existem, e nenhuma das duas é tabela: coluna é acordo **entre linhas**, e as
+  duas resolvem largura dentro de cada linha. Sem cabeçalho e sem largura de
+  tabela, o `Date` de uma linha não fica embaixo do `Date` da outra. A `09` da
+  ERLibUi descreve o componente;
+- **a célula do grafo**, que desenha ponto e traço a partir das faixas que a IDE
+  calcula.
+
+O padrão dos três é o dos componentes que já existem: a biblioteca posiciona,
+desenha e encaminha o gesto; **quem decide o que vai dentro de cada célula é a
+IDE**.
+
+### Em que fase cada pedaço entra
+
+| pedaço | fase | por quê |
+|---|---|---|
+| botão, janela, divisão, nó `branches` | 0 | é leitura pura, e prova a tela com o menor código atrás |
+| aba `status`, os três painéis, as ações de linha | 1 | é o `working_tree` inteiro, que é o que a fase 1 entrega |
+| aba `history`, a tabela, o grafo | 2 | precisa do `history` e do `ComposedTable` |
+| nós `tags` e `stashes` | 3 | aparecem antes, vazios; a capacidade chega aqui |
+| nó `remotes`, à frente e atrás | 4 | é `fetch`, e sem ele não há o que contar |
+
+**Os nós aparecem desde o começo, mesmo sem ter o que mostrar.** Um nó que só
+existe depois que a capacidade chega faz a tela mudar de forma a cada fase; um nó
+vazio diz o que a IDE ainda não sabe fazer, e é honesto.
+
+**Isto muda uma decisão anterior desta especificação.** O `stash` estava listado
+em "o que fica de fora" como candidato à versão seguinte; com um nó dele na tela,
+ele passa a ser fase 3. A lista lá embaixo foi corrigida.
+
 ## Fases
 
 ### Fase 0 — A crate existe, e ela responde `status`
@@ -501,9 +680,13 @@ pendurado.
 
 ## O que fica de fora, e por quê
 
-- **`stash`** cabe em `working_tree` e não entra na primeira versão. Ele aparece
-  no diálogo de "há alterações não commitadas" da fase 3, e é o candidato natural
-  à fase seguinte;
+- ~~**`stash`**~~ **entrou.** Ele era o candidato natural à versão seguinte, e o
+  gerenciador lhe deu um nó na tela: ficar de fora significaria um nó que não
+  abre. É fase 3, ao lado do diálogo de "há alterações não commitadas" que já o
+  oferecia;
+- **o gerenciador como painel encaixado.** Ele nasce como janela sobreposta.
+  Virar painel do arranjo — ao lado do Explorer, ou embaixo com o terminal — é
+  mudança de onde ele mora, e não do que ele tem dentro;
 - **preparar por hunk ou por linha.** É o que separa uma integração boa de uma
   suficiente, e é caro. Fica anotado como o primeiro item depois das fases;
 - **submódulos, worktrees e LFS.** Cada um é um modelo próprio de repositório
@@ -583,4 +766,5 @@ E número medido, como a `19`, a `20` e a `21` fizeram:
 | 0 | tempo do `status` no projeto de referência, repositório limpo e sujo |
 | 1 | tempo do `diff` de um arquivo; tempo entre gravar e a margem mudar |
 | 3 | tempo do `checkout` de branch até editor, Explorer e índice em dia |
+| 2 | tempo até a primeira página do histórico aparecer, no de referência |
 | 4 | atraso entre `git` no terminal integrado e a IDE refletir |
