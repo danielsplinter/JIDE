@@ -6770,7 +6770,11 @@ fn o_ponteiro_leva_o_foco_para_o_painel_da_direita() {
     );
     assert!(shell.active_text().is_some_and(|texto| texto != antes));
 
-    // Abrir um arquivo com a direita em foco põe a aba nova nela.
+    // Abrir um arquivo com a direita em foco põe a aba nova nela — e o clique
+    // que escolhe o arquivo é **no Explorer**, que fica do outro lado da tela.
+    // Esse clique chega ao mesmo caminho que trata os cliques dos dois painéis,
+    // e tratá-lo como clique na esquerda roubava o lado que ia receber.
+    shell.pointer_down(Point::new(ACTIVITY_WIDTH + 40.0, 300.0), size);
     let Ok(_) = shell.open_file(&segundo) else {
         panic!("o segundo arquivo não abriu");
     };

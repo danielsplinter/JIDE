@@ -541,9 +541,18 @@ impl IdeShell {
             }
             return true;
         }
-        // Caiu na esquerda: o foco volta para lá antes de o clique seguir.
-        self.marcar_clique(false);
-        self.focar_a_esquerda();
+        // **Só dentro da coluna da esquerda.** Este caminho recebe todo clique da
+        // janela — o do Explorer, o do terminal, o da barra de menus —, e tratar
+        // todos eles como "cliquei na esquerda" fazia o clique no Explorer
+        // roubar o lado que ia receber o arquivo. Era o defeito: dividir,
+        // escolher um arquivo, e vê-lo abrir do outro lado.
+        if self
+            .left_column(size)
+            .is_some_and(|coluna| coluna.contains(point))
+        {
+            self.marcar_clique(false);
+            self.focar_a_esquerda();
+        }
         false
     }
 
