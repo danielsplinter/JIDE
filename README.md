@@ -13,6 +13,12 @@ workers canceláveis, e o suporte a Java cobre análise sintática e semântica,
 navegação, referências, autocomplete, toolchain JDK, os build systems Maven e
 Gradle e a depuração remota de processos em execução.
 
+A janela tem tela de abertura, divisão do editor em dois painéis, lista de
+projetos recentes agrupada por linguagem e uma segunda instância por
+`Arquivo → Duplicar workspace`. As especificações `23` a `28` cobrem o que veio
+depois da fase 7 — TypeScript, Angular, índice em disco, a dívida de arquitetura
+e a divisão do editor.
+
 ## Dependência da interface
 
 **Tudo o que aparece na tela é desenhado por um componente da ERLibUi.** A IDE
@@ -230,6 +236,68 @@ na linha e na coluna encontradas.
 
 `Ctrl+S` grava a aba ativa, o mesmo que `Arquivo → Salvar`.
 Pressione `F3` para abrir a busca e `Esc` para fechá-la.
+
+## Dois editores lado a lado
+
+O **clique com o botão direito sobre uma aba** abre um menu com `Split direita`.
+Escolher divide a área em dois editores independentes: cada um com sua faixa de
+abas, seu cursor e sua rolagem. O documento da aba clicada passa a ser mostrado
+também à direita e **continua à esquerda** — dividir é ver a mesma coisa de dois
+lugares, e não mudar de lugar.
+
+O texto é **um só**. Editar de um lado aparece no outro na mesma tecla, porque os
+dois olham o mesmo documento; o que é de cada lado é a vista. Duas cópias fariam
+gravar escolher em silêncio qual das versões sobrevive.
+
+**O foco segue o ponteiro**: passar o mouse sobre um dos lados o torna o lado
+ativo, e a partir daí o clique, a rolagem e a digitação são dele. As barras de
+rolagem e a lista de completação também acompanham — elas pertencem ao painel da
+frente, e não à área do editor inteira.
+
+**Mas quem recebe um arquivo aberto é o painel em que se clicou por último.** São
+duas perguntas diferentes: "onde o ponteiro está" e "onde eu estava trabalhando".
+O caminho do mouse até o Explorer passa por cima do painel do lado, e essa
+travessia não pode decidir em qual painel o arquivo escolhido vai abrir.
+
+A **divisa entre os dois se arrasta** na horizontal, e nenhum dos lados chega a
+sumir. Fechar a última aba da direita desfaz a divisão, em vez de deixar uma
+metade vazia na tela.
+
+## A barra de atividades
+
+A faixa estreita à esquerda tem dois botões. A **lupa** abre a busca por
+conteúdo. O **outro** recolhe e devolve o painel do Explorer: recolhido, a
+largura dele vai para o editor e o terminal, e a largura que você tinha ajustado
+volta quando ele reabre — não a de fábrica.
+
+Os três divisores da janela — o do Explorer, o do terminal e o dos dois editores
+— **trocam o desenho do ponteiro** para a seta de redimensionar quando o mouse
+passa sobre eles, antes de qualquer arrasto. Um divisor que só se anuncia depois
+de ter sido movido não anuncia nada.
+
+## Projetos recentes
+
+`Arquivo → Recentes` abre uma lista **agrupada por linguagem**: uma porta para
+cada uma, e os projetos dentro dela. O que a IDE não reconheceu vai para
+`Outras`, sempre no fim — um grupo no meio faria as linguagens conhecidas mudarem
+de lugar por causa de uma pasta qualquer aberta no meio do caminho.
+
+A linguagem sai do **sistema de build detectado na pasta**, e não de uma tabela
+de manifestos: quem diz de quem é o `pom.xml` ou o `package.json` é a contribuição
+que registrou aquele sistema de build. Uma pasta que apenas embrulha o projeto —
+o formato de quem clona um repositório dentro de uma pasta de mesmo nome —
+responde pelo que há dentro dela.
+
+A lista guarda dez projetos, do mais recente para o mais antigo, no mesmo arquivo
+de configuração. Reabrir um projeto o traz de volta ao topo em vez de repetir a
+linha, e o que sumiu do disco continua gravado — ele pode voltar — mas não é
+oferecido.
+
+`Arquivo → Duplicar workspace` abre **outra janela** sobre o mesmo projeto. É
+outro processo, e não outra janela do mesmo: cada instância tem o próprio
+analisador, o próprio índice e o próprio terminal. Duas janelas dentro do mesmo
+processo dividiriam os três, e dividir é onde mora a maior parte dos defeitos que
+esta IDE já caçou.
 
 No Explorer, as cadeias de pacote Java aparecem comprimidas numa linha só —
 `br.com.exemplo.endpoints` em vez de quatro níveis —, como no IntelliJ. Os

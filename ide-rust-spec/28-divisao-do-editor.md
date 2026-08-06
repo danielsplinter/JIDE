@@ -88,6 +88,42 @@ passam por esse campo em duas dúzias de lugares, e fazer cada um deles escolher
 painel pelo foco significaria que esquecer **um** faria o cursor andar no painel
 que ninguém está olhando. Entre vinte e quatro, esquecer um é questão de tempo.
 
+## O que o primeiro uso corrigiu
+
+A fase 1 subiu compilando, com teste, e mesmo assim **sete defeitos apareceram no
+primeiro uso de verdade**. Eles estão aqui porque cada um tem uma lição que não
+cabe no commit que o corrigiu:
+
+- **o componente pintava sobre as duas áreas.** O `SplitPane` da ERLibUi nasceu
+  com um fundo e dois rótulos de demonstração — `Pane A` e `Pane B` —, e eles
+  apagaram da tela a faixa de abas dos dois lados. Um componente-container que
+  desenha dentro das áreas do hospedeiro não é usável; sobrou a divisa;
+- **a faixa de abas da esquerda sumiu.** Eu lhe dei uma largura para parar na
+  divisa, e com ela um estilo sem crescimento: o nó colapsou. Quem para a faixa
+  na divisa é o recorte da pintura, e não a largura do nó;
+- **o ponteiro ficava preso na divisa.** O soltar não chegava ao painel, e ele
+  seguia em arrasto para sempre;
+- **o clique no editor da direita movia o cursor da esquerda.** O clique era
+  entregue ao painel guardado na divisão — que, depois da troca de foco, é o do
+  **outro** lado. A correção foi deixar o clique seguir para o mesmo caminho que
+  trata o editor de sempre: um caminho só para os dois painéis;
+- **a barra de rolagem horizontal sumiu dos dois lados.** A trilha era a da área
+  inteira, larga demais para o texto de um painel só: o componente concluía que
+  não havia o que rolar. As barras e a lista de completação pertencem ao painel
+  da frente;
+- **a mesma aba acendia nos dois lados.** A faixa da esquerda perguntava pelo
+  documento ativo da sessão, e ele segue o lado com foco. Cada faixa pergunta
+  pelo documento dela;
+- **o arquivo escolhido no Explorer abria no painel errado.** O caminho que trata
+  os cliques da área dividida recebe **todo** clique da janela, e eu tratava
+  "não caiu na direita" como "caiu na esquerda" — o clique no Explorer roubava o
+  lado que ia receber, um instante antes de o arquivo abrir.
+
+Três deles — o cursor no painel errado, a barra que sumiu e a lista de
+completação no lugar errado — são a **mesma família**: alguma coisa continuava
+falando da área do editor inteira depois de ela ter virado duas. Quando a área
+se parte, tudo o que a media precisa ser reperguntado.
+
 ## Fase 3 — o que fica de fora ⬜
 
 Divisão vertical, mais de duas divisões e arrastar uma aba de um lado para o
