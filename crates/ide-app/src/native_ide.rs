@@ -35,7 +35,7 @@ use ide_application::{
 use ide_core::{AppConfig, ToolRole, config_path};
 use ide_debug_api::{DebugEvent, StepKind};
 use ide_domain::{
-    DefinitionRequest, DocumentId, DocumentSnapshot, LanguageId, ProviderId, SymbolKind,
+    CancellationToken, DefinitionRequest, DocumentId, DocumentSnapshot, LanguageId, ProviderId, SymbolKind,
     TextPosition, TextRange,
 };
 use ide_language_host::{LanguageHost, LanguageToolchainConfig};
@@ -788,6 +788,10 @@ impl NativeIde {
         // Fica para depois do primeiro quadro, como o realce já fica.
         self.runtime.project_pending = Some(folder.to_path_buf());
         self.runtime.languages_pending = true;
+        // O branch e a contagem entram na barra de estado assim que houver
+        // resposta. É a única pergunta ao Git que a IDE faz sozinha: as outras
+        // saem de quem abre o gerenciador.
+        self.refresh_git();
         if let Some(window) = self.window.window.as_ref() {
             window
                 .inner()
@@ -1552,6 +1556,39 @@ impl NativeIde {
             shell.set_content_search_results(Vec::new());
             shell.set_status_message(format!("Procurando usos de {}…", request.token));
         }
+    }
+
+    /// Pergunta ao repositório o que mostrar, fora da thread da interface.
+    ///
+    /// Uma pergunta por vez: o `SearchController` guarda só a última, e a
+    /// resposta de uma que ficou pelo caminho é descartada em vez de chegar
+    /// depois da atual — que é a família de defeito que a `21` nomeou, a
+    /// resposta velha parecida com a certa.
+    fn refresh_git(&mut self) {
+        let Some(raiz) = self
+            .ui
+            .shell
+            .as_ref()
+            .map(|shell| shell.workspace_root().to_path_buf())
+        else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = self.languages.git.start(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(retrato_do_repositorio(&raiz, &cancel));
+        });
+    }
+
+    /// Instala o retrato, se já chegou. Não espera por nada.
+    fn collect_git(&mut self) -> bool {
+        let Some(view) = self.languages.git.collect() else {
+            return false;
+        };
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_git_view(view);
+        }
+        true
     }
 
     /// Recolhe os usos, se já chegaram. Não espera por nada.
@@ -3173,6 +3210,7 @@ impl NativeIde {
                         }
                     }
                 }
+                UiAction::RefreshGit => self.refresh_git(),
                 UiAction::OpenProject => self.choose_project(),
                 UiAction::DuplicateWorkspace => self.duplicate_workspace(),
                 UiAction::OpenRecentProject(path) => self.open_recent_project(&path),
@@ -3473,6 +3511,58 @@ fn collect_named_source_roots(node: &FileNode, names: &[String], output: &mut Ve
     }
 }
 
+/// Pergunta ao repositório, e traduz a resposta para o que a tela mostra.
+///
+/// **Esta é a única função da IDE que nomeia o `ide-git`.** É a raiz de
+/// composição, e é o lugar onde o domínio vira tela — do outro lado dela o shell
+/// tem `GitView`, com `String` e `usize`, e nenhum tipo do domínio de Git.
+///
+/// O runtime é montado aqui porque o adapter fala com um processo, e processo
+/// precisa do reator do tokio. É o mesmo desenho das ferramentas de build: uma
+/// linha de execução própria, runtime `current_thread` dentro dela.
+fn retrato_do_repositorio(raiz: &std::path::Path, cancel: &CancellationToken) -> ide_ui::GitView {
+    let mut view = ide_ui::GitView::default();
+    let repositorio = match ide_git::open(raiz) {
+        Ok(repositorio) => repositorio,
+        Err(ide_git::GitError::NotARepository) => {
+            // Não é erro: a maioria das pastas não é repositório, e a janela diz
+            // isso em vez de aparecer vazia.
+            return view;
+        }
+        Err(erro) => {
+            view.message = Some(erro.to_string());
+            return view;
+        }
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        view.message = Some("Não foi possível falar com o Git".to_owned());
+        return view;
+    };
+    match runtime.block_on(repositorio.working_tree().status(cancel)) {
+        Ok(status) => {
+            view.head = status.head.as_ref().map(ide_git::Head::label);
+            view.changed = status.changed_files();
+            view.staged = status.count(ide_git::FileState::Staged);
+            view.modified = status.count(ide_git::FileState::Modified);
+            view.untracked = status.count(ide_git::FileState::Untracked);
+        }
+        Err(erro) => view.message = Some(erro.to_string()),
+    }
+    if let Ok(branches) = runtime.block_on(repositorio.branches().local(cancel)) {
+        view.branches = branches
+            .into_iter()
+            .map(|branch| ide_ui::BranchItem {
+                name: branch.name.0,
+                current: branch.current,
+            })
+            .collect();
+    }
+    view
+}
+
 impl ApplicationHandler for NativeIde {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -3486,6 +3576,7 @@ impl ApplicationHandler for NativeIde {
         changed |= self.advance_search_spinner();
         changed |= self.advance_project_loading();
         changed |= self.collect_references();
+        changed |= self.collect_git();
         changed |= self.collect_navigation();
         changed |= self.collect_completion();
         // Aceitar um item escreve o nome; o `import` que ele exige é a pergunta
@@ -3591,6 +3682,7 @@ impl ApplicationHandler for NativeIde {
                 let horizontal = self.ui.shell.as_ref().is_some_and(|shell| {
                     shell.sidebar_divider_hover(cursor, logico)
                         || shell.split_divider_hover(cursor, logico)
+                        || shell.git_divider_hover(cursor)
                 });
                 let vertical = self
                     .ui

@@ -258,6 +258,13 @@ impl IdeShell {
     ) {
         match kind {
             SurfaceKind::Rename => self.paint_rename(commands, size),
+            SurfaceKind::Git => {
+                let context = self.layout_context();
+                let mut pintura = self.paint_context();
+                if self.git.paint(&self.host, &context, &mut pintura, size) {
+                    commands.extend(pintura.into_commands());
+                }
+            }
             SurfaceKind::Generate => self.paint_generate(commands, size),
             SurfaceKind::TypeSearch => self.paint_type_search(commands, size),
             SurfaceKind::Inspection => self.paint_inspection(commands, size),
@@ -613,6 +620,11 @@ impl IdeShell {
             "UTF-8".to_owned(),
             format!("Ln {}, Col {}", position.0 + 1, position.1 + 1),
         ];
+        // O branch e quantos arquivos mudaram, quando há repositório. Vem
+        // antes do resumo do projeto porque é o que muda com mais frequência.
+        if let Some(git) = self.git.view().status_segment() {
+            trailing.push(git);
+        }
         if let Some(summary) = self.context.project_summary.as_deref() {
             trailing.push(summary.to_owned());
         }

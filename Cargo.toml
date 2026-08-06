@@ -6,6 +6,7 @@ members = [
     "crates/ide-core",
     "crates/ide-debug-api",
     "crates/ide-domain",
+    "crates/ide-git",
     "crates/ide-language-api",
     "crates/ide-language-host",
     "crates/ide-project",

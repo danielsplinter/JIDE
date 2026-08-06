@@ -249,6 +249,12 @@ pub(super) struct LanguageController {
     /// Chega quando chegar: até lá o Explorer mostra os nomes sem crachá, que é
     /// a verdade — ninguém sabia ainda.
     pub(super) declaration_kinds: SearchController<HashMap<u64, ide_domain::SymbolKind>>,
+    /// O retrato do repositório, perguntado fora da thread da interface.
+    ///
+    /// `git status` num repositório grande custa centenas de milissegundos, e a
+    /// `22` já dizia que ele é I/O caro. Perguntar na chamada seria a sétima vez
+    /// do defeito que a `25` caçou cinco vezes e a completação repetiu.
+    pub(super) git: SearchController<ide_ui::GitView>,
     /// A navegação em curso. Ver `navigate_to_definition`.
     pub(super) navigation: SearchController<NavigationOutcome>,
     /// Os usos de um nome, procurados fora da thread da interface.

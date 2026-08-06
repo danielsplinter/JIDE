@@ -140,6 +140,7 @@ impl IdeShell {
                     .with_row_height(DEBUG_ROW_HEIGHT),
             },
             generate: GenerateSurface::default(),
+            git: GitSurface::default(),
             new_item: NewItemSurface::default(),
             rename: RenameSurface::default(),
             context_menu: ContextMenuSurface::default(),
@@ -203,6 +204,7 @@ impl IdeShell {
                     surface_layer_id(SurfaceKind::TabSwitcher),
                 );
                 rename::attach(&mut host, surface_layer_id(SurfaceKind::Rename));
+                git::attach(&mut host, surface_layer_id(SurfaceKind::Git));
                 type_search::attach(&mut host, surface_layer_id(SurfaceKind::TypeSearch));
                 host
             },

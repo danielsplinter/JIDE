@@ -301,6 +301,7 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
                 "ide-core",
                 "ide-debug-api",
                 "ide-domain",
+                "ide-git",
                 "ide-language-api",
                 "ide-language-host",
                 "ide-process",
@@ -367,6 +368,18 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
         // Nem marcação nem folhas de estilo compilam ou executam: só gramática
         // e contrato. As duas param no mesmo par de dependências, e é o mínimo
         // que uma linguagem pode custar nesta arquitetura.
+        // Git é **uma** crate, com as capacidades em módulos, e a `22` decidiu
+        // isso de propósito: não há `ide-git-api` mais `ide-git-cli`, porque o
+        // que separa a IDE da implementação aqui não é fronteira de crate — é
+        // privacidade de módulo, que o compilador garante.
+        //
+        // Ela alcança `ide-domain` pelo cancelamento e `ide-process` pela
+        // função que impede o filho de abrir janela de console. Nada mais: não
+        // conhece projeto, linguagem nem tela.
+        (
+            "ide-git",
+            BTreeSet::from(["ide-domain", "ide-process"]),
+        ),
         (
             "language-markup",
             BTreeSet::from(["ide-domain", "ide-language-api"]),
@@ -866,9 +879,13 @@ fn phase_five_keeps_ui_state_split_by_feature() {
     // campo novo aqui é o mesmo tipo de campo que `generate`, `rename` e
     // `new_item`: uma superfície, e não coordenação nova. **Quatro campos
     // saíram** do Explorer para um entrar aqui.
+    // De 18 para 19: o gerenciador de Git, que é superfície como `generate`,
+    // `rename` e o menu de contexto — e não coordenação nova. O que ele guarda é
+    // o que **veio de fora**: a tela não pergunta ao repositório, e o campo é do
+    // mesmo tipo de `declaration_kinds`, recepção e não decisão.
     assert!(
-        struct_field_count(&shell, "IdeShell") <= 18,
-        "IdeShell deve possuir no máximo 18 campos de coordenação"
+        struct_field_count(&shell, "IdeShell") <= 19,
+        "IdeShell deve possuir no máximo 19 campos de coordenação"
     );
 
     let features = [
@@ -1096,7 +1113,11 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // existia. A marcação custou outra, e ela existe porque um `.html` precisa
     // de realce mesmo sem framework nenhum — a frase da `24` sobre a camada
     // nativa ser HTML puro estava escrita e não construída.
-    assert_eq!(crates.len(), 18, "a refatoração não deve pulverizar crates");
+    // 19: as 18 anteriores mais `ide-git`. Ela é a primeira crate desde a
+    // consolidação que não é linguagem, e o motivo é o mesmo que valeu para
+    // elas — uma capacidade com adapter próprio, atrás de traits, que ninguém
+    // além da raiz de composição nomeia.
+    assert_eq!(crates.len(), 19, "a refatoração não deve pulverizar crates");
     // 51: as 46 anteriores mais cinco, que é o que Angular custou no grafo.
     //
     // **Duas de produção** — `ide-app -> language-angular` e
@@ -1107,9 +1128,16 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     //
     // A conta inclui `dev-dependencies` de propósito, desde sempre: teste que
     // alcança meio mundo é acoplamento igual, só que sem aparecer no binário.
+    // De 55 para 58: as três que `ide-git` custou. **Duas de produção** —
+    // `ide-git -> ide-domain` e `ide-git -> ide-process` — e **uma da raiz**,
+    // `ide-app -> ide-git`, que é o único lugar da IDE que pode nomeá-la.
+    //
+    // O que estas três não incluem é o que importa: `ide-ui` **não** entrou no
+    // grafo do Git. A tela recebe um `GitView` de `String` e `usize`, e por isso
+    // a fronteira do domínio para na raiz de composição.
     assert!(
-        edge_count <= 55,
-        "o grafo interno ultrapassou a linha final de 55 arestas: {edge_count}"
+        edge_count <= 58,
+        "o grafo interno ultrapassou a linha final de 58 arestas: {edge_count}"
     );
     // O fan-out da raiz de composição **cresce com o número de linguagens**, e
     // é para isso que ela existe: é o único lugar que pode nomear todas. 16 é
@@ -1117,9 +1145,13 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     //
     // O que este número precisa pegar não é o crescimento — é o crescimento
     // **sem linguagem nova**, que seria a raiz virando depósito.
+    // 18 é 17 mais `ide-git`. **Esta subida não é linguagem nova**, e por isso
+    // merece a frase: a raiz é o único lugar que pode nomear o adapter de Git,
+    // e é lá que o domínio dele vira o `GitView` que a tela recebe. Fosse em
+    // qualquer outro lugar, seria a fronteira da `22` vazando.
     assert!(
-        app_fan_out <= 17,
-        "ide-app ultrapassou o fan-out final de 17: {app_fan_out}"
+        app_fan_out <= 18,
+        "ide-app ultrapassou o fan-out final de 18: {app_fan_out}"
     );
     // Era `>= 13`, absoluto, e a fase 8 mostrou que a forma estava errada: o
     // número caiu para 11 sozinho quando cinco crates viraram módulos, sem que
@@ -1197,7 +1229,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // **O número desce, e não sobe.** Cada decomposição futura baixa o teto;
         // subir exige alguém decidindo que sobe, e escrevendo por quê — como as
         // linhas acima fazem.
-        ("crates/ide-app/src/native_ide.rs", 5_389),
+        // De 5 389 para 5 483: a tradução do domínio de Git para o que a tela
+        // mostra, mais a pergunta em thread e a coleta dela. São 91 linhas, e
+        // elas estão aqui **porque só a raiz de composição pode nomear o
+        // `ide-git`** — é a mesma razão que põe o registro das linguagens neste
+        // arquivo. O teto sobe; a dívida 1 da `26` continua aberta.
+        ("crates/ide-app/src/native_ide.rs", 5_483),
         // De 7 269 para 7 315: o teste que a fase 4 da `18` pedia — o copiado do
         // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
         // primeira adição depois de nascer**, que é o que ela existe para fazer:
@@ -1219,7 +1256,13 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // a da saída ficam abertas ao mesmo tempo, cada uma com o seu texto, e
         // `Esc` fecha só a que tem o foco. Sessenta e cinco linhas de um teste
         // novo, porque o defeito era exatamente a convivência.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 7_499),
+        //
+        // De 7 499 para 7 729: a fase 0 do gerenciador de Git — o botão que
+        // abre e fecha, os quatro nós, o filtro da busca, a barra de estado e a
+        // pasta que não é repositório. Seis testes, e é a última vez que este
+        // teto sobe por uma tela nova sem que o arquivo seja partido: o item
+        // 4(b) do plano da `26` é justamente parti-lo por assunto.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 7_729),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
@@ -1259,9 +1302,10 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // não é janela nova: é uma que já existia e morava no estado do Explorer,
     // arrastando junto três campos de alvo — inclusive um `DocumentId`, que é
     // identidade de outra área. Quatro campos saíram de lá para um entrar aqui.
+    // O 19º é o gerenciador de Git: mais uma superfície, pela fase 0 da `22`.
     assert_eq!(
         struct_field_count(&shell, "IdeShell"),
-        18,
+        19,
         "IdeShell divergiu da linha final"
     );
 }
@@ -1476,7 +1520,15 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// leitura de um `pom.xml` —, sem processo externo nenhum, e a mesma
     /// chamada já acontece nesta thread na importação, logo adiante. Ela roda ao
     /// abrir e ao trocar de projeto, e não a cada quadro.*
-    const TETO: usize = 32;
+    /// *De 32 para 33: perguntar ao repositório em que branch ele está e o que
+    /// mudou, na fase 0 da `22`. Ela **está em thread própria** — `refresh_git`
+    /// manda a pergunta e o quadro seguinte recolhe a resposta —, e o runtime
+    /// do tokio é montado lá dentro porque o adapter fala com um processo. Um
+    /// `git status` num repositório grande custa centenas de milissegundos; na
+    /// thread da janela seria a sétima vez do defeito que a `25` caçou cinco.
+    /// São **duas** esperas, e não uma — o estado e a lista de branches —, na
+    /// mesma função e no mesmo runtime.*
+    const TETO: usize = 34;
 
     assert!(
         chamadas.len() <= TETO,
@@ -1486,5 +1538,58 @@ fn nothing_new_blocks_in_the_application_crate() {
          defeito que já apareceu seis vezes — mande a pergunta para uma thread \
          e recolha o resultado no quadro seguinte: {chamadas:#?}",
         chamadas.len()
+    );
+}
+
+/// Só a crate do Git fala Git.
+///
+/// A `22` pediu esta guarda por escrito, e o motivo é o de sempre: a fronteira
+/// que não é verificada é a fronteira que alguém atravessa no dia em que tiver
+/// pressa. `Command::new("git")` num controlador da aplicação resolveria o
+/// problema daquele dia e faria a IDE passar a conhecer a implementação — de um
+/// jeito que compila, passa nos testes e só aparece na tela de quem usa.
+///
+/// Ela vale para os três nomes que uma implementação teria: o processo, a
+/// `libgit2` e a `gix`. Trocar de um para outro é assunto de dentro do
+/// `ide-git`, e nenhum deles pode ser nomeável fora.
+#[test]
+fn ninguem_fora_da_crate_do_git_fala_git() {
+    let root = workspace_root();
+    let mut infratores = Vec::new();
+    for entrada in fs::read_dir(root.join("crates"))
+        .unwrap_or_else(|error| panic!("não foi possível listar as crates: {error}"))
+        .filter_map(Result::ok)
+    {
+        let caminho = entrada.path();
+        if !caminho.is_dir() || caminho.file_name().is_some_and(|nome| nome == "ide-git") {
+            continue;
+        }
+        for arquivo in rust_sources(&caminho) {
+            let Ok(fonte) = fs::read_to_string(&arquivo) else {
+                continue;
+            };
+            // O próprio arquivo de guardas escreve os três nomes, e é o que
+            // ele existe para fazer: procurá-los. Uma guarda que se acusa
+            // sozinha ensina a desligá-la.
+            if arquivo.ends_with("tests/architecture.rs") || arquivo.ends_with("architecture.rs") {
+                continue;
+            }
+            let relativo = arquivo.strip_prefix(&root).unwrap_or(&arquivo);
+            for (numero, linha) in fonte.lines().enumerate() {
+                if linha.trim_start().starts_with("//") {
+                    continue;
+                }
+                if linha.contains("Command::new(\"git\")")
+                    || linha.contains("git2::")
+                    || linha.contains("gix::")
+                {
+                    infratores.push(format!("{}:{}", relativo.display(), numero + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        infratores.is_empty(),
+        "Git falado fora da crate que o fala: {infratores:#?}"
     );
 }

@@ -595,7 +595,7 @@ IDE**.
 
 | pedaço | fase | por quê |
 |---|---|---|
-| botão, janela, divisão, nó `branches` | 0 | é leitura pura, e prova a tela com o menor código atrás |
+| botão, janela, divisão, nó `branches`, busca ✅ | 0 | é leitura pura, e prova a tela com o menor código atrás |
 | aba `status`, os três painéis, as ações de linha | 1 | é o `working_tree` inteiro, que é o que a fase 1 entrega |
 | aba `history`, a tabela, o grafo | 2 | precisa do `history` e do `ComposedTable` |
 | nós `tags` e `stashes` | 3 | aparecem antes, vazios; a capacidade chega aqui |
@@ -611,7 +611,7 @@ ele passa a ser fase 3. A lista lá embaixo foi corrigida.
 
 ## Fases
 
-### Fase 0 — A crate existe, e ela responde `status`
+### Fase 0 — A crate existe, e ela responde `status` ✅
 
 Crate, `model`, `error`, os traits de `repository` e `working_tree`, o adapter de
 linha de comando, e o suficiente para a barra de estado mostrar o branch e a
@@ -624,6 +624,46 @@ código possível atrás dela.
 arquivos alterados. Abrir um não versionado não mostra nada e não falha. E o
 tempo do primeiro `status` está medido, no projeto de referência de 26 mil
 arquivos.
+
+**Feita.** `ide-git` é a 19ª crate: `discover`, `open`, `WorkingTreeService::status`
+e `BranchService::local`, com o adapter de linha de comando atrás de traits. A
+barra de estado mostra `main ~3`; a janela do gerenciador abre pelo terceiro botão
+da barra de atividades, com a divisa arrastável, os quatro nós e a busca das
+branches. O nó `branches` tem conteúdo; os outros três aparecem vazios.
+
+Cinco coisas que a implementação obrigou a resolver, e uma que ela não resolveu:
+
+- **`--no-optional-locks`, e não só o `status`.** O `status` normal escreve o
+  índice para guardar o que descobriu, e para isso pega o `index.lock` — o mesmo
+  que o terminal integrado disputa. A seção "uma escrita por vez" previa tratar a
+  disputa; esta linha faz a leitura da IDE **não entrar** nela;
+- **a leitura do `-z` tem um caso que o formato de linhas não tem.** Numa
+  renomeação o caminho de origem vem como campo separado, e não colado ao
+  registro. Quem varresse os campos sem consumi-lo trataria o caminho antigo como
+  registro solto, e a renomeação sumiria da tela. Tem teste;
+- **um arquivo pode estar preparado e alterado ao mesmo tempo**, e são duas
+  entradas — cada painel mostra a sua. A barra de estado conta **arquivos**, e
+  não entradas, senão diria mais trabalho do que há;
+- **`HEAD` solto e repositório sem commit** não são casos exóticos: um `checkout`
+  de commit produz o primeiro, e `git init` produz o segundo. Os dois têm variante
+  própria em `Head`, e a barra mostra o hash abreviado em vez de vazio;
+- **a declaração da divisa entra antes do arranjo do quadro.** Feita na pintura,
+  o arrasto aparecia um quadro atrasado — a coluna ficava com a proporção
+  anterior enquanto o ponteiro já estava noutro lugar. O comentário que explica
+  isso já existia em `place_overlay`, escrito para a janela de configurações;
+- **o tempo no projeto de referência não foi medido.** O `camel-main` desta
+  máquina não é repositório — veio como pasta, e não como clone —, e medir num
+  projeto que não tem `.git` não é medir. O que deu para medir é o **próprio
+  repositório da IDE**: 228 arquivos versionados, 32–37 ms por `status`, três
+  execuções. É pequeno demais para dizer qualquer coisa sobre 26 mil, e por isso
+  o critério continua aberto.
+
+E o que a fronteira custou, dito por número: **três arestas** no grafo —
+`ide-git -> ide-domain`, `ide-git -> ide-process` e `ide-app -> ide-git`. `ide-ui`
+**não** entrou nele: a tela recebe um `GitView` de `String` e `usize`, e a
+tradução acontece na raiz de composição. A guarda que a seção de verificação
+pedia existe e passa: nenhuma crate fora de `ide-git` escreve
+`Command::new("git")`, `git2::` ou `gix::`.
 
 ### Fase 1 — Ver e escolher o que muda
 

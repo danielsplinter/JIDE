@@ -883,6 +883,7 @@ dependencies = [
  "ide-core",
  "ide-debug-api",
  "ide-domain",
+ "ide-git",
  "ide-language-api",
  "ide-language-host",
  "ide-process",
@@ -950,6 +951,18 @@ name = "ide-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "ide-git"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ide-domain",
+ "ide-process",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

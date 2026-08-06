@@ -422,7 +422,7 @@ impl IdeShell {
     /// Montados a cada quadro a partir do estado, como as abas: o nome do
     /// segundo diz o que o clique **vai fazer**, e ele muda quando o painel
     /// recolhe.
-    pub(super) fn activity_buttons(&self) -> [Button; 2] {
+    pub(super) fn activity_buttons(&self) -> [Button; 3] {
         let painel = if self.sidebar_collapsed() {
             "Mostrar o Explorer"
         } else {
@@ -433,6 +433,8 @@ impl IdeShell {
                 .with_command("activity.search"),
             Button::icon(ACTIVITY_SIDEBAR_ID, Icon::Panels, painel)
                 .with_command("activity.sidebar"),
+            Button::icon(ACTIVITY_GIT_ID, Icon::Branch, "Git")
+                .with_command("activity.git"),
         ]
     }
 
@@ -443,8 +445,10 @@ impl IdeShell {
     pub(super) fn activity_rect(id: WidgetId) -> Rect {
         let topo = if id == ACTIVITY_SEARCH_ID {
             TITLE_HEIGHT + 8.0
-        } else {
+        } else if id == ACTIVITY_SIDEBAR_ID {
             TITLE_HEIGHT + 52.0
+        } else {
+            TITLE_HEIGHT + 88.0
         };
         Rect::new(12.0, topo, 24.0, 24.0)
     }
@@ -462,6 +466,10 @@ impl IdeShell {
         match escolhido {
             Some(id) if id == ACTIVITY_SEARCH_ID => {
                 self.open_content_search();
+                true
+            }
+            Some(id) if id == ACTIVITY_GIT_ID => {
+                self.toggle_git();
                 true
             }
             Some(_) => {

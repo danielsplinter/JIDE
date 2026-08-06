@@ -6731,6 +6731,7 @@ fn soltar_o_botao_solta_a_divisa_dos_dois_editores() {
     );
     shell.pointer_down(meio, size);
     shell.pointer_move(Point::new(meio.x + 120.0, meio.y), size);
+
     let arrastado = shell
         .split_panel_for(size)
         .map_or(0.0, |painel| painel.ratio());
@@ -7147,7 +7148,7 @@ fn os_divisores_pedem_a_seta_antes_do_arrasto() {
 /// e não chegavam à árvore de acessibilidade. Pareciam ações, e não eram
 /// nenhuma.
 #[test]
-fn a_barra_de_atividades_tem_dois_botoes() {
+fn a_barra_de_atividades_tem_tres_botoes() {
     let root = std::env::temp_dir().join(format!("er-ide-atividades-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     assert!(std::fs::create_dir_all(&root).is_ok());
@@ -7496,4 +7497,233 @@ fn a_busca_do_terminal_fica_na_fileira_das_abas() {
         caixa.origin.x + caixa.size.width <= recolher.origin.x + 0.01,
         "e termina antes do botão de recolher: {caixa:?} contra {recolher:?}"
     );
+}
+
+/// O terceiro botão da barra abre o gerenciador, e pede o retrato de novo.
+///
+/// As duas coisas juntas de propósito: abrir uma janela que mostra o estado da
+/// última vez é o defeito que a `21` nomeou — a resposta velha parecida com a
+/// certa. Quem commitou no terminal integrado entre uma abertura e outra veria
+/// a contagem de antes, sem nada avisando.
+#[test]
+fn o_botao_do_git_abre_o_gerenciador_e_pede_o_retrato() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+
+    let botao = IdeShell::activity_rect(ACTIVITY_GIT_ID);
+    let clique = Point::new(botao.origin.x + 12.0, botao.origin.y + 12.0);
+    shell.pointer_down(clique, size);
+    assert!(shell.git_surface().is_open(), "o botão abre a janela");
+    assert!(
+        shell
+            .commands
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::RefreshGit)),
+        "abrir pergunta ao repositório de novo"
+    );
+
+    // O mesmo botão fecha: sem isso, quem clicou de novo fica sem saída a não
+    // ser o Esc.
+    shell.pointer_down(clique, size);
+    assert!(!shell.git_surface().is_open());
+}
+
+/// A janela mostra os quatro nós, e só o de branches tem conteúdo.
+///
+/// Os outros três aparecem vazios de propósito. Um nó que só existe depois que a
+/// capacidade chega faria a tela mudar de forma a cada fase.
+#[test]
+fn o_painel_da_esquerda_tem_os_quatro_nos() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        changed: 3,
+        staged: 1,
+        modified: 1,
+        untracked: 1,
+        branches: vec![
+            BranchItem {
+                name: "main".to_owned(),
+                current: true,
+            },
+            BranchItem {
+                name: "feature/busca".to_owned(),
+                current: false,
+            },
+        ],
+        message: None,
+    });
+    shell.toggle_git();
+    let desenhado = shell.paint(size);
+    let escrito = |texto: &str| {
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+    };
+
+    assert!(escrito("Branches (2)"), "o nó das branches conta o que tem");
+    for nome in ["Tags", "Remotes", "Stashes"] {
+        assert!(escrito(nome), "o nó {nome} aparece mesmo vazio");
+    }
+    // O lado direito mostra a contagem por estado, que é o que a fase 0 tem.
+    assert!(escrito("Preparados: 1") && escrito("Não rastreados: 1"));
+}
+
+/// A busca filtra as branches, e some com o nó que ficou sem nenhuma.
+///
+/// Um `Tags` vazio depois de digitar diria que não há tag nenhuma — o que é
+/// mentira: o que há é uma busca que não casou com nada ali.
+#[test]
+fn a_busca_do_gerenciador_filtra_as_branches() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        branches: vec![
+            BranchItem {
+                name: "main".to_owned(),
+                current: true,
+            },
+            BranchItem {
+                name: "feature/busca".to_owned(),
+                current: false,
+            },
+            BranchItem {
+                name: "feature/git".to_owned(),
+                current: false,
+            },
+        ],
+        ..GitView::default()
+    });
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    // Quatro raízes, nenhuma aberta ainda.
+    assert_eq!(shell.git_surface().visible_rows(), 4);
+
+    shell.text_input("feature");
+    let _ = shell.paint(size);
+    assert_eq!(shell.git_surface().query(), "feature");
+    assert_eq!(
+        shell.git_surface().visible_rows(),
+        1,
+        "com filtro sobra só o nó das branches, e os três vazios somem"
+    );
+    let desenhado = shell.paint(size);
+    assert!(
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == "Branches (2)")),
+        "e ele conta só as que casaram"
+    );
+
+    // Apagar devolve tudo: o filtro não pode consumir o que ele escondeu.
+    for _ in 0..7 {
+        shell.key_down("Backspace");
+    }
+    let _ = shell.paint(size);
+    assert!(shell.git_surface().query().is_empty());
+    assert_eq!(shell.git_surface().visible_rows(), 4);
+}
+
+/// A barra de estado mostra a branch e quantos arquivos mudaram.
+///
+/// É o critério da fase 0 da `22`, e ele vale com a janela fechada: quem não
+/// abre o gerenciador precisa ver em que branch está.
+#[test]
+fn a_barra_de_estado_mostra_a_branch_e_o_que_mudou() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        changed: 3,
+        ..GitView::default()
+    });
+    let desenhado = shell.paint(size);
+    assert!(
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == "main ~3")),
+        "a branch e a contagem, com a janela fechada"
+    );
+
+    // Sem nada alterado, a contagem some — um `~0` seria ruído fixo na barra.
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        ..GitView::default()
+    });
+    let desenhado = shell.paint(size);
+    assert!(
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == "main")),
+    );
+}
+
+/// Uma pasta que não é repositório não é erro, e a janela diz isso.
+///
+/// A maioria das pastas não é repositório. Abrir vazia deixaria quem clicou sem
+/// saber se a IDE não achou nada ou se ela falhou.
+#[test]
+fn sem_repositorio_o_gerenciador_explica_em_vez_de_ficar_vazio() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.toggle_git();
+    let desenhado = shell.paint(size);
+    assert!(
+        desenhado.iter().any(|comando| {
+            matches!(comando, PaintCommand::DrawText(t) if t.text.contains("não está num repositório"))
+        }),
+        "a janela explica a ausência"
+    );
+    assert!(
+        shell.git_view().status_segment().is_none(),
+        "e a barra de estado não inventa segmento nenhum"
+    );
+}
+
+/// A divisa do gerenciador se arrasta, e o painel da esquerda muda de largura.
+///
+/// A divisão é do `SplitPane` da biblioteca — a IDE não desenha nem arruma —, e
+/// o que se afirma aqui é o que quem usa vê: puxar a linha do meio dá mais
+/// espaço para a árvore. A mesma pergunta que muda o ponteiro para a seta dupla
+/// é a que o arrasto usa, e por isso as duas não podem divergir.
+#[test]
+fn a_divisa_do_gerenciador_se_arrasta() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let (_, _, arvore_antes, _) = git::GitSurface::areas(&shell.host);
+    let divisa = shell.git_surface().divider_area();
+    assert!(divisa.size.width > 0.0, "a divisa precisa de área para o gesto");
+    let meio = Point::new(
+        divisa.origin.x + divisa.size.width / 2.0,
+        divisa.origin.y + divisa.size.height / 2.0,
+    );
+    assert!(
+        shell.git_divider_hover(meio),
+        "sob o ponteiro ela se anuncia, e não só depois de alguém movê-la"
+    );
+
+    shell.pointer_down(meio, size);
+    shell.pointer_move(Point::new(meio.x + 120.0, meio.y), size);
+    let _ = shell.paint(size);
+    let (_, _, arvore_depois, _) = git::GitSurface::areas(&shell.host);
+    assert!(
+        arvore_depois.size.width > arvore_antes.size.width + 50.0,
+        "puxar para a direita alarga a árvore: {arvore_antes:?} para {arvore_depois:?}"
+    );
+
+    // Soltar encerra o arrasto: sem isso a divisa seguiria o ponteiro sem
+    // ninguém estar segurando nada, que é o defeito que a divisão do editor já
+    // teve.
+    shell.pointer_up();
+    assert!(!shell.git_divider_hover(Point::new(10.0, 10.0)));
 }

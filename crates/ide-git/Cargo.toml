@@ -1,0 +1,21 @@
+[package]
+name = "ide-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ide-domain = { path = "../ide-domain" }
+ide-process = { path = "../ide-process" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+
+[lints]
+workspace = true

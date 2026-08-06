@@ -34,6 +34,11 @@ pub enum ApplicationCommand {
     /// alguém escolher, a lista pode ter sido reordenada por outra janela, e
     /// uma posição passaria a apontar para outro projeto.
     OpenRecentProject(std::path::PathBuf),
+    /// Pede o retrato do repositório de novo.
+    ///
+    /// A tela não fala com o Git: ela pede, e quem responde é a aplicação, fora
+    /// da linha de execução da interface. Ver a `22`.
+    RefreshGit,
     OpenSettings,
     OpenToolchainSettings,
     /// Abre o seletor de pasta para apontar uma instalação.

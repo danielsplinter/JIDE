@@ -13,6 +13,7 @@
 use crate::debugging::DebugFrameView;
 use crate::debugging::{DebugPanelState, DebugView};
 use crate::ide_shell::generate::GenerateSurface;
+use crate::ide_shell::git::GitSurface;
 use crate::ide_shell::inspection::InspectionSurface;
 use crate::ide_shell::new_item::NewItemSurface;
 use crate::ide_shell::rename::RenameSurface;
@@ -204,6 +205,8 @@ const TERMINAL_TOGGLE_ID: WidgetId = WidgetId(10_024);
 const ACTIVITY_SEARCH_ID: WidgetId = WidgetId(10_101);
 /// O botão que mostra e esconde o painel do Explorer.
 const ACTIVITY_SIDEBAR_ID: WidgetId = WidgetId(10_102);
+/// O botão que abre o gerenciador de Git.
+const ACTIVITY_GIT_ID: WidgetId = WidgetId(10_509);
 const EXPLORER_CONTEXT_MENU_ID: WidgetId = WidgetId(10_025);
 const COMPLETION_POPUP_ID: WidgetId = WidgetId(10_026);
 const COMPLETION_LIST_ID: WidgetId = WidgetId(10_027);
@@ -283,6 +286,7 @@ struct ShellContext {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SurfaceKind {
     Rename,
+    Git,
     Generate,
     TypeSearch,
     Inspection,
@@ -291,8 +295,9 @@ enum SurfaceKind {
     TabSwitcher,
 }
 
-const SURFACES: [SurfaceKind; 7] = [
+const SURFACES: [SurfaceKind; 8] = [
     SurfaceKind::Rename,
+    SurfaceKind::Git,
     SurfaceKind::Generate,
     SurfaceKind::TypeSearch,
     SurfaceKind::Inspection,
@@ -318,8 +323,11 @@ enum Layer {
 ///
 /// É `SURFACES` lida de trás para frente — a ordem em que as janelas são
 /// desenhadas — com a lista de completação declarada no lugar que ela ocupa.
-const OVERLAY: [Layer; 8] = [
+const OVERLAY: [Layer; 9] = [
     Layer::Surface(SurfaceKind::Settings),
+    // O gerenciador fica embaixo das janelas que ele pode abrir por cima: ele é
+    // uma tela de trabalho, e não um diálogo que interrompe.
+    Layer::Surface(SurfaceKind::Git),
     Layer::Surface(SurfaceKind::NewItem),
     Layer::Surface(SurfaceKind::TabSwitcher),
     Layer::Surface(SurfaceKind::Inspection),
@@ -575,6 +583,8 @@ pub struct IdeShell {
     /// As janelas de gerar e de renomear, cada uma com seu estado e seus
     /// eventos. Ver `14-ide-shell-decomposition`.
     generate: GenerateSurface,
+    /// O gerenciador de Git, com a árvore de referências e as duas abas.
+    git: GitSurface,
     new_item: NewItemSurface,
     rename: RenameSurface,
     menu: MenuState,
@@ -814,6 +824,12 @@ impl IdeShell {
                     let sections = self.catalog.settings_sections.len();
                     self.settings.sync_declaration(&mut self.host, sections);
                 }
+                // O mesmo vale para a divisa do gerenciador: a largura da coluna
+                // sai da proporção dela, e declarada na pintura ficaria um
+                // quadro atrás do ponteiro que a arrastou.
+                if open && kind == SurfaceKind::Git {
+                    self.git.sync_declaration(&mut self.host);
+                }
             }
         }
         // A faixa da busca é declarada uma vez e escondida quando a barra não
@@ -986,6 +1002,7 @@ impl IdeShell {
     fn surface_is_open(&self, kind: SurfaceKind) -> bool {
         match kind {
             SurfaceKind::Rename => self.rename.is_open(),
+            SurfaceKind::Git => self.git.is_open(),
             SurfaceKind::Generate => self.generate.is_open(),
             SurfaceKind::TypeSearch => self.search.is_open(),
             SurfaceKind::Inspection => self.inspection.is_open(),
@@ -999,6 +1016,7 @@ impl IdeShell {
     fn surface_escape(&mut self, kind: SurfaceKind) {
         match kind {
             SurfaceKind::Rename => self.cancel_rename(),
+            SurfaceKind::Git => self.git.close(),
             SurfaceKind::Generate => self.close_generate(),
             SurfaceKind::TypeSearch => self.close_type_search(),
             SurfaceKind::Inspection => self.close_inspection(),
@@ -1013,6 +1031,10 @@ impl IdeShell {
     fn surface_pointer_down(&mut self, kind: SurfaceKind, point: Point, size: Size) {
         match kind {
             SurfaceKind::Rename => self.rename_pointer_down(point, size),
+            SurfaceKind::Git => {
+                let context = self.layout_context();
+                self.git.pointer_down(&mut self.host, &context, point);
+            }
             SurfaceKind::Generate => self.generate_pointer_down(point, size),
             SurfaceKind::TypeSearch => self.type_search_pointer_down(point, size),
             SurfaceKind::Inspection => self.inspection_pointer_down(point, size),
@@ -1031,6 +1053,17 @@ impl IdeShell {
                 self.rename_pointer_event(&UiEvent::PointerMove(primary_pointer(point)));
                 Some(true)
             }
+            // A divisa da janela do Git se arrasta, e por isso ela precisa do
+            // movimento: só com o clique, a divisa é pega e nunca anda.
+            SurfaceKind::Git => {
+                let context = self.layout_context();
+                self.git.pointer_event(
+                    &self.host,
+                    &context,
+                    &UiEvent::PointerMove(primary_pointer(point)),
+                );
+                Some(true)
+            }
             // A janela cobre o que está atrás: mover ali não arrasta nada.
             SurfaceKind::Settings => Some(false),
             _ => None,
@@ -1041,6 +1074,14 @@ impl IdeShell {
     fn surface_pointer_up(&mut self, kind: SurfaceKind) {
         if kind == SurfaceKind::Rename {
             self.rename_pointer_event(&UiEvent::PointerUp(primary_pointer(Point::ZERO)));
+        }
+        if kind == SurfaceKind::Git {
+            let context = self.layout_context();
+            self.git.pointer_event(
+                &self.host,
+                &context,
+                &UiEvent::PointerUp(primary_pointer(Point::ZERO)),
+            );
         }
     }
 
@@ -1067,6 +1108,11 @@ impl IdeShell {
                 self.type_search_scroll(point, delta_lines);
                 true
             }
+            SurfaceKind::Git => {
+                let context = self.layout_context();
+                self.git.scroll(&self.host, &context, point, delta_lines);
+                true
+            }
             SurfaceKind::Settings => true,
             SurfaceKind::Inspection | SurfaceKind::NewItem | SurfaceKind::TabSwitcher => false,
         }
@@ -1076,6 +1122,7 @@ impl IdeShell {
     fn surface_key(&mut self, kind: SurfaceKind, key: &str, modifiers: Modifiers) -> bool {
         match kind {
             SurfaceKind::Rename => self.rename_key(key, modifiers),
+            SurfaceKind::Git => self.git.key(key),
             SurfaceKind::Generate => false,
             SurfaceKind::TypeSearch => self.type_search_key(key),
             SurfaceKind::Inspection => self.inspection_key(key, modifiers),
@@ -1104,6 +1151,12 @@ impl IdeShell {
     fn surface_text_input(&mut self, kind: SurfaceKind, text: &str) -> bool {
         match kind {
             SurfaceKind::Rename => self.rename_text_input(text),
+            // Com a janela aberta, o que se digita é da busca das branches: é a
+            // única caixa que ela tem, e é onde o cursor está.
+            SurfaceKind::Git => {
+                self.git.text_input(text);
+                true
+            }
             SurfaceKind::Generate => false,
             SurfaceKind::TypeSearch => self.type_search_text_input(text),
             SurfaceKind::Inspection => self.inspection_text_input(text),
@@ -1648,6 +1701,8 @@ mod documents;
 mod editor_area;
 mod explorer_area;
 mod generate;
+mod git;
+pub use git::{BranchItem, GitView};
 mod inspection;
 mod menu_bar;
 mod new_item;
