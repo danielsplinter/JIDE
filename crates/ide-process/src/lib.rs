@@ -112,6 +112,47 @@ fn processo_vivo(id: ProcessId) -> bool {
     sistema.process(pid).is_some()
 }
 
+/// Impede que o processo filho abra uma janela de console.
+///
+/// No Windows, um processo **sem** console — que é o que a IDE é no binário de
+/// produção — faz o sistema criar uma janela nova para cada filho de subsistema
+/// console. O analisador externo aparecia como um terminal preto ao lado da
+/// IDE, com o nome do executável no título.
+///
+/// Vale também para o binário com console: ali o filho herdava o terminal da
+/// IDE, e o que ele escrevesse se misturaria ao log. A saída dele já vem por
+/// canos — é assim que a IDE a lê —, então não se perde nada.
+///
+/// Fora do Windows não há o que fazer, e a função existe justamente para que
+/// quem chama não precise saber disso.
+pub fn sem_janela_de_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(SEM_JANELA);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+/// O mesmo, para quem monta o comando com a biblioteca padrão.
+///
+/// Uma pergunta rápida e síncrona — "qual é a sua versão?" — não justifica um
+/// runtime assíncrono, e é justamente ela que pisca uma janela na cara de quem
+/// abre a IDE.
+pub fn sem_janela_de_console_sincrono(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(SEM_JANELA);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+/// `CREATE_NO_WINDOW`, do Win32.
+#[cfg(windows)]
+const SEM_JANELA: u32 = 0x0800_0000;
+
 #[async_trait]
 impl ProcessSupervisor for NativeProcessSupervisor {
     async fn spawn(&self, request: ProcessRequest) -> Result<ProcessId, ProcessError> {
@@ -121,6 +162,7 @@ impl ProcessSupervisor for NativeProcessSupervisor {
         let mut command = Command::new(&request.program);
         command.args(&request.args).kill_on_drop(true);
         command.envs(request.environment);
+        sem_janela_de_console(&mut command);
         if let Some(directory) = &request.working_directory {
             command.current_dir(directory);
         }
@@ -174,6 +216,7 @@ impl ProcessSupervisor for NativeProcessSupervisor {
             .args(&request.args)
             .envs(request.environment)
             .kill_on_drop(true);
+        sem_janela_de_console(&mut command);
         if let Some(directory) = &request.working_directory {
             command.current_dir(directory);
         }

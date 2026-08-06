@@ -215,6 +215,7 @@ fn conversa(
             .stderr(Stdio::piped())
             // Matar ao soltar é o que impede processo órfão sobrevivendo à IDE.
             .kill_on_drop(true);
+        crate::sem_janela_de_console(&mut command);
         if let Some(diretorio) = &request.working_directory {
             command.current_dir(diretorio);
         }

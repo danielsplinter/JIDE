@@ -96,6 +96,40 @@ fn rust_sources(directory: &Path) -> Vec<PathBuf> {
     sources
 }
 
+/// Todo processo filho nasce sem janela de console.
+///
+/// No binário de produção a IDE não tem console, e o Windows cria uma janela
+/// nova para cada filho de subsistema console: o analisador externo apareceu
+/// como um terminal preto ao lado da IDE, com `node.exe` no título.
+///
+/// A guarda olha os lugares que montam um comando e exige a marca ao lado. Ela
+/// existe porque o defeito é **invisível em desenvolvimento** — ali a IDE tem
+/// console, o filho o herda, e nenhuma janela aparece.
+#[test]
+fn nenhum_processo_filho_abre_janela_de_console() {
+    let root = workspace_root();
+    let mut faltando = Vec::new();
+    for relativo in [
+        "crates/ide-process/src/lib.rs",
+        "crates/ide-process/src/conversation.rs",
+        "crates/language-typescript/src/toolchain/mod.rs",
+    ] {
+        let fonte = fs::read_to_string(root.join(relativo))
+            .unwrap_or_else(|error| panic!("não foi possível ler {relativo}: {error}"));
+        let comandos = fonte.matches("Command::new(").count();
+        // Os testes do próprio arquivo montam comandos e não precisam da marca:
+        // eles rodam num console, e uma janela a mais ali não incomoda ninguém.
+        let marcas = fonte.matches("sem_janela_de_console").count();
+        if comandos > marcas {
+            faltando.push(format!("{relativo}: {comandos} comandos, {marcas} marcas"));
+        }
+    }
+    assert!(
+        faltando.is_empty(),
+        "comando montado sem `sem_janela_de_console`: {faltando:#?}"
+    );
+}
+
 #[test]
 fn ui_dependencies_are_relative_centralized_and_versioned() {
     let root = workspace_root();

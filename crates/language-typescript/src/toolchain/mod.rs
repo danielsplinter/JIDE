@@ -124,10 +124,12 @@ impl ToolchainProvider for NodeToolchainProvider {
 /// Falhar é silencioso: uma instalação sem versão legível continua utilizável, e
 /// recusá-la por não saber se apresentar seria pior.
 fn version_of(home: &Path) -> Option<String> {
-    let saida = std::process::Command::new(node_executable(home))
-        .arg("--version")
-        .output()
-        .ok()?;
+    let mut comando = std::process::Command::new(node_executable(home));
+    comando.arg("--version");
+    // Sem isto, perguntar a versão pisca uma janela de console na cara de quem
+    // abre a IDE — e ela aparece uma vez por instalação detectada.
+    ide_process::sem_janela_de_console_sincrono(&mut comando);
+    let saida = comando.output().ok()?;
     if !saida.status.success() {
         return None;
     }
