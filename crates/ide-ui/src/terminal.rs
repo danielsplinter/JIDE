@@ -125,6 +125,81 @@ pub(super) fn ordered_selection(selection: TerminalSelection) -> (TextPosition, 
     }
 }
 
+/// Uma coordenada que a saída aponta: caminho, linha e coluna.
+///
+/// Linha e coluna vêm **como estão no texto**, contadas de um — é assim que todo
+/// compilador as escreve. Quem abre converte para a contagem interna.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct LinkDaSaida {
+    pub(super) caminho: String,
+    pub(super) linha: usize,
+    pub(super) coluna: usize,
+}
+
+/// O link sob uma coluna de uma linha da saída, se houver um ali.
+///
+/// # Como o padrão é lido
+///
+/// `Arquivo.java:42:7` é lido **da direita para a esquerda**: os dois últimos
+/// campos separados por `:` são números, e o que sobra é o caminho. Ler da
+/// esquerda quebraria em `C:\\projetos\\Arquivo.java:42` — a letra da unidade
+/// tem dois-pontos, e ela é a primeira coisa que aparece num caminho do Windows.
+///
+/// A coluna é opcional: `Arquivo.java:42` aponta para o começo da linha.
+///
+/// # O que não vira link
+///
+/// Um trecho sem `.` nem barra não é caminho — `versão:1:2` não abriria nada. É
+/// heurística, e ela erra para o lado de não oferecer: um link que não abre nada
+/// é pior do que texto que não é link.
+pub(super) fn link_da_saida(texto: &str, coluna: usize) -> Option<LinkDaSaida> {
+    let mut inicio = 0usize;
+    for palavra in texto.split_whitespace() {
+        // Onde esta palavra começa, em caracteres — `split_whitespace` não diz.
+        let deslocamento = texto[inicio..].find(palavra)? + inicio;
+        let comeco = texto[..deslocamento].chars().count();
+        let fim = comeco + palavra.chars().count();
+        inicio = deslocamento + palavra.len();
+        if coluna < comeco || coluna >= fim {
+            continue;
+        }
+        return link_do_trecho(palavra);
+    }
+    None
+}
+
+/// A leitura de um trecho isolado, já sem o resto da linha.
+fn link_do_trecho(palavra: &str) -> Option<LinkDaSaida> {
+    // O rastro de pilha do Java escreve `(Arquivo.java:42)`, e a saída de muita
+    // ferramenta termina em vírgula ou ponto.
+    let limpo = palavra.trim_matches(|c: char| "()[]{}<>,;'\"".contains(c));
+    let partes: Vec<&str> = limpo.rsplitn(3, ':').collect();
+    let (caminho, linha, coluna) = match partes.as_slice() {
+        [coluna, linha, caminho] => (
+            (*caminho).to_owned(),
+            linha.parse().ok()?,
+            coluna.parse().ok()?,
+        ),
+        [linha, caminho] => ((*caminho).to_owned(), linha.parse().ok()?, 1usize),
+        _ => return None,
+    };
+    if linha == 0 || coluna == 0 {
+        return None;
+    }
+    // `at br.Pedido.total(Pedido.java:42)` — o rastro de pilha cola o método no
+    // arquivo, e tirar só o parêntese do fim deixaria o método dentro do
+    // caminho. O arquivo é o que vem **depois** do último parêntese aberto.
+    let caminho = caminho
+        .rsplit_once('(')
+        .map_or(caminho.clone(), |(_, depois)| depois.to_owned());
+    let parece_caminho = caminho.contains('.') || caminho.contains('/') || caminho.contains('\\');
+    (parece_caminho && !caminho.is_empty()).then_some(LinkDaSaida {
+        caminho,
+        linha,
+        coluna,
+    })
+}
+
 pub(super) fn selection_columns(
     selection: Option<TerminalSelection>,
     line: usize,
@@ -147,4 +222,39 @@ pub(super) fn selection_columns(
         length
     };
     (to > from).then_some((from, to))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O que a saída aponta, e o que ela não aponta.
+    #[test]
+    fn a_saida_aponta_arquivo_linha_e_coluna() {
+        let texto = "erro em src/Pedido.java:42:7 — falta ponto e vírgula";
+        assert_eq!(
+            link_da_saida(texto, 12),
+            Some(LinkDaSaida {
+                caminho: "src/Pedido.java".to_owned(),
+                linha: 42,
+                coluna: 7,
+            })
+        );
+        assert!(link_da_saida(texto, 0).is_none());
+        assert_eq!(
+            link_da_saida("Pedido.java:42", 3).map(|link| (link.linha, link.coluna)),
+            Some((42, 1))
+        );
+        assert_eq!(
+            link_da_saida("at br.Pedido.total(Pedido.java:42)", 20).map(|link| link.caminho),
+            Some("Pedido.java".to_owned())
+        );
+        let janela = concat!("C:", "\\", "projetos", "\\", "Pedido.java:42:7");
+        assert_eq!(
+            link_da_saida(janela, 5).map(|link| (link.linha, link.coluna)),
+            Some((42, 7))
+        );
+        assert!(link_da_saida("versao:1:2", 3).is_none());
+        assert!(link_da_saida("Pedido.java:0:1", 3).is_none());
+    }
 }

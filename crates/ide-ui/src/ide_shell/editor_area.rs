@@ -91,6 +91,15 @@ impl IdeShell {
     }
 
     pub fn navigation_hover(&self, point: Point, size: Size, control: bool) -> bool {
+        // Na saída do terminal o link é clicável **sem** `Ctrl`, como no console
+        // de qualquer IDE: ali não há texto para o clique disputar — ele não
+        // move cursor nem posiciona nada.
+        if !self.terminal.minimized
+            && point.y >= self.geometry().editor_bottom
+            && self.terminal_link_at(point).is_some()
+        {
+            return true;
+        }
         if !control {
             return false;
         }

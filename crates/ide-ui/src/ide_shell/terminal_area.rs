@@ -377,6 +377,37 @@ impl IdeShell {
         self.set_terminal_scroll(alvo);
     }
 
+    /// O arquivo que a saída aponta sob este ponto, se houver um ali.
+    ///
+    /// **A célula vem da grade**, pela mesma medição com que ela foi desenhada:
+    /// perguntar a largura do caractere aqui poria o clique numa coluna e o
+    /// texto em outra.
+    ///
+    /// O caminho relativo é resolvido contra a raiz do projeto, que é onde o
+    /// terminal nasce. Um caminho que não existe **não vira link**: oferecer um
+    /// clique que abre nada é pior do que não oferecer.
+    pub(super) fn terminal_link_at(&self, point: Point) -> Option<(PathBuf, usize, usize)> {
+        let (linha, coluna) = self.terminal.grid.position_at(point);
+        let texto: String = self
+            .active_terminal()
+            .grid_rows()
+            .get(linha)?
+            .iter()
+            .map(|celula| celula.character)
+            .collect();
+        let link = link_da_saida(&texto, coluna)?;
+        let caminho = PathBuf::from(&link.caminho);
+        let absoluto = if caminho.is_absolute() {
+            caminho
+        } else {
+            self.workspace_path().join(caminho)
+        };
+        // Contadas de um no texto do compilador, de zero aqui dentro.
+        absoluto
+            .is_file()
+            .then(|| (absoluto, link.linha - 1, link.coluna - 1))
+    }
+
     /// Onde fica o botão de recolher e mostrar o terminal.
     ///
     /// Fora do tratador porque quem roteia o clique precisa da mesma área: com
@@ -405,6 +436,16 @@ impl IdeShell {
         let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         if point.x < editor_x || point.y < geometry.editor_bottom {
+            return;
+        }
+        // Um caminho com linha e coluna na saída é uma coordenada, e a IDE sabe
+        // abrir coordenadas. O clique nele abre o arquivo em vez de começar uma
+        // seleção — quem clica num link não está marcando texto.
+        if let Some((caminho, linha, coluna)) = self.terminal_link_at(point) {
+            self.commands
+                .push(ApplicationCommand::OpenDocument(
+                    OpenDocumentRequest::new(caminho).at(linha, coluna),
+                ));
             return;
         }
         self.context.focus = ShellFocus::Terminal;

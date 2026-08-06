@@ -217,7 +217,7 @@ aproximado para o resto.
 `ide-terminal`, agora sem consumidor na interface — o `run()` programático ainda os
 usa para disparar compilações. Reduzi-los ao mínimo é limpeza, não fase.
 
-## Fase 4 — O que a grade permite — **pendente**
+## Fase 4 — O que a grade permite ✅
 
 Com grade e cursor, três coisas passaram a ser possíveis. Nenhuma é requisito
 para o terminal parecer de verdade — as fases 0 a 3 entregaram isso —, mas as
@@ -266,7 +266,7 @@ O que **não** foi medido: o custo de varrer o histórico a cada tecla. São at�
 cinco mil linhas de oitenta colunas, e a varredura roda a cada letra digitada,
 como a do editor. É a primeira coisa a olhar se digitar ali parecer pesado.
 
-### 3. Links clicáveis
+### 3. Links clicáveis ✅
 
 `Arquivo.java:42:7` na saída do compilador é uma coordenada, e a IDE sabe abrir
 coordenadas. Reconhecer o padrão nas células e transformar o clique em navegação
@@ -275,9 +275,37 @@ coordenadas. Reconhecer o padrão nas células e transformar o clique em navega�
 **Critério:** clicar num caminho com linha e coluna na saída abre o arquivo no
 editor, naquela posição.
 
+**Feita.** O clique abre o arquivo na linha e coluna, e o ponteiro vira mão sobre
+o link — **sem `Ctrl`**, como no console de qualquer IDE: ali o clique não
+disputa com nada, porque não move cursor nem posiciona texto.
+
+O padrão é lido **da direita para a esquerda**: os dois últimos campos separados
+por `:` são números, e o que sobra é o caminho. Ler da esquerda quebraria em
+`C:\projetos\Arquivo.java:42` — a letra da unidade tem dois-pontos, e ela é a
+primeira coisa de um caminho no Windows. A coluna é opcional.
+
+Duas formas de saída que o teste cobriu e que a primeira versão errava:
+
+- **o rastro de pilha do Java** cola o método no arquivo —
+  `at br.Pedido.total(Pedido.java:42)` —, e tirar só o parêntese do fim deixava
+  o método dentro do caminho. O arquivo é o que vem depois do último `(`;
+- **o que não parece caminho não vira link.** `versao:1:2` tem a forma certa e
+  não é arquivo nenhum. A heurística erra para o lado de não oferecer: um link
+  que não abre nada é pior do que texto que não é link. Pelo mesmo motivo, um
+  caminho que não existe em disco também não vira link.
+
+**A célula vem da grade**, pela mesma medição com que ela foi desenhada — a
+terceira vez nesta fase em que perguntar a geometria noutro lugar poria o gesto
+numa coluna e o texto em outra.
+
 **A ordem entre as três não importa** — são independentes. A primeira é a que
-tem consequência hoje, porque as outras duas são recursos ausentes e ela é uma
+tinha consequência, porque as outras duas eram recursos ausentes e ela era uma
 divergência entre o que se vê e o que se copia.
+
+**As três estão feitas.** O que as unia era a mesma pergunta — *em que célula
+isto está?* — e a mesma resposta: perguntar à grade, que é o que a tela desenha.
+Cada uma das três começou lendo de outro lugar, e cada uma foi corrigida para
+ler dali.
 
 ### Conferido em 06/08/2026
 
