@@ -222,6 +222,8 @@ const SEARCH_STRIP_ID: WidgetId = WidgetId(10_482);
 /// um `TextInput` —, e é o que importa para quem usa: a busca é uma, e aparece
 /// onde se está procurando.
 const SEARCH_STRIP_TERMINAL_ID: WidgetId = WidgetId(10_103);
+/// A faixa das abas do terminal, que agora tem duas coisas dentro.
+const FRAME_TERMINAL_TOPO_ID: WidgetId = WidgetId(10_106);
 const SEARCH_POPUP_TERMINAL_ID: WidgetId = WidgetId(10_104);
 const SEARCH_INPUT_TERMINAL_ID: WidgetId = WidgetId(10_105);
 /// Linhas visíveis da lista de completação antes de precisar rolar.
@@ -235,6 +237,14 @@ const COMPLETION_POPUP_WIDTH: f32 = 260.0;
 const COMPLETION_POPUP_PADDING: f32 = 4.0;
 const SEARCH_BOX_WIDTH: f32 = 380.0;
 const SEARCH_BOX_HEIGHT: f32 = 42.0;
+/// A caixa da busca do terminal, que divide a fileira com as abas.
+///
+/// Menor que a do editor porque o lugar é outro: ali ela flutua sobre o código e
+/// pode ser larga; aqui ela mora **na fileira das abas**, e o que ela ocupar sai
+/// do espaço delas.
+const SEARCH_BOX_TERMINAL_WIDTH: f32 = 260.0;
+/// O que fica reservado à direita, onde mora o botão de recolher.
+const TERMINAL_TOGGLE_ROOM: f32 = 34.0;
 /// Raiz do anfitrião da tela inteira; não é desenhada.
 const SHELL_ROOT_ID: WidgetId = WidgetId(10_200);
 /// Primeiro id da faixa reservada às áreas das janelas; uma por superfície.
@@ -455,23 +465,48 @@ fn declare_frame(host: &mut UiHost) {
     // As três faixas do terminal, na ordem em que se leem: as abas, a saída, e
     // a linha de comando **no pé** — como em qualquer terminal, o que já foi
     // executado sobe e o cursor espera embaixo.
+    // A fileira do topo do terminal: as abas à esquerda, e à direita a busca,
+    // antes do botão de recolher. Uma linha, e não dois nós soltos — é o arranjo
+    // que reparte a largura entre eles, como faz com os ícones do título.
     let _ = host.declare(
         FRAME_TERMINAL_ID,
+        FRAME_TERMINAL_TOPO_ID,
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            cross_align: CrossAlign::Center,
+            height: Some(TERMINAL_TAB_HEIGHT),
+            ..LayoutStyle::default()
+        },
+    );
+    let _ = host.declare(
+        FRAME_TERMINAL_TOPO_ID,
         TERMINAL_TABS_ID,
-        fixa(TERMINAL_TAB_HEIGHT),
+        LayoutStyle {
+            flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
     );
     let _ = host.declare(FRAME_TERMINAL_ID, TERMINAL_OUTPUT_ID, cresce(coluna));
     let _ = host.declare(
-        FRAME_TERMINAL_ID,
+        FRAME_TERMINAL_TOPO_ID,
         SEARCH_STRIP_TERMINAL_ID,
-        LayoutStyle::default(),
+        LayoutStyle {
+            direction: LayoutDirection::Row,
+            main_align: MainAlign::End,
+            cross_align: CrossAlign::Center,
+            width: Some(SEARCH_BOX_TERMINAL_WIDTH + TERMINAL_TOGGLE_ROOM),
+            // O espaço da direita é do botão de recolher, que se desenha por
+            // cima da fileira: sem a reserva, a busca ficaria embaixo dele.
+            padding: EdgeInsets::only(0.0, TERMINAL_TOGGLE_ROOM, 0.0, 0.0),
+            ..LayoutStyle::default()
+        },
     );
     let _ = host.declare(
         SEARCH_STRIP_TERMINAL_ID,
         SEARCH_POPUP_TERMINAL_ID,
         LayoutStyle {
-            width: Some(SEARCH_BOX_WIDTH),
-            height: Some(SEARCH_BOX_HEIGHT),
+            width: Some(SEARCH_BOX_TERMINAL_WIDTH),
+            height: Some(TERMINAL_TAB_HEIGHT - 6.0),
             ..LayoutStyle::default()
         },
     );
@@ -809,8 +844,9 @@ impl IdeShell {
             LayoutStyle {
                 direction: LayoutDirection::Row,
                 main_align: MainAlign::End,
-                cross_align: CrossAlign::Start,
-                padding: EdgeInsets::only(6.0, 0.0, 0.0, 12.0),
+                cross_align: CrossAlign::Center,
+                width: Some(SEARCH_BOX_TERMINAL_WIDTH + TERMINAL_TOGGLE_ROOM),
+                padding: EdgeInsets::only(0.0, TERMINAL_TOGGLE_ROOM, 0.0, 0.0),
                 hidden: !self.editor_area.search_open
                     || !self.context.busca_no_terminal
                     || self.terminal.minimized,
@@ -853,6 +889,12 @@ impl IdeShell {
     }
 
     /// As faixas do terminal, lidas do arranjo: a saída e a linha de comando.
+    /// As mesmas faixas, para o teste conferir onde as coisas ficaram.
+    #[cfg(test)]
+    pub(super) fn terminal_bands_for_test(&self) -> (Rect, Rect) {
+        self.terminal_bands()
+    }
+
     fn terminal_bands(&self) -> (Rect, Rect) {
         let area = |id| {
             self.host

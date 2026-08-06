@@ -7403,3 +7403,32 @@ fn a_busca_no_terminal_usa_a_mesma_barra_e_procura_na_saida() {
     assert!(shell.terminal.busca.is_none());
     assert!(!shell.context.busca_no_terminal);
 }
+
+/// A busca do terminal mora na fileira das abas, antes do botão de recolher.
+///
+/// Ela nasceu embaixo da saída, onde disputava altura com o que se estava
+/// lendo. Na fileira das abas ela não come linha nenhuma do terminal — e o
+/// espaço da direita continua sendo do botão que recolhe o painel.
+#[test]
+fn a_busca_do_terminal_fica_na_fileira_das_abas() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+
+    shell.context.focus = ShellFocus::Terminal;
+    shell.toggle_search();
+    let _ = shell.paint(size);
+
+    let caixa = shell.search_box_area();
+    let recolher = shell.terminal_toggle_rect(size);
+    let (saida, _) = shell.terminal_bands_for_test();
+    assert!(caixa.size.width > 0.0, "a caixa precisa ter área");
+    assert!(
+        caixa.origin.y + caixa.size.height <= saida.origin.y + 0.01,
+        "ela fica acima da saída, na fileira das abas: {caixa:?} contra {saida:?}"
+    );
+    assert!(
+        caixa.origin.x + caixa.size.width <= recolher.origin.x + 0.01,
+        "e termina antes do botão de recolher: {caixa:?} contra {recolher:?}"
+    );
+}

@@ -1211,7 +1211,10 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // abrir com o foco no terminal, achar na grade, andar entre as
         // ocorrências nos dois sentidos e fechar limpando os dois lados. É a
         // terceira e última pendência da fase 4 da `18` que ganha teste.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 7_405),
+        // De 7 405 para 7 434: onde a busca do terminal mora — na fileira das
+        // abas, antes do botão de recolher. Posição de coisa na tela se afirma
+        // por área, e não por olho.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 7_434),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
