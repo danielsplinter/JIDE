@@ -380,6 +380,12 @@ impl IdeShell {
     }
 
     pub(super) fn editor_view_rect(&self, size: Size) -> Rect {
+        // Dividida, a esquerda ocupa a coluna que o componente deu a ela. A
+        // conta da largura e da divisa e dele: refaze-la aqui poria o clique num
+        // painel e o desenho no outro.
+        if let Some(esquerda) = self.left_editor_rect(size) {
+            return esquerda;
+        }
         let geometry = self.geometry();
         Rect::new(
             ACTIVITY_WIDTH + self.sidebar_width(size),
@@ -1111,6 +1117,9 @@ impl IdeShell {
                 if self.editor_area.session.close(id).is_ok() {
                     self.editor_area.syntax_snapshots.remove(&id);
                     self.editor_area.syntax_spans.remove(&id);
+                    // O outro lado pode estar mostrando o mesmo documento, e ele
+                    // acabou de deixar de existir.
+                    self.split_forget(id);
                     self.editor_area
                         .pane
                         .set_cursor(self.active_text().map_or(0, str::len));

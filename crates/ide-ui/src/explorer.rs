@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ide_domain::SymbolKind;
+use ide_domain::{DocumentId, SymbolKind};
 use ide_workspace::FileNode;
 use ui_api::Widget;
 use ui_components::{
@@ -30,6 +30,11 @@ pub(super) struct ExplorerState {
     /// `context_menu_target` guarda a **pasta**, porque é nela que a criação
     /// acontece; renomear fala do arquivo, e são caminhos diferentes.
     pub(super) context_menu_file: Option<PathBuf>,
+    /// A aba sobre a qual o menu foi aberto, quando foi sobre uma.
+    ///
+    /// Guardada como o alvo do Explorer ao lado: o menu devolve um comando, e
+    /// quem o executa precisa saber de qual aba ele falava.
+    pub(super) context_menu_tab: Option<DocumentId>,
     pub(super) expanded: HashSet<PathBuf>,
     /// Pastas cujos filhos já foram pedidos à aplicação.
     ///

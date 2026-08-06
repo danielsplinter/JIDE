@@ -51,6 +51,7 @@ impl IdeShell {
                 context_menu: ContextMenu::new(EXPLORER_CONTEXT_MENU_ID, Vec::new()),
                 context_menu_target: None,
                 context_menu_file: None,
+                context_menu_tab: None,
                 expanded,
                 // A varredura de abertura já trouxe os filhos da raiz.
                 requested: std::iter::once(raiz_lida).collect(),
@@ -84,6 +85,7 @@ impl IdeShell {
                 completion_selected: 0,
                 completacao_aceita: None,
                 history: NavigationHistory::default(),
+                divisao: None,
             },
             terminal: TerminalPanelState {
                 console: Console::new(TERMINAL_CONSOLE_ID, Vec::new()).with_metrics(

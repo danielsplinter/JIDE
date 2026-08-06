@@ -6551,3 +6551,95 @@ fn clicking_inside_the_search_bar_focuses_it_instead_of_the_code() {
         "digitar depois do clique e busca"
     );
 }
+
+/// Dividir à direita põe o mesmo documento em dois editores independentes.
+///
+/// Independentes **na vista**, e não no texto: o cursor e a rolagem são de cada
+/// lado, e o conteúdo é um só. Duas cópias do texto fariam gravar escolher em
+/// silêncio qual das versões sobrevive.
+#[test]
+fn dividir_a_direita_abre_dois_editores_sobre_o_mesmo_texto() {
+    let root = std::env::temp_dir().join(format!("er-ide-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido {}").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let size = Size::new(1280.0, 800.0);
+    assert!(!shell.is_split());
+
+    // Clique secundário sobre a aba, e a opção do menu.
+    let aba = Point::new(
+        shell.editor_view_rect(size).origin.x + 10.0,
+        TITLE_HEIGHT + TAB_HEIGHT / 2.0,
+    );
+    shell.secondary_pointer_down(aba, size);
+    assert!(shell.context_menu_open(), "o menu da aba deveria abrir");
+    shell.run_explorer_command("editor.split.right");
+    // Escolher pelo menu o fecha; aqui o comando foi chamado direto, e o menu
+    // aberto engoliria os gestos seguintes.
+    shell.key_down("Escape");
+
+    assert!(shell.is_split(), "a área deveria estar dividida");
+    assert_eq!(
+        shell.editor_area.session.active_id(),
+        Some(documento),
+        "o documento dividido continua sendo o ativo"
+    );
+    let desenhado = shell.paint(size);
+    let nomes = desenhado
+        .iter()
+        .filter(|comando| {
+            matches!(comando, PaintCommand::DrawText(texto) if texto.text.contains("Pedido.java"))
+        })
+        .count();
+    assert!(
+        nomes >= 2,
+        "as duas faixas de abas precisam mostrar o arquivo, e vieram {nomes}"
+    );
+
+    // O texto é um só: escrever de um lado vale para o outro.
+    shell.context.focus = ShellFocus::Editor;
+    shell.editor_area.pane.set_cursor(0);
+    shell.text_input("// dois lados\n");
+    let Some(divisao) = shell.editor_area.divisao.as_ref() else {
+        panic!("a divisão precisa existir");
+    };
+    assert_eq!(divisao.ativa, documento);
+    assert!(
+        shell
+            .editor_area
+            .session
+            .document(divisao.ativa)
+            .is_some_and(|documento| documento.buffer.text().starts_with("// dois lados")),
+        "os dois lados olham o mesmo texto"
+    );
+
+    // Fechar a aba da direita desfaz a divisão.
+    let Some(abas) = shell.right_tabs_rect(size) else {
+        panic!("a faixa de abas da direita precisa ter área");
+    };
+    let fechar = Point::new(abas.origin.x + TAB_WIDTH - 14.0, abas.origin.y + TAB_HEIGHT / 2.0);
+    // O ponteiro passa antes de clicar, como acontece com um mouse: numa aba com
+    // alterações por gravar, é a passagem que revela o botão de fechar.
+    shell.pointer_move(fechar, size);
+    shell.pointer_down(fechar, size);
+    assert!(
+        !shell.is_split(),
+        "sem aba nenhuma não há painel; abas={:?}",
+        shell
+            .editor_area
+            .divisao
+            .as_ref()
+            .map(|divisao| divisao.abas.clone())
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

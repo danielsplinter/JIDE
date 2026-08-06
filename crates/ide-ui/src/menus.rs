@@ -117,6 +117,18 @@ fn rotulos_dos_recentes(recents: &[RecentProject]) -> Vec<String> {
         .collect()
 }
 
+/// O menu de uma aba do editor.
+///
+/// Uma entrada só por enquanto, e ela basta para o que se pediu. O menu existe
+/// como lugar: as ações de aba — fechar as outras, fixar, dividir para baixo —
+/// entram aqui quando forem pedidas, e não antes.
+pub(super) fn tab_entries() -> Vec<MenuEntry> {
+    vec![MenuEntry::Item(MenuItem::new(
+        "Split direita",
+        CommandId("editor.split.right".to_owned()),
+    ))]
+}
+
 pub(super) fn editor_entries(
     has_selection: bool,
     debugging: bool,

@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use ide_domain::{CompletionItem, DocumentId, SyntaxSnapshot};
 use ide_workspace::{EditorSession, TextBuffer};
 use ui_api::{LayoutContext, PaintContext, Widget};
-use ui_components::Scrollbar;
+use ui_components::{Scrollbar, SplitPane, Tabs};
 use ui_core::{Point, Rect, Size};
 use ui_editor::{
     CodeEditor, EditSnapshot, LineDecoration, SyntaxSpan, TextRange as EditorRange, UndoHistory,
@@ -60,6 +60,43 @@ pub(super) struct EditorAreaState {
     pub(super) completacao_aceita: Option<String>,
     /// Por onde a navegação passou, para poder voltar.
     pub(super) history: NavigationHistory,
+    /// O segundo editor, quando alguém dividiu a área. Ver a `28`.
+    pub(super) divisao: Option<Divisao>,
+}
+
+/// O editor da direita: a **vista**, e nada do documento.
+///
+/// Os documentos continuam num lugar só, na `EditorSession`. Partir o armazém
+/// faria o mesmo arquivo aberto dos dois lados virar dois documentos com duas
+/// revisões — editar de um lado não apareceria do outro, e gravar escolheria em
+/// silêncio qual das versões sobrevive.
+///
+/// O que é daqui é o que é de vista: quais abas este lado mostra, qual está
+/// ativa, e um painel próprio com cursor, seleção e rolagem.
+pub(super) struct Divisao {
+    /// Documentos que este lado mostra, na ordem das abas.
+    pub(super) abas: Vec<DocumentId>,
+    /// A aba ativa **deste** lado.
+    pub(super) ativa: DocumentId,
+    /// O documento que a esquerda mostrava quando o foco veio para cá.
+    ///
+    /// `session.active` segue o lado com foco — é o que faz salvar, completar,
+    /// navegar e realçar continuarem funcionando sem saber que há divisão. Para
+    /// devolver o foco à esquerda é preciso lembrar o que era dela.
+    pub(super) ativa_da_esquerda: DocumentId,
+    pub(super) pane: EditorPane,
+    /// Se é este lado que tem o foco.
+    pub(super) focado: bool,
+    /// O componente que reparte a área e carrega a divisa.
+    ///
+    /// A geometria dos dois lados sai dele, e não de uma conta aqui: com a conta
+    /// em dois lugares, o clique cai num painel e o desenho aparece no outro.
+    pub(super) painel: SplitPane,
+    /// A faixa de abas deste lado.
+    ///
+    /// Guardada, e não construída do zero a cada quadro, porque o destaque sob
+    /// o ponteiro é dela: a instância que recebeu o gesto é a que desenha.
+    pub(super) tabs: Tabs,
 }
 
 /// Onde o cursor estava antes de um salto.

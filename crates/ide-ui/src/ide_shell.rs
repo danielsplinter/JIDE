@@ -71,7 +71,8 @@ use ui_api::{EventContext, LayoutContext, PaintContext, TextMetrics, Widget};
 use ui_components::MenuEntry;
 use ui_components::{
     Button, ComposedTreeView, ContextMenu, Icon, IconTint, ListView, MenuBar, MenuBarItem, MenuItem,
-    Popup, Scrollbar, ScrollbarOrientation, SplitOrientation, Splitter, StatusBar, TabItem, Tabs,
+    Popup, Scrollbar, ScrollbarOrientation, SplitOrientation, SplitPane, Splitter, StatusBar,
+    TabItem, Tabs,
     TerminalCell, TerminalCursor, TerminalView, TextInput,
 };
 use ui_core::{
@@ -184,6 +185,10 @@ const STATUS_BAR_ID: WidgetId = WidgetId(10_014);
 const PROJECT_LOADING_ID: WidgetId = WidgetId(10_015);
 const EDITOR_TABS_ID: WidgetId = WidgetId(10_015);
 const TERMINAL_TABS_ID: WidgetId = WidgetId(10_016);
+/// A faixa de abas do editor da direita, quando a area esta dividida.
+const SPLIT_TABS_ID: WidgetId = WidgetId(10_099);
+/// O componente que reparte a area do editor em dois.
+const SPLIT_PANE_ID: WidgetId = WidgetId(10_100);
 const EDITOR_SCROLLBAR_ID: WidgetId = WidgetId(10_017);
 const EDITOR_HORIZONTAL_SCROLLBAR_ID: WidgetId = WidgetId(10_063);
 const TERMINAL_SCROLLBAR_ID: WidgetId = WidgetId(10_018);
@@ -858,6 +863,15 @@ impl IdeShell {
                 ..LayoutStyle::default()
             },
         );
+        // Dividida, a faixa de abas da esquerda para onde a coluna dela para: sem
+        // isto ela atravessaria a divisa e cobriria as abas da direita.
+        self.host.set_style(
+            EDITOR_TABS_ID,
+            LayoutStyle {
+                width: self.left_tabs_width(size),
+                ..LayoutStyle::default()
+            },
+        );
         let quadros = self.debug_panel.view.frames.len().clamp(1, 8) as f32;
         self.host.set_style(
             DEBUG_FRAMES_ID,
@@ -1115,6 +1129,11 @@ impl IdeShell {
         if self.splitter_pointer_down(point, size) {
             return;
         }
+        // A divisão vem antes das abas e do texto: dividida, a área tem duas de
+        // cada, e é a coluna em que o ponto caiu que decide de quem é o gesto.
+        if self.split_pointer_down(point, size) {
+            return;
+        }
         if self.editor_tabs_pointer_down(point, size) {
             return;
         }
@@ -1166,6 +1185,11 @@ impl IdeShell {
                 &UiEvent::PointerMove(primary_pointer(point)),
             );
             self.apply_scrollbar(target);
+            return true;
+        }
+        // A divisa dos dois editores: mesmo parada ela precisa do movimento para
+        // se destacar sob o ponteiro, e em arrasto é ela quem manda no gesto.
+        if self.split_pointer_move(point, size) {
             return true;
         }
         // O arraste no editor é do painel, que sabe se um gesto começou nele.
@@ -1485,6 +1509,7 @@ mod new_item;
 mod painting;
 mod rename;
 mod settings;
+mod split;
 mod surfaces;
 mod tab_switcher;
 mod terminal_area;

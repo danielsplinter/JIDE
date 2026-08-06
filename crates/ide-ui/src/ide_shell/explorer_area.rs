@@ -410,6 +410,11 @@ impl IdeShell {
         }
         let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
+        // Sobre uma aba o menu fala da aba: dividir a area a partir dela.
+        if point.y >= TITLE_HEIGHT && point.y < TITLE_HEIGHT + TAB_HEIGHT && point.x >= editor_x {
+            self.tab_context_menu(point, size);
+            return;
+        }
         // No editor o menu fala do texto: copiar e colar.
         if point.x >= editor_x
             && point.x < editor_x + geometry.editor_width
@@ -523,6 +528,12 @@ impl IdeShell {
 
     pub(super) fn run_explorer_command(&mut self, command: &str) {
         match command {
+            "editor.split.right" => {
+                if let Some(documento) = self.explorer.context_menu_tab.take() {
+                    self.dividir_a_direita(documento);
+                }
+                return;
+            }
             // A geração em si ainda não existe: o menu já escolhe o que gerar, e
             // dizer isso é melhor do que um clique que não faz nada.
             "editor.generate.getter" => {

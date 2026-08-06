@@ -422,6 +422,7 @@ impl IdeShell {
             );
         }
         commands.push(PaintCommand::PopClip);
+        commands.extend(self.paint_split(size));
         if self.debug_panel.view.attached {
             commands.extend(self.paint_debug_panel());
         }
