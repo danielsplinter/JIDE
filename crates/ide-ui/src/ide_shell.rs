@@ -198,6 +198,10 @@ const EXPLORER_TREE_ID: WidgetId = WidgetId(10_020);
 const SIDEBAR_SPLITTER_ID: WidgetId = WidgetId(10_022);
 const TERMINAL_SPLITTER_ID: WidgetId = WidgetId(10_023);
 const TERMINAL_TOGGLE_ID: WidgetId = WidgetId(10_024);
+/// A lupa da barra de atividades.
+const ACTIVITY_SEARCH_ID: WidgetId = WidgetId(10_101);
+/// O botão que mostra e esconde o painel do Explorer.
+const ACTIVITY_SIDEBAR_ID: WidgetId = WidgetId(10_102);
 const EXPLORER_CONTEXT_MENU_ID: WidgetId = WidgetId(10_025);
 const COMPLETION_POPUP_ID: WidgetId = WidgetId(10_026);
 const COMPLETION_LIST_ID: WidgetId = WidgetId(10_027);
@@ -850,8 +854,15 @@ impl IdeShell {
         self.host.set_style(
             FRAME_SIDEBAR_ID,
             LayoutStyle {
+                // Recolhido o nó some da moldura, e não apenas encolhe: com a
+                // largura mínima ele voltaria a aparecer sozinho.
+                hidden: self.sidebar_collapsed(),
                 width: Some(sidebar),
-                min_width: Some(SIDEBAR_MIN_WIDTH),
+                min_width: Some(if self.sidebar_collapsed() {
+                    0.0
+                } else {
+                    SIDEBAR_MIN_WIDTH
+                }),
                 ..LayoutStyle::default()
             },
         );
@@ -1109,6 +1120,9 @@ impl IdeShell {
             return;
         }
         if point.y < TITLE_HEIGHT {
+            return;
+        }
+        if self.activity_pointer_down(point, size) {
             return;
         }
         if self.terminal_toggle_pointer_down(point, size) {

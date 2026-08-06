@@ -7095,3 +7095,50 @@ fn os_divisores_pedem_a_seta_antes_do_arrasto() {
     assert!(!shell.terminal_divider_hover(Point::new(700.0, sobre_o_terminal.y - 80.0), size));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Os dois itens da barra de atividades são botões, e cada um faz o seu.
+///
+/// Eram ícones pintados à mão: não acendiam sob o ponteiro, não recebiam clique
+/// e não chegavam à árvore de acessibilidade. Pareciam ações, e não eram
+/// nenhuma.
+#[test]
+fn a_barra_de_atividades_tem_dois_botoes() {
+    let root = std::env::temp_dir().join(format!("er-ide-atividades-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let largura_com_painel = shell.sidebar_width(size);
+    assert!(largura_com_painel > 0.0);
+
+    // A lupa abre a busca.
+    let lupa = IdeShell::activity_rect(ACTIVITY_SEARCH_ID);
+    shell.pointer_down(
+        Point::new(lupa.origin.x + 12.0, lupa.origin.y + 12.0),
+        size,
+    );
+    assert!(shell.type_search_open(), "a lupa abre a busca");
+    shell.escape();
+
+    // O outro recolhe o painel, e o que sobra vai para os outros.
+    let painel = IdeShell::activity_rect(ACTIVITY_SIDEBAR_ID);
+    let clique = Point::new(painel.origin.x + 12.0, painel.origin.y + 12.0);
+    shell.pointer_down(clique, size);
+    let _ = shell.paint(size);
+    assert!(shell.sidebar_collapsed(), "o painel recolhe");
+    assert_eq!(shell.sidebar_width(size), 0.0);
+    assert!(
+        shell.editor_view_rect(size).size.width > 0.0,
+        "o editor fica com a largura que era do painel"
+    );
+
+    // E o mesmo botão o traz de volta, com a largura que ele tinha.
+    shell.pointer_down(clique, size);
+    let _ = shell.paint(size);
+    assert!(!shell.sidebar_collapsed());
+    assert_eq!(shell.sidebar_width(size), largura_com_painel);
+    let _ = std::fs::remove_dir_all(&root);
+}

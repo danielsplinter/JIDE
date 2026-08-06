@@ -40,6 +40,9 @@ impl IdeShell {
     /// sai da frente da linha, e a seta piscaria de volta no meio do gesto.
     #[must_use]
     pub fn sidebar_divider_hover(&self, point: Point, size: Size) -> bool {
+        if self.explorer.recolhido {
+            return false;
+        }
         self.sidebar_resizing() || self.sidebar_splitter_for(size).hit_area().contains(point)
     }
 
@@ -402,10 +405,87 @@ impl IdeShell {
     }
 
     pub(super) fn sidebar_width(&self, size: Size) -> f32 {
+        // Recolhido, o painel não ocupa nada, e o que sobra vai para o editor e
+        // o terminal. A largura escolhida continua guardada: reabrir devolve a
+        // que a pessoa tinha, e não a de fábrica.
+        if self.explorer.recolhido {
+            return 0.0;
+        }
         self.explorer.sidebar_width.clamp(
             SIDEBAR_MIN_WIDTH,
             (size.width - 320.0).max(SIDEBAR_MIN_WIDTH),
         )
+    }
+
+    /// Os dois botões da barra de atividades, na ordem em que aparecem.
+    ///
+    /// Montados a cada quadro a partir do estado, como as abas: o nome do
+    /// segundo diz o que o clique **vai fazer**, e ele muda quando o painel
+    /// recolhe.
+    pub(super) fn activity_buttons(&self) -> [Button; 2] {
+        let painel = if self.sidebar_collapsed() {
+            "Mostrar o Explorer"
+        } else {
+            "Esconder o Explorer"
+        };
+        [
+            Button::icon(ACTIVITY_SEARCH_ID, Icon::Search, "Buscar")
+                .with_command("activity.search"),
+            Button::icon(ACTIVITY_SIDEBAR_ID, Icon::Panels, painel)
+                .with_command("activity.sidebar"),
+        ]
+    }
+
+    /// Onde cada botão da barra de atividades fica.
+    ///
+    /// Um lugar só para o desenho e para o clique: com a conta em dois lugares,
+    /// clicar na borda de um faria uma coisa e o desenho mostraria outra.
+    pub(super) fn activity_rect(id: WidgetId) -> Rect {
+        let topo = if id == ACTIVITY_SEARCH_ID {
+            TITLE_HEIGHT + 8.0
+        } else {
+            TITLE_HEIGHT + 52.0
+        };
+        Rect::new(12.0, topo, 24.0, 24.0)
+    }
+
+    /// Clique na barra de atividades. Devolve `true` quando foi de um botão.
+    pub(super) fn activity_pointer_down(&mut self, point: Point, size: Size) -> bool {
+        if point.x >= ACTIVITY_WIDTH || point.y < TITLE_HEIGHT {
+            return false;
+        }
+        let escolhido = self
+            .activity_buttons()
+            .into_iter()
+            .find(|botao| Self::activity_rect(botao.id()).contains(point))
+            .map(|botao| botao.id());
+        match escolhido {
+            Some(id) if id == ACTIVITY_SEARCH_ID => {
+                self.open_content_search();
+                true
+            }
+            Some(_) => {
+                self.toggle_sidebar();
+                // A moldura mudou de largura, e quem perguntar a geometria em
+                // seguida precisa dela já refeita.
+                self.place_overlay(size);
+                true
+            }
+            // A faixa consome o clique mesmo fora dos botões: ali não há
+            // conteúdo para reagir embaixo.
+            None => true,
+        }
+    }
+
+    /// Se o painel do Explorer está recolhido.
+    #[must_use]
+    pub const fn sidebar_collapsed(&self) -> bool {
+        self.explorer.recolhido
+    }
+
+    /// Mostra ou esconde o painel do Explorer.
+    pub const fn toggle_sidebar(&mut self) {
+        self.explorer.recolhido = !self.explorer.recolhido;
     }
 
     /// Clique secundário: abre o menu de contexto sobre o item do Explorer.

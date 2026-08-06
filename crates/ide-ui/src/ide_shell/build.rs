@@ -58,6 +58,7 @@ impl IdeShell {
                 scroll_x: 0.0,
                 scroll_line: 0,
                 sidebar_width: SIDEBAR_WIDTH,
+                recolhido: false,
                 splitter: Splitter::new(SIDEBAR_SPLITTER_ID, SplitOrientation::Horizontal),
                 vertical_scrollbar: Scrollbar::new(
                     EXPLORER_VERTICAL_SCROLLBAR_ID,

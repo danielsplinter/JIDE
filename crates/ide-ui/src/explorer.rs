@@ -46,6 +46,11 @@ pub(super) struct ExplorerState {
     pub(super) scroll_x: f32,
     pub(super) scroll_line: usize,
     pub(super) sidebar_width: f32,
+    /// Se o painel está recolhido.
+    ///
+    /// Separado da largura de propósito: recolher e reabrir devolve a largura
+    /// que a pessoa tinha escolhido, e zerá-la a perderia.
+    pub(super) recolhido: bool,
     pub(super) splitter: Splitter,
     pub(super) vertical_scrollbar: Scrollbar,
     pub(super) horizontal_scrollbar: Scrollbar,

@@ -4,7 +4,7 @@
 //! cima, na ordem inversa do funil de eventos.
 
 use super::*;
-use ui_components::{Label, Panel, Spinner, SurfaceTone, paint_icon};
+use ui_components::{Label, Panel, Spinner, SurfaceTone};
 
 impl IdeShell {
     /// Desenha um texto solto com a `Label` da biblioteca.
@@ -327,20 +327,14 @@ impl IdeShell {
         ] {
             self.paint_label(&mut commands, id, texto, origem, tamanho, tom);
         }
-        // Os ícones da barra de atividades são desenhados pela biblioteca, com
-        // primitivas: como texto, dependiam de a fonte do sistema ter aquele
-        // glifo, e ficavam fora do tema e da acessibilidade.
+        // Os dois da barra de atividades são **botões**, e não ícones pintados:
+        // como desenho eles não acendiam sob o ponteiro, não recebiam clique e
+        // não chegavam à árvore de acessibilidade — pareciam ações e não eram
+        // nenhuma.
         let mut icones = self.paint_context();
-        for (icone, topo) in [
-            (Icon::Search, TITLE_HEIGHT + 8.0),
-            (Icon::Panels, TITLE_HEIGHT + 52.0),
-        ] {
-            paint_icon(
-                &mut icones,
-                Rect::new(12.0, topo, 24.0, 24.0),
-                icone,
-                colors.text,
-            );
+        for mut botao in self.activity_buttons() {
+            botao.layout(&self.layout_context(), Self::activity_rect(botao.id()));
+            botao.paint(&mut icones);
         }
         commands.extend(icones.into_commands());
         // O botão de recolher o terminal é um botão de verdade: retângulo,
