@@ -47,6 +47,9 @@ impl IdeShell {
                     ativa_da_esquerda: esquerda,
                     pane: EditorPane::new(EditorCapabilities::full()),
                     focado: false,
+                    // Dividir é um gesto sobre este lado: quem acabou de mandar
+                    // um arquivo para cá está trabalhando aqui.
+                    clicado: true,
                     painel: SplitPane::new(SPLIT_PANE_ID, SplitOrientation::Horizontal, 0.5),
                     tabs: Tabs::new(SPLIT_TABS_ID, Vec::new()).with_tab_width(TAB_WIDTH),
                 });
@@ -157,14 +160,35 @@ impl IdeShell {
         let Some(divisao) = self.editor_area.divisao.as_mut() else {
             return false;
         };
-        if !divisao.focado {
+        // **O último clique, e não a passagem do ponteiro.** O caminho do mouse
+        // até o Explorer atravessa o painel da esquerda, e essa travessia não
+        // significa que se deixou de trabalhar na direita.
+        if !divisao.clicado {
+            // A esquerda recebe: o foco vai junto com o arquivo aberto, senão
+            // ele apareceria num painel e o cursor piscaria no outro.
+            let direita = divisao.ativa;
+            self.focar_a_esquerda();
+            if let Some(divisao) = self.editor_area.divisao.as_mut() {
+                // O que a direita mostrava continua o mesmo — a abertura não é
+                // dela —, e a esquerda passa a mostrar o que acabou de abrir.
+                divisao.ativa = direita;
+                divisao.ativa_da_esquerda = documento;
+            }
+            // `focar_a_esquerda` reativa o documento que a esquerda mostrava
+            // antes, e agora ela mostra outro: o que acabou de ser aberto.
+            let _ = self.editor_area.session.activate(documento);
             return false;
         }
+        let esquerda = divisao.ativa_da_esquerda;
         if !divisao.abas.contains(&documento) {
             divisao.abas.push(documento);
         }
         divisao.ativa = documento;
-        divisao.pane.set_cursor(0);
+        self.focar_a_direita();
+        if let Some(divisao) = self.editor_area.divisao.as_mut() {
+            divisao.ativa_da_esquerda = esquerda;
+            divisao.pane.set_cursor(0);
+        }
         true
     }
 
@@ -499,10 +523,12 @@ impl IdeShell {
             }
         }
         if abas.contains(point) {
+            self.marcar_clique(true);
             self.split_tabs_pointer_down(point, size);
             return true;
         }
         if texto.contains(point) {
+            self.marcar_clique(true);
             self.focar_a_direita();
             // O clique no texto é do painel: cursor, âncora e calha são dele.
             let texto = self
@@ -516,8 +542,16 @@ impl IdeShell {
             return true;
         }
         // Caiu na esquerda: o foco volta para lá antes de o clique seguir.
+        self.marcar_clique(false);
         self.focar_a_esquerda();
         false
+    }
+
+    /// Registra de que lado foi o último clique dentro da área dividida.
+    fn marcar_clique(&mut self, na_direita: bool) {
+        if let Some(divisao) = self.editor_area.divisao.as_mut() {
+            divisao.clicado = na_direita;
+        }
     }
 
     /// Clique na faixa de abas da direita: escolher uma, ou fechá-la.

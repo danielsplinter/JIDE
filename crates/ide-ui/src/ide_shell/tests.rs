@@ -6794,3 +6794,70 @@ fn o_ponteiro_leva_o_foco_para_o_painel_da_direita() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// O arquivo novo abre no painel em que se clicou por último.
+///
+/// **Clique, e não passagem do ponteiro.** O caminho do mouse até o Explorer
+/// atravessa o painel da esquerda, e essa travessia não significa que se deixou
+/// de trabalhar na direita — quem diz onde se estava trabalhando é o último
+/// clique.
+#[test]
+fn o_arquivo_novo_abre_no_painel_com_foco() {
+    let root = std::env::temp_dir().join(format!("er-ide-abre-foco-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let primeiro = root.join("Pedido.java");
+    let segundo = root.join("Cliente.java");
+    assert!(std::fs::write(&primeiro, "class Pedido {}").is_ok());
+    assert!(std::fs::write(&segundo, "class Cliente {}").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&primeiro) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let size = Size::new(1280.0, 800.0);
+    shell.dividir_a_direita(documento);
+    assert!(shell.split_focado(), "a divisão nasce com a direita em foco");
+
+    // Um clique no painel da esquerda: é ele que passa a receber os arquivos.
+    let Some(esquerda) = shell.left_column(size) else {
+        panic!("a coluna da esquerda precisa ter área");
+    };
+    let dentro_da_esquerda = Point::new(esquerda.origin.x + 30.0, esquerda.origin.y + 150.0);
+    shell.pointer_move(dentro_da_esquerda, size);
+    shell.pointer_down(dentro_da_esquerda, size);
+    // E o ponteiro passa pela direita a caminho do Explorer: a travessia não
+    // pode mudar para onde o arquivo vai.
+    let Some(direita) = shell.right_column(size) else {
+        panic!("a coluna da direita precisa ter área");
+    };
+    shell.pointer_move(
+        Point::new(direita.origin.x + 30.0, direita.origin.y + 150.0),
+        size,
+    );
+    shell.pointer_move(Point::new(ACTIVITY_WIDTH + 40.0, 300.0), size);
+
+    let Ok(_) = shell.open_file(&segundo) else {
+        panic!("o segundo arquivo não abriu");
+    };
+    let Some(novo) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let Some(divisao) = shell.editor_area.divisao.as_ref() else {
+        panic!("a divisão precisa continuar existindo");
+    };
+    assert!(
+        !divisao.abas.contains(&novo),
+        "o arquivo novo não pode ir para o painel que não tem o foco"
+    );
+    assert_eq!(
+        shell.left_active_document(),
+        Some(novo),
+        "ele abre no painel apontado, e é a aba acesa dele"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

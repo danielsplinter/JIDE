@@ -86,7 +86,17 @@ pub(super) struct Divisao {
     pub(super) ativa_da_esquerda: DocumentId,
     pub(super) pane: EditorPane,
     /// Se é este lado que tem o foco.
+    ///
+    /// Muda com a **passagem do ponteiro**: é ele que decide para onde vão a
+    /// digitação, a rolagem e o clique.
     pub(super) focado: bool,
+    /// Se o último clique dentro da área dividida foi neste lado.
+    ///
+    /// Separado do foco de propósito, e é a diferença entre "onde o ponteiro
+    /// está" e "onde se estava trabalhando". Levar o ponteiro até o Explorer
+    /// atravessa o painel do lado, e essa passagem não pode decidir em qual
+    /// painel o arquivo escolhido vai abrir — quem decide é o último clique.
+    pub(super) clicado: bool,
     /// O componente que reparte a área e carrega a divisa.
     ///
     /// A geometria dos dois lados sai dele, e não de uma conta aqui: com a conta

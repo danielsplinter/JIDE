@@ -72,9 +72,14 @@ mostra a mesma mudança com o cursor no lugar em que ele estava.
 ## Fase 2 — o foco segue o ponteiro ✅
 
 Passar o ponteiro sobre um dos lados o torna o lado ativo, e a partir daí tudo
-acontece nele: clique, rolagem, digitação. Clicar num arquivo no Explorer abre a
-aba **no painel apontado**, e não sempre no da esquerda — é o que faz a divisão
-servir para comparar dois arquivos.
+acontece nele: clique, rolagem, digitação.
+
+**Mas quem recebe um arquivo aberto é o painel em que se clicou por último**, e
+não o que o ponteiro atravessou. São duas perguntas diferentes: "onde o ponteiro
+está" e "onde eu estava trabalhando". O caminho do mouse até o Explorer passa
+por cima do painel do lado, e essa travessia não pode decidir em qual painel o
+arquivo escolhido vai abrir — foi assim que um arquivo foi parar no painel
+errado.
 
 **O painel da frente é sempre o mesmo campo.** `editor_area.pane` é o painel do
 lado com foco, e trocar o foco troca os dois de lugar. Parece indireto e é o
