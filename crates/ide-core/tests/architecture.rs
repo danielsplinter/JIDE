@@ -1202,7 +1202,11 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
         // primeira adição depois de nascer**, que é o que ela existe para fazer:
         // o número subiu porque alguém decidiu que sobe, e não sozinho.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 7_315),
+        //
+        // De 7 315 para 7 333: `Shift+Enter` na barra de busca, que faltava
+        // para o gesto ter volta. São dezoito linhas dentro de um teste que já
+        // existia, e não um teste novo.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 7_333),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))

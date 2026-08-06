@@ -490,6 +490,18 @@ impl IdeShell {
             .is_some()
     }
 
+    /// `Shift+Enter` na barra: o cursor vai à ocorrência anterior.
+    pub fn go_to_previous_search_hit(&mut self) -> bool {
+        let Some(document) = self.editor_area.session.active() else {
+            return false;
+        };
+        let texto = document.buffer.text().to_owned();
+        self.editor_area
+            .pane
+            .go_to_previous_search_hit(&texto)
+            .is_some()
+    }
+
     /// A área que o arranjo deu à barra de busca.
     #[must_use]
     pub fn search_box_area(&self) -> Rect {

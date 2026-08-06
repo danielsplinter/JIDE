@@ -6309,6 +6309,24 @@ fn the_search_bar_marks_every_hit_and_enter_walks_them() {
         );
     }
 
+    // `Shift+Enter` é o mesmo gesto ao contrário, e também dá a volta: do
+    // começo ele salta para a última ocorrência do arquivo.
+    let com_shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    for esperada in [marcas[2].0, marcas[1].0, marcas[0].0, marcas[2].0] {
+        shell.key_down_with_modifiers("Enter", com_shift);
+        assert_eq!(
+            shell.editor_area.pane.cursor(),
+            esperada,
+            "com Shift o cursor anda para trás e volta ao fim"
+        );
+    }
+    // E o `Enter` sem `Shift` continua indo para frente, do mesmo ponto.
+    shell.key_down("Enter");
+    assert_eq!(shell.editor_area.pane.cursor(), marcas[0].0);
+
     // Apagar uma letra muda o que se procura, e as marcas acompanham.
     shell.key_down("Backspace");
     assert!(

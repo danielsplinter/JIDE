@@ -869,6 +869,26 @@ impl EditorPane {
         Some(linha)
     }
 
+    /// `Shift+Enter` na barra: a ocorrência **anterior**, dando a volta.
+    ///
+    /// O espelho da de cima, e não uma variação dela: procura a última que
+    /// começa antes do cursor e, quando não há nenhuma, vai para a última do
+    /// arquivo. Voltar sem dar a volta prenderia quem procurou algo que só
+    /// existe acima do ponto em que se estava.
+    pub fn go_to_previous_search_hit(&mut self, text: &str) -> Option<usize> {
+        let alvo = self
+            .search_hits
+            .iter()
+            .rev()
+            .find(|(start, _)| *start < self.cursor)
+            .or_else(|| self.search_hits.last())?;
+        self.cursor = alvo.0;
+        self.selection = None;
+        let (linha, _) = line_column(text, self.cursor);
+        self.pending_reveal = Some(linha);
+        Some(linha)
+    }
+
     /// A ocorrência sob o cursor, em bytes — a que recebe a borda.
     #[must_use]
     pub fn focused_search_hit(&self) -> Option<(usize, usize)> {

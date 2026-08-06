@@ -1443,10 +1443,16 @@ impl IdeShell {
             }
         } else if self.context.focus == ShellFocus::Search {
             // Na barra, `Enter` é o gesto inteiro: leva o cursor à próxima
-            // ocorrência e dá a volta no fim do arquivo. O resto do texto entra
-            // por `text_input`, e as setas continuam sendo do editor.
+            // ocorrência e dá a volta no fim do arquivo. Com `Shift`, à
+            // anterior — o mesmo gesto ao contrário, e é a convenção de todo
+            // editor. O resto do texto entra por `text_input`, e as setas
+            // continuam sendo do editor.
             if key.eq_ignore_ascii_case("enter") {
-                self.go_to_next_search_hit();
+                if modifiers.shift {
+                    self.go_to_previous_search_hit();
+                } else {
+                    self.go_to_next_search_hit();
+                }
             }
         } else if self.context.focus == ShellFocus::Terminal {
             // Seta, `Tab`, `Enter`, `Ctrl+C`: todas vão ao shell, e é ele quem
