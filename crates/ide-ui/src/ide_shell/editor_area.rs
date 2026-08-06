@@ -380,10 +380,14 @@ impl IdeShell {
     }
 
     pub(super) fn editor_view_rect(&self, size: Size) -> Rect {
-        // Dividida, a esquerda ocupa a coluna que o componente deu a ela. A
-        // conta da largura e da divisa e dele: refaze-la aqui poria o clique num
-        // painel e o desenho no outro.
-        if let Some(esquerda) = self.left_editor_rect(size) {
+        // Dividida, o painel da frente ocupa a coluna do lado com foco. A conta
+        // da largura e da divisa é do componente: refazê-la aqui poria o clique
+        // num painel e o desenho no outro.
+        if self.split_focado() {
+            if let Some(direita) = self.right_editor_rect(size) {
+                return direita;
+            }
+        } else if let Some(esquerda) = self.left_editor_rect(size) {
             return esquerda;
         }
         let geometry = self.geometry();
@@ -704,6 +708,8 @@ impl IdeShell {
         if self.inspection.is_open() {
             return Some(self.inspection.editor_and_source());
         }
+        // `editor_area.pane` já é o painel do lado com foco: quem troca de lado
+        // troca os dois de lugar. Ver `focar_a_direita`.
         let document = self.editor_area.session.active_mut()?;
         Some((&mut self.editor_area.pane, &mut document.buffer))
     }
@@ -859,6 +865,15 @@ impl IdeShell {
         if self.inspection.is_open() {
             self.inspection.layout_editor(&self.host);
             return;
+        }
+        // Os dois lados, e não só o da frente: converter ponto em posição do
+        // texto depende de o painel saber onde ele está, e o de trás recebe
+        // gestos assim que o ponteiro passar por cima dele.
+        if let (Some(outro), Some(divisao)) = (
+            self.other_editor_rect(size),
+            self.editor_area.divisao.as_mut(),
+        ) {
+            divisao.pane.set_bounds(outro);
         }
         let bounds = self.editor_view_rect(size);
         self.editor_area.pane.set_bounds(bounds);

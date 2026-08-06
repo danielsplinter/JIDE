@@ -1291,6 +1291,8 @@ impl IdeShell {
             let visible = (geo.editor_height / EDITOR_LINE_HEIGHT).floor().max(1.0) as usize;
             let maximo = total.saturating_sub(visible) as f32 * EDITOR_LINE_HEIGHT;
             let passo = delta_lines * EDITOR_LINE_HEIGHT;
+            // A roda gira o painel do lado apontado — e ele já é o painel da
+            // frente, porque o movimento do ponteiro levou o foco para lá.
             let destino =
                 (self.editor_area.pane.scroll_offset() + passo).clamp(0.0, maximo.max(0.0));
             self.editor_area.pane.set_scroll_offset(destino);

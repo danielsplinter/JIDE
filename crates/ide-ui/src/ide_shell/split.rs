@@ -128,6 +128,46 @@ impl IdeShell {
         Some(Self::editor_rect(esquerda, &self.geometry()))
     }
 
+    /// A coluna inteira da esquerda: a faixa de abas e o texto.
+    pub(super) fn left_column(&self, size: Size) -> Option<Rect> {
+        let (esquerda, _) = self.split_columns(size)?;
+        Some(esquerda)
+    }
+
+    /// A coluna inteira da direita.
+    pub(super) fn right_column(&self, size: Size) -> Option<Rect> {
+        let (_, direita) = self.split_columns(size)?;
+        Some(direita)
+    }
+
+    /// Se é o painel da direita que tem o foco agora.
+    pub(super) fn split_focado(&self) -> bool {
+        self.editor_area
+            .divisao
+            .as_ref()
+            .is_some_and(|divisao| divisao.focado)
+    }
+
+    /// Abre um documento no painel da direita, quando é ele que tem o foco.
+    ///
+    /// Devolve `true` quando o documento foi para lá. É o que faz clicar num
+    /// arquivo do Explorer abrir a aba **no painel em que se está olhando**, em
+    /// vez de sempre à esquerda.
+    pub(super) fn abrir_no_split(&mut self, documento: DocumentId) -> bool {
+        let Some(divisao) = self.editor_area.divisao.as_mut() else {
+            return false;
+        };
+        if !divisao.focado {
+            return false;
+        }
+        if !divisao.abas.contains(&documento) {
+            divisao.abas.push(documento);
+        }
+        divisao.ativa = documento;
+        divisao.pane.set_cursor(0);
+        true
+    }
+
     /// A faixa de abas da esquerda, quando há divisão.
     pub(super) fn left_tabs_rect(&self, size: Size) -> Option<Rect> {
         let (esquerda, _) = self.split_columns(size)?;
@@ -147,16 +187,27 @@ impl IdeShell {
     }
 
     /// Põe o foco no lado direito e faz o documento dele ser o ativo.
+    ///
+    /// # Os painéis trocam de lugar
+    ///
+    /// `editor_area.pane` é **sempre o painel do lado com foco**, e a divisão
+    /// guarda o outro. Trocar o foco troca os dois de lugar.
+    ///
+    /// Parece indireto e é o contrário: digitar, apagar, indentar, mover o
+    /// cursor, colar, buscar e rolar passam por `editor_area.pane` em duas dúzias
+    /// de lugares. Se o painel dependesse do foco em cada um deles, bastava
+    /// esquecer um para o cursor andar no painel que ninguém está olhando — e
+    /// esquecer um, entre vinte e quatro, é questão de tempo. Com a troca, quem
+    /// escreve continua escrevendo "o painel", e ele já é o certo.
     fn focar_a_direita(&mut self) {
-        let Some(divisao) = self.editor_area.divisao.as_mut() else {
+        let ativo = self.editor_area.session.active_id();
+        let editor_area = &mut self.editor_area;
+        let Some(divisao) = editor_area.divisao.as_mut() else {
             return;
         };
         if !divisao.focado {
-            divisao.ativa_da_esquerda = self
-                .editor_area
-                .session
-                .active_id()
-                .unwrap_or(divisao.ativa_da_esquerda);
+            divisao.ativa_da_esquerda = ativo.unwrap_or(divisao.ativa_da_esquerda);
+            std::mem::swap(&mut editor_area.pane, &mut divisao.pane);
             divisao.focado = true;
         }
         let ativa = divisao.ativa;
@@ -166,18 +217,41 @@ impl IdeShell {
 
     /// Põe o foco no lado esquerdo e devolve a ele o documento ativo.
     fn focar_a_esquerda(&mut self) {
-        let Some(divisao) = self.editor_area.divisao.as_mut() else {
+        let ativo = self.editor_area.session.active_id();
+        let editor_area = &mut self.editor_area;
+        let Some(divisao) = editor_area.divisao.as_mut() else {
             return;
         };
         if !divisao.focado {
             return;
         }
+        divisao.ativa = ativo.unwrap_or(divisao.ativa);
+        std::mem::swap(&mut editor_area.pane, &mut divisao.pane);
         divisao.focado = false;
         let esquerda = divisao.ativa_da_esquerda;
         if self.editor_area.session.document(esquerda).is_some() {
             let _ = self.editor_area.session.activate(esquerda);
         }
         self.context.focus = ShellFocus::Editor;
+    }
+
+    /// A área do lado que **não** tem o foco — a do painel que a divisão guarda.
+    pub(super) fn other_editor_rect(&self, size: Size) -> Option<Rect> {
+        if self.split_focado() {
+            self.left_editor_rect(size)
+        } else {
+            self.right_editor_rect(size)
+        }
+    }
+
+    /// O documento mostrado pelo lado que não tem o foco.
+    fn other_document(&self) -> Option<DocumentId> {
+        let divisao = self.editor_area.divisao.as_ref()?;
+        Some(if divisao.focado {
+            divisao.ativa_da_esquerda
+        } else {
+            divisao.ativa
+        })
     }
 
     /// A faixa de abas da direita, remontada a partir dos documentos dela.
@@ -220,18 +294,19 @@ impl IdeShell {
     /// deste lado — dois cursores piscando ao mesmo tempo diriam que os dois
     /// recebem o que se digita.
     pub(super) fn sync_split_pane(&mut self, size: Size) {
-        let (Some(bounds), Some(divisao)) =
-            (self.right_editor_rect(size), self.editor_area.divisao.as_ref())
-        else {
+        let (Some(bounds), Some(id)) = (self.other_editor_rect(size), self.other_document()) else {
             return;
         };
-        let (id, focado) = (divisao.ativa, divisao.focado);
+        // Este é o painel de quem **não** tem o foco: ele nunca se desenha com
+        // cursor aceso. Dois cursores piscando diriam que os dois recebem o que
+        // se digita.
+        let focado = false;
         let Some(document) = self.editor_area.session.document(id) else {
             return;
         };
         let (revision, path) = (document.buffer.revision(), document.path.clone());
         let decorations = self.editor_decorations(&path);
-        let focused = focado && self.context.focus == ShellFocus::Editor;
+        let focused = focado;
         let context = self.layout_context();
         let syntax = self
             .editor_area
@@ -307,7 +382,7 @@ impl IdeShell {
     pub(super) fn paint_split(&mut self, size: Size) -> Vec<PaintCommand> {
         let (Some(abas), Some(texto), Some(painel)) = (
             self.right_tabs_rect(size),
-            self.right_editor_rect(size),
+            self.other_editor_rect(size),
             self.split_panel_for(size),
         ) else {
             return Vec::new();
@@ -353,6 +428,21 @@ impl IdeShell {
         let arrastando = painel.is_dragging();
         if let Some(divisao) = self.editor_area.divisao.as_mut() {
             divisao.painel = painel;
+        }
+        // **O foco segue o ponteiro.** Passar sobre um dos lados o torna o lado
+        // ativo, e a partir daí tudo acontece nele: clique, rolagem, digitação.
+        // Sem isto, olhar um lado e digitar no outro seria o comportamento
+        // normal — e é exatamente o que confunde quem divide a tela.
+        //
+        // Só enquanto ninguém arrasta: no meio de um arrasto o ponteiro
+        // atravessa os dois lados, e trocar o foco ali seria trocá-lo por causa
+        // de um gesto que não é sobre foco nenhum.
+        if !arrastando {
+            if self.right_column(size).is_some_and(|coluna| coluna.contains(point)) {
+                self.focar_a_direita();
+            } else if self.left_column(size).is_some_and(|coluna| coluna.contains(point)) {
+                self.focar_a_esquerda();
+            }
         }
         // A faixa de abas da direita também precisa do movimento: é por ele que
         // ela sabe qual aba está sob o ponteiro — e é o que faz aparecer o

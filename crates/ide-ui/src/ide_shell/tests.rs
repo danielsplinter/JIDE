@@ -6702,3 +6702,85 @@ fn soltar_o_botao_solta_a_divisa_dos_dois_editores() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// O foco segue o ponteiro, e tudo passa a acontecer no painel apontado.
+///
+/// Olhar um lado e digitar no outro é o que confunde quem divide a tela. Aqui se
+/// confere o caminho inteiro: passar o ponteiro dá o foco, digitar escreve no
+/// painel apontado, e abrir um arquivo abre a aba **nele**.
+#[test]
+fn o_ponteiro_leva_o_foco_para_o_painel_da_direita() {
+    let root = std::env::temp_dir().join(format!("er-ide-foco-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let primeiro = root.join("Pedido.java");
+    let segundo = root.join("Cliente.java");
+    assert!(std::fs::write(&primeiro, "class Pedido {}").is_ok());
+    assert!(std::fs::write(&segundo, "class Cliente {}").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&primeiro) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let size = Size::new(1280.0, 800.0);
+    shell.dividir_a_direita(documento);
+
+    // O ponteiro volta para a esquerda: o foco vai com ele.
+    let Some(esquerda) = shell.left_column(size) else {
+        panic!("a coluna da esquerda precisa ter área");
+    };
+    shell.pointer_move(
+        Point::new(esquerda.origin.x + 40.0, esquerda.origin.y + 200.0),
+        size,
+    );
+    assert!(!shell.split_focado(), "apontar a esquerda foca a esquerda");
+
+    // E de volta para a direita, sem clique nenhum.
+    let Some(direita) = shell.right_column(size) else {
+        panic!("a coluna da direita precisa ter área");
+    };
+    let dentro_da_direita = Point::new(direita.origin.x + 40.0, direita.origin.y + 200.0);
+    shell.pointer_move(dentro_da_direita, size);
+    assert!(shell.split_focado(), "apontar a direita foca a direita");
+
+    // A digitação vai para o painel apontado: é o cursor dele que anda.
+    let Some((_, texto)) = shell.focused_editor_ref() else {
+        panic!("o painel apontado precisa ter documento");
+    };
+    let antes = texto.text().to_owned();
+    shell.text_input("//");
+    let Some(divisao) = shell.editor_area.divisao.as_ref() else {
+        panic!("a divisão precisa existir");
+    };
+    // Com a direita em foco, o painel da frente **é** o dela: os dois trocam de
+    // lugar quando o foco troca. Ver `focar_a_direita`.
+    assert_eq!(
+        shell.editor_area.pane.cursor(),
+        2,
+        "o cursor que andou é o do lado apontado"
+    );
+    assert_eq!(
+        divisao.pane.cursor(),
+        0,
+        "o painel do outro lado não recebeu a digitação"
+    );
+    assert!(shell.active_text().is_some_and(|texto| texto != antes));
+
+    // Abrir um arquivo com a direita em foco põe a aba nova nela.
+    let Ok(_) = shell.open_file(&segundo) else {
+        panic!("o segundo arquivo não abriu");
+    };
+    let Some(novo) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let Some(divisao) = shell.editor_area.divisao.as_ref() else {
+        panic!("a divisão precisa continuar existindo");
+    };
+    assert_eq!(divisao.ativa, novo, "a aba nova é do painel apontado");
+    assert!(divisao.abas.contains(&novo));
+    let _ = std::fs::remove_dir_all(&root);
+}

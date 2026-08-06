@@ -96,7 +96,12 @@ impl IdeShell {
     /// Apresenta um documento cujo conteúdo já foi carregado pelo workspace.
     pub fn show_document(&mut self, path: &Path, text: impl Into<String>) -> DocumentId {
         let id = self.editor_area.session.open(path, text);
-        self.editor_area.pane.set_cursor(0);
+        // Com a área dividida, o arquivo abre no painel em que se está olhando.
+        // Abrir sempre à esquerda faria a divisão servir para ver dois arquivos
+        // só até alguém clicar no terceiro.
+        if !self.abrir_no_split(id) {
+            self.editor_area.pane.set_cursor(0);
+        }
         self.context.focus = ShellFocus::Editor;
         self.context.status_message = format!("Opened {}", path.display());
         self.sync_explorer_to_active();

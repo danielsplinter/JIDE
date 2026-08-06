@@ -56,7 +56,7 @@ O que a IDE faz é o que ela sempre faz: dizer **o que** vai em cada área — u
 `EditorPane` e um `Tabs` de cada lado, ambos já da biblioteca — e qual documento
 cada um mostra.
 
-## Fase 1 — dois editores, e a divisa entre eles ⬜
+## Fase 1 — dois editores, e a divisa entre eles ✅
 
 - clique secundário sobre a faixa de abas abre o menu com "Split direita";
 - escolher divide: o documento da aba clicada passa a ser mostrado também à
@@ -69,10 +69,19 @@ cada um mostra.
 **Critério:** um teste que divide, escreve de um lado e afirma que o outro lado
 mostra a mesma mudança com o cursor no lugar em que ele estava.
 
-## Fase 2 — abrir do lado certo ⬜
+## Fase 2 — o foco segue o ponteiro ✅
 
-Clicar num arquivo no Explorer abre no painel **com foco**, e não sempre no da
-esquerda. É o que faz a divisão servir para comparar dois arquivos.
+Passar o ponteiro sobre um dos lados o torna o lado ativo, e a partir daí tudo
+acontece nele: clique, rolagem, digitação. Clicar num arquivo no Explorer abre a
+aba **no painel apontado**, e não sempre no da esquerda — é o que faz a divisão
+servir para comparar dois arquivos.
+
+**O painel da frente é sempre o mesmo campo.** `editor_area.pane` é o painel do
+lado com foco, e trocar o foco troca os dois de lugar. Parece indireto e é o
+contrário: digitar, apagar, indentar, mover o cursor, colar, buscar e rolar
+passam por esse campo em duas dúzias de lugares, e fazer cada um deles escolher o
+painel pelo foco significaria que esquecer **um** faria o cursor andar no painel
+que ninguém está olhando. Entre vinte e quatro, esquecer um é questão de tempo.
 
 ## Fase 3 — o que fica de fora ⬜
 
