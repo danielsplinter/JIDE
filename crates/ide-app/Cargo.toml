@@ -5,6 +5,17 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Binário de entrega: a janela sobe sem o console atrás dela.
+#
+# É uma feature, e não um perfil, porque perfil do Cargo não chega ao código —
+# não existe `cfg(profile = "release")`. Amarrá-la a `debug_assertions` faria o
+# console sumir de **todo** release, e é justamente num release que se precisa do
+# log quando algo só acontece lá.
+#
+# Desligada por padrão: quem compila para trabalhar quer ver o `tracing`.
+producao = []
+
 [dependencies]
 async-trait.workspace = true
 ide-application = { path = "../ide-application" }

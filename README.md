@@ -37,6 +37,33 @@ essa pasta conjunta para outro usuário ou unidade não exige editar manifests.
 cargo run -p ide-app
 ```
 
+## Gerar o executável
+
+```text
+cargo build --release -p ide-app
+```
+
+```text
+cargo build --release -p ide-app --features producao
+```
+
+O binário sai em `target/release/ide-app.exe`. A tela de abertura está embutida
+nele, então ele não depende de nenhum arquivo ao lado.
+
+Os dois comandos diferem em uma coisa: **com `producao`, o Windows não anexa um
+console ao processo**. Sem a feature — o padrão — o console fica, e é nele que o
+`tracing` aparece; é o binário de quem está caçando defeito.
+
+É uma feature, e não um perfil, porque perfil do Cargo não chega ao código: não
+existe `cfg(profile = "release")`. Amarrar a decisão a `debug_assertions` faria o
+console sumir de **todo** release, e é justamente num release que se precisa do
+log quando algo só acontece lá.
+
+**No binário de produção o log não tem para onde ir**: `stdout` e `stderr` ficam
+sem destino, e o `tracing` segue escrevendo no vazio. Enquanto o `init_logging`
+não souber gravar em arquivo, um defeito relatado sobre esse binário chega sem
+rastro nenhum.
+
 Na primeira execução, o Explorer carrega o diretório no qual a IDE foi iniciada.
 Depois disso vale o último projeto aberto por `Arquivo → Projeto...`, gravado em
 `%APPDATA%\er-ide\config.toml` no Windows e em `~/.config/er-ide/config.toml`
