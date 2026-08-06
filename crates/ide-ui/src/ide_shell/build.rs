@@ -143,16 +143,11 @@ impl IdeShell {
             new_item: NewItemSurface::default(),
             rename: RenameSurface::default(),
             menu: MenuState {
+                recents: Vec::new(),
                 bar: MenuBar::new(
                     MENU_BAR_ID,
                     vec![
-                        MenuBarItem::menu(
-                            "Arquivo",
-                            vec![
-                                MenuItem::new("Projeto...", "file.project"),
-                                MenuItem::new("Salvar", "file.save"),
-                            ],
-                        ),
+                        crate::menus::file_menu(&[]),
                         MenuBarItem::menu(
                             "Projeto",
                             vec![
@@ -231,44 +226,6 @@ impl IdeShell {
     /// Templates, páginas, raízes e tarefas deixam de ser convenções da UI:
     /// trocar o catálogo reconstrói os controles que apresentam esses dados.
     pub fn set_ui_catalog(&mut self, catalog: UiContributionCatalog) {
-        let mut project_items = vec![
-            MenuItem::new("Compilar projeto", "project.build"),
-            MenuItem::new("Reimportar projeto", "project.reimport"),
-            MenuItem::new("Executar aplicação", "project.run"),
-            MenuItem::new("Parar aplicação", "project.stop"),
-        ];
-        project_items.extend(catalog.tasks.iter().map(|task| {
-            MenuItem::new(
-                task.title.clone(),
-                CommandId(format!("task.execute.{}", task.id.0)),
-            )
-        }));
-        self.menu.bar = MenuBar::new(
-            MENU_BAR_ID,
-            vec![
-                MenuBarItem::menu(
-                    "Arquivo",
-                    vec![
-                        MenuItem::new("Projeto...", "file.project"),
-                        MenuItem::new("Salvar", "file.save"),
-                    ],
-                ),
-                MenuBarItem::menu("Projeto", project_items),
-                MenuBarItem::menu(
-                    "Depurar",
-                    vec![
-                        MenuItem::new("Conectar...", "debug.connect"),
-                        MenuItem::new("Continuar", "debug.continue"),
-                        MenuItem::new("Pausar", "debug.pause"),
-                        MenuItem::new("Passo sobre", "debug.over"),
-                        MenuItem::new("Entrar", "debug.into"),
-                        MenuItem::new("Sair", "debug.out"),
-                        MenuItem::new("Desconectar", "debug.detach"),
-                    ],
-                ),
-                MenuBarItem::command("Configurações", "settings.open"),
-            ],
-        );
         let mut settings_titles = catalog
             .settings_sections
             .iter()
@@ -287,11 +244,65 @@ impl IdeShell {
                     .with_command(CommandId(format!("task.execute.{}", task.id.0)));
         }
         self.catalog = catalog;
+        self.rebuild_menu_bar();
         self.explorer.tree.set_roots(explorer_items(
             &self.explorer.workspace,
             &self.catalog.source_root_names,
             &self.declaration_kinds,
         ));
+    }
+
+    /// Recebe os projetos que "Arquivo → Recentes" vai oferecer.
+    ///
+    /// Chega pronta de fora: quem sabe onde a lista mora e o que dela ainda
+    /// existe é a aplicação. A tela só a apresenta — e guarda a ordem, porque é
+    /// por ela que o clique volta a virar caminho.
+    pub fn set_recent_projects(&mut self, recents: Vec<PathBuf>) {
+        if self.menu.recents == recents {
+            return;
+        }
+        self.menu.recents = recents;
+        self.rebuild_menu_bar();
+    }
+
+    /// Remonta a barra a partir do catálogo e dos recentes de agora.
+    ///
+    /// Uma barra só, montada num lugar só: as tarefas do catálogo e a lista de
+    /// recentes chegam em momentos diferentes, e quem chegasse depois apagaria o
+    /// que o outro tinha posto se cada um montasse a sua.
+    fn rebuild_menu_bar(&mut self) {
+        let mut project_items = vec![
+            MenuItem::new("Compilar projeto", "project.build"),
+            MenuItem::new("Reimportar projeto", "project.reimport"),
+            MenuItem::new("Executar aplicação", "project.run"),
+            MenuItem::new("Parar aplicação", "project.stop"),
+        ];
+        project_items.extend(self.catalog.tasks.iter().map(|task| {
+            MenuItem::new(
+                task.title.clone(),
+                CommandId(format!("task.execute.{}", task.id.0)),
+            )
+        }));
+        self.menu.bar = MenuBar::new(
+            MENU_BAR_ID,
+            vec![
+                crate::menus::file_menu(&self.menu.recents),
+                MenuBarItem::menu("Projeto", project_items),
+                MenuBarItem::menu(
+                    "Depurar",
+                    vec![
+                        MenuItem::new("Conectar...", "debug.connect"),
+                        MenuItem::new("Continuar", "debug.continue"),
+                        MenuItem::new("Pausar", "debug.pause"),
+                        MenuItem::new("Passo sobre", "debug.over"),
+                        MenuItem::new("Entrar", "debug.into"),
+                        MenuItem::new("Sair", "debug.out"),
+                        MenuItem::new("Desconectar", "debug.detach"),
+                    ],
+                ),
+                MenuBarItem::command("Configurações", "settings.open"),
+            ],
+        );
     }
 
     /// Recebe da aplicação que espécie de tipo cada arquivo declara.

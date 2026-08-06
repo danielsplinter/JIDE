@@ -5437,6 +5437,55 @@ fn saving_writes_the_active_tab_to_disk() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// "Duplicar workspace" pede outra janela, e não abre nada por conta própria.
+///
+/// O shell não sabe abrir processo, e não deve saber: ele diz o que o clique
+/// significa, e quem executa é a aplicação. Aqui se confere só isso — que o
+/// item existe, que é o terceiro do menu Arquivo, e que ele emite o comando.
+#[test]
+fn duplicar_workspace_pede_outra_janela() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+
+    shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
+    shell.pointer_down(Point::new(100.0, TITLE_HEIGHT + 63.0), size);
+
+    let commands = shell.drain_application_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::DuplicateWorkspace)),
+        "o menu deveria emitir DuplicateWorkspace, e veio {commands:?}"
+    );
+}
+
+/// Escolher um projeto em "Arquivo → Recentes" pede a abertura dele.
+///
+/// A posição clicada volta a ser caminho aqui dentro; a aplicação recebe o
+/// caminho pronto, e não um índice que ela teria de reinterpretar.
+#[test]
+fn um_recente_escolhido_no_menu_pede_o_projeto() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let primeiro = std::path::PathBuf::from("/tmp/loja");
+    let segundo = std::path::PathBuf::from("/tmp/portal");
+    shell.set_recent_projects(vec![primeiro, segundo.clone()]);
+
+    // Arquivo → Recentes → o segundo da lista de dentro.
+    shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
+    shell.pointer_down(Point::new(100.0, TITLE_HEIGHT + 42.0), size);
+    shell.pointer_down(Point::new(420.0, TITLE_HEIGHT + 63.0), size);
+
+    let commands = shell.drain_application_commands();
+    assert!(
+        commands.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::OpenRecentProject(caminho) if *caminho == segundo
+        )),
+        "o menu deveria pedir o projeto recente, e veio {commands:?}"
+    );
+}
+
 /// O item "Salvar" entrega o conteúdo à aplicação sem escrever pela UI.
 #[test]
 fn the_file_menu_saves_the_active_tab() {
@@ -5454,9 +5503,12 @@ fn the_file_menu_saves_the_active_tab() {
     shell.editor_area.pane.set_cursor(0);
     shell.text_input("// pelo menu\n");
     let size = Size::new(1280.0, 800.0);
-    // Abre o menu Arquivo e escolhe a segunda entrada.
+    // Abre o menu Arquivo e escolhe "Salvar", que é a **quarta** entrada:
+    // "Projeto...", "Recentes" e "Duplicar workspace" vêm antes. A escolha é por
+    // posição, então acrescentar um item acima dela muda esta linha — e é a
+    // falha deste teste que avisa.
     shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
-    shell.pointer_down(Point::new(100.0, TITLE_HEIGHT + 42.0), size);
+    shell.pointer_down(Point::new(100.0, TITLE_HEIGHT + 84.0), size);
     let commands = shell.drain_application_commands();
     let Some(ApplicationCommand::SaveDocument(request)) = commands.first() else {
         panic!("o menu deveria emitir SaveDocument");

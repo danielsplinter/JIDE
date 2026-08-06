@@ -11,11 +11,38 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 use super::NativeIde;
 
+/// Qual projeto abrir, entre o que foi pedido, o último e o diretório atual.
+///
+/// O **pedido vem antes de tudo**: é o único caminho por onde alguém diz "abra
+/// este projeto, e não o de sempre".
+///
+/// É o que faz "Duplicar workspace" abrir a segunda janela no mesmo projeto da
+/// primeira. Confiar na configuração não bastaria: ela guarda o **último**
+/// projeto aberto, e a primeira janela pode trocar de projeto antes de a
+/// segunda terminar de subir — as duas acabariam em lugares diferentes, e o
+/// menu diria "duplicar" tendo feito outra coisa.
 pub(super) fn startup_root(
+    requested: Option<PathBuf>,
     config: &AppConfig,
     current_directory: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    config.resolved_project().or(current_directory)
+    requested
+        .or_else(|| config.resolved_project())
+        .or(current_directory)
+}
+
+/// A pasta pedida como argumento, quando ela é mesmo uma pasta.
+///
+/// Lida aqui e passada adiante, em vez de consultada lá dentro: `startup_root`
+/// é decisão, e decisão que lê o ambiente não se testa — passa a depender de
+/// como o teste foi invocado.
+///
+/// Um argumento que não aponta para uma pasta é ignorado em silêncio: quem
+/// abre a IDE com um caminho errado prefere vê-la abrir no projeto de sempre a
+/// vê-la recusar subir.
+pub(super) fn requested_root() -> Option<PathBuf> {
+    let caminho = PathBuf::from(std::env::args().nth(1)?);
+    caminho.is_dir().then_some(caminho)
 }
 
 /// Traduz as escolhas do formato antigo, que tinha um campo por ferramenta.

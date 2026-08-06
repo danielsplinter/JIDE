@@ -21,6 +21,19 @@ pub enum ApplicationCommand {
     /// A árvore é rasa: só o que foi aberto está em memória. Ver a `19`.
     LoadDirectory(std::path::PathBuf),
     OpenProject,
+    /// Abre **outra janela** sobre o mesmo projeto.
+    ///
+    /// Duas janelas do mesmo workspace servem a quem lê um arquivo enquanto
+    /// escreve outro, ou compara dois pontos distantes do mesmo código. É outra
+    /// instância, e não outra aba: cada uma tem o próprio editor, o próprio
+    /// terminal e o próprio analisador.
+    DuplicateWorkspace,
+    /// Abre um projeto escolhido na lista de recentes.
+    ///
+    /// Carrega o **caminho**, e não a posição na lista: entre montar o menu e
+    /// alguém escolher, a lista pode ter sido reordenada por outra janela, e
+    /// uma posição passaria a apontar para outro projeto.
+    OpenRecentProject(std::path::PathBuf),
     OpenSettings,
     OpenToolchainSettings,
     /// Abre o seletor de pasta para apontar uma instalação.

@@ -1,9 +1,9 @@
 //! Construção das ações de menus do editor, Explorer e depuração.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ide_application::{DebugRequest, NewItemTemplate};
-use ui_components::{MenuBar, MenuEntry, MenuItem};
+use ui_components::{MenuBar, MenuBarItem, MenuEntry, MenuItem};
 use ui_core::CommandId;
 
 use crate::explorer::{is_package, is_source_root};
@@ -11,6 +11,64 @@ use crate::explorer::{is_package, is_source_root};
 /// Estado da barra de menus principal.
 pub(super) struct MenuState {
     pub(super) bar: MenuBar,
+    /// Projetos oferecidos em "Recentes", na ordem em que aparecem.
+    ///
+    /// Guardados aqui porque o clique chega como posição — o menu diz "o
+    /// terceiro" — e alguém precisa dizer qual caminho é esse. A barra é
+    /// reconstruída junto com esta lista, e as duas nunca se separam.
+    pub(super) recents: Vec<PathBuf>,
+}
+
+/// O prefixo dos comandos de projeto recente; o resto é a posição na lista.
+pub(super) const RECENTE: &str = "file.recent.";
+
+/// O menu "Arquivo", com a porta de recentes já montada.
+///
+/// Existe como função porque o menu é construído em dois lugares — na abertura
+/// e a cada catálogo novo — e um menu que muda só num deles é um menu que some.
+pub(super) fn file_menu(recents: &[PathBuf]) -> MenuBarItem {
+    let entradas = rotulos_dos_recentes(recents)
+        .into_iter()
+        .enumerate()
+        .map(|(posicao, rotulo)| MenuItem::new(rotulo, CommandId(format!("{RECENTE}{posicao}"))))
+        .collect::<Vec<_>>();
+    MenuBarItem::menu(
+        "Arquivo",
+        vec![
+            MenuItem::new("Projeto...", "file.project"),
+            MenuItem::submenu("Recentes", entradas),
+            MenuItem::new("Duplicar workspace", "file.duplicate"),
+            MenuItem::new("Salvar", "file.save"),
+        ],
+    )
+}
+
+/// Como cada projeto recente se apresenta na lista.
+///
+/// O nome da pasta basta quase sempre e é o que a pessoa reconhece. **Quando
+/// dois recentes têm o mesmo nome** — e é justamente entre esses que a lista
+/// mais serve, `frontend` de um cliente e `frontend` de outro — o nome sozinho
+/// mentiria; então a pasta que os contém entra junto para separá-los.
+fn rotulos_dos_recentes(recents: &[PathBuf]) -> Vec<String> {
+    let nome = |caminho: &Path| {
+        caminho
+            .file_name()
+            .map_or_else(|| caminho.display().to_string(), |n| n.to_string_lossy().into_owned())
+    };
+    recents
+        .iter()
+        .map(|caminho| {
+            let proprio = nome(caminho);
+            let repetido = recents
+                .iter()
+                .filter(|outro| outro.as_path() != caminho.as_path())
+                .any(|outro| nome(outro) == proprio);
+            match caminho.parent().filter(|_| repetido) {
+                Some(pai) => format!("{proprio} — {}", nome(pai)),
+                None => proprio,
+            }
+        })
+        .collect()
 }
 
 pub(super) fn editor_entries(
@@ -108,6 +166,41 @@ pub(super) fn debug_request(command: &str) -> Option<DebugRequest> {
         "debug.out" => Some(DebugRequest::StepOut),
         "debug.detach" => Some(DebugRequest::Detach),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod recentes_tests {
+    use super::*;
+
+    /// O nome da pasta basta; nomes repetidos ganham a pasta que os contém.
+    #[test]
+    fn dois_recentes_de_mesmo_nome_se_distinguem() {
+        let rotulos = rotulos_dos_recentes(&[
+            PathBuf::from("/casa/loja/frontend"),
+            PathBuf::from("/casa/banco/frontend"),
+            PathBuf::from("/casa/relatorios"),
+        ]);
+        assert_eq!(
+            rotulos,
+            vec!["frontend — loja", "frontend — banco", "relatorios"],
+            "só o nome repetido precisa do pai"
+        );
+    }
+
+    /// Uma porta sem projetos fica desabilitada em vez de sumir.
+    #[test]
+    fn sem_recentes_a_porta_continua_no_menu() {
+        let arquivo = file_menu(&[]);
+        let Some(recentes) = arquivo
+            .children
+            .iter()
+            .find(|item| item.label == "Recentes")
+        else {
+            panic!("o menu Arquivo deveria ter a porta de recentes");
+        };
+        assert!(recentes.children().is_empty());
+        assert!(!recentes.enabled);
     }
 }
 

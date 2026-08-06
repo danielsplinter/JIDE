@@ -15,6 +15,8 @@ pub(super) enum UiAction {
     ReloadWorkspace,
     LoadDirectory(std::path::PathBuf),
     OpenProject,
+    DuplicateWorkspace,
+    OpenRecentProject(PathBuf),
     OpenSettings,
     OpenToolchainSettings,
     BrowseTool {
@@ -50,6 +52,8 @@ impl From<ApplicationCommand> for UiAction {
             ApplicationCommand::ReloadWorkspace => Self::ReloadWorkspace,
             ApplicationCommand::LoadDirectory(path) => Self::LoadDirectory(path),
             ApplicationCommand::OpenProject => Self::OpenProject,
+            ApplicationCommand::DuplicateWorkspace => Self::DuplicateWorkspace,
+            ApplicationCommand::OpenRecentProject(path) => Self::OpenRecentProject(path),
             ApplicationCommand::OpenSettings => Self::OpenSettings,
             ApplicationCommand::OpenToolchainSettings => Self::OpenToolchainSettings,
             ApplicationCommand::BrowseTool { section, role } => {

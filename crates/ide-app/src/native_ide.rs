@@ -7,7 +7,7 @@ use std::{
 
 #[cfg(test)]
 use crate::bootstrap::default_goals;
-use crate::bootstrap::{java_source, project_sources, startup_root};
+use crate::bootstrap::{java_source, project_sources, requested_root, startup_root};
 use crate::bridges::position_at_offset;
 use crate::splash;
 use crate::controllers::{
@@ -164,7 +164,11 @@ impl NativeIde {
         }
         self.ui
             .replace_event_bus(self.runtime.config.event_capacity.max(1));
-        let root = startup_root(&self.runtime.config, std::env::current_dir().ok())
+        let root = startup_root(
+            requested_root(),
+            &self.runtime.config,
+            std::env::current_dir().ok(),
+        )
             .ok_or_else(|| "não foi possível determinar o diretório do projeto".to_owned())?;
         let nativo = Arc::new(NativeProcessSupervisor::default());
         // O supervisor concreto fica guardado para a medição: ele é quem sabe
@@ -310,6 +314,10 @@ impl NativeIde {
         }
         self.documents.remembered = shell.open_document_paths();
         self.ui.shell = Some(shell);
+        // O projeto da abertura também é um recente. Antes só entravam os
+        // abertos pelo menu, e quem sobe a IDE por linha de comando numa pasta
+        // nunca a encontrava depois na lista — justo quem mais alterna.
+        self.remember_project(&root);
         self.publish_event(IdeEvent::WorkspaceOpened { root: root.clone() });
         // A raiz precisa estar registrada **antes** de resolver ferramenta:
         // é ela que decide se vale a sobreposição do projeto ou o padrão.
@@ -564,6 +572,95 @@ impl NativeIde {
             return;
         };
         self.open_another_project(&folder);
+    }
+
+    /// Abre um projeto escolhido em "Arquivo → Recentes".
+    ///
+    /// A pasta é conferida na hora do clique, e não só quando o menu foi
+    /// montado: entre uma coisa e outra alguém pode ter renomeado, movido ou
+    /// desconectado o disco. Abrir a mesma pasta de novo não faz nada — seria
+    /// derrubar o analisador e reabrir tudo para chegar onde já se estava.
+    fn open_recent_project(&mut self, path: &Path) {
+        if !path.is_dir() {
+            self.report_to_shell(&format!("{} não está mais disponível", path.display()));
+            self.publish_recent_projects();
+            return;
+        }
+        let atual = self
+            .ui
+            .shell
+            .as_ref()
+            .is_some_and(|shell| shell.workspace_path() == path);
+        if atual {
+            return;
+        }
+        self.open_another_project(path);
+    }
+
+    /// Manda para a tela os projetos recentes que ainda existem.
+    ///
+    /// Chamado depois de gravar a configuração, que é quando a lista muda, e
+    /// também quando um recente se revela ausente: nos dois casos o menu montado
+    /// deixou de descrever o que existe.
+    fn publish_recent_projects(&mut self) {
+        let recentes = self.runtime.config.workspace.resolved_recent_paths();
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_recent_projects(recentes);
+        }
+    }
+
+    /// Abre outra janela da IDE sobre o mesmo projeto.
+    ///
+    /// # Outro processo, e não outra janela do mesmo
+    ///
+    /// Uma segunda janela dentro deste processo dividiria o analisador, o
+    /// índice e o supervisor de processos com a primeira — e dividir é onde
+    /// mora a maior parte dos defeitos que esta sessão caçou. Um processo novo
+    /// nasce com tudo próprio, e as duas janelas só compartilham o disco.
+    ///
+    /// O preço é honesto e vale dizer: o projeto é indexado duas vezes, e são
+    /// dois analisadores externos. Quem duplica quer duas janelas de verdade.
+    ///
+    /// # A raiz vai como argumento
+    ///
+    /// Não como "o que a configuração disser": ela guarda o **último** projeto,
+    /// e esta janela pode trocar de projeto antes de a outra terminar de subir.
+    /// O menu diz "duplicar", e duplicar é abrir o que está aqui.
+    fn duplicate_workspace(&mut self) {
+        let Some(raiz) = self.runtime.workspace_root.clone() else {
+            return;
+        };
+        let executavel = match std::env::current_exe() {
+            Ok(caminho) => caminho,
+            Err(error) => {
+                self.report_to_shell(&format!("não foi possível duplicar: {error}"));
+                return;
+            }
+        };
+        // Sem esperar por ela: a janela nova tem vida própria, e ficar com o
+        // filho pendurado faria esta janela segurar um processo que ela não
+        // controla mais.
+        match std::process::Command::new(executavel)
+            .arg(&raiz)
+            .current_dir(&raiz)
+            .spawn()
+        {
+            Ok(_) => {
+                tracing::info!(raiz = %raiz.display(), "outra janela da IDE foi aberta");
+                self.report_to_shell("Outra janela deste projeto está abrindo");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "a segunda janela não subiu");
+                self.report_to_shell(&format!("não foi possível duplicar: {error}"));
+            }
+        }
+    }
+
+    /// Diz na barra de estado, quando há shell para dizer.
+    fn report_to_shell(&mut self, mensagem: &str) {
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(mensagem.to_owned());
+        }
     }
 
     /// Troca o projeto aberto sem fechar a IDE.
@@ -2747,6 +2844,10 @@ impl NativeIde {
                 shell.set_status_message(format!("Configuração não pôde ser gravada: {error}"));
             }
         }
+        // A lista em memória subiu o projeto para o topo mesmo que a gravação
+        // tenha falhado; o menu mostra o que a sessão sabe, e não o que o disco
+        // aceitou guardar.
+        self.publish_recent_projects();
     }
 
     /// Raízes de código enviadas ao depurador para mapear posições em arquivos.
@@ -2986,6 +3087,8 @@ impl NativeIde {
                     }
                 }
                 UiAction::OpenProject => self.choose_project(),
+                UiAction::DuplicateWorkspace => self.duplicate_workspace(),
+                UiAction::OpenRecentProject(path) => self.open_recent_project(&path),
                 UiAction::OpenSettings => {
                     self.open_toolchain_selector(&java_contribution::language_id());
                 }
@@ -4926,6 +5029,28 @@ mod tests {
         assert_eq!(refine_type_hits(vindos, "", None).len(), 1);
     }
 
+    /// O projeto pedido ganha do último aberto e do diretório atual.
+    ///
+    /// É o que sustenta "Duplicar workspace": a janela nova recebe a raiz como
+    /// argumento e não pergunta à configuração — que guarda o **último**
+    /// projeto, e pode já ser outro quando ela terminar de subir.
+    #[test]
+    fn o_projeto_pedido_ganha_de_todo_o_resto() {
+        let pedido = PathBuf::from("/w/pedido");
+        let mut config = AppConfig::default();
+        config.workspace.last_path = Some(PathBuf::from("/w/ultimo"));
+
+        assert_eq!(
+            startup_root(
+                Some(pedido.clone()),
+                &config,
+                Some(PathBuf::from("/w/atual"))
+            ),
+            Some(pedido),
+            "o pedido vem antes do último projeto e do diretório atual"
+        );
+    }
+
     #[test]
     fn startup_reopens_the_last_project_and_falls_back_to_the_current_directory() {
         let root = std::env::temp_dir().join(format!("er-ide-startup-{}", std::process::id()));
@@ -4937,24 +5062,24 @@ mod tests {
         let mut config = AppConfig::default();
         config.workspace.last_path = Some(project.clone());
         assert_eq!(
-            startup_root(&config, Some(current.clone())),
+            startup_root(None, &config, Some(current.clone())),
             Some(project.clone()),
             "o último projeto tem prioridade sobre o diretório atual"
         );
 
         config.workspace.last_path = Some(root.join("removido"));
         assert_eq!(
-            startup_root(&config, Some(current.clone())),
+            startup_root(None, &config, Some(current.clone())),
             Some(current.clone()),
             "uma pasta que sumiu não impede a IDE de abrir"
         );
 
         assert_eq!(
-            startup_root(&AppConfig::default(), Some(current)),
+            startup_root(None, &AppConfig::default(), Some(current)),
             Some(PathBuf::from("/w/atual")),
             "sem registro, vale o diretório atual"
         );
-        assert!(startup_root(&AppConfig::default(), None).is_none());
+        assert!(startup_root(None, &AppConfig::default(), None).is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

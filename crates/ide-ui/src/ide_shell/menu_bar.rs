@@ -23,6 +23,31 @@ impl IdeShell {
                 self.context.status_message = "Select a project folder".to_owned();
                 return true;
             }
+            EventResult::Action(WidgetAction::Command(command))
+                if command.0 == "file.duplicate" =>
+            {
+                self.commands.push(ApplicationCommand::DuplicateWorkspace);
+                self.context.status_message = "Abrindo outra janela deste projeto".to_owned();
+                return true;
+            }
+            EventResult::Action(WidgetAction::Command(command))
+                if command.0.starts_with(crate::menus::RECENTE) =>
+            {
+                // A posição volta a ser caminho aqui, contra a mesma lista que
+                // montou o menu. Uma posição sem caminho não vira comando: é o
+                // que sobra de um menu montado antes da lista encolher.
+                if let Some(path) = command
+                    .0
+                    .strip_prefix(crate::menus::RECENTE)
+                    .and_then(|posicao| posicao.parse::<usize>().ok())
+                    .and_then(|posicao| self.menu.recents.get(posicao))
+                {
+                    self.context.status_message = format!("Abrindo {}", path.display());
+                    self.commands
+                        .push(ApplicationCommand::OpenRecentProject(path.clone()));
+                }
+                return true;
+            }
             EventResult::Action(WidgetAction::Command(command)) if command.0 == "file.save" => {
                 self.request_save_active_document();
                 return true;

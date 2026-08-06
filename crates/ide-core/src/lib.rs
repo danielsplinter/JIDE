@@ -258,7 +258,21 @@ pub struct WorkspaceConfig {
     /// Documento em foco no último uso.
     #[serde(default)]
     pub active_document: Option<PathBuf>,
+    /// Projetos abertos recentemente, do mais recente para o mais antigo.
+    ///
+    /// Separado de `last_path` porque respondem perguntas diferentes: um diz o
+    /// que reabrir sozinho, o outro oferece uma escolha. Guardar só o último
+    /// obrigaria quem alterna entre dois projetos a procurar a pasta toda vez.
+    #[serde(default)]
+    pub recent_paths: Vec<PathBuf>,
 }
+
+/// Quantos projetos a lista de recentes guarda.
+///
+/// Uma lista que não esquece vira um arquivo de configuração que só cresce e um
+/// menu onde ninguém acha nada. Dez cobre a alternância real entre projetos e
+/// ainda cabe na tela.
+const RECENTES: usize = 10;
 
 impl WorkspaceConfig {
     /// Último projeto, apenas quando ainda existe como diretório.
@@ -271,6 +285,31 @@ impl WorkspaceConfig {
             .as_ref()
             .filter(|path| path.is_dir())
             .cloned()
+    }
+
+    /// Põe um projeto no topo da lista de recentes.
+    ///
+    /// **Sobe em vez de repetir**: reabrir um projeto que já estava na lista o
+    /// move para o topo, e não acrescenta uma segunda linha igual. Uma lista com
+    /// o mesmo caminho três vezes desperdiça o pouco espaço que ela tem.
+    pub fn remember_recent(&mut self, path: &Path) {
+        self.recent_paths.retain(|antigo| antigo != path);
+        self.recent_paths.insert(0, path.to_path_buf());
+        self.recent_paths.truncate(RECENTES);
+    }
+
+    /// Os recentes que ainda existem como diretório.
+    ///
+    /// Uma pasta renomeada, removida ou num disco desconectado continua no
+    /// arquivo — ela pode voltar —, mas não é oferecida: um item de menu que
+    /// não abre nada é pior do que um item a menos.
+    #[must_use]
+    pub fn resolved_recent_paths(&self) -> Vec<PathBuf> {
+        self.recent_paths
+            .iter()
+            .filter(|path| path.is_dir())
+            .cloned()
+            .collect()
     }
 
     /// Documentos a reabrir em um projeto, apenas os que ainda são arquivos.
@@ -334,6 +373,7 @@ impl AppConfig {
             self.workspace.active_document = None;
         }
         self.workspace.last_path = Some(root.to_path_buf());
+        self.workspace.remember_recent(root);
         self.save(path)
     }
 
@@ -650,6 +690,61 @@ mod tests {
     fn absent_config_uses_bounded_defaults() {
         let config = AppConfig::load(Path::new("missing-ide-config.toml"));
         assert!(matches!(config, Ok(value) if value.event_capacity == 1_024));
+    }
+
+    /// Reabrir um projeto o traz de volta ao topo, sem duplicar a linha.
+    #[test]
+    fn os_recentes_guardam_a_ordem_de_uso() {
+        let root = temporary("recentes");
+        let file = root.join("config").join("config.toml");
+        let projetos = ["um", "dois", "tres"].map(|nome| root.join(nome));
+        for projeto in &projetos {
+            assert!(fs::create_dir_all(projeto).is_ok());
+        }
+
+        let mut config = AppConfig::default();
+        for projeto in &projetos {
+            assert!(config.remember_workspace(projeto, &file).is_ok());
+        }
+        assert!(config.remember_workspace(&projetos[0], &file).is_ok());
+
+        let reloaded = match AppConfig::load(&file) {
+            Ok(config) => config,
+            Err(error) => panic!("releitura falhou: {error}"),
+        };
+        assert_eq!(
+            reloaded.workspace.recent_paths,
+            vec![
+                projetos[0].clone(),
+                projetos[2].clone(),
+                projetos[1].clone()
+            ],
+            "o reaberto sobe ao topo e não aparece duas vezes"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A lista não cresce sem fim, e o que sumiu do disco não é oferecido.
+    #[test]
+    fn os_recentes_param_de_crescer_e_escondem_o_que_sumiu() {
+        let root = temporary("recentes-limite");
+        let mut config = AppConfig::default();
+        for indice in 0..RECENTES + 4 {
+            config
+                .workspace
+                .remember_recent(&root.join(format!("projeto-{indice}")));
+        }
+        assert_eq!(config.workspace.recent_paths.len(), RECENTES);
+
+        let presente = root.join("presente");
+        assert!(fs::create_dir_all(&presente).is_ok());
+        config.workspace.remember_recent(&presente);
+        assert_eq!(
+            config.workspace.resolved_recent_paths(),
+            vec![presente],
+            "só o que ainda é pasta chega ao menu"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// As abas voltam com o projeto, e só as que ainda existem.
