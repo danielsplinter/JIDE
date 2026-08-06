@@ -469,9 +469,31 @@ impl IdeShell {
                     Some((numero, inicio, fim))
                 })
                 .collect();
+            // As ocorrências da busca, convertidas de linha absoluta para a
+            // linha da tela: o componente desenha o que vê, e o que ele vê é a
+            // viewport.
+            let topo = self.terminal.tabs[self.terminal.active].scroll_line;
+            let (realces, atual) = self.terminal.busca.as_ref().map_or_else(
+                || (Vec::new(), None),
+                |busca| {
+                    let faixa = |achado: &ide_terminal::TerminalMatch| {
+                        achado.line.checked_sub(topo).map(|linha| {
+                            (linha, achado.column, achado.column + achado.length)
+                        })
+                    };
+                    (
+                        busca.achados.iter().filter_map(faixa).collect(),
+                        busca
+                            .atual
+                            .and_then(|indice| busca.achados.get(indice))
+                            .and_then(faixa),
+                    )
+                },
+            );
             let contexto = self.layout_context();
             let mut saida = self.paint_context();
             let grade = &mut self.terminal.grid;
+            grade.set_highlights(realces, atual);
             grade.set_selection(marcadas);
             grade.set_rows(linhas);
             // O cursor é da tela viva, não do histórico: rolado para trás, ele
@@ -505,8 +527,12 @@ impl IdeShell {
             // A área vem do arranjo, e não de uma conta aqui: é o que faz o
             // clique e o desenho concordarem sem ninguém repetir coordenada.
             // Ver ADR-020.
-            let caixa = self.host.bounds(SEARCH_POPUP_ID).unwrap_or_default();
-            let mut surface = Popup::new(SEARCH_POPUP_ID).with_padding(6.0);
+            // Os nós são dois — um por área —, e o componente é o mesmo. Qual
+            // deles vale sai do alvo, num lugar só: com a escolha repetida, o
+            // clique cairia numa faixa e o desenho apareceria na outra.
+            let (popup_id, input_id) = self.search_widget_ids();
+            let caixa = self.host.bounds(popup_id).unwrap_or_default();
+            let mut surface = Popup::new(popup_id).with_padding(6.0);
             surface.set_content_size(Size::new(
                 (caixa.size.width - 12.0).max(0.0),
                 (caixa.size.height - 12.0).max(0.0),
@@ -519,8 +545,12 @@ impl IdeShell {
             let mut search_paint = self.paint_context();
             surface.paint(&mut search_paint);
             if let Some(content) = surface.content_rect() {
-                let mut field = TextInput::new(SEARCH_INPUT_ID, &self.editor_area.search_query)
-                    .with_placeholder("Buscar no arquivo");
+                let mut field = TextInput::new(input_id, &self.editor_area.search_query)
+                    .with_placeholder(if self.context.busca_no_terminal {
+                        "Buscar na saída"
+                    } else {
+                        "Buscar no arquivo"
+                    });
                 // O campo mostra o cursor quando **ele** tem o foco. A barra
                 // continua na tela depois de um clique no editor, e ali o cursor
                 // que pisca é o do código.

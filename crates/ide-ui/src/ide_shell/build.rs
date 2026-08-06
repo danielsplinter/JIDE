@@ -85,6 +85,7 @@ impl IdeShell {
                 divisao: None,
             },
             terminal: TerminalPanelState {
+                busca: None,
                 console: Console::new(TERMINAL_CONSOLE_ID, Vec::new()).with_metrics(
                     14.0,
                     EDITOR_LINE_HEIGHT,
@@ -177,6 +178,7 @@ impl IdeShell {
             declaration_kinds: HashMap::new(),
             context: ShellContext {
                 focus: ShellFocus::None,
+                busca_no_terminal: false,
                 text_metrics: None,
                 clipboard: None,
                 theme: Theme::default(),

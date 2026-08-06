@@ -7331,3 +7331,75 @@ fn o_terminal_copia_o_que_esta_na_grade() {
     );
     let _ = size;
 }
+
+/// `Ctrl+F` com o foco no terminal procura **na saída**, e não no arquivo.
+///
+/// A barra é a mesma — o componente do editor —, e o que muda é o alvo, decidido
+/// pelo foco de então. Aqui se confere o caminho inteiro: abrir, achar, andar
+/// entre as ocorrências e fechar.
+#[test]
+fn a_busca_no_terminal_usa_a_mesma_barra_e_procura_na_saida() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+
+    // Sem foco no terminal, `Ctrl+F` continua sendo a busca do arquivo.
+    shell.context.focus = ShellFocus::Editor;
+    shell.toggle_search();
+    assert!(!shell.context.busca_no_terminal);
+    shell.escape();
+
+    // Com o foco no terminal, a mesma tecla procura na saída.
+    shell.context.focus = ShellFocus::Terminal;
+    shell.toggle_search();
+    assert!(
+        shell.context.busca_no_terminal,
+        "o alvo sai do foco de quem abriu a barra"
+    );
+    assert_eq!(shell.context.focus, ShellFocus::Search);
+
+    // O que se digita procura na grade: o prompt do shell tem o caminho do
+    // projeto, e é o que há na tela num terminal recém-aberto.
+    let alvo = shell
+        .active_terminal()
+        .grid_rows()
+        .first()
+        .and_then(|linha| linha.iter().find(|celula| celula.character.is_alphanumeric()))
+        .map(|celula| celula.character);
+    if let Some(caractere) = alvo {
+        shell.text_input(&caractere.to_string());
+        let Some(busca) = shell.terminal.busca.as_ref() else {
+            panic!("a busca da saída precisa existir depois de digitar");
+        };
+        assert!(!busca.achados.is_empty(), "o caractere está na tela");
+        assert_eq!(busca.atual, Some(0), "a primeira já nasce em foco");
+
+        // `Enter` anda, `Shift+Enter` volta, e as duas dão a volta.
+        let total = busca.achados.len();
+        let com_shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        shell.key_down("Enter");
+        assert_eq!(
+            shell.terminal.busca.as_ref().and_then(|busca| busca.atual),
+            Some(1 % total)
+        );
+        shell.key_down_with_modifiers("Enter", com_shift);
+        assert_eq!(
+            shell.terminal.busca.as_ref().and_then(|busca| busca.atual),
+            Some(0)
+        );
+        shell.key_down_with_modifiers("Enter", com_shift);
+        assert_eq!(
+            shell.terminal.busca.as_ref().and_then(|busca| busca.atual),
+            Some(total - 1),
+            "do começo, Shift+Enter dá a volta pelo fim"
+        );
+    }
+
+    // Fechar limpa os dois: o alvo e o que foi achado.
+    shell.escape();
+    assert!(shell.terminal.busca.is_none());
+    assert!(!shell.context.busca_no_terminal);
+}

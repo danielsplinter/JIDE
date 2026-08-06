@@ -1,6 +1,6 @@
 //! Estado de abas, seleção e rolagem do terminal.
 
-use ide_terminal::{ShellKind, TerminalSession};
+use ide_terminal::{ShellKind, TerminalMatch, TerminalSession};
 use ui_components::{Console, TerminalView};
 use ui_components::{Scrollbar, Splitter};
 
@@ -34,7 +34,20 @@ pub(super) struct TerminalTab {
 }
 
 /// Estado do painel de terminais e de sua interação.
+/// A busca na saída de um terminal.
+///
+/// Vive no painel, e não junto da busca do editor, porque o que ela guarda é do
+/// terminal: as ocorrências vêm em **linha absoluta** do histórico, e é por elas
+/// que a rolagem anda.
+pub(super) struct BuscaNoTerminal {
+    pub(super) achados: Vec<TerminalMatch>,
+    /// Qual das ocorrências está em foco. Sem nenhuma, não há para onde rolar.
+    pub(super) atual: Option<usize>,
+}
+
 pub(super) struct TerminalPanelState {
+    /// A busca em curso na saída, quando há uma.
+    pub(super) busca: Option<BuscaNoTerminal>,
     /// A saída, viva entre quadros.
     ///
     /// Não é reconstruída a cada pintura porque duas coisas dependem da medição

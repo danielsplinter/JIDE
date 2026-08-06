@@ -1206,7 +1206,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // De 7 315 para 7 333: `Shift+Enter` na barra de busca, que faltava
         // para o gesto ter volta. São dezoito linhas dentro de um teste que já
         // existia, e não um teste novo.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 7_333),
+        //
+        // De 7 333 para 7 405: a busca na saída do terminal, ponta a ponta —
+        // abrir com o foco no terminal, achar na grade, andar entre as
+        // ocorrências nos dois sentidos e fechar limpando os dois lados. É a
+        // terceira e última pendência da fase 4 da `18` que ganha teste.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 7_405),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))

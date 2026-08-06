@@ -37,7 +37,7 @@ use crate::ide_shell::type_search::TypeSearchSurface;
 use crate::settings::SettingsPage;
 use crate::shell::{ShellCommandQueue, ShellFocus};
 use crate::terminal::{
-    ScrollTarget, TerminalPanelState, TerminalSelection, TerminalTab, TextPosition,
+    BuscaNoTerminal, ScrollTarget, TerminalPanelState, TerminalSelection, TerminalTab, TextPosition,
     selection_columns,
 };
 use ide_application::{
@@ -215,6 +215,15 @@ const SEARCH_INPUT_ID: WidgetId = WidgetId(10_029);
 /// **superior esquerdo**; a faixa preenche a área e alinha ao fim, e é ela que
 /// põe a barra do outro lado sem ninguém calcular coordenada.
 const SEARCH_STRIP_ID: WidgetId = WidgetId(10_482);
+/// A mesma barra de busca, do lado do terminal.
+///
+/// Outro nó, e não o mesmo movido: a área de cada faixa vem da moldura, e um nó
+/// só não pode estar dentro de duas. O **componente** é o mesmo — um `Popup` com
+/// um `TextInput` —, e é o que importa para quem usa: a busca é uma, e aparece
+/// onde se está procurando.
+const SEARCH_STRIP_TERMINAL_ID: WidgetId = WidgetId(10_103);
+const SEARCH_POPUP_TERMINAL_ID: WidgetId = WidgetId(10_104);
+const SEARCH_INPUT_TERMINAL_ID: WidgetId = WidgetId(10_105);
 /// Linhas visíveis da lista de completação antes de precisar rolar.
 const COMPLETION_VISIBLE_ROWS: usize = 8;
 const COMPLETION_ROW_HEIGHT: f32 = 24.0;
@@ -234,6 +243,12 @@ const SURFACE_LAYER_BASE: WidgetId = WidgetId(10_210);
 /// Serviços e estado visual compartilhados apenas pelo coordenador.
 struct ShellContext {
     focus: ShellFocus,
+    /// Se a barra de busca aberta procura na **saída do terminal**.
+    ///
+    /// A barra é uma só, e o que muda é o alvo. Ele é decidido no `Ctrl+F` pelo
+    /// foco de então e não muda depois: clicar no código com a busca do terminal
+    /// aberta não pode trocar o que ela procura no meio.
+    busca_no_terminal: bool,
     text_metrics: Option<Arc<dyn TextMetrics>>,
     clipboard: Option<Arc<dyn ClipboardService>>,
     theme: Theme,
@@ -446,6 +461,20 @@ fn declare_frame(host: &mut UiHost) {
         fixa(TERMINAL_TAB_HEIGHT),
     );
     let _ = host.declare(FRAME_TERMINAL_ID, TERMINAL_OUTPUT_ID, cresce(coluna));
+    let _ = host.declare(
+        FRAME_TERMINAL_ID,
+        SEARCH_STRIP_TERMINAL_ID,
+        LayoutStyle::default(),
+    );
+    let _ = host.declare(
+        SEARCH_STRIP_TERMINAL_ID,
+        SEARCH_POPUP_TERMINAL_ID,
+        LayoutStyle {
+            width: Some(SEARCH_BOX_WIDTH),
+            height: Some(SEARCH_BOX_HEIGHT),
+            ..LayoutStyle::default()
+        },
+    );
     let _ = host.declare(
         FRAME_TERMINAL_ID,
         TERMINAL_INPUT_ID,
@@ -768,7 +797,23 @@ impl IdeShell {
                 main_align: MainAlign::End,
                 cross_align: CrossAlign::Start,
                 padding: EdgeInsets::only(12.0, 0.0, 0.0, 12.0),
-                hidden: !self.editor_area.search_open,
+                // Cada faixa aparece quando a busca é da área dela. As duas
+                // nunca estão na tela ao mesmo tempo: a barra é uma, e o alvo
+                // diz onde ela mora.
+                hidden: !self.editor_area.search_open || self.context.busca_no_terminal,
+                ..LayoutStyle::default()
+            },
+        );
+        self.host.set_style(
+            SEARCH_STRIP_TERMINAL_ID,
+            LayoutStyle {
+                direction: LayoutDirection::Row,
+                main_align: MainAlign::End,
+                cross_align: CrossAlign::Start,
+                padding: EdgeInsets::only(6.0, 0.0, 0.0, 12.0),
+                hidden: !self.editor_area.search_open
+                    || !self.context.busca_no_terminal
+                    || self.terminal.minimized,
                 ..LayoutStyle::default()
             },
         );
@@ -1108,11 +1153,12 @@ impl IdeShell {
         // A barra de busca está sobre o código: sem perguntar ao anfitrião, o
         // clique nela atravessaria e moveria o cursor do editor. Quem diz que o
         // ponto caiu ali é a área declarada, e não uma conta repetida aqui.
+        let (popup_da_busca, campo_da_busca) = self.search_widget_ids();
         if self.editor_area.search_open
             && self
                 .host
                 .hit_test(point)
-                .any(|id| id == SEARCH_POPUP_ID || id == SEARCH_INPUT_ID)
+                .any(|id| id == popup_da_busca || id == campo_da_busca)
         {
             self.context.focus = ShellFocus::Search;
             return;
@@ -1448,7 +1494,11 @@ impl IdeShell {
             // editor. O resto do texto entra por `text_input`, e as setas
             // continuam sendo do editor.
             if key.eq_ignore_ascii_case("enter") {
-                if modifiers.shift {
+                // A mesma tecla, e o alvo decide quem anda: o cursor no arquivo,
+                // ou a vista na saída do terminal.
+                if self.context.busca_no_terminal {
+                    self.step_terminal_search(!modifiers.shift);
+                } else if modifiers.shift {
                     self.go_to_previous_search_hit();
                 } else {
                     self.go_to_next_search_hit();

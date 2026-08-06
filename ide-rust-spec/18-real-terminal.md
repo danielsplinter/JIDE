@@ -238,13 +238,33 @@ duas listas divergem.
 lidos da grade. A seleção retangular vem junto, porque na grade ela é o caso
 fácil: dois números de coluna em vez de um por linha.
 
-### 2. Busca na saída
+### 2. Busca na saída ✅
 
 Achar um texto exige saber em **que célula** ele está, para destacá-lo e rolar
 até lá. Hoje não há como apontar para uma célula.
 
 **Critério:** procurar um texto na saída destaca as ocorrências e leva a vista
 até a escolhida, inclusive no que já rolou para o histórico.
+
+**Feita.** `Ctrl+F` com o foco no terminal abre **a mesma barra** do editor — o
+alvo é decidido ali, pelo foco de então, e não muda depois. O que se digita
+procura na saída inteira; `Enter` e `Shift+Enter` andam entre as ocorrências,
+dando a volta nas duas pontas; `Esc` fecha e limpa.
+
+Três coisas que a implementação obrigou a resolver:
+
+- **o motor lê a janela visível, e só ela.** A varredura passeia a viewport pelo
+  histórico e a devolve ao lugar. Procurar na lista que a IDE acumula à parte
+  seria a segunda fonte que já fez o copiado divergir do marcado;
+- **cada janela da varredura é posicionada a partir do fim**, e não da anterior.
+  Rolar de uma para a outra acumulava erro: 57 ocorrências onde havia 40;
+- **as ocorrências e a seleção são duas listas** no componente. Elas coexistem —
+  quem procura pode ter marcado algo antes —, e a atual se distingue das outras,
+  senão ir até a próxima levaria a vista a um lugar onde tudo tem a mesma cor.
+
+O que **não** foi medido: o custo de varrer o histórico a cada tecla. São até
+cinco mil linhas de oitenta colunas, e a varredura roda a cada letra digitada,
+como a do editor. É a primeira coisa a olhar se digitar ali parecer pesado.
 
 ### 3. Links clicáveis
 

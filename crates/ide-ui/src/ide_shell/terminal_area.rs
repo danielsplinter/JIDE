@@ -306,6 +306,77 @@ impl IdeShell {
     }
 
     /// O botão que recolhe e restaura o painel de terminais.
+    /// Refaz a busca na saída do terminal ativo.
+    ///
+    /// A varredura passeia o histórico e volta — ver `find_all`. Ela roda a cada
+    /// tecla, como a do editor, e o custo é proporcional ao histórico: cinco mil
+    /// linhas de oitenta colunas. **Não foi medido**, e é a primeira coisa a
+    /// olhar se digitar aqui parecer pesado.
+    pub(super) fn refresh_terminal_search(&mut self) {
+        let procurado = self.editor_area.search_query.clone();
+        if !self.editor_area.search_open || procurado.trim().is_empty() {
+            self.terminal.busca = None;
+            return;
+        }
+        let ativo = self.terminal.active;
+        let onde_estava = self.terminal.tabs[ativo].scroll_line;
+        let achados = self.terminal.tabs[ativo]
+            .session
+            .find_all(&procurado, onde_estava);
+        // A primeira ocorrência já nasce em foco: quem procurou quer ver alguma,
+        // e exigir um `Enter` para a primeira seria pedir duas vezes.
+        let atual = (!achados.is_empty()).then_some(0);
+        self.terminal.busca = Some(BuscaNoTerminal { achados, atual });
+        self.reveal_terminal_match();
+    }
+
+    /// Anda entre as ocorrências da saída, dando a volta nas duas pontas.
+    ///
+    /// `adiante` falso é o `Shift+Enter`: o mesmo gesto ao contrário, como na
+    /// busca do editor. A volta existe pelo mesmo motivo lá e aqui — sem ela,
+    /// quem procurou algo que só está atrás fica preso.
+    pub(super) fn step_terminal_search(&mut self, adiante: bool) {
+        let Some(busca) = self.terminal.busca.as_mut() else {
+            return;
+        };
+        let total = busca.achados.len();
+        if total == 0 {
+            return;
+        }
+        busca.atual = Some(match busca.atual {
+            Some(atual) if adiante => (atual + 1) % total,
+            Some(atual) => (atual + total - 1) % total,
+            None => 0,
+        });
+        self.reveal_terminal_match();
+    }
+
+    /// Rola a saída até a ocorrência em foco.
+    ///
+    /// A linha das ocorrências é **absoluta**, e a rolagem entende o mesmo
+    /// número — é por isso que a varredura devolve assim. Uma linha já visível
+    /// não move nada: rolar até o que já se vê tira a vista do lugar sem
+    /// motivo.
+    fn reveal_terminal_match(&mut self) {
+        let Some(busca) = self.terminal.busca.as_ref() else {
+            return;
+        };
+        let Some(achado) = busca.atual.and_then(|atual| busca.achados.get(atual)) else {
+            return;
+        };
+        let linha = achado.line;
+        let ativo = self.terminal.active;
+        let topo = self.terminal.tabs[ativo].scroll_line;
+        let altura = self.terminal_visible_lines();
+        if linha >= topo && linha < topo + altura {
+            return;
+        }
+        // A ocorrência no meio da tela, e não colada no topo: ver o que veio
+        // antes dela é metade do motivo de procurar.
+        let alvo = linha.saturating_sub(altura / 2);
+        self.set_terminal_scroll(alvo);
+    }
+
     /// Onde fica o botão de recolher e mostrar o terminal.
     ///
     /// Fora do tratador porque quem roteia o clique precisa da mesma área: com
