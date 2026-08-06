@@ -5459,6 +5459,40 @@ fn duplicar_workspace_pede_outra_janela() {
     );
 }
 
+/// O movimento do ponteiro chega à barra de menus, e pede o quadro.
+///
+/// A barra não está no anfitrião: ela é arranjada na hora, e sem alguém lhe
+/// entregar o movimento ela nunca saberia que o ponteiro passou por cima. O
+/// retorno é o que faz a janela redesenhar — sem ele o realce só apareceria
+/// quando outra coisa qualquer pedisse um quadro novo.
+#[test]
+fn o_movimento_do_ponteiro_chega_a_barra_de_menus() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+
+    assert!(
+        shell.pointer_move(Point::new(100.0, TITLE_HEIGHT / 2.0), size),
+        "sobre um item da barra, o quadro precisa ser redesenhado"
+    );
+    // Parado no mesmo item, nada mudou e não há o que redesenhar.
+    assert!(!shell.pointer_move(Point::new(101.0, TITLE_HEIGHT / 2.0), size));
+    // Saindo da barra, o realce apagado ainda pede um quadro.
+    assert!(shell.pointer_move(Point::new(600.0, 400.0), size));
+
+    // Com o menu aberto, apontar "Recentes" abre a lista ao lado sem clique.
+    shell.set_recent_projects(vec![std::path::PathBuf::from("/tmp/loja")]);
+    shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
+    shell.pointer_move(Point::new(100.0, TITLE_HEIGHT + 42.0), size);
+    let desenhado = shell.paint(size);
+    assert!(
+        desenhado.iter().any(|comando| matches!(
+            comando,
+            PaintCommand::DrawText(texto) if texto.text == "loja"
+        )),
+        "a lista de recentes deveria estar aberta só por apontar"
+    );
+}
+
 /// Escolher um projeto em "Arquivo → Recentes" pede a abertura dele.
 ///
 /// A posição clicada volta a ser caminho aqui dentro; a aplicação recebe o

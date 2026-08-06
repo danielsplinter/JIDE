@@ -1138,6 +1138,14 @@ impl IdeShell {
         self.place_overlay(size);
         self.host
             .event(&UiEvent::PointerMove(primary_pointer(point)));
+        // A barra de menus vem cedo: o que passa por cima dela é dela, aberta ou
+        // fechada — fechada ela ainda precisa do movimento para acender o item
+        // apontado. Sob o ponteiro, o gesto para aqui; fora dela, segue adiante,
+        // e o `true` de saída é só para apagar o realce que ficou aceso.
+        let realce_mudou = self.menu_bar_pointer_move(point, size);
+        if realce_mudou || self.menu.bar.hovering() {
+            return realce_mudou;
+        }
         // Com o menu aberto, o destaque acompanha o ponteiro dentro dele.
         if self.explorer.context_menu.is_open() {
             return self.context_menu_event(&UiEvent::PointerMove(primary_pointer(point)), size);

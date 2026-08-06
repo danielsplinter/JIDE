@@ -6,6 +6,28 @@
 use super::*;
 
 impl IdeShell {
+    /// Ponteiro passando sobre a barra de menus.
+    ///
+    /// Devolve `true` quando o realce mudou de lugar e o quadro seguinte precisa
+    /// ser desenhado. **Sair do menu também conta**: sem isso o item apontado
+    /// ficaria aceso depois de o ponteiro já ter ido embora, e nada mais pediria
+    /// o redesenho. Parado sobre o mesmo item, devolve `false` — senão a janela
+    /// redesenharia a cada pixel percorrido sobre a barra.
+    ///
+    /// Quem decide o que fica aceso é o componente; aqui só se entrega o gesto e
+    /// se pergunta se algo mudou.
+    pub(super) fn menu_bar_pointer_move(&mut self, point: Point, size: Size) -> bool {
+        self.menu.bar.layout(
+            &self.layout_context(),
+            Rect::new(82.0, 0.0, (size.width - 82.0).max(0.0), TITLE_HEIGHT),
+        );
+        let resultado = self.menu.bar.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerMove(primary_pointer(point)),
+        );
+        matches!(resultado, EventResult::Handled)
+    }
+
     /// Clique na barra de menus. Devolve `true` quando ela o consumiu.
     pub(super) fn menu_bar_pointer_down(&mut self, point: Point, size: Size) -> bool {
         self.menu.bar.layout(
