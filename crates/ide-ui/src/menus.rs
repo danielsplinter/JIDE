@@ -49,20 +49,21 @@ pub(super) fn file_menu(recents: &[RecentProject]) -> MenuBarItem {
 /// contado aqui abriria o projeto de outra linha.
 ///
 /// Os grupos saem na ordem em que as linguagens aparecem — a mais usada
-/// recentemente primeiro —, e dentro de cada um a ordem de uso se mantém. Um
-/// projeto cuja linguagem a IDE não reconheceu fica solto, no fim: inventar um
-/// grupo para ele seria afirmar algo que ninguém sabe.
+/// recentemente primeiro —, e dentro de cada um a ordem de uso se mantém. O que
+/// a IDE não reconheceu vai para "Outras", **sempre no fim**: um grupo que
+/// aparecesse no meio faria as linguagens conhecidas mudarem de lugar por causa
+/// de uma pasta qualquer aberta no meio do caminho.
 fn recent_entries(recents: &[RecentProject]) -> Vec<MenuItem> {
     let rotulos = rotulos_dos_recentes(recents);
     let mut grupos: Vec<(String, Vec<MenuItem>)> = Vec::new();
-    let mut soltos = Vec::new();
+    let mut outras = Vec::new();
     for (posicao, recente) in recents.iter().enumerate() {
         let Some(rotulo) = rotulos.get(posicao) else {
             continue;
         };
         let item = MenuItem::new(rotulo.clone(), CommandId(format!("{RECENTE}{posicao}")));
         let Some(linguagem) = recente.language.as_ref() else {
-            soltos.push(item);
+            outras.push(item);
             continue;
         };
         match grupos.iter_mut().find(|(nome, _)| nome == linguagem) {
@@ -70,13 +71,21 @@ fn recent_entries(recents: &[RecentProject]) -> Vec<MenuItem> {
             None => grupos.push((linguagem.clone(), vec![item])),
         }
     }
-    let mut entradas: Vec<MenuItem> = grupos
+    if !outras.is_empty() {
+        grupos.push((OUTRAS.to_owned(), outras));
+    }
+    grupos
         .into_iter()
         .map(|(linguagem, itens)| MenuItem::submenu(linguagem, itens))
-        .collect();
-    entradas.extend(soltos);
-    entradas
+        .collect()
 }
+
+/// O grupo de quem a IDE não soube dizer a linguagem.
+///
+/// O nome não afirma linguagem nenhuma — é justamente o que se sabe daqueles
+/// projetos. Uma pasta sem manifesto reconhecido continua sendo um recente
+/// legítimo, e precisa de um lugar como as outras.
+const OUTRAS: &str = "Outras";
 
 /// Como cada projeto recente se apresenta na lista.
 ///
@@ -250,8 +259,13 @@ mod recentes_tests {
         let rotulos: Vec<_> = entradas.iter().map(|item| item.label.clone()).collect();
         assert_eq!(
             rotulos,
-            vec!["Java", "TypeScript", "rascunho"],
-            "uma porta por linguagem, na ordem de uso, e o desconhecido solto"
+            vec!["Java", "TypeScript", "Outras"],
+            "uma porta por linguagem, na ordem de uso, e o desconhecido no fim"
+        );
+        assert_eq!(
+            entradas[2].children()[0].label,
+            "rascunho",
+            "a pasta sem linguagem reconhecida mora em Outras"
         );
         let java: Vec<_> = entradas[0]
             .children()

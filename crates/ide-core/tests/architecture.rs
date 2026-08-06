@@ -1318,7 +1318,13 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// pelo mesmo motivo — a placa não fica pronta de graça —, e ela acontece
     /// **antes de existir quadro para atrasar**. Nenhum laço de eventos está
     /// girando ainda; não há o que travar.*
-    const TETO: usize = 31;
+    /// *De 31 para 32: detectar em que linguagem a pasta é reconhecida, para o
+    /// menu de recentes agrupar por ela. Esta **não** está em thread própria, e
+    /// mesmo assim sobe: detectar é procurar manifesto em disco — `is_file` e a
+    /// leitura de um `pom.xml` —, sem processo externo nenhum, e a mesma
+    /// chamada já acontece nesta thread na importação, logo adiante. Ela roda ao
+    /// abrir e ao trocar de projeto, e não a cada quadro.*
+    const TETO: usize = 32;
 
     assert!(
         chamadas.len() <= TETO,

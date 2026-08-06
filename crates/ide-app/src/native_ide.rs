@@ -314,15 +314,19 @@ impl NativeIde {
         }
         self.documents.remembered = shell.open_document_paths();
         self.ui.shell = Some(shell);
-        // O projeto da abertura também é um recente. Antes só entravam os
-        // abertos pelo menu, e quem sobe a IDE por linha de comando numa pasta
-        // nunca a encontrava depois na lista — justo quem mais alterna.
-        self.remember_project(&root);
         self.publish_event(IdeEvent::WorkspaceOpened { root: root.clone() });
         // A raiz precisa estar registrada **antes** de resolver ferramenta:
         // é ela que decide se vale a sobreposição do projeto ou o padrão.
         self.runtime.workspace_root = Some(root.clone());
         self.register_build_systems();
+        // O projeto da abertura também é um recente. Antes só entravam os
+        // abertos pelo menu, e quem sobe a IDE por linha de comando numa pasta
+        // nunca a encontrava depois na lista — justo quem mais alterna.
+        //
+        // **Depois de registrar os sistemas de build**: é por eles que se sabe
+        // em que linguagem a pasta é reconhecida, e antes daqui a resposta seria
+        // sempre "nenhuma".
+        self.remember_project(&root);
         let (tool_sender, tool_events) = mpsc::channel();
         self.tasks.sender = Some(tool_sender);
         self.tasks.events = Some(tool_events);
@@ -627,21 +631,33 @@ impl NativeIde {
         }
     }
 
-    /// Em que linguagem o projeto aberto foi reconhecido.
+    /// Em que linguagem **esta pasta** é reconhecida.
     ///
     /// Sai do sistema de build detectado, e não de uma tabela de manifestos: a
     /// aplicação não sabe o nome de linguagem nenhuma, e quem diz de quem é o
-    /// `pom.xml` ou o `package.json` é a contribuição que registrou aquele
-    /// sistema de build.
+    /// manifesto encontrado é a contribuição que registrou aquele sistema de
+    /// build.
     ///
-    /// `None` enquanto o projeto não foi importado — a importação acontece
-    /// depois do primeiro quadro — e para uma pasta que não é projeto de
-    /// ninguém.
-    fn detected_language(&self) -> Option<String> {
-        let importado = self.project.imported.as_ref()?;
+    /// # Detecta, e não pergunta ao projeto importado
+    ///
+    /// Ler `project.imported` respondia sobre **o projeto anterior**: ele só é
+    /// trocado dentro da importação, que roda depois do primeiro quadro. Abrir
+    /// um projeto Java vindo de um TypeScript o registrava como TypeScript, e a
+    /// correção só chegava se a importação desse certo — um Maven sem JDK
+    /// deixava a etiqueta errada para sempre.
+    ///
+    /// A detecção é só procurar manifesto em disco; a importação é que roda
+    /// processo externo. Perguntar aqui custa pouco e responde sobre a pasta
+    /// certa mesmo quando a importação depois falha.
+    ///
+    /// `None` para uma pasta que não é projeto de ninguém.
+    fn detected_language(&self, root: &Path) -> Option<String> {
+        let (_, descriptor) = pollster::block_on(self.project.build_systems.detect(root))
+            .ok()
+            .flatten()?;
         self.languages
             .contributions
-            .language_for_build_system(&importado.descriptor.build_system.0)
+            .language_for_build_system(&descriptor.build_system.0)
             .map(|descriptor| descriptor.language_id.0.clone())
     }
 
@@ -737,8 +753,10 @@ impl NativeIde {
         self.publish_event(IdeEvent::WorkspaceOpened {
             root: folder.to_path_buf(),
         });
-        self.remember_project(folder);
+        // Nesta ordem: quem diz em que linguagem a pasta é reconhecida são os
+        // sistemas de build, e eles são registrados de novo a cada troca.
         self.register_build_systems();
+        self.remember_project(folder);
         // Detectar ferramenta e importar o projeto rodam processos externos e
         // **esperam por eles** — o Maven chega a baixar dependências. Na
         // abertura isso acontece antes de a janela existir, e por isso ninguém
@@ -2806,13 +2824,6 @@ impl NativeIde {
                     shell.set_project_summary(Some(summary.clone()));
                     shell.set_status_message(format!("Projeto importado: {summary}"));
                 }
-                // **A linguagem só se sabe agora.** A abertura registra o
-                // recente antes disto — ela acontece antes do primeiro quadro, e
-                // importar roda processo externo —, então ali o projeto entra na
-                // lista sem linguagem. Registrar de novo é o que o põe embaixo
-                // da porta certa; a ordem da lista não muda, ele já está no topo.
-                let raiz = root.to_path_buf();
-                self.remember_project(&raiz);
                 self.publish_event(event);
             }
             Err(error) => {
@@ -2885,7 +2896,7 @@ impl NativeIde {
         let Some(path) = self.runtime.config_path.clone() else {
             return;
         };
-        let linguagem = self.detected_language();
+        let linguagem = self.detected_language(root);
         if let Err(error) = self
             .runtime
             .config
@@ -4741,6 +4752,82 @@ mod tests {
     /// **aplicação**. O teste que deu a fase por cumprida montava um
     /// `LanguageHost` e falava com ele — e o host roteava certo o tempo todo. O
     /// que descartava o `.ts` era a sincronização de documentos, um nível acima,
+    /// A linguagem do recente sai da **pasta**, e não do projeto ainda aberto.
+    ///
+    /// Relatado por quem usa: um projeto Java apareceu debaixo de "TypeScript".
+    /// Ele foi aberto vindo de um projeto TypeScript, e o registro perguntava ao
+    /// `project.imported` — que só é trocado dentro da importação, depois do
+    /// primeiro quadro. A pasta nova era etiquetada com a linguagem da anterior,
+    /// e a correção só chegava se a importação desse certo.
+    #[test]
+    fn a_linguagem_do_recente_e_a_da_pasta_registrada() {
+        let raiz = std::env::temp_dir().join(format!("er-ide-recente-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&raiz);
+        let java = raiz.join("camel");
+        assert!(std::fs::create_dir_all(&java).is_ok());
+        assert!(
+            std::fs::write(
+                java.join("pom.xml"),
+                "<project><artifactId>camel</artifactId></project>",
+            )
+            .is_ok()
+        );
+        let qualquer = raiz.join("rascunho");
+        assert!(std::fs::create_dir_all(&qualquer).is_ok());
+
+        let processes = Arc::new(NativeProcessSupervisor::default());
+        let mut ide = NativeIde::default();
+        ide.runtime.processes = Some(processes.clone());
+        ide.register_build_systems();
+        assert!(
+            ide.languages
+                .contributions
+                .register(java_contribution::contribution(processes.clone()))
+                .is_ok()
+        );
+        assert!(
+            ide.languages
+                .contributions
+                .register(typescript_contribution::contribution(processes, &[]))
+                .is_ok()
+        );
+        // O projeto anterior continua importado: é exatamente a situação de
+        // quem troca de projeto, porque a importação do novo ainda não rodou.
+        ide.project.imported = Some(ImportedProject {
+            adapter: match ide.project.build_systems.adapter(&BuildSystemId(
+                language_typescript::NPM_BUILD_SYSTEM_ID.to_owned(),
+            )) {
+                Some(adapter) => adapter,
+                None => panic!("o sistema de build do projeto anterior precisa estar registrado"),
+            },
+            descriptor: ProjectDescriptor {
+                build_system: BuildSystemId(language_typescript::NPM_BUILD_SYSTEM_ID.to_owned()),
+                root: raiz.join("loja"),
+                manifest: raiz.join("loja").join("package.json"),
+                name: None,
+                wrapper: None,
+            },
+            model: ProjectModel::new(
+                BuildSystemId(language_typescript::NPM_BUILD_SYSTEM_ID.to_owned()),
+                raiz.join("loja"),
+                "loja",
+            ),
+            manifest_modified: None,
+        });
+
+        assert_eq!(
+            ide.detected_language(&java).as_deref(),
+            Some(java_contribution::JAVA_LANGUAGE_ID),
+            "a pasta tem manifesto de Java, e é dela que a resposta sai"
+        );
+        assert_eq!(
+            ide.detected_language(&qualquer),
+            None,
+            "uma pasta que não é projeto de ninguém não recebe linguagem inventada"
+        );
+        let _ = std::fs::remove_dir_all(&raiz);
+    }
+
     /// que perguntava se a extensão era `java` com a palavra escrita à mão.
     ///
     /// Testar a camada que se acabou de mexer e concluir sobre a de cima é o

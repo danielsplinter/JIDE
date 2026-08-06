@@ -5479,11 +5479,11 @@ fn o_movimento_do_ponteiro_chega_a_barra_de_menus() {
     // Saindo da barra, o realce apagado ainda pede um quadro.
     assert!(shell.pointer_move(Point::new(600.0, 400.0), size));
 
-    // Com o menu aberto, apontar "Recentes" abre a lista ao lado sem clique.
-    // Sem linguagem conhecida o projeto fica solto, e é uma linha só.
+    // Com o menu aberto, apontar "Recentes" abre a lista ao lado sem clique —
+    // e nela estão as linguagens, uma porta cada.
     shell.set_recent_projects(vec![RecentProject {
         path: std::path::PathBuf::from("/tmp/loja"),
-        language: None,
+        language: Some("TypeScript".to_owned()),
     }]);
     shell.pointer_down(Point::new(100.0, TITLE_HEIGHT / 2.0), size);
     shell.pointer_move(Point::new(100.0, TITLE_HEIGHT + 42.0), size);
@@ -5491,7 +5491,7 @@ fn o_movimento_do_ponteiro_chega_a_barra_de_menus() {
     assert!(
         desenhado.iter().any(|comando| matches!(
             comando,
-            PaintCommand::DrawText(texto) if texto.text == "loja"
+            PaintCommand::DrawText(texto) if texto.text == "TypeScript"
         )),
         "a lista de recentes deveria estar aberta só por apontar"
     );
