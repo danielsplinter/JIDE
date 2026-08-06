@@ -12,8 +12,10 @@ ninguém cruzou uma linha que alguém já tinha desenhado. O que esta especifica
 registra é o que cresceu **onde não havia linha nenhuma**, e por isso cresceu
 sem ninguém precisar autorizar.
 
-Ela é curta de propósito, e nasce **pendente**: são três itens, e nenhum deles é
-uma correção de defeito. São hipotecas.
+Ela é curta de propósito, e nasce **pendente**: nenhum dos itens é uma correção
+de defeito. São hipotecas. As três primeiras vieram daquela sessão; a quarta foi
+acrescentada depois, no dia em que um defeito de verdade foi corrigido pela
+metade — e a metade que ficou é dívida pelo mesmo motivo das outras.
 
 ## O que não se perdeu, e é a metade que importa
 
@@ -97,12 +99,54 @@ feito porque apareceu no fim de uma sessão longa.
 **Critério:** um teste em que a escolha chega depois de outra lista ter sido
 pedida, e nada é escrito.
 
+## Dívida 4 — duas respostas para "onde o projeto começa" ⬜
+
+Uma pasta que contém **uma única pasta** é a forma de quem clona um repositório
+dentro de uma pasta de mesmo nome: abre-se `projetos/java/camel-main`, e o
+`pom.xml` está em `camel-main/camel-main`.
+
+Hoje a IDE responde a essa situação em **lugares que não concordam**:
+
+- a árvore do Explorer **desce** a cadeia de pastas únicas e mostra o conteúdo
+  em vez da porta seguinte (`scan_path_until_content`);
+- a **detecção do sistema de build** também desce, desde o commit que voltou a
+  reconhecer `camel-main` como Java — é dela que sai a linguagem do menu de
+  recentes;
+- a **importação do projeto** *não* desce. Ela procura manifesto só na raiz
+  aberta, não acha, e **desiste em silêncio**.
+
+O resultado é uma IDE que diz "este é um projeto Java" no menu e ao mesmo tempo
+não tem projeto nenhum importado: sem sumário, sem raízes de fontes declaradas,
+sem compilar nem executar pelo menu Projeto. Nada disso avisa — a importação sem
+detecção retorna sem mensagem, porque "esta pasta não é um projeto" é resposta
+legítima na maioria das vezes.
+
+**Por que não foi corrigido junto.** Descer na detecção é barato: ela responde
+uma pergunta só, e errar custa uma etiqueta errada num menu. Descer na
+importação muda **qual pasta é a raiz do workspace** — e a raiz decide as raízes
+de fontes, o diretório do terminal, o escopo da busca, o processo de execução, a
+ferramenta que vale por projeto e o que é gravado na configuração. É decisão de
+produto, e não correção: pode ser que a IDE deva adotar a pasta de dentro como
+raiz, que deva perguntar, ou que deva abrir a de dentro desde o começo.
+
+**O risco de deixar assim** é o formato de defeito que esta arquitetura mais
+persegue: duas fontes para a mesma verdade, divergindo em silêncio. Quem
+trabalha num projeto assim vê o Explorer certo e o menu Projeto morto, sem nada
+ligando uma coisa à outra.
+
+**Critério:** uma resposta só para "onde este projeto começa", usada pela
+árvore, pela detecção e pela importação — e um teste que abra uma pasta que
+apenas embrulha o projeto e afirme que ele foi **importado**, e não apenas
+reconhecido.
+
 ## Por que isto é uma especificação, e não uma lista de tarefas
 
-Porque as três têm **motivo**, e motivo é o que uma lista perde. A dívida 1 tem
-uma história que a explica; a 2 é uma guarda que pode estar se gastando; a 3 é
-uma troca deliberada entre acoplar em cinco crates e acoplar em duas chamadas.
+Porque as quatro têm **motivo**, e motivo é o que uma lista perde. A dívida 1
+tem uma história que a explica; a 2 é uma guarda que pode estar se gastando; a 3
+é uma troca deliberada entre acoplar em cinco crates e acoplar em duas chamadas;
+a 4 é uma correção que parou no ponto em que deixaria de ser correção e passaria
+a ser decisão de produto.
 
-Quem chegar aqui daqui a seis meses vai reencontrar as três, e a pergunta que
+Quem chegar aqui daqui a seis meses vai reencontrar as quatro, e a pergunta que
 importa não é "o que falta" — é **"por que ficou assim"**. É isso que está
 escrito.
