@@ -143,6 +143,17 @@ impl IdeShell {
         Some(direita)
     }
 
+    /// Se o ponteiro está sobre a divisa dos dois editores — ou arrastando-a.
+    ///
+    /// Quem troca o desenho do ponteiro é a janela, e ela precisa de uma
+    /// pergunta só: a resposta inclui o arrasto porque a divisa continua sendo o
+    /// alvo do gesto mesmo quando o ponteiro já saiu de cima dela.
+    #[must_use]
+    pub fn split_divider_hover(&self, point: Point, size: Size) -> bool {
+        self.split_panel_for(size)
+            .is_some_and(|painel| painel.is_dragging() || painel.divider().contains(point))
+    }
+
     /// Se é o painel da direita que tem o foco agora.
     pub(super) fn split_focado(&self) -> bool {
         self.editor_area

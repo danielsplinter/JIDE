@@ -7016,3 +7016,51 @@ fn a_completacao_nasce_no_painel_com_foco() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Sobre a divisa, o ponteiro anuncia que ela se arrasta.
+///
+/// A janela troca o desenho do ponteiro perguntando isto. Sem a pergunta, a
+/// divisa é uma linha como outra qualquer na tela, e quem usa só descobre que
+/// ela se move por acidente.
+#[test]
+fn a_divisa_dos_editores_pede_a_seta_de_redimensionar() {
+    let root = std::env::temp_dir().join(format!("er-ide-seta-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido {}").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    let Some(documento) = shell.editor_area.session.active_id() else {
+        panic!("o arquivo aberto precisa ser o ativo");
+    };
+    let size = Size::new(1280.0, 800.0);
+    // Sem divisão não há divisa, e a pergunta não pode inventar uma.
+    assert!(!shell.split_divider_hover(Point::new(640.0, 400.0), size));
+
+    shell.dividir_a_direita(documento);
+    let Some(painel) = shell.split_panel_for(size) else {
+        panic!("a divisão precisa existir");
+    };
+    let divisa = painel.divider();
+    let sobre = Point::new(
+        divisa.origin.x + divisa.size.width / 2.0,
+        divisa.origin.y + 100.0,
+    );
+    assert!(shell.split_divider_hover(sobre, size));
+    assert!(
+        !shell.split_divider_hover(Point::new(sobre.x + 60.0, sobre.y), size),
+        "longe dela, o ponteiro volta a ser o de sempre"
+    );
+
+    // Em arrasto a resposta continua sendo sim, mesmo com o ponteiro longe: a
+    // divisa segue sendo o alvo do gesto.
+    shell.pointer_down(sobre, size);
+    shell.pointer_move(Point::new(sobre.x + 200.0, sobre.y), size);
+    assert!(shell.split_divider_hover(Point::new(sobre.x + 200.0, sobre.y), size));
+    let _ = std::fs::remove_dir_all(&root);
+}

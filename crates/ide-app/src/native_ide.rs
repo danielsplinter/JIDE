@@ -3593,7 +3593,12 @@ impl ApplicationHandler for NativeIde {
                     .ui
                     .shell
                     .as_ref()
-                    .is_some_and(IdeShell::sidebar_resizing);
+                    .is_some_and(IdeShell::sidebar_resizing)
+                    // A divisa dos dois editores redimensiona na horizontal,
+                    // como a da lateral: é a mesma seta.
+                    || self.ui.shell.as_ref().is_some_and(|shell| {
+                        shell.split_divider_hover(self.window.cursor, window.logical_size())
+                    });
                 let navigation_hover = self.ui.shell.as_ref().is_some_and(|shell| {
                     shell.navigation_hover(
                         self.window.cursor,
@@ -3730,7 +3735,12 @@ impl ApplicationHandler for NativeIde {
                     .ui
                     .shell
                     .as_ref()
-                    .is_some_and(IdeShell::sidebar_resizing);
+                    .is_some_and(IdeShell::sidebar_resizing)
+                    // A divisa dos dois editores redimensiona na horizontal,
+                    // como a da lateral: é a mesma seta.
+                    || self.ui.shell.as_ref().is_some_and(|shell| {
+                        shell.split_divider_hover(self.window.cursor, window.logical_size())
+                    });
                 window.inner().set_cursor(if sidebar_resizing {
                     CursorIcon::EwResize
                 } else if resizing {
