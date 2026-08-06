@@ -83,7 +83,10 @@ impl WorkspaceController {
         root: &Path,
         target: &Path,
     ) -> Vec<(std::path::PathBuf, Vec<FileNode>)> {
-        self.service.scan_path(root, target)
+        // Até o alvo **e além dele**, enquanto não houver o que escolher: abrir
+        // uma pasta cujo único filho é outra pasta não mostra nada, mostra a
+        // próxima porta.
+        self.service.scan_path_until_content(root, target)
     }
 
     pub(super) fn scan(&self, root: &Path) -> Result<FileNode, WorkspaceError> {

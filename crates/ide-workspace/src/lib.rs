@@ -30,6 +30,13 @@ impl Default for WorkspaceService {
     }
 }
 
+/// Até onde uma cadeia de pastas únicas é seguida numa só leitura.
+///
+/// Uma cadeia de pacotes real tem meia dúzia de elos. O teto não existe para
+/// ela: existe para o caso em que uma ligação simbólica aponta para cima e a
+/// descida deixaria de ter fim.
+const PROFUNDIDADE_DA_CADEIA: usize = 32;
+
 impl WorkspaceService {
     #[must_use]
     pub fn new(filesystem: Arc<dyn WorkspacePort>) -> Self {
@@ -101,6 +108,47 @@ impl WorkspaceService {
                 }
                 break;
             }
+        }
+        niveis
+    }
+
+    /// Os níveis até uma pasta, e depois **enquanto não houver o que escolher**.
+    ///
+    /// Uma pasta cujo único filho é outra pasta não mostra nada ao ser aberta:
+    /// mostra a próxima porta. Numa árvore de pacotes isso vira `br`, depois
+    /// `com`, depois `exemplo` — um clique por porta, e nenhum deles revelando
+    /// coisa alguma.
+    ///
+    /// Quem abriu pediu para ver o que há dentro, e o que há dentro está no fim
+    /// da cadeia. Esta leitura desce até lá de uma vez.
+    ///
+    /// A condição é **estrutural**, e não de linguagem: "um filho só, e ele é
+    /// pasta". Nada aqui sabe o que é um pacote — e é por isso que vale igual
+    /// para qualquer projeto.
+    pub fn scan_path_until_content(
+        &self,
+        root: &Path,
+        target: &Path,
+    ) -> Vec<(PathBuf, Vec<FileNode>)> {
+        let mut niveis = self.scan_path(root, target);
+        // Um teto para a descida: uma cadeia de pastas únicas é curta na
+        // prática, e um limite impede que um laço de ligações simbólicas
+        // transforme um clique numa varredura sem fim.
+        for _ in 0..PROFUNDIDADE_DA_CADEIA {
+            let Some((_, filhos)) = niveis.last() else {
+                break;
+            };
+            let [unico] = filhos.as_slice() else {
+                break;
+            };
+            if !unico.is_directory {
+                break;
+            }
+            let caminho = unico.path.clone();
+            let Ok(netos) = tree::children_of(self.filesystem.as_ref(), &caminho) else {
+                break;
+            };
+            niveis.push((caminho, netos));
         }
         niveis
     }
@@ -200,6 +248,9 @@ mod tests {
             .is_ok()
         );
         assert!(fs::write(root.join("docs/fora.txt"), "conteudo fora\n").is_ok());
+        // Uma cadeia de pastas únicas, para a leitura que desce até o conteúdo.
+        assert!(fs::create_dir_all(root.join("cadeia/um/dois/tres")).is_ok());
+        assert!(fs::write(root.join("cadeia/um/dois/tres/Fim.java"), "class Fim {}\n").is_ok());
         assert!(
             fs::write(
                 root.join("modulo/src/main/java/br/com/ignorado.txt"),
@@ -248,6 +299,62 @@ mod tests {
         ));
         assert_eq!(fs::read_to_string(&file).unwrap_or_default(), "primeiro");
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// Abrir uma pasta desce a cadeia inteira até achar o que escolher.
+    ///
+    /// Sem isto, `um`, `dois` e `tres` custam um clique cada, e nenhum deles
+    /// mostra coisa alguma — só a próxima porta.
+    #[test]
+    fn abrir_uma_pasta_desce_ate_o_conteudo() {
+        let root = workspace();
+        let service = WorkspaceService::native();
+        let alvo = root.join("cadeia").join("um");
+
+        let ate_o_alvo = service.scan_path(&root, &alvo);
+        let ate_o_conteudo = service.scan_path_until_content(&root, &alvo);
+
+        assert!(
+            ate_o_conteudo.len() > ate_o_alvo.len(),
+            "a leitura precisa passar do alvo enquanto houver um caminho só"
+        );
+        assert_eq!(
+            ate_o_conteudo.last().map(|(caminho, _)| caminho.clone()),
+            Some(root.join("cadeia").join("um").join("dois").join("tres")),
+            "a descida para no primeiro nível que tem o que escolher"
+        );
+        assert!(
+            ate_o_conteudo
+                .last()
+                .is_some_and(|(_, filhos)| filhos.iter().any(|no| !no.is_directory)),
+            "e esse nível traz o conteúdo junto"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A descida para onde há escolha, e não segue por uma pasta qualquer.
+    #[test]
+    fn a_descida_para_quando_ha_o_que_escolher() {
+        let root = workspace();
+        let service = WorkspaceService::native();
+        // De `modulo/src` a cadeia é única até `br/com`, que tem dois filhos.
+        let alvo = root.join("modulo").join("src");
+        let niveis = service.scan_path_until_content(&root, &alvo);
+        assert_eq!(
+            niveis.last().map(|(caminho, _)| caminho.clone()),
+            Some(
+                root.join("modulo")
+                    .join("src")
+                    .join("main")
+                    .join("java")
+                    .join("br")
+                    .join("com")
+            ),
+            "para no primeiro nível com mais de uma coisa dentro"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

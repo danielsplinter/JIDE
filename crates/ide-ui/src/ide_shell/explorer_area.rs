@@ -99,10 +99,30 @@ impl IdeShell {
             &expanded,
             target,
         ) {
-            // Duas linhas de contexto ajudam a reconhecer o pacote pai. A cópia
-            // da TreeView usada na pintura limita o deslocamento no fim da lista.
-            self.explorer.scroll_line = row.saturating_sub(2);
+            // **Rolar só quando precisa.** Se a linha já está à vista, mexer na
+            // rolagem move a árvore debaixo de quem acabou de clicar nela: o
+            // arquivo clicado salta para o alto da lista e tudo o mais desliza
+            // junto, sem que ninguém tenha pedido.
+            //
+            // Duas linhas de contexto ajudam a reconhecer o pacote pai quando a
+            // rolagem de fato acontece.
+            if !self.explorer_row_visible(row) {
+                self.explorer.scroll_line = row.saturating_sub(2);
+            }
         }
+    }
+
+    /// Se uma linha da árvore está dentro da parte visível do painel.
+    ///
+    /// Mede pela altura do último desenho: é a única que existe antes de o
+    /// próximo quadro acontecer, e é a que o usuário está olhando.
+    fn explorer_row_visible(&self, row: usize) -> bool {
+        let altura = self.explorer_tree_rect(self.context.last_size).size.height;
+        let cabem = (altura / EXPLORER_ROW_HEIGHT).floor().max(1.0) as usize;
+        let primeira = self.explorer.scroll_line;
+        // A última linha inteira, e não a que aparece pela metade: revelar algo
+        // cortado ao meio é revelar pela metade.
+        row >= primeira && row < primeira + cabem
     }
 
     /// Posiciona a árvore de acordo com as barras de rolagem da janela.
@@ -237,6 +257,9 @@ impl IdeShell {
     /// substitui pedir pasta a pasta, que perdia o nível fundo por ele chegar
     /// antes do pai.
     pub fn insert_path_children(&mut self, niveis: Vec<(PathBuf, Vec<FileNode>)>) {
+        // Antes de inserir: é a diferença entre "faltava e chegou" e "já estava
+        // lá", e depois da inserção as duas se parecem.
+        let ativo_faltava = self.active_document_missing_from_tree();
         let mut mudou = false;
         for (pasta, filhos) in niveis {
             // Veio, logo não se pergunta mais: uma leitura por caminho traz
@@ -247,11 +270,70 @@ impl IdeShell {
         if !mudou {
             return;
         }
+        self.expand_single_child_chains();
         self.explorer
             .rebuild_items(&self.catalog.source_root_names, &self.declaration_kinds);
         self.sync_explorer_tree();
-        // A árvore mudou: o documento ativo pode finalmente existir nela.
-        self.sync_explorer_to_active();
+        // A árvore mudou, e o documento ativo pode **finalmente** existir nela —
+        // era esse o caso que isto veio resolver: a árvore é lida por partes, e
+        // o arquivo aberto só aparece quando a pasta dele chega.
+        //
+        // **Só nesse caso.** Reconciliar a cada carga arrastava a árvore para o
+        // arquivo da aba toda vez que alguém expandia um pacote: quem clicou
+        // via a lista pular para outro lugar e a seleção mudar sozinha, sem
+        // nada a ver com o que tinha acabado de abrir.
+        if ativo_faltava {
+            self.sync_explorer_to_active();
+        }
+    }
+
+    /// Abre também os elos de uma cadeia de pasta única.
+    ///
+    /// A árvore junta `br`, `com` e `exemplo` numa linha só, e a identidade
+    /// dessa linha é a do **último** diretório da cadeia. Quem clicou, porém,
+    /// abriu o **primeiro** — era o único que existia na árvore quando o clique
+    /// aconteceu.
+    ///
+    /// Sem isto, a linha juntada nasce fechada: os filhos chegaram, o nome
+    /// virou `br.com.exemplo`, e ela continua pedindo mais um clique para
+    /// mostrar o que já está em memória. Marcar a cadeia inteira faz o clique
+    /// valer até onde há o que ver.
+    fn expand_single_child_chains(&mut self) {
+        fn descer(node: &FileNode, saida: &mut Vec<PathBuf>) {
+            let mut atual = node;
+            loop {
+                let [unico] = atual.children.as_slice() else {
+                    return;
+                };
+                if !unico.is_directory {
+                    return;
+                }
+                saida.push(unico.path.clone());
+                atual = unico;
+            }
+        }
+        fn achar<'a>(node: &'a FileNode, path: &Path) -> Option<&'a FileNode> {
+            if node.path == path {
+                return Some(node);
+            }
+            node.children.iter().find_map(|filho| achar(filho, path))
+        }
+        let mut novos = Vec::new();
+        for aberto in &self.explorer.expanded {
+            if let Some(node) = achar(&self.explorer.workspace, aberto) {
+                descer(node, &mut novos);
+            }
+        }
+        self.explorer.expanded.extend(novos);
+    }
+
+    /// Se o documento ativo ainda não existe na árvore.
+    ///
+    /// Ele pode faltar por a árvore ser rasa: cada pasta é lida quando alguém a
+    /// expande, e o arquivo aberto pode estar sob uma que ninguém abriu ainda.
+    fn active_document_missing_from_tree(&self) -> bool {
+        self.active_document_path()
+            .is_some_and(|path| self.explorer_path_for(explorer_id(&path)).is_none())
     }
 
     /// Guarda os filhos que a aplicação leu para uma pasta expandida.

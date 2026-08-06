@@ -612,6 +612,163 @@ fn outside_the_source_root_the_menu_offers_a_folder() {
     }
 }
 
+/// Expandir uma pasta não arrasta a árvore para o arquivo da aba.
+///
+/// Quando os filhos de uma pasta chegam, o Explorer reconciliava com o
+/// documento ativo: rolava até ele e o selecionava. Para quem acabou de clicar
+/// num pacote, isso é a lista pulando para outro lugar e a seleção mudando
+/// sozinha, sem nada a ver com o que se abriu.
+///
+/// A reconciliação existe para outro caso — a árvore é rasa, e o arquivo da aba
+/// pode estar sob uma pasta que ninguém abriu ainda —, e é só nele que ela vale.
+#[test]
+fn expandir_uma_pasta_nao_pula_para_o_arquivo_da_aba() {
+    // O arquivo da aba precisa cair **fora da parte visível**, senão a
+    // reconciliação não teria para onde rolar e o teste passaria sem provar
+    // nada — foi assim na primeira versão dele.
+    let mut filhos: Vec<FileNode> = (0..60)
+        .map(|indice| dir(&format!("demo/p{indice:02}"), Vec::new()))
+        .collect();
+    filhos.push(dir(
+        "demo/aberto",
+        vec![file("demo/aberto/Aberto.java")],
+    ));
+    filhos.push(dir("demo/outro", Vec::new()));
+    let tree = dir("demo", filhos);
+    let mut shell = IdeShell::from_tree(tree);
+    // A pasta do arquivo aberto está expandida: ele existe na árvore, e não há
+    // o que reconciliar.
+    shell
+        .explorer
+        .expanded
+        .insert(PathBuf::from("demo/aberto"));
+    shell.sync_explorer_tree();
+    shell.show_document(Path::new("demo/aberto/Aberto.java"), "class Aberto {}");
+    assert!(
+        shell.explorer.scroll_line > 0,
+        "o teste precisa de um arquivo fundo o bastante para a rolagem existir"
+    );
+
+    // De volta ao topo, como quem rolou para olhar outra coisa.
+    shell.explorer.scroll_line = 0;
+    shell.explorer.tree.set_selected(None);
+
+    // Agora chegam os filhos de uma pasta **outra**, como no clique de expandir.
+    shell.insert_path_children(vec![(
+        PathBuf::from("demo/outro"),
+        vec![file("demo/outro/Outro.java")],
+    )]);
+
+    assert_eq!(
+        shell.explorer.scroll_line, 0,
+        "a árvore não pode rolar para o arquivo da aba quando alguém expande \
+         outra pasta"
+    );
+    assert_eq!(
+        shell.explorer.tree.selected(),
+        None,
+        "nem trocar a seleção sozinha"
+    );
+}
+
+/// A linha juntada nasce **aberta**, e não pedindo mais um clique.
+///
+/// A árvore junta `br`, `com` e `exemplo` numa linha só, e a identidade dessa
+/// linha é a do **último** diretório. Quem clicou abriu o **primeiro** — era o
+/// único que existia na árvore naquele instante. Sem casar os dois, os filhos
+/// chegam, o nome vira `br.com.exemplo`, e a linha continua fechada.
+#[test]
+fn a_cadeia_de_pacotes_termina_aberta_apos_um_clique() {
+    let tree = dir(
+        "demo",
+        vec![dir("demo/src/main/java", vec![dir("demo/src/main/java/br", Vec::new())])],
+    );
+    let mut shell = IdeShell::from_tree(tree);
+    shell.set_ui_catalog(java_catalog());
+
+    // O clique abriu o primeiro elo: é o único que existia na árvore.
+    shell
+        .explorer
+        .expanded
+        .insert(PathBuf::from("demo/src/main/java/br"));
+
+    // A leitura desce a cadeia de uma vez, como o workspace passou a fazer.
+    shell.insert_path_children(vec![
+        (
+            PathBuf::from("demo/src/main/java/br"),
+            vec![dir("demo/src/main/java/br/com", Vec::new())],
+        ),
+        (
+            PathBuf::from("demo/src/main/java/br/com"),
+            vec![dir("demo/src/main/java/br/com/exemplo", Vec::new())],
+        ),
+        (
+            PathBuf::from("demo/src/main/java/br/com/exemplo"),
+            vec![file("demo/src/main/java/br/com/exemplo/App.java")],
+        ),
+    ]);
+
+    assert!(
+        shell
+            .explorer
+            .expanded
+            .contains(&PathBuf::from("demo/src/main/java/br/com/exemplo")),
+        "o fim da cadeia precisa ficar aberto: é ele que a linha juntada \
+         representa, e é onde está o que se quis ver"
+    );
+}
+
+/// Clicar num arquivo já à vista não mexe na rolagem.
+///
+/// Abrir um documento reconcilia a árvore com ele — e a reconciliação rolava
+/// sempre, mesmo quando a linha já estava na tela. O efeito era o arquivo
+/// clicado saltar para o alto da lista e tudo o mais deslizar junto, sem que
+/// ninguém tivesse pedido.
+#[test]
+fn clicar_num_arquivo_a_vista_nao_rola_a_arvore() {
+    let arquivos: Vec<FileNode> = (1..=8)
+        .map(|indice| file(&format!("demo/pasta/A{indice}.java")))
+        .collect();
+    let tree = dir("demo", vec![dir("demo/pasta", arquivos)]);
+    let mut shell = IdeShell::from_tree(tree);
+    shell.explorer.expanded.insert(PathBuf::from("demo/pasta"));
+    shell.sync_explorer_tree();
+
+    // A vista está no topo, e o painel é alto o bastante para caberem todos.
+    shell.explorer.scroll_line = 0;
+    shell.show_document(Path::new("demo/pasta/A5.java"), "class A5 {}");
+
+    assert_eq!(
+        shell.explorer.scroll_line, 0,
+        "o arquivo já estava à vista: rolar move a árvore debaixo de quem clicou"
+    );
+    assert_eq!(
+        shell.explorer.tree.selected(),
+        Some(explorer_id(Path::new("demo/pasta/A5.java"))),
+        "e ele continua sendo o escolhido"
+    );
+}
+
+/// Um arquivo fora da vista **é** revelado: revelar continua sendo o trabalho.
+#[test]
+fn um_arquivo_fora_da_vista_continua_sendo_revelado() {
+    let arquivos: Vec<FileNode> = (1..=200)
+        .map(|indice| file(&format!("demo/pasta/A{indice}.java")))
+        .collect();
+    let tree = dir("demo", vec![dir("demo/pasta", arquivos)]);
+    let mut shell = IdeShell::from_tree(tree);
+    shell.explorer.expanded.insert(PathBuf::from("demo/pasta"));
+    shell.sync_explorer_tree();
+    shell.explorer.scroll_line = 0;
+
+    shell.show_document(Path::new("demo/pasta/A180.java"), "class A180 {}");
+
+    assert!(
+        shell.explorer.scroll_line > 0,
+        "um arquivo muito abaixo da vista precisa ser trazido para ela"
+    );
+}
+
 /// Abrir uma pasta não pode esvaziar a irmã que já estava aberta.
 ///
 /// Ler um caminho traz todos os níveis até ele, cada um com os filhos
@@ -1647,7 +1804,10 @@ fn active_file_expands_selects_and_scrolls_the_explorer() {
         .join("exemplo")
         .join("controller");
     assert!(std::fs::create_dir_all(&package).is_ok());
-    for index in 0..12 {
+    // Muitos arquivos antes: o ativo precisa cair **fora** da parte visível
+    // para haver o que revelar. Com poucos, ele já estaria à vista, e exigir
+    // rolagem seria exigir que a árvore se mexesse à toa.
+    for index in 0..60 {
         assert!(std::fs::write(root.join(format!("Anterior{index:02}.txt")), "x").is_ok());
     }
     let first = package.join("PrimeiroController.java");
