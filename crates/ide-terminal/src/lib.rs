@@ -389,6 +389,30 @@ impl TerminalSession {
         self.engine.scroll_to_bottom();
     }
 
+    /// Onde um texto aparece na saída — na tela e no que já rolou.
+    ///
+    /// # Por que ela mexe na rolagem
+    ///
+    /// O motor lê **a janela visível**, e só ela: `viewport_line` responde sobre
+    /// a tela de agora. Ler o histórico sem mexer na janela exigiria uma API que
+    /// ele não tem, então a busca **passeia a viewport** pelo histórico, uma tela
+    /// por vez, e a devolve ao lugar em que estava. Quem chama não percebe: a
+    /// varredura é síncrona, nada é desenhado no meio dela.
+    ///
+    /// A alternativa seria procurar na lista de linhas que a IDE acumula à
+    /// parte — e foi justamente por haver duas fontes para a mesma tela que o
+    /// copiado e o marcado divergiam. Uma fonte só, mesmo que custe o passeio.
+    ///
+    /// # A linha devolvida
+    ///
+    /// É **absoluta**: zero é a linha mais antiga do histórico. Quem quiser
+    /// mostrá-la rola para `min(linha, scrollback_len())`, e ela aparece.
+    ///
+    /// A comparação ignora maiúsculas e minúsculas, como a busca do editor.
+    pub fn find_all(&mut self, texto: &str, voltar_para: usize) -> Vec<TerminalMatch> {
+        procurar(&mut self.engine, self.pty_rows as usize, texto, voltar_para)
+    }
+
     /// Linha e coluna do cursor, para quem desenha.
     #[must_use]
     pub fn cursor_position(&self) -> (usize, usize) {
@@ -542,6 +566,79 @@ impl TerminalSession {
             self.lines.pop_front();
         }
     }
+}
+
+/// A varredura em si, sobre o motor.
+///
+/// Livre, e não método da sessão, por um motivo prático: assim ela se testa com
+/// um motor alimentado à mão, sem PTY e sem processo. Uma busca que só se prova
+/// com um shell de verdade não se prova em lugar nenhum.
+fn procurar(
+    engine: &mut Engine,
+    altura: usize,
+    texto: &str,
+    voltar_para: usize,
+) -> Vec<TerminalMatch> {
+    let procurado = texto.trim().to_lowercase();
+    if procurado.is_empty() {
+        return Vec::new();
+    }
+    let total = engine.scrollback_len();
+    let mut achados = Vec::new();
+    // **Cada janela é posicionada a partir do fim, e não da anterior.** Rolar de
+    // uma para a outra parecia mais simples e acumulava erro: o motor não
+    // promete andar exatamente o que se pede, e a conta de "onde estou" saía do
+    // lugar — a varredura pulava linhas e inventava outras. Do fim, `subir k`
+    // sempre põe o topo da janela em `total - k`, sem memória e sem soma.
+    let mut acima = total;
+    let mut lido_ate = 0usize;
+    loop {
+        engine.scroll_to_bottom();
+        engine.scroll_up(acima);
+        let topo = total - acima;
+        for linha in 0..altura {
+            let absoluta = topo + linha;
+            if absoluta < lido_ate {
+                continue;
+            }
+            let conteudo: String = engine
+                .viewport_line(linha)
+                .iter()
+                .map(Cell::c)
+                .collect::<String>()
+                .to_lowercase();
+            let mut de = 0usize;
+            while let Some(achado) = conteudo[de..].find(&procurado) {
+                achados.push(TerminalMatch {
+                    line: absoluta,
+                    column: conteudo[..de + achado].chars().count(),
+                    length: procurado.chars().count(),
+                });
+                de += achado + procurado.len();
+            }
+        }
+        lido_ate = topo + altura;
+        if acima == 0 {
+            break;
+        }
+        acima = acima.saturating_sub(altura);
+    }
+    // De volta ao lugar: buscar é leitura, e leitura não move a tela de quem
+    // está olhando.
+    engine.scroll_to_bottom();
+    engine.scroll_up(total.saturating_sub(voltar_para));
+    achados
+}
+
+/// Onde um texto foi achado na saída.
+///
+/// A linha é **absoluta**: zero é a mais antiga do histórico, e não a primeira
+/// que se vê. É o número que a rolagem entende.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalMatch {
+    pub line: usize,
+    pub column: usize,
+    pub length: usize,
 }
 
 /// Uma célula da grade, sem nada do emulador dentro.
@@ -966,6 +1063,42 @@ mod tests {
         );
         assert!(wait_for(&mut terminal, "LOCATION="));
         assert!(terminal.lines().any(|line| line.text.contains("crates")));
+    }
+
+    /// A busca acha na tela **e** no que já rolou, e devolve a viewport.
+    ///
+    /// O motor só lê a janela visível, então a varredura passeia por ela — e o
+    /// que se confere aqui é que o passeio termina onde começou. Uma busca que
+    /// deixa a tela em outro lugar rouba de quem estava lendo.
+    #[test]
+    fn a_busca_alcanca_o_historico_e_nao_move_a_tela() {
+        // Quarenta linhas numa grade de 24: dezesseis sobem para o histórico.
+        let mut bytes = Vec::new();
+        for numero in 0..40 {
+            bytes.extend_from_slice(format!("linha {numero} com alvo\r\n").as_bytes());
+        }
+        let mut engine = grade(&bytes);
+        let total = engine.scrollback_len();
+        assert!(total > 0, "o histórico precisa ter linhas");
+
+        let achados = procurar(&mut engine, 24, "alvo", total);
+        assert_eq!(
+            achados.len(),
+            40,
+            "cada linha escrita tem uma ocorrência, inclusive as que rolaram"
+        );
+        assert_eq!(achados[0].line, 0, "a primeira é a mais antiga do histórico");
+        assert!(
+            achados.iter().all(|achado| achado.length == 4),
+            "o comprimento é o do procurado"
+        );
+
+        // A tela voltou ao fim, que é onde estava.
+        assert_eq!(texto(&engine, 23), texto(&grade(&bytes), 23));
+
+        // Maiúsculas não importam, e o vazio não acha nada.
+        assert_eq!(procurar(&mut engine, 24, "ALVO", total).len(), 40);
+        assert!(procurar(&mut engine, 24, "   ", total).is_empty());
     }
 
     /// Uma grade solta, alimentada à mão: sem PTY, sem processo, sem tela.
