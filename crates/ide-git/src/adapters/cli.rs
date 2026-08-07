@@ -170,6 +170,21 @@ impl CliGit {
     }
 }
 
+impl CliGit {
+    /// Se o repositório ainda não tem commit nenhum.
+    ///
+    /// Perguntado **só quando algo falhou**: é um processo a mais, e num
+    /// repositório com histórico ele nunca roda.
+    async fn head_ausente(&self, cancel: &CancellationToken) -> bool {
+        self.run(
+            &["--no-optional-locks", "rev-parse", "--verify", "HEAD"],
+            cancel,
+        )
+        .await
+        .is_err()
+    }
+}
+
 #[async_trait]
 impl WorkingTreeService for CliGit {
     async fn status(&self, cancel: &CancellationToken) -> GitResult<RepositoryStatus> {
@@ -183,21 +198,58 @@ impl WorkingTreeService for CliGit {
         cancel: &CancellationToken,
     ) -> GitResult<FileDiff> {
         let relativo = self.relativo(path);
-        let mut args = vec!["--no-optional-locks", "diff", "--no-color", "--unified=3"];
-        if side == DiffSide::Index {
-            args.push("--cached");
-        }
-        args.push("--");
         let Some(relativo) = relativo.to_str() else {
             return Err(GitError::Backend {
                 detail: "caminho que não é UTF-8".to_owned(),
             });
         };
+        // **Contra o último commit, e não contra o índice.**
+        //
+        // `git diff` sozinho compara a árvore de trabalho com o *índice*, e essa
+        // não é a pergunta que a tela faz: a coluna da esquerda mostra o arquivo
+        // do último commit, e a margem do editor marca o que mudou desde ele.
+        //
+        // Quem preparava o que tinha apagado via o defeito inteiro: as duas
+        // colunas visivelmente diferentes e **nenhuma marca**, porque contra o
+        // índice não havia mesmo diferença nenhuma. Preparar não é commitar, e
+        // não pode fazer o trabalho sumir da tela.
+        //
+        // O `--cached` já compara o índice com o commit, e por isso continua
+        // como está: os dois lados falam do mesmo par.
+        let mut args = vec!["--no-optional-locks", "diff", "--no-color", "--unified=3"];
+        if side == DiffSide::Index {
+            args.push("--cached");
+        } else {
+            args.push("HEAD");
+        }
+        args.push("--");
         args.push(relativo);
-        let saida = self.run(&args, cancel).await?;
-        let mut diff = ler_diff(&String::from_utf8_lossy(&saida));
-        diff.path = path.to_path_buf();
-        Ok(diff)
+        match self.run(&args, cancel).await {
+            Ok(saida) => {
+                let mut diff = ler_diff(&String::from_utf8_lossy(&saida));
+                diff.path = path.to_path_buf();
+                Ok(diff)
+            }
+            // Sem `HEAD` não há commit nenhum, e o `git` recusa o nome. Aí a
+            // pergunta certa é a de sempre: tudo o que está no arquivo é novo, e
+            // é contra o índice que se sabe o que dele já foi preparado.
+            Err(erro) if side == DiffSide::WorkingTree && self.head_ausente(cancel).await => {
+                let _ = erro;
+                let args = vec![
+                    "--no-optional-locks",
+                    "diff",
+                    "--no-color",
+                    "--unified=3",
+                    "--",
+                    relativo,
+                ];
+                let saida = self.run(&args, cancel).await?;
+                let mut diff = ler_diff(&String::from_utf8_lossy(&saida));
+                diff.path = path.to_path_buf();
+                Ok(diff)
+            }
+            Err(erro) => Err(erro),
+        }
     }
 
     async fn committed_text(&self, path: &Path, cancel: &CancellationToken) -> GitResult<String> {

@@ -780,3 +780,139 @@ fn empurrar_e_buscar_movem_a_contagem_de_commits() {
 
     let _ = std::fs::remove_dir_all(&remoto);
 }
+
+/// Apagar um bloco de linhas seguidas aparece inteiro na comparação.
+///
+/// Relatado: um bloco apagado não aparecia marcado. As três coisas que a tela
+/// usa saem daqui, e as três precisam falar do bloco inteiro — as linhas que
+/// saíram, as fileiras que as seguram na altura certa, e o texto de então.
+#[test]
+fn apagar_um_bloco_marca_todas_as_linhas_dele() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("bloco-apagado") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    let antes = "um\ndois\ntres\nquatro\ncinco\nseis\nsete\noito\n";
+    repo.escrever("a.txt", antes);
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+
+    // Fora as linhas 3, 4 e 5 (índices 2, 3 e 4).
+    let depois = "um\ndois\nseis\nsete\noito\n";
+    repo.escrever("a.txt", depois);
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let arvore = repositorio.working_tree();
+    let cancel = CancellationToken::new();
+    let Ok(diff) = esperar(arvore.diff(
+        &repo.root().join("a.txt"),
+        ide_git::DiffSide::WorkingTree,
+        &cancel,
+    )) else {
+        panic!("a comparação falhou");
+    };
+
+    assert_eq!(
+        diff.removed_lines(),
+        vec![2, 3, 4],
+        "as três linhas apagadas, contadas no arquivo de então: {:?}",
+        diff.hunks
+    );
+
+    let pares = diff.aligned_lines(antes.lines().count(), depois.lines().count());
+    let buracos: Vec<usize> = pares
+        .iter()
+        .filter(|par| par.new.is_none())
+        .filter_map(|par| par.old)
+        .collect();
+    assert_eq!(
+        buracos,
+        vec![2, 3, 4],
+        "e as três abrem buraco do lado de agora: {pares:?}"
+    );
+    assert_eq!(
+        pares.len(),
+        8,
+        "oito fileiras: o arquivo de então inteiro, com o de agora encaixado"
+    );
+}
+
+/// O bloco apagado aparece **mesmo depois de preparado**.
+///
+/// Relatado: apagar um bloco de linhas e não vê-lo marcado. A coluna da esquerda
+/// mostra o arquivo do último *commit*, e a comparação da árvore de trabalho
+/// perguntava contra o **índice** — quem prepara o que apagou passa a ver duas
+/// colunas visivelmente diferentes e nenhuma marca, porque contra o índice não
+/// há mesmo diferença nenhuma. As duas respostas têm de falar do mesmo par.
+#[test]
+fn o_bloco_apagado_aparece_mesmo_depois_de_preparado() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("bloco-preparado") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    let antes = "um\ndois\ntres\nquatro\ncinco\nseis\nsete\noito\n";
+    repo.escrever("a.txt", antes);
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+
+    // Fora as linhas 3, 4 e 5 — e preparadas, que é o gesto de quem vai
+    // commitar em seguida.
+    repo.escrever("a.txt", "um\ndois\nseis\nsete\noito\n");
+    assert!(repo.git(&["add", "a.txt"]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let arvore = repositorio.working_tree();
+    let cancel = CancellationToken::new();
+    let Ok(diff) = esperar(arvore.diff(
+        &repo.root().join("a.txt"),
+        ide_git::DiffSide::WorkingTree,
+        &cancel,
+    )) else {
+        panic!("a comparação falhou");
+    };
+    assert_eq!(
+        diff.removed_lines(),
+        vec![2, 3, 4],
+        "o bloco continua apagado em relação ao commit, preparado ou não"
+    );
+}
+
+/// Repositório sem commit nenhum ainda responde a comparação.
+///
+/// A comparação passou a perguntar contra `HEAD`, e num repositório recém-criado
+/// esse nome não existe: o `git` recusa, e sem a volta por cima a tela receberia
+/// um erro no lugar do arquivo. É o primeiro minuto de todo projeto novo.
+#[test]
+fn sem_commit_nenhum_a_comparacao_ainda_responde() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("sem-commit-diff") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um
+dois
+");
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let cancel = CancellationToken::new();
+    assert!(
+        esperar(repositorio.working_tree().diff(
+            &repo.root().join("a.txt"),
+            ide_git::DiffSide::WorkingTree,
+            &cancel,
+        ))
+        .is_ok(),
+        "sem `HEAD`, a pergunta é a de sempre, e não um erro"
+    );
+}
