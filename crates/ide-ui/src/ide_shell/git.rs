@@ -68,7 +68,11 @@ const COMMIT_ID: WidgetId = WidgetId(11_901);
 const AMEND_ID: WidgetId = WidgetId(11_902);
 
 /// A janela é larga: à esquerda a navegação, à direita o trabalho.
-const PANEL_SIZE: Size = Size::new(920.0, 560.0);
+///
+/// A largura é a da tabela do histórico, e não a da árvore: cinco colunas —
+/// grafo, descrição, data, autor e hash — com as quatro últimas de largura
+/// própria deixavam a descrição espremida em novecentos pontos.
+const PANEL_SIZE: Size = Size::new(1200.0, 560.0);
 const ROW_HEIGHT: f32 = 24.0;
 /// A largura útil do painel: o que sobra depois das margens dos dois lados.
 const BODY_WIDTH: f32 = PANEL_SIZE.width - 32.0;
