@@ -1266,12 +1266,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // elas estão aqui **porque só a raiz de composição pode nomear o
         // `ide-git`** — é a mesma razão que põe o registro das linguagens neste
         // arquivo. O teto sobe; a dívida 1 da `26` continua aberta.
-        // De 5 483 para 6 207: a fase 1 da `22` — as três escritas, a
-        // diferença de um arquivo e a comparação. São 583 linhas — as fases 2, 3 e 4 trouxeram o commit, a página do histórico com as faixas do grafo, e as seis escritas que mexem em branch, fusão e `stash`, o remoto, a reação ao que muda no disco e a fila das margens pedidas —, e estão aqui
+        // De 5 483 para 6 260: a fase 1 da `22` — as três escritas, a
+        // diferença de um arquivo e a comparação. São 583 linhas — as fases 2, 3 e 4 trouxeram o commit, a página do histórico com as faixas do grafo, e as seis escritas que mexem em branch, fusão e `stash`, o remoto, a reação ao que muda no disco, a fila das margens pedidas e a devolução de uma linha ao arquivo —, e estão aqui
         // pelo mesmo motivo das anteriores: **só a raiz de composição pode
         // nomear o `ide-git`**. A dívida 1 da `26` continua aberta, e este
         // arquivo continua sendo o primeiro candidato a ser partido.
-        ("crates/ide-app/src/native_ide.rs", 6_207),
+        ("crates/ide-app/src/native_ide.rs", 6_260),
         // De 7 269 para 7 315: o teste que a fase 4 da `18` pedia — o copiado do
         // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
         // primeira adição depois de nascer**, que é o que ela existe para fazer:

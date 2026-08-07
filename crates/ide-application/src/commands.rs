@@ -48,6 +48,12 @@ pub enum GitRequest {
     Pull,
     /// Manda o que está aqui.
     Push,
+    /// Leva uma linha do arquivo de então para o de agora.
+    ///
+    /// É desfazer o que se fez naquela linha, e nada mais: o `restore` do Git é
+    /// por arquivo, e quem só quer uma linha de volta não deveria ter de
+    /// escolher entre perder o resto e não ter jeito.
+    RestoreLine { path: std::path::PathBuf, line: usize },
     /// Guarda o que está na árvore de trabalho.
     Stash,
     /// Devolve para a árvore o que estava guardado.

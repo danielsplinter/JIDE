@@ -20,7 +20,7 @@
 
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
-    Button, ButtonAlign, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
+    Button, ButtonAlign, ButtonFill, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
     ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, Panel, SplitOrientation,
     SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar,
 };
@@ -61,6 +61,13 @@ const JANELA_TABS_ID: WidgetId = WidgetId(10_531);
 const DIFF_ID: WidgetId = WidgetId(10_532);
 /// A divisa que reparte as duas colunas da comparação.
 const DIFF_SPLIT_ID: WidgetId = WidgetId(10_533);
+/// O botão que leva a linha da esquerda para a direita.
+const APLICAR_ID: WidgetId = WidgetId(11_940);
+/// Largura e altura do botão que flutua sobre o texto.
+///
+/// Menor que a altura padrão de propósito: ele mora **dentro** de uma linha de
+/// texto, e um botão de quarenta pontos cobriria as duas vizinhas.
+const APLICAR_LADO: f32 = 22.0;
 /// As linhas da comparação: uma célula por linha de texto.
 const DIFF_LINHA_BASE: WidgetId = WidgetId(12_000);
 /// O botão que fecha a janela, no canto de cima.
@@ -198,6 +205,12 @@ pub struct GitSpan {
 pub struct GitDiff {
     /// O caminho relativo, que é o que se lê no título.
     pub label: String,
+    /// O caminho inteiro, que é o que uma ação sobre este arquivo carrega.
+    ///
+    /// Os dois, e não um: o de cima é para ler, e este é para agir. Guardar só
+    /// o relativo obrigaria a tela a saber onde o projeto começa para remontar o
+    /// outro — e a raiz é do shell.
+    pub path: std::path::PathBuf,
     /// O arquivo como está no último commit.
     pub committed: String,
     /// O arquivo como está agora.
@@ -1016,6 +1029,46 @@ impl GitSurface {
         )
     }
 
+    /// Onde fica o botão que leva a linha da esquerda para a direita.
+    ///
+    /// **Ele acompanha a linha escolhida**, encostado na borda direita da coluna
+    /// de então: é a linha de onde o texto sai, e um botão parado no alto não
+    /// diria de qual linha ele está falando.
+    ///
+    /// Sem linha escolhida não há botão: ele apareceria oferecendo uma ação que
+    /// não se sabe sobre o quê.
+    fn botao_de_aplicar(&self, coluna: Rect) -> Option<Rect> {
+        let lista = self.colunas_do_diff.as_ref()?.first()?;
+        let escolhida = lista.selected()?;
+        let topo = coluna.origin.y + escolhida as f32 * ROW_HEIGHT - lista.scroll_offset();
+        // Fora da vista, nenhum botão: rolar a coluna não pode deixá-lo preso na
+        // borda falando de uma linha que já saiu da tela.
+        if topo < coluna.origin.y || topo + ROW_HEIGHT > coluna.origin.y + coluna.size.height {
+            return None;
+        }
+        Some(Rect::new(
+            coluna.origin.x + coluna.size.width - APLICAR_LADO - 6.0,
+            topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
+            APLICAR_LADO,
+            APLICAR_LADO,
+        ))
+    }
+
+    /// O caminho do arquivo que está sendo comparado.
+    fn caminho_do_diff(&self) -> Option<std::path::PathBuf> {
+        self.diff.as_ref().map(|diff| diff.path.clone())
+    }
+
+    /// A comparação que está na tela, para quem precisa do texto dela.
+    pub(super) fn view_diff(&self) -> Option<&GitDiff> {
+        self.diff.as_ref()
+    }
+
+    /// A linha escolhida na coluna de então, se há uma.
+    fn linha_escolhida(&self) -> Option<usize> {
+        self.colunas_do_diff.as_ref()?.first()?.selected()
+    }
+
     /// A comparação, quando há uma pedida.
     ///
     /// Sem nenhuma, o painel fica vazio com uma linha dizendo por onde se pede
@@ -1053,6 +1106,19 @@ impl GitSurface {
         // A divisa por último: ela fica **sobre** a borda entre as duas colunas.
         if let Some(split) = self.split_do_diff.as_ref() {
             split.paint(paint);
+        }
+        // E o botão depois dela: ele flutua sobre o texto, e o que flutua é
+        // desenhado por cima do que está embaixo.
+        if let Some(area_do_botao) = self.botao_de_aplicar(colunas[0]) {
+            let mut aplicar = Button::new(APLICAR_ID, "→")
+                // Fundo transparente: ele está **sobre** o texto que se está
+                // lendo para decidir se clica, e um fundo cheio esconderia
+                // justamente isso. A borda continua, e é ela que diz que ali se
+                // clica.
+                .with_fill(ButtonFill::Transparent)
+                .with_height(APLICAR_LADO);
+            aplicar.layout(layout, area_do_botao);
+            aplicar.paint(paint);
         }
     }
 
@@ -1327,6 +1393,19 @@ impl GitSurface {
             let area_do_diff = area(host, DIFF_ID);
             if self.diff.is_some() && area_do_diff.contains(point) {
                 let colunas = self.colunas_da_comparacao(area_do_diff, context);
+                // O botão antes das colunas: ele flutua sobre a de então, e um
+                // clique nele cairia na linha de baixo se a pergunta viesse
+                // depois.
+                if let Some(area_do_botao) = self.botao_de_aplicar(colunas[0])
+                    && area_do_botao.contains(point)
+                    && let Some(linha) = self.linha_escolhida()
+                    && let Some(caminho) = self.caminho_do_diff()
+                {
+                    return Some(GitRequest::RestoreLine {
+                        path: caminho,
+                        line: linha,
+                    });
+                }
                 if let Some(split) = self.split_do_diff.as_mut()
                     && split.divider().contains(point)
                 {
@@ -1945,6 +2024,21 @@ impl GitSurface {
             .map_or(0.0, |tree| tree.scroll_offset().y)
     }
 
+    /// As duas colunas da comparação, para o teste apontar nelas.
+    #[cfg(test)]
+    pub(super) fn colunas_do_diff_para_teste(&mut self, host: &UiHost) -> [Rect; 2] {
+        let area_do_diff = area(host, DIFF_ID);
+        let context = LayoutContext::default();
+        self.colunas_da_comparacao(area_do_diff, &context)
+    }
+
+    /// O botão que devolve a linha, para o teste clicar nele.
+    #[cfg(test)]
+    pub(super) fn botao_de_aplicar_para_teste(&mut self, host: &UiHost) -> Option<Rect> {
+        let colunas = self.colunas_do_diff_para_teste(host);
+        self.botao_de_aplicar(colunas[0])
+    }
+
     /// As abas da janela, para o teste apontar nelas.
     #[cfg(test)]
     pub(super) fn abas_da_janela_para_teste(&self, host: &UiHost) -> Rect {
@@ -2112,6 +2206,20 @@ impl super::IdeShell {
         self.git.marcas.insert(path, marks);
     }
 
+    /// A linha do arquivo **de então**, como a comparação a mostra.
+    ///
+    /// Quem devolve uma linha ao arquivo de agora precisa do texto dela, e ele
+    /// já está aqui: foi o que a coluna da esquerda desenhou.
+    #[must_use]
+    pub fn git_diff_line(&self, line: usize) -> Option<String> {
+        self.git
+            .view_diff()?
+            .committed
+            .lines()
+            .nth(line)
+            .map(ToOwned::to_owned)
+    }
+
     /// O arquivo na frente, quando ainda não se sabe o que mudou nele.
     ///
     /// Quem pergunta ao repositório é a aplicação, e ela pergunta isto a cada
@@ -2157,7 +2265,11 @@ impl super::IdeShell {
             .display()
             .to_string()
             .replace('\\', "/");
-        self.git.mostrar_diff(GitDiff { label, ..diff });
+        self.git.mostrar_diff(GitDiff {
+            label,
+            path: path.to_path_buf(),
+            ..diff
+        });
         true
     }
 

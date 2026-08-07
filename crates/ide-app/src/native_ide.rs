@@ -1690,6 +1690,7 @@ impl NativeIde {
             GitRequest::Fetch => self.mexer_na_branch("fetch", String::new()),
             GitRequest::Pull => self.mexer_na_branch("pull", String::new()),
             GitRequest::Push => self.mexer_na_branch("push", String::new()),
+            GitRequest::RestoreLine { path, line } => self.devolver_a_linha(&path, line),
             GitRequest::Stash => self.mexer_na_branch("stash", String::new()),
             GitRequest::StashPop(indice) => self.mexer_na_branch("pop", indice.to_string()),
             GitRequest::Stage(path) => self.escrever_no_git("stage", path),
@@ -1858,6 +1859,56 @@ impl NativeIde {
         });
     }
 
+    /// Leva uma linha do arquivo de então para o de agora, e grava.
+    ///
+    /// **É escrita em arquivo, e por isso acontece aqui.** A tela pede; quem
+    /// toca o disco é a aplicação, como em todo o resto. O texto de então vem do
+    /// que já está na tela — foi ele que a comparação mostrou, e é ele que quem
+    /// clicou está mandando para o outro lado.
+    ///
+    /// A linha que não existe mais no arquivo de agora é **acrescentada no fim**
+    /// em vez de recusada em silêncio: quem pediu a linha 40 de um arquivo que
+    /// hoje tem 30 quer aquela linha de volta.
+    fn devolver_a_linha(&mut self, path: &Path, line: usize) {
+        let Some(texto) = self
+            .ui
+            .shell
+            .as_ref()
+            .and_then(|shell| shell.git_diff_line(line))
+        else {
+            return;
+        };
+        let atual = std::fs::read_to_string(path).unwrap_or_default();
+        // O fim de linha do arquivo, e não o da máquina: reescrever um
+        // arquivo com CRLF usando LF marcaria **todas** as linhas como
+        // alteradas, e devolver uma linha viraria um diff inteiro.
+        let quebra = if atual.contains("\r\n") { "\r\n" } else { "\n" };
+        let terminava_com_quebra = atual.ends_with('\n');
+        let mut linhas: Vec<String> = atual.lines().map(ToOwned::to_owned).collect();
+        if line < linhas.len() {
+            linhas[line] = texto;
+        } else {
+            linhas.push(texto);
+        }
+        let mut novo = linhas.join(quebra);
+        if terminava_com_quebra {
+            novo.push_str(quebra);
+        }
+        if std::fs::write(path, novo).is_err() {
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_status_message("Não foi possível gravar o arquivo".to_owned());
+            }
+            return;
+        }
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(format!("Linha {} devolvida", line + 1));
+        }
+        // O arquivo mudou no disco: a comparação e a margem vêm de lá, e as
+        // duas precisam ser refeitas. O observador também veria, 300 ms depois;
+        // quem clicou não pode esperar por ele para ver o que acabou de fazer.
+        self.pedir_diferenca(path.to_path_buf(), false, true);
+    }
+
     /// Pede a margem do arquivo que está na frente, se ela ainda não foi pedida.
     ///
     /// Roda a cada quadro e custa uma consulta a um mapa. É o que faz a marca
@@ -1920,8 +1971,10 @@ impl NativeIde {
             // são as mesmas que a margem do editor usa — calculá-las duas vezes
             // daria duas respostas para a mesma pergunta.
             let comparacao = ide_ui::GitDiff {
-                // O rótulo é do shell, que sabe onde o projeto começa.
+                // O rótulo e o caminho são do shell, que sabe onde o projeto
+                // começa; daqui vai o conteúdo.
                 label: String::new(),
+                path: std::path::PathBuf::new(),
                 committed: resultado.committed,
                 current: atual,
                 marks: resultado.marks,
