@@ -17,5 +17,7 @@ mod gerenciador;
 mod alteracoes;
 /// A aba `History` e o commit.
 mod historico;
+/// Os comandos da comparação.
+mod comandos;
 /// A aba `Diff` e a margem.
 mod diff;

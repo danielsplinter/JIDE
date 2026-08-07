@@ -1288,7 +1288,20 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // composição pode nomear o `ide-git` e a `ide-ui` na mesma linha. É
         // produto, e não teste — que era exatamente o que a descida anterior
         // veio separar.
-        ("crates/ide-app/src/native_ide.rs", 5_190),
+        //
+        // E de 5 190 para 5 195: a comparação que abre pede realce. São cinco
+        // linhas, quatro delas de comentário, e o comentário é o que importa —
+        // é a segunda vez que alguém descobre, pela tela sem cor, que mudar
+        // texto sem pedir realce novo deixa o arquivo em branco.
+        //
+        // E de 5 195 para 5 240: devolver um trecho inteiro. São quarenta linhas
+        // de produto — uma gravação só para as sete linhas de uma alteração, em
+        // vez de sete gravações com os números andando entre uma e outra —, mais
+        // o lugar único onde a gravação, o documento aberto, o realce e a
+        // comparação são refeitos. Esse lugar único **tirou** repetição: a linha
+        // e o trecho faziam os mesmos quatro passos, e eram fáceis de esquecer
+        // pela metade.
+        ("crates/ide-app/src/native_ide.rs", 5_240),
         // Os testes da raiz, no arquivo de onde saíram. O teto é o mesmo tipo de
         // acordo: 1 400, igual ao dos testes do shell, e pelo mesmo motivo —
         // acima disso ninguém acha o teste certo, e edita o errado.

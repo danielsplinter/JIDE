@@ -78,6 +78,17 @@ pub enum GitRequest {
         from: usize,
         target: RestoreTarget,
     },
+    /// Leva um trecho inteiro do arquivo de então para o de agora.
+    ///
+    /// **Uma alteração de sete linhas eram sete cliques**, e sete gravações, e
+    /// sete comparações refeitas — com os números andando entre uma e outra.
+    /// `from` é a faixa de linhas do arquivo de então, do começo ao fim
+    /// inclusive.
+    RestoreBlock {
+        path: std::path::PathBuf,
+        from: (usize, usize),
+        target: RestoreTarget,
+    },
     /// Guarda o que está na árvore de trabalho.
     Stash,
     /// Devolve para a árvore o que estava guardado.

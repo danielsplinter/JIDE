@@ -1126,7 +1126,7 @@ impl IdeShell {
     fn surface_key(&mut self, kind: SurfaceKind, key: &str, modifiers: Modifiers) -> bool {
         match kind {
             SurfaceKind::Rename => self.rename_key(key, modifiers),
-            SurfaceKind::Git => self.git.key(key),
+            SurfaceKind::Git => self.git.key(key, modifiers),
             SurfaceKind::Generate => false,
             SurfaceKind::TypeSearch => self.type_search_key(key),
             SurfaceKind::Inspection => self.inspection_key(key, modifiers),

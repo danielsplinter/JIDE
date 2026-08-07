@@ -24,11 +24,13 @@ use ui_components::{
     ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, Panel, SplitOrientation,
     SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar,
 };
-use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetId};
+use ui_core::{Modifiers, Point, Rect, ScrollEvent, Size, TokenKind, UiEvent, WidgetId};
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle};
 
 use ide_application::{ApplicationCommand, GitRequest, RestoreTarget};
+use ide_domain::DocumentId;
+use std::path::PathBuf;
 
 use super::primary_pointer;
 
@@ -61,6 +63,50 @@ const JANELA_TABS_ID: WidgetId = WidgetId(10_531);
 const DIFF_ID: WidgetId = WidgetId(10_532);
 /// A divisa que reparte as duas colunas da comparação.
 const DIFF_SPLIT_ID: WidgetId = WidgetId(10_533);
+/// Um trecho classificado de uma linha, na travessia entre quem analisa e a tela.
+///
+/// Mesma razão do [`GitSpan`]: uma tupla de três não diz qual número é qual, e
+/// esta é a fronteira onde um trocado passa calado.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitToken {
+    pub start: usize,
+    pub end: usize,
+    pub kind: TokenKind,
+}
+
+/// O nome pelo qual um lado da comparação é conhecido por quem analisa.
+///
+/// **A extensão é a do arquivo, e o nome não é.** A extensão é o que decide qual
+/// linguagem responde; o nome tem de ser outro porque o arquivo de verdade pode
+/// estar aberto ao mesmo tempo, e dois documentos com o mesmo caminho são o
+/// mesmo documento para quem analisa — o realce de um cairia no outro.
+fn caminho_do_lado(path: &std::path::Path, lado: &str) -> PathBuf {
+    let extensao = path.extension().and_then(|extensao| extensao.to_str());
+    let tronco = path
+        .file_stem()
+        .and_then(|tronco| tronco.to_str())
+        .unwrap_or("diff");
+    let nome = match extensao {
+        Some(extensao) => format!("{tronco}.git-{lado}.{extensao}"),
+        None => format!("{tronco}.git-{lado}"),
+    };
+    path.parent()
+        .map_or_else(|| PathBuf::from(&nome), |pasta| pasta.join(&nome))
+}
+
+/// Os dois textos da comparação, como documentos para quem analisa linguagem.
+///
+/// **O realce vem de quem entende a linguagem, e quem entende a linguagem
+/// trabalha sobre documentos.** Os dois lados de uma comparação não são
+/// documentos abertos — o de então nem existe no disco —, e sem um nome próprio
+/// não haveria a quem perguntar de que cor é cada palavra.
+///
+/// Os números ficam no fim da faixa de propósito: os documentos de verdade são
+/// contados a partir do zero, e um encontro entre os dois faria o realce de um
+/// arquivo cair no outro.
+const DIFF_DOC_ENTAO: DocumentId = DocumentId(u64::MAX - 1);
+const DIFF_DOC_AGORA: DocumentId = DocumentId(u64::MAX);
+
 /// As setas que levam uma linha da esquerda para a direita: uma por linha.
 ///
 /// Longe de tudo de propósito. As duas colunas da comparação já reservam cem mil
@@ -69,6 +115,11 @@ const DIFF_SPLIT_ID: WidgetId = WidgetId(10_533);
 /// arquivo — dois widgets com o mesmo identificador são o mesmo widget para a
 /// moldura, e o estado de um cairia no outro.
 const APLICAR_BASE: WidgetId = WidgetId(1_000_000);
+/// Os comandos do cabeçalho da comparação: anterior, seguinte, e o lado.
+const DIFF_ANTERIOR_ID: WidgetId = WidgetId(11_950);
+const DIFF_SEGUINTE_ID: WidgetId = WidgetId(11_951);
+const DIFF_LADO_ID: WidgetId = WidgetId(11_952);
+const DIFF_CONTAGEM_ID: WidgetId = WidgetId(11_953);
 /// Largura e altura do botão que flutua sobre o texto.
 ///
 /// Menor que a altura padrão de propósito: ele mora **dentro** de uma linha de
@@ -113,6 +164,15 @@ const RATIO_ALTO: f32 = 0.33;
 const RATIO_BAIXO: f32 = 0.5;
 /// Altura do título de cada painel.
 const TITULO_ALTURA: f32 = 20.0;
+/// A faixa do alto da comparação: o título e os comandos dela.
+///
+/// Mais alta que a do resumo porque tem botões, e botão de vinte pontos não é
+/// alvo de clique — é um risco na tela que por acaso responde.
+const DIFF_CABECALHO: f32 = 30.0;
+/// Largura dos botões que andam entre as alterações.
+const DIFF_PASSO_LARGURA: f32 = 30.0;
+/// Largura do botão que troca o lado da comparação.
+const DIFF_LADO_LARGURA: f32 = 110.0;
 /// Largura de um botão de ação de linha.
 const ACAO_LARGURA: f32 = 92.0;
 /// Quanto a barra do alto se separa do que está em volta dela.
@@ -214,6 +274,20 @@ pub struct Devolucao {
     pub(super) target: RestoreTarget,
 }
 
+impl GitDiff {
+    /// Se o que veio não é texto.
+    ///
+    /// **Um byte zero é a marca**, e é a mesma que o próprio Git usa para
+    /// decidir isso. Não é infalível — um `utf-16` de verdade tem zeros —, e é
+    /// o erro certo: um arquivo tratado como binário aparece com um aviso, e um
+    /// binário tratado como texto enche a tela de lixo e oferece setas para
+    /// devolvê-lo linha a linha.
+    #[must_use]
+    pub fn e_binario(&self) -> bool {
+        self.committed.contains(' ') || self.current.contains(' ')
+    }
+}
+
 /// Uma fileira da comparação: que linha aparece de cada lado.
 ///
 /// **Os dois lados são opcionais.** Uma linha que só existe no arquivo de então
@@ -257,6 +331,12 @@ pub struct GitDiff {
     pub added_spans: Vec<GitSpan>,
     /// Os trechos removidos, dentro das linhas do arquivo de então.
     pub removed_spans: Vec<GitSpan>,
+    /// De que lado é esta comparação: o preparado, ou a árvore de trabalho.
+    ///
+    /// São duas diferenças distintas sobre o mesmo arquivo, e quem já preparou
+    /// parte do trabalho precisa saber qual está vendo — senão conclui que o
+    /// resto se perdeu.
+    pub staged: bool,
     /// As fileiras: que linha de cada lado ocupa cada altura da tela.
     ///
     /// Vazio quer dizer "não sei emparelhar", e aí as duas colunas voltam a ser
@@ -401,6 +481,37 @@ pub(super) struct GitSurface {
     diff: Option<GitDiff>,
     /// As duas colunas da comparação, mantidas entre quadros: a rolagem é delas.
     colunas_do_diff: Option<[ComposedList; 2]>,
+    /// O realce de cada lado, uma lista de trechos por linha.
+    ///
+    /// Chega depois das colunas: perguntar a que classe pertence cada palavra é
+    /// trabalho de outra camada, e esperar por ela deixaria a comparação em
+    /// branco no instante em que se pede.
+    realce_do_diff: [Vec<Vec<(usize, usize, TokenKind)>>; 2],
+    /// Quantas comparações já passaram por aqui.
+    ///
+    /// É a versão dos dois documentos acima. Sem ela, abrir a comparação de
+    /// outro arquivo não avisaria ninguém — os identificadores são os mesmos, e
+    /// quem compara versões concluiria que nada mudou.
+    versao_do_diff: u64,
+    /// As fileiras, os blocos e as setas, calculados quando a comparação muda.
+    ///
+    /// **Uma vez, e não a cada quadro.** Tudo isto sai da mesma resposta do Git,
+    /// e nada disso muda entre um quadro e o seguinte — mas era refeito em todos:
+    /// dois mapas de dez mil entradas, três varreduras e uma cópia da lista de
+    /// fileiras, trinta vezes por segundo. Num arquivo de dez mil linhas o quadro
+    /// levava 64 ms; medido, e não suposto.
+    fileiras_do_diff: Vec<GitLinePair>,
+    blocos_do_diff: Vec<(usize, usize)>,
+    /// As setas de linha, em ordem de fileira — é o que deixa achar as visíveis
+    /// por busca binária em vez de percorrer o arquivo inteiro.
+    setas_do_diff: Vec<Devolucao>,
+    /// As setas de trecho, e a última linha de então que cada uma leva.
+    trechos_do_diff: Vec<(Devolucao, usize)>,
+    /// Em que alteração se está, entre as que o arquivo tem.
+    ///
+    /// **Nenhuma quando a comparação abre**: a primeira tecla leva à primeira,
+    /// e começar já dentro de uma faria a segunda parecer a primeira.
+    bloco_atual: Option<usize>,
     split_do_diff: Option<SplitPane>,
     /// Se o cursor está na caixa da mensagem.
     ///
@@ -607,7 +718,92 @@ impl GitSurface {
     pub(super) fn mostrar_diff(&mut self, diff: GitDiff) {
         self.diff = Some(diff);
         self.aba_da_janela = AbaDaJanela::Diff;
+        // O realce é do arquivo anterior: mantê-lo pintaria as palavras deste
+        // com as classes daquele, que é pior do que não pintar nada.
+        self.realce_do_diff = [Vec::new(), Vec::new()];
+        self.versao_do_diff += 1;
         self.rebuild_diff();
+    }
+
+    /// Guarda o realce de um dos lados, repartido por linha.
+    ///
+    /// Chega em deslocamentos do texto inteiro, e as linhas da comparação são
+    /// desenhadas uma a uma: repartir aqui, uma vez, evita a mesma conta em cada
+    /// linha de cada quadro.
+    pub(super) fn set_realce_do_diff(&mut self, de_agora: bool, texto: &str, spans: &[GitToken]) {
+        let mut por_linha: Vec<Vec<(usize, usize, TokenKind)>> = Vec::new();
+        let mut inicio_da_linha = 0usize;
+        for linha in texto.split('\n') {
+            let comprimento = linha.chars().count();
+            let fim_da_linha = inicio_da_linha + comprimento;
+            por_linha.push(
+                spans
+                    .iter()
+                    .filter(|token| token.end > inicio_da_linha && token.start < fim_da_linha)
+                    .map(|token| {
+                        (
+                            token.start.max(inicio_da_linha) - inicio_da_linha,
+                            token.end.min(fim_da_linha) - inicio_da_linha,
+                            token.kind,
+                        )
+                    })
+                    .collect(),
+            );
+            // O `+ 1` é a quebra, que conta no deslocamento e não é desenhada.
+            inicio_da_linha = fim_da_linha + 1;
+        }
+        self.realce_do_diff[usize::from(de_agora)] = por_linha;
+        self.rebuild_diff();
+    }
+
+    /// Se este documento é um dos dois lados da comparação.
+    pub(super) const fn aceita_realce(&self, id: DocumentId) -> bool {
+        id.0 == DIFF_DOC_ENTAO.0 || id.0 == DIFF_DOC_AGORA.0
+    }
+
+    /// De que lado vem este realce.
+    pub(super) const fn realce_e_do_lado_de_agora(&self, id: DocumentId) -> bool {
+        id.0 == DIFF_DOC_AGORA.0
+    }
+
+    /// O texto de um dos lados, para repartir o realce que chegou sobre ele.
+    pub(super) fn texto_do_lado(&self, de_agora: bool) -> Option<String> {
+        let diff = self.diff.as_ref()?;
+        Some(if de_agora {
+            diff.current.clone()
+        } else {
+            diff.committed.clone()
+        })
+    }
+
+    /// Os dois textos da comparação, para quem sabe analisá-los.
+    ///
+    /// Vazio quando não há comparação nenhuma na tela: analisar um arquivo que
+    /// ninguém está olhando é trabalho jogado fora.
+    pub(super) fn textos_do_diff(&self) -> Vec<(DocumentId, PathBuf, u64, String)> {
+        // Com a janela fechada, ninguém está olhando: analisar os dois textos
+        // seria trabalho jogado fora, e some desta lista quem some da tela —
+        // que é o que fecha os dois documentos do lado de quem analisa.
+        if !self.is_open() {
+            return Vec::new();
+        }
+        let Some(diff) = self.diff.as_ref() else {
+            return Vec::new();
+        };
+        vec![
+            (
+                DIFF_DOC_ENTAO,
+                caminho_do_lado(&diff.path, "then"),
+                self.versao_do_diff,
+                diff.committed.clone(),
+            ),
+            (
+                DIFF_DOC_AGORA,
+                caminho_do_lado(&diff.path, "now"),
+                self.versao_do_diff,
+                diff.current.clone(),
+            ),
+        ]
     }
 
     /// Monta as duas colunas da comparação, uma fileira por par de linhas.
@@ -621,7 +817,8 @@ impl GitSurface {
     /// O lado direito é tingido pelo que mudou: é a mesma marcação da margem do
     /// editor, e ela já vem calculada de quem leu o repositório.
     fn rebuild_diff(&mut self) {
-        let Some(diff) = self.diff.as_ref() else {
+        self.recalcular_o_diff();
+        let Some(diff) = self.diff.as_ref().filter(|diff| !diff.e_binario()) else {
             self.colunas_do_diff = None;
             return;
         };
@@ -642,11 +839,12 @@ impl GitSurface {
         };
         let trechos_de_agora = trechos(&diff.added_spans);
         let trechos_de_entao = trechos(&diff.removed_spans);
-        let fileiras = self.fileiras();
+        let fileiras = self.fileiras_do_diff.clone();
         let Some(diff) = self.diff.as_ref() else {
             return;
         };
         let coluna = |texto: &str, base: u64, de_agora: bool| {
+            let classes = &self.realce_do_diff[usize::from(de_agora)];
             let linhas: Vec<String> = texto.lines().map(ToOwned::to_owned).collect();
             let linhas = fileiras
                 .iter()
@@ -697,6 +895,15 @@ impl GitSurface {
                             Box::new({
                                 let rotulo =
                                     Label::new(WidgetId(base + fileira as u64 * 2 + 1), linha);
+                                // O realce da linguagem é a tinta; a marca do que
+                                // mudou é o fundo. As duas convivem, e é isso que
+                                // deixa ver **o que** mudou e **em que** mudou.
+                                let rotulo = match classes.get(numero) {
+                                    Some(classes) if !classes.is_empty() => {
+                                        rotulo.with_syntax(classes.clone())
+                                    }
+                                    _ => rotulo,
+                                };
                                 match trecho {
                                     Some((inicio, fim, tint)) => {
                                         rotulo.with_marked_range(inicio, fim, tint)
@@ -755,9 +962,9 @@ impl GitSurface {
         // O título fica acima das duas colunas, e a divisa reparte o que sobra.
         let corpo = Rect::new(
             area_do_diff.origin.x,
-            area_do_diff.origin.y + TITULO_ALTURA,
+            area_do_diff.origin.y + DIFF_CABECALHO,
             area_do_diff.size.width,
-            (area_do_diff.size.height - TITULO_ALTURA).max(0.0),
+            (area_do_diff.size.height - DIFF_CABECALHO).max(0.0),
         );
         split.layout(context, corpo);
         [split.first(), split.second()]
@@ -898,7 +1105,14 @@ impl GitSurface {
     }
 
     /// Tecla na janela. Devolve `true` quando ela era daqui.
-    pub(super) fn key(&mut self, key: &str) -> bool {
+    pub(super) fn key(&mut self, key: &str, modifiers: Modifiers) -> bool {
+        // `F7` anda entre as alterações, e `Shift+F7` volta — o mesmo gesto ao
+        // contrário, como em toda busca desta IDE. Vem antes das caixas de
+        // texto porque nenhuma delas escreve `F7`.
+        if key.eq_ignore_ascii_case("f7") && self.aba_da_janela == AbaDaJanela::Diff {
+            self.andar_entre_alteracoes(!modifiers.shift);
+            return true;
+        }
         if self.escrevendo {
             match key {
                 "Backspace" => {
@@ -1121,54 +1335,28 @@ impl GitSurface {
     /// borda falando de uma linha que já saiu da tela, e desenhar as de fora
     /// custaria uma por linha do arquivo.
     fn botoes_de_aplicar(&self, coluna: Rect) -> Vec<(Devolucao, Rect)> {
-        let Some(diff) = self.diff.as_ref() else {
-            return Vec::new();
-        };
-        let Some(lista) = self.colunas_do_diff.as_ref().and_then(|colunas| colunas.first()) else {
-            return Vec::new();
-        };
-        let removidas: std::collections::HashSet<usize> = diff.removed.iter().copied().collect();
-        let rolagem = lista.scroll_offset();
-        let mut botoes = Vec::new();
-        // Quantas linhas do arquivo de agora vieram antes desta fileira: é onde
-        // uma linha que só existe do lado de então entra, se for devolvida.
-        let mut adiante = 0usize;
-        for (fileira, par) in self.fileiras().iter().enumerate() {
-            let Some(antiga) = par.old else {
-                adiante = par.new.map_or(adiante, |nova| nova + 1);
-                continue;
-            };
-            if let Some(nova) = par.new {
-                adiante = nova + 1;
-            }
-            if !removidas.contains(&antiga) {
-                continue;
-            }
-            let topo = coluna.origin.y + fileira as f32 * ROW_HEIGHT - rolagem;
-            // Fora da vista, nenhuma seta: rolar a coluna não pode deixar uma
-            // presa na borda falando de uma linha que já saiu da tela.
-            if topo < coluna.origin.y
-                || topo + ROW_HEIGHT > coluna.origin.y + coluna.size.height
-            {
-                continue;
-            }
-            botoes.push((
-                Devolucao {
-                    fileira,
-                    from: antiga,
-                    target: par.new.map_or(RestoreTarget::Insert(adiante), |nova| {
-                        RestoreTarget::Replace(nova)
-                    }),
-                },
-                Rect::new(
-                    coluna.origin.x + coluna.size.width - APLICAR_LADO - 6.0,
-                    topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
-                    APLICAR_LADO,
-                    APLICAR_LADO,
-                ),
-            ));
-        }
-        botoes
+        let (primeira, ultima) = self.faixa_visivel(coluna);
+        let comeco = self
+            .setas_do_diff
+            .partition_point(|seta| seta.fileira < primeira);
+        self.setas_do_diff
+            .get(comeco..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|seta| seta.fileira <= ultima)
+            .filter_map(|seta| {
+                let topo = self.topo_da_fileira(coluna, seta.fileira)?;
+                Some((
+                    *seta,
+                    Rect::new(
+                        coluna.origin.x + coluna.size.width - APLICAR_LADO - 6.0,
+                        topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
+                        APLICAR_LADO,
+                        APLICAR_LADO,
+                    ),
+                ))
+            })
+            .collect()
     }
 
     /// Põe as duas colunas na mesma altura depois de um gesto.
@@ -1210,26 +1398,243 @@ impl GitSurface {
         )
     }
 
-    /// As fileiras da comparação, ou o casamento ingênuo quando não há nenhuma.
+    /// Onde ficam os quatro comandos do cabeçalho: lado, contagem, e os dois passos.
     ///
-    /// Um lugar só: a pintura e a seta têm de concordar sobre que altura mostra
-    /// que linha, e duas contas iguais escritas em dois lugares divergem na
-    /// primeira correção.
-    fn fileiras(&self) -> Vec<GitLinePair> {
-        let Some(diff) = self.diff.as_ref() else {
-            return Vec::new();
-        };
-        if !diff.pairs.is_empty() {
-            return diff.pairs.clone();
+    /// Da direita para a esquerda, porque é a borda direita que não se move: o
+    /// nome do arquivo cresce e encolhe, e ancorar nele faria os botões
+    /// dançarem a cada arquivo.
+    fn comandos_do_cabecalho(&self, area_do_diff: Rect) -> [Rect; 4] {
+        let alto = DIFF_CABECALHO - 6.0;
+        let y = area_do_diff.origin.y + 3.0;
+        let direita = area_do_diff.origin.x + area_do_diff.size.width;
+        let seguinte = Rect::new(direita - DIFF_PASSO_LARGURA - 4.0, y, DIFF_PASSO_LARGURA, alto);
+        let anterior = Rect::new(
+            seguinte.origin.x - DIFF_PASSO_LARGURA - 2.0,
+            y,
+            DIFF_PASSO_LARGURA,
+            alto,
+        );
+        let contagem = Rect::new(anterior.origin.x - 110.0, y, 106.0, alto);
+        let lado = Rect::new(
+            contagem.origin.x - DIFF_LADO_LARGURA - 6.0,
+            y,
+            DIFF_LADO_LARGURA,
+            alto,
+        );
+        [lado, contagem, anterior, seguinte]
+    }
+
+    /// As alterações do arquivo, cada uma como a faixa de fileiras que ocupa.
+    ///
+    /// **Uma alteração é um bloco, e não uma linha.** Trocar três linhas
+    /// seguidas é *uma* coisa que aconteceu, e contá-las como três faria a
+    /// contagem dizer doze onde quem olha vê quatro — e obrigaria a apertar a
+    /// tecla três vezes para sair de um lugar só.
+    fn blocos_alterados(&self) -> &[(usize, usize)] {
+        &self.blocos_do_diff
+    }
+
+    /// Leva à alteração seguinte, ou à anterior. `true` quando havia para onde ir.
+    ///
+    /// Dá a volta nas duas pontas, como toda busca desta IDE: quem chega ao fim
+    /// procurando alterações quer recomeçar, e não bater numa parede.
+    pub(super) fn andar_entre_alteracoes(&mut self, adiante: bool) -> bool {
+        let quantos = self.blocos_do_diff.len();
+        if quantos == 0 {
+            return false;
         }
-        let de_entao = diff.committed.lines().count();
-        let de_agora = diff.current.lines().count();
-        (0..de_entao.max(de_agora))
-            .map(|numero| GitLinePair {
-                old: (numero < de_entao).then_some(numero),
-                new: (numero < de_agora).then_some(numero),
+        let escolhido = match (self.bloco_atual, adiante) {
+            (None, true) => 0,
+            (None, false) => quantos - 1,
+            (Some(atual), true) => (atual + 1) % quantos,
+            (Some(atual), false) => (atual + quantos - 1) % quantos,
+        };
+        self.bloco_atual = Some(escolhido);
+        let (comeco, _) = self.blocos_do_diff[escolhido];
+        // Duas linhas de folga acima: uma alteração encostada na borda de cima
+        // não deixa ver de onde ela vem.
+        let alvo = (comeco as f32 - 2.0).max(0.0) * ROW_HEIGHT;
+        if let Some(listas) = self.colunas_do_diff.as_mut() {
+            for lista in listas.iter_mut() {
+                lista.set_scroll_offset(alvo);
+            }
+        }
+        true
+    }
+
+    /// Onde se está e quantas há, para o cabeçalho dizer.
+    fn contagem_das_alteracoes(&self) -> String {
+        let total = self.blocos_alterados().len();
+        if total == 0 {
+            return "sem alterações".to_owned();
+        }
+        match self.bloco_atual {
+            Some(atual) => format!("{} de {total}", atual + 1),
+            None => format!("{total} alterações"),
+        }
+    }
+
+    /// A seta do trecho inteiro, no alto de cada bloco de mais de uma linha.
+    ///
+    /// **Só quando o bloco tem mais de uma linha.** Num bloco de uma, ela faria
+    /// exatamente o que a seta da linha já faz, e duas setas iguais lado a lado
+    /// só fazem parar para descobrir qual é qual.
+    ///
+    /// Fica ao lado da seta da linha, com a barra a mais no desenho: é o mesmo
+    /// gesto, para mais coisa de uma vez.
+    fn botoes_de_trecho(&self, coluna: Rect) -> Vec<(Devolucao, usize, Rect)> {
+        let (primeira, ultima) = self.faixa_visivel(coluna);
+        let comeco = self
+            .trechos_do_diff
+            .partition_point(|(seta, _)| seta.fileira < primeira);
+        self.trechos_do_diff
+            .get(comeco..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|(seta, _)| seta.fileira <= ultima)
+            .filter_map(|(seta, fim)| {
+                let topo = self.topo_da_fileira(coluna, seta.fileira)?;
+                Some((
+                    *seta,
+                    *fim,
+                    Rect::new(
+                        coluna.origin.x + coluna.size.width - APLICAR_LADO * 2.0 - 10.0,
+                        topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
+                        APLICAR_LADO,
+                        APLICAR_LADO,
+                    ),
+                ))
             })
             .collect()
+    }
+
+    /// Refaz tudo o que se deduz de uma comparação nova.
+    ///
+    /// Chamado quando a comparação chega, e só então: nada disto muda entre dois
+    /// quadros, e refazê-lo em cada um era o que fazia um arquivo de dez mil
+    /// linhas custar 64 ms por quadro.
+    fn recalcular_o_diff(&mut self) {
+        let Some(diff) = self.diff.as_ref() else {
+            self.fileiras_do_diff = Vec::new();
+            self.blocos_do_diff = Vec::new();
+            self.setas_do_diff = Vec::new();
+            self.trechos_do_diff = Vec::new();
+            return;
+        };
+        // As fileiras: as que o domínio emparelhou, ou cada texto numerado do
+        // zero quando não há diferença nenhuma a emparelhar.
+        self.fileiras_do_diff = if diff.pairs.is_empty() {
+            let de_entao = diff.committed.lines().count();
+            let de_agora = diff.current.lines().count();
+            (0..de_entao.max(de_agora))
+                .map(|numero| GitLinePair {
+                    old: (numero < de_entao).then_some(numero),
+                    new: (numero < de_agora).then_some(numero),
+                })
+                .collect()
+        } else {
+            diff.pairs.clone()
+        };
+
+        let marcas: std::collections::HashMap<usize, GitLineChange> =
+            diff.marks.iter().copied().collect();
+        let removidas: std::collections::HashSet<usize> = diff.removed.iter().copied().collect();
+        let mudou = |par: &GitLinePair| match (par.old, par.new) {
+            // Um lado vazio é linha que entrou ou saiu: mudou, sempre.
+            (None, _) | (_, None) => true,
+            (Some(antiga), Some(nova)) => {
+                removidas.contains(&antiga)
+                    || matches!(marcas.get(&nova), Some(GitLineChange::Added))
+            }
+        };
+
+        let mut blocos: Vec<(usize, usize)> = Vec::new();
+        let mut setas: Vec<Devolucao> = Vec::new();
+        // Quantas linhas do arquivo de agora vieram antes desta fileira: é onde
+        // uma linha que só existe do lado de então entra, se for devolvida.
+        let mut adiante = 0usize;
+        for (fileira, par) in self.fileiras_do_diff.iter().enumerate() {
+            if mudou(par) {
+                match blocos.last_mut() {
+                    // Encostada na anterior: é a mesma alteração continuando.
+                    Some(ultimo) if ultimo.1 + 1 == fileira => ultimo.1 = fileira,
+                    _ => blocos.push((fileira, fileira)),
+                }
+            }
+            if let Some(antiga) = par.old
+                && removidas.contains(&antiga)
+            {
+                setas.push(Devolucao {
+                    fileira,
+                    from: antiga,
+                    target: par
+                        .new
+                        .map_or(RestoreTarget::Insert(adiante), RestoreTarget::Replace),
+                });
+            }
+            if let Some(nova) = par.new {
+                adiante = nova + 1;
+            }
+        }
+
+        // As setas de trecho saem dos blocos: a primeira e a última linha de
+        // então que cada um leva, e onde ele entra do lado de agora.
+        let mut trechos = Vec::new();
+        for (comeco, fim) in &blocos {
+            let no_bloco: Vec<&Devolucao> = setas
+                .iter()
+                .filter(|seta| seta.fileira >= *comeco && seta.fileira <= *fim)
+                .collect();
+            let (Some(primeira), Some(ultima)) = (no_bloco.first(), no_bloco.last()) else {
+                continue;
+            };
+            // Bloco de uma linha só não ganha seta de trecho: ela faria o que a
+            // seta da linha já faz, e duas iguais lado a lado só fazem parar
+            // para descobrir qual é qual.
+            if primeira.from == ultima.from {
+                continue;
+            }
+            trechos.push((
+                Devolucao {
+                    fileira: *comeco,
+                    from: primeira.from,
+                    target: primeira.target,
+                },
+                ultima.from,
+            ));
+        }
+
+        self.blocos_do_diff = blocos;
+        self.setas_do_diff = setas;
+        self.trechos_do_diff = trechos;
+    }
+
+    /// A faixa de fileiras que cabe na coluna, dado o que já rolou.
+    ///
+    /// As setas vêm em ordem de fileira, e por isso as visíveis se acham por
+    /// busca binária: sem ela, cada quadro percorreria o arquivo inteiro para
+    /// desenhar as poucas que estão na tela.
+    fn faixa_visivel(&self, coluna: Rect) -> (usize, usize) {
+        let rolagem = self
+            .colunas_do_diff
+            .as_ref()
+            .and_then(|colunas| colunas.first())
+            .map_or(0.0, ComposedList::scroll_offset);
+        let primeira = (rolagem / ROW_HEIGHT).floor().max(0.0) as usize;
+        let quantas = (coluna.size.height / ROW_HEIGHT).ceil() as usize + 1;
+        (primeira, primeira + quantas)
+    }
+
+    /// Onde uma fileira aparece na coluna, se aparecer inteira.
+    fn topo_da_fileira(&self, coluna: Rect, fileira: usize) -> Option<f32> {
+        let rolagem = self
+            .colunas_do_diff
+            .as_ref()
+            .and_then(|colunas| colunas.first())
+            .map_or(0.0, ComposedList::scroll_offset);
+        let topo = coluna.origin.y + fileira as f32 * ROW_HEIGHT - rolagem;
+        (topo >= coluna.origin.y && topo + ROW_HEIGHT <= coluna.origin.y + coluna.size.height)
+            .then_some(topo)
     }
 
     /// O caminho do arquivo que está sendo comparado.
@@ -1247,6 +1652,18 @@ impl GitSurface {
     /// Sem nenhuma, o painel fica vazio com uma linha dizendo por onde se pede
     /// uma — um painel vazio sem explicação parece defeito.
     fn paint_diff(&mut self, area_do_diff: Rect, layout: &LayoutContext, paint: &mut PaintContext) {
+        // Binário não se compara linha a linha: desenhar os bytes de um `.png`
+        // como texto enche a tela de lixo e ainda oferece setas para devolvê-lo.
+        if self.diff.as_ref().is_some_and(GitDiff::e_binario) {
+            let mut aviso = Label::new(
+                WidgetId(SUMMARY_BASE.0 + 8),
+                "Arquivo binário: não há comparação linha a linha".to_owned(),
+            )
+            .with_tone(IconTint::Muted);
+            aviso.layout(layout, area_do_diff);
+            aviso.paint(paint);
+            return;
+        }
         let Some(titulo) = self.diff.as_ref().map(|diff| diff.label.clone()) else {
             let mut vazio = Label::new(
                 WidgetId(SUMMARY_BASE.0 + 7),
@@ -1257,17 +1674,61 @@ impl GitSurface {
             vazio.paint(paint);
             return;
         };
+        let comandos = self.comandos_do_cabecalho(area_do_diff);
         let mut cabecalho = Label::new(WidgetId(SUMMARY_BASE.0 + 6), titulo);
         cabecalho.layout(
             layout,
             Rect::new(
                 area_do_diff.origin.x,
-                area_do_diff.origin.y,
-                area_do_diff.size.width,
+                area_do_diff.origin.y + (DIFF_CABECALHO - TITULO_ALTURA) / 2.0,
+                (comandos[0].origin.x - area_do_diff.origin.x - 8.0).max(0.0),
                 TITULO_ALTURA,
             ),
         );
         cabecalho.paint(paint);
+
+        // Os comandos da comparação, à direita do nome do arquivo.
+        let staged = self.diff.as_ref().is_some_and(|diff| diff.staged);
+        let mut lado = Button::new(
+            DIFF_LADO_ID,
+            if staged {
+                "Preparado"
+            } else {
+                "Árvore de trabalho"
+            },
+        )
+        .with_height(DIFF_CABECALHO - 6.0)
+        .with_fill(ButtonFill::Transparent);
+        lado.layout(layout, comandos[0]);
+        lado.paint(paint);
+
+        let mut contagem = Label::new(DIFF_CONTAGEM_ID, self.contagem_das_alteracoes())
+            .with_tone(IconTint::Muted);
+        contagem.layout(
+            layout,
+            Rect::new(
+                comandos[1].origin.x,
+                comandos[1].origin.y + (DIFF_CABECALHO - TITULO_ALTURA) / 2.0,
+                comandos[1].size.width,
+                TITULO_ALTURA,
+            ),
+        );
+        contagem.paint(paint);
+
+        for (indice, texto) in ["\u{2191}", "\u{2193}"].into_iter().enumerate() {
+            let mut passo = Button::new(
+                if indice == 0 {
+                    DIFF_ANTERIOR_ID
+                } else {
+                    DIFF_SEGUINTE_ID
+                },
+                texto,
+            )
+            .with_height(DIFF_CABECALHO - 6.0)
+            .with_fill(ButtonFill::Transparent);
+            passo.layout(layout, comandos[2 + indice]);
+            passo.paint(paint);
+        }
 
         let colunas = self.colunas_da_comparacao(area_do_diff, layout);
         if let Some(listas) = self.colunas_do_diff.as_mut() {
@@ -1282,6 +1743,16 @@ impl GitSurface {
         }
         // E as setas depois dela: elas flutuam sobre o texto, e o que flutua é
         // desenhado por cima do que está embaixo.
+        for (devolucao, _, area_do_botao) in self.botoes_de_trecho(colunas[0]) {
+            let mut trecho = Button::new(
+                WidgetId(APLICAR_BASE.0 + 500_000 + devolucao.fileira as u64),
+                "⇒",
+            )
+            .with_fill(ButtonFill::Transparent)
+            .with_height(APLICAR_LADO);
+            trecho.layout(layout, area_do_botao);
+            trecho.paint(paint);
+        }
         for (devolucao, area_do_botao) in self.botoes_de_aplicar(colunas[0]) {
             // Um identificador por fileira: dois botões com o mesmo id seriam o
             // mesmo botão para a moldura, e o estado de um cairia no outro.
@@ -1570,10 +2041,43 @@ impl GitSurface {
         if self.aba_da_janela == AbaDaJanela::Diff {
             let area_do_diff = area(host, DIFF_ID);
             if self.diff.is_some() && area_do_diff.contains(point) {
+                // O cabeçalho antes de tudo: ele fica acima das colunas, e um
+                // clique nele não é clique em linha nenhuma.
+                let comandos = self.comandos_do_cabecalho(area_do_diff);
+                if comandos[2].contains(point) {
+                    self.andar_entre_alteracoes(false);
+                    return None;
+                }
+                if comandos[3].contains(point) {
+                    self.andar_entre_alteracoes(true);
+                    return None;
+                }
+                if comandos[0].contains(point) {
+                    // Trocar de lado é outra pergunta sobre o mesmo arquivo, e
+                    // quem responde é o repositório: daqui sai o pedido.
+                    let diff = self.diff.as_ref()?;
+                    let (caminho, staged) = (diff.path.clone(), diff.staged);
+                    return Some(GitRequest::ShowDiff {
+                        path: caminho,
+                        staged: !staged,
+                    });
+                }
                 let colunas = self.colunas_da_comparacao(area_do_diff, context);
                 // As setas antes das colunas: elas flutuam sobre a de então, e
                 // um clique nelas cairia na linha de baixo se a pergunta viesse
                 // depois.
+                if let Some((devolucao, ultima, _)) = self
+                    .botoes_de_trecho(colunas[0])
+                    .into_iter()
+                    .find(|(_, _, area)| area.contains(point))
+                    && let Some(caminho) = self.caminho_do_diff()
+                {
+                    return Some(GitRequest::RestoreBlock {
+                        path: caminho,
+                        from: (devolucao.from, ultima),
+                        target: devolucao.target,
+                    });
+                }
                 if let Some((devolucao, _)) = self
                     .botoes_de_aplicar(colunas[0])
                     .into_iter()
@@ -1598,17 +2102,28 @@ impl GitSurface {
                 // Clicar na trilha da barra salta a rolagem, e é gesto como
                 // qualquer outro: as duas colunas andam juntas depois dele.
                 let antes = self.rolagem_das_colunas();
+                let mut escolhida = None;
                 if let Some(listas) = self.colunas_do_diff.as_mut() {
-                    for (lista, coluna) in listas.iter_mut().zip(colunas) {
+                    for (indice, (lista, coluna)) in listas.iter_mut().zip(colunas).enumerate() {
                         if coluna.contains(point) {
                             lista.layout(context, coluna);
                             lista.event(
                                 &mut EventContext::default(),
                                 &UiEvent::PointerDown(primary_pointer(point)),
                             );
+                            escolhida = lista.selected().map(|fileira| (indice, fileira));
                             break;
                         }
                     }
+                }
+                // A mesma fileira nos dois lados: escolher à esquerda e a
+                // direita continuar noutra linha é a comparação dizendo duas
+                // coisas ao mesmo tempo. A fileira é a unidade, e ela já
+                // emparelha as duas versões.
+                if let Some((clicada, fileira)) = escolhida
+                    && let Some(listas) = self.colunas_do_diff.as_mut()
+                {
+                    listas[1 - clicada].set_selected(Some(fileira));
                 }
                 self.casar_a_rolagem(antes);
 
@@ -2230,6 +2745,30 @@ impl GitSurface {
         let area_do_diff = area(host, DIFF_ID);
         let context = LayoutContext::default();
         self.colunas_da_comparacao(area_do_diff, &context)
+    }
+
+    /// As setas de trecho, para o teste clicar nelas.
+    #[cfg(test)]
+    pub(super) fn botoes_de_trecho_para_teste(
+        &mut self,
+        host: &UiHost,
+    ) -> Vec<(Devolucao, usize, Rect)> {
+        let colunas = self.colunas_do_diff_para_teste(host);
+        self.botoes_de_trecho(colunas[0])
+    }
+
+    /// Os comandos do cabeçalho, para o teste apontar neles.
+    #[cfg(test)]
+    pub(super) fn comandos_do_cabecalho_para_teste(&self, host: &UiHost) -> [Rect; 4] {
+        self.comandos_do_cabecalho(area(host, DIFF_ID))
+    }
+
+    /// A fileira escolhida em cada coluna, para o teste ver as duas concordarem.
+    #[cfg(test)]
+    pub(super) fn escolhidas_do_diff(&self) -> [Option<usize>; 2] {
+        self.colunas_do_diff.as_ref().map_or([None; 2], |listas| {
+            [listas[0].selected(), listas[1].selected()]
+        })
     }
 
     /// As setas que devolvem linhas, para o teste clicar nelas.

@@ -116,8 +116,20 @@ impl IdeShell {
         self.editor_area.active_text()
     }
 
+    /// Os documentos que a camada de linguagem precisa conhecer.
+    ///
+    /// As abas abertas, **e os dois lados da comparação do Git quando há uma na
+    /// tela**. Os dois lados não são abas — o arquivo de então nem existe no
+    /// disco —, mas precisam de realce pelo mesmo motivo que o editor: um
+    /// `diff` sem cor obriga a ler com mais atenção justamente onde a atenção já
+    /// está ocupada com o que mudou.
+    ///
+    /// Entrar por aqui é o que lhes dá **o ciclo de vida inteiro de graça**:
+    /// abrem quando a comparação abre, mudam quando ela troca de arquivo e são
+    /// fechados quando ela sai da tela, porque quem some desta lista é fechado.
     pub fn document_snapshots(&self) -> Vec<DocumentSnapshot> {
-        self.editor_area
+        let mut snapshots: Vec<DocumentSnapshot> = self
+            .editor_area
             .session
             .tabs()
             .map(|document| DocumentSnapshot {
@@ -126,10 +138,25 @@ impl IdeShell {
                 version: document.buffer.revision(),
                 text: document.buffer.text().to_owned(),
             })
-            .collect()
+            .collect();
+        snapshots.extend(self.git.textos_do_diff().into_iter().map(
+            |(id, path, version, text)| DocumentSnapshot {
+                id,
+                path,
+                version,
+                text,
+            },
+        ));
+        snapshots
     }
 
     pub fn set_syntax_snapshot(&mut self, snapshot: SyntaxSnapshot) {
+        // Os dois lados da comparação não são documentos abertos, e o realce
+        // deles não é do editor: vai para a janela que os desenha.
+        if self.git.aceita_realce(snapshot.document_id) {
+            self.instalar_realce_do_diff(&snapshot);
+            return;
+        }
         let Some(document) = self.editor_area.session.document(snapshot.document_id) else {
             return;
         };
@@ -155,6 +182,23 @@ impl IdeShell {
         self.editor_area
             .syntax_snapshots
             .insert(snapshot.document_id, snapshot);
+    }
+
+    /// Reparte o realce de um lado da comparação e o entrega à janela.
+    ///
+    /// A conversão é a mesma do editor — posições em linha e coluna viram
+    /// deslocamentos no texto —, e por isso mora no mesmo lugar: duas contas
+    /// iguais escritas em dois lugares divergem na primeira correção.
+    fn instalar_realce_do_diff(&mut self, snapshot: &SyntaxSnapshot) {
+        let de_agora = self.git.realce_e_do_lado_de_agora(snapshot.document_id);
+        let Some(texto) = self.git.texto_do_lado(de_agora) else {
+            return;
+        };
+        let spans = converted_syntax(&texto, snapshot)
+            .into_iter()
+            .map(|(start, end, kind)| git::GitToken { start, end, kind })
+            .collect::<Vec<_>>();
+        self.git.set_realce_do_diff(de_agora, &texto, &spans);
     }
 
     pub fn syntax_snapshot(&self, document_id: DocumentId) -> Option<&SyntaxSnapshot> {

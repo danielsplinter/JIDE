@@ -693,6 +693,71 @@ fn arrastar_a_barra_de_uma_coluna_leva_a_outra_junto() {
     );
 }
 
+/// Quanto custa montar a comparação de um arquivo grande.
+///
+/// **A medida existe porque o palpite não valia nada.** Cada fileira vira uma
+/// `ComposedRow` com dois rótulos, e num arquivo de dez mil linhas são vinte mil
+/// rótulos montados a cada vez que a comparação é refeita — o que acontece a
+/// cada realce que chega. O teto é folgado de propósito: ele não persegue
+/// milissegundos, ele avisa se alguém trocar a montagem por algo de outra ordem.
+#[test]
+fn montar_a_comparacao_de_um_arquivo_grande_cabe_no_orcamento() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let texto = |marca: &str| {
+        (0..10_000)
+            .map(|numero| format!("    private int campo{numero}; // {marca}"))
+            .collect::<Vec<_>>()
+            .join("
+")
+    };
+    let comeco = std::time::Instant::now();
+    assert!(shell.abrir_comparacao(
+        &raiz.join("grande.java"),
+        GitDiff {
+            committed: texto("entao"),
+            current: texto("agora"),
+            marks: (0..10_000).map(|n| (n, GitLineChange::Added)).collect(),
+            removed: (0..10_000).collect(),
+            ..GitDiff::default()
+        },
+    ));
+    let montagem = comeco.elapsed();
+
+    // O primeiro quadro também arruma o que ainda não tinha posição; o que
+    // interessa medir é o de regime, que é o que se repete trinta vezes por
+    // segundo enquanto a comparação está na tela.
+    let _ = shell.paint(size);
+    let comeco = std::time::Instant::now();
+    let _ = shell.paint(size);
+    let quadro = comeco.elapsed();
+
+    // Medidos em compilação de depuração: cerca de 50 ms para montar e 4 ms por
+    // quadro. Os tetos são folgados sobre isso — a máquina de quem roda varia, e
+    // o que se quer pegar é a ordem de grandeza mudando, não o dia ruim.
+    //
+    // **O quadro já custou 64 ms**, e não por causa das linhas: as setas e os
+    // blocos eram recalculados em cada um, com dois mapas de dez mil entradas e
+    // uma cópia da lista de fileiras. Passaram a ser calculados quando a
+    // comparação chega, e as visíveis se acham por busca binária. O teto de 30
+    // ms é o que impede aquilo de voltar sem que ninguém note.
+    assert!(
+        montagem < std::time::Duration::from_millis(300),
+        "montar dez mil fileiras levou {montagem:?}"
+    );
+    assert!(
+        quadro < std::time::Duration::from_millis(30),
+        "o quadro de dez mil fileiras levou {quadro:?}"
+    );
+    println!("montagem: {montagem:?}, quadro em regime: {quadro:?}");
+}
+
 /// Devolver uma linha muda o editor principal daquele arquivo, sem roubar o foco.
 ///
 /// O texto que a janela do Git grava é o texto que o editor mostra. Antes ele

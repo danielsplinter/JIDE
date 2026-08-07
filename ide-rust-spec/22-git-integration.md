@@ -208,6 +208,23 @@ pub trait WorkingTreeService: Send + Sync {
 }
 ```
 
+**Os dois lados do `DiffSide` comparam com o último commit**, e não um com o
+outro:
+
+- `WorkingTree` é `git diff HEAD` — o arquivo como está no disco contra o commit;
+- `Index` é `git diff --cached` — o que está preparado contra o commit.
+
+*Não é detalhe de implementação, é a pergunta que a tela faz.* A coluna da
+esquerda mostra o arquivo do último commit e a margem do editor marca o que mudou
+desde ele. Enquanto `WorkingTree` era o `git diff` puro — árvore contra **índice**
+—, preparar o que se tinha apagado fazia o trabalho sumir: duas colunas
+visivelmente diferentes e nenhuma marca, porque contra o índice não havia mesmo
+diferença nenhuma. Preparar não é commitar.
+
+Num repositório sem commit nenhum o nome `HEAD` não existe e o `git` recusa. Aí a
+pergunta volta a ser a de sempre — é o primeiro minuto de todo projeto novo, e
+receber um erro no lugar do arquivo seria pior que a resposta aproximada.
+
 Leitura recebe token; escrita não. Cancelar uma leitura é jogar fora uma resposta
 que ninguém quer mais — trocar de arquivo antes do `diff` chegar. Cancelar uma
 escrita pela metade deixaria o repositório num estado que ninguém pediu, e o
@@ -600,6 +617,25 @@ de uma de acréscimos é uma troca, e as linhas se casam pela ordem —, e **tem
 ser a mesma, ou o trecho verde de uma linha cairia numa fileira sem o vermelho
 correspondente ao lado.
 
+**As duas colunas saem coloridas**, com o mesmo realce do editor: um `diff` em
+tinta única obriga a ler com mais atenção justamente onde a atenção já está
+ocupada com o que mudou. O realce da linguagem é a *tinta*; a marca do que entrou
+ou saiu é o *fundo* — as duas convivem, e é isso que deixa ver o que mudou e em
+que mudou.
+
+Quem entende de linguagem trabalha sobre **documentos**, e os dois lados de uma
+comparação não são documentos abertos: o arquivo de então nem existe no disco.
+Eles entram na lista de documentos por conta própria, com identificadores no fim
+da faixa e um nome de arquivo próprio — a extensão do original, que é o que
+escolhe a linguagem, e um nome diferente, porque o arquivo de verdade pode estar
+aberto ao mesmo tempo e dois documentos com o mesmo caminho são o mesmo documento
+para quem analisa.
+
+*Entrar por ali é o que lhes dá o ciclo de vida inteiro de graça*: abrem quando a
+comparação abre, mudam quando ela troca de arquivo e são fechados quando a janela
+sai da tela — quem some da lista é fechado. Com a janela fechada não há o que
+analisar, e não se analisa.
+
 **As duas colunas rolam juntas em qualquer gesto**: a roda, o arrasto da alça e o
 clique na trilha. A roda chega às duas sozinha; nos outros dois quem arrasta
 segura *uma* barra, e é a janela que põe a outra na mesma altura — a `ComposedList`
@@ -642,6 +678,57 @@ alteradas — e faz três coisas em seguida:
 
 O observador de disco também veria a gravação, 300 ms depois. Quem clicou não
 pode esperar por ele para ver o que acabou de fazer.
+
+#### Os comandos da comparação
+
+No alto da aba, à direita do nome do arquivo:
+
+- **de que lado é a comparação** — o que está preparado, ou a árvore de trabalho.
+  São duas diferenças distintas sobre o mesmo arquivo, e quem preparou parte do
+  trabalho e vê só uma delas conclui que o resto se perdeu. O botão diz qual está
+  na tela e o clique pede a outra;
+- **quantas alterações há, e em qual se está** — "3 de 12". Sem isso, quanto falta
+  só se descobre chegando ao fim;
+- **anterior e seguinte**, também em `Shift+F7` e `F7`. Os dois dão a volta, como
+  toda busca desta IDE: quem chega ao fim procurando alterações quer recomeçar, e
+  não bater numa parede.
+
+*Uma alteração é um bloco, e não uma linha.* Trocar três linhas seguidas é **uma**
+coisa que aconteceu; contá-las como três faria a contagem dizer doze onde quem
+olha vê quatro, e obrigaria a apertar a tecla três vezes para sair de um lugar só.
+
+E é por isso que um bloco de mais de uma linha ganha uma **segunda seta**, `⇒`, ao
+lado da seta da linha: devolver uma alteração de sete linhas eram sete cliques, e
+sete gravações — com os números andando entre uma e outra, porque cada gravação
+move as linhas de baixo. A devolução do trecho é uma gravação só. Num bloco de uma
+linha a seta não aparece: faria exatamente o que a da linha já faz, e duas iguais
+lado a lado só fazem parar para descobrir qual é qual.
+
+**Escolher uma linha de um lado escolhe a mesma fileira do outro.** A fileira já
+emparelha as duas versões; escolher à esquerda e a direita continuar noutra linha
+é a comparação dizendo duas coisas ao mesmo tempo.
+
+**Binário não é comparado.** Um byte zero é a marca — a mesma que o Git usa —, e
+no lugar das colunas fica uma frase. Não é infalível: um `utf-16` de verdade tem
+zeros, e o erro é para o lado certo. Um texto tratado como binário aparece com um
+aviso; um binário tratado como texto enche a tela de lixo e ainda oferece setas
+para devolvê-lo linha a linha.
+
+#### O que custa mostrar uma comparação grande
+
+Medido, e não suposto, num arquivo de **dez mil linhas** (compilação de
+depuração): cerca de 50 ms para montar as fileiras e **4 ms por quadro**.
+
+O quadro já custou **64 ms**, e não por causa das linhas — as colunas só arranjam
+e desenham o que está na vista. Eram as setas e os blocos, recalculados em cada
+quadro: dois mapas de dez mil entradas, três varreduras e uma cópia da lista de
+fileiras, trinta vezes por segundo. Nada disso muda entre dois quadros. Passaram a
+ser calculados quando a comparação chega, e as setas visíveis se acham por busca
+binária sobre uma lista ordenada por fileira.
+
+Há um teto num teste — 300 ms para montar, 30 ms por quadro — pelo mesmo motivo de
+todos os tetos desta base: não perseguir milissegundos, e sim avisar quando alguém
+troca isto por algo de outra ordem.
 
 ### O que o gerenciador não faz
 

@@ -809,6 +809,12 @@ pub(super) struct GitDiffOutcome {
     /// Calculadas pelo domínio, que é quem sabe ler um `diff`. Vêm vazias
     /// quando não se pediu a comparação: a margem do editor não precisa delas.
     pub(super) pairs: Vec<ide_ui::GitLinePair>,
+    /// De que lado foi a pergunta: o preparado, ou a árvore de trabalho.
+    ///
+    /// Volta com a resposta porque a tela precisa dizer qual está mostrando —
+    /// as duas são diferenças do mesmo arquivo, e não dizer qual é faz quem já
+    /// preparou parte do trabalho concluir que o resto se perdeu.
+    pub(super) staged: bool,
     /// Se é para abrir a comparação lado a lado, ou só marcar a margem.
     ///
     /// A margem é pedida sozinha quando um arquivo é aberto: quem abre um

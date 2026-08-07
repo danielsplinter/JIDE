@@ -1693,6 +1693,9 @@ impl NativeIde {
             GitRequest::RestoreLine { path, from, target } => {
                 self.devolver_a_linha(&path, from, target);
             }
+            GitRequest::RestoreBlock { path, from, target } => {
+                self.devolver_o_trecho(&path, from, target);
+            }
             GitRequest::Stash => self.mexer_na_branch("stash", String::new()),
             GitRequest::StashPop(indice) => self.mexer_na_branch("pop", indice.to_string()),
             GitRequest::Stage(path) => self.escrever_no_git("stage", path),
@@ -1871,6 +1874,70 @@ impl NativeIde {
     /// A linha que não existe mais no arquivo de agora é **acrescentada no fim**
     /// em vez de recusada em silêncio: quem pediu a linha 40 de um arquivo que
     /// hoje tem 30 quer aquela linha de volta.
+    /// Leva um trecho inteiro do arquivo de então para o de agora.
+    ///
+    /// **Uma gravação só, e não uma por linha.** Devolver sete linhas com sete
+    /// pedidos gravaria sete vezes, e cada gravação move as linhas de baixo: do
+    /// segundo pedido em diante os números já não seriam os que a tela mostrou.
+    fn devolver_o_trecho(&mut self, path: &Path, from: (usize, usize), target: RestoreTarget) {
+        let Some(shell) = self.ui.shell.as_ref() else {
+            return;
+        };
+        let linhas: Vec<String> = (from.0..=from.1)
+            .filter_map(|linha| shell.git_diff_line(linha))
+            .collect();
+        if linhas.is_empty() {
+            return;
+        }
+        let atual = std::fs::read_to_string(path).unwrap_or_default();
+        let quantas = linhas.len();
+        let novo = match target {
+            // Trocar o que ocupa o lugar e acrescentar o que sobra: o trecho de
+            // então pode ser mais comprido que o de agora, e o que não coube em
+            // troca entra como linha nova logo abaixo.
+            RestoreTarget::Replace(inicio) => {
+                let mut texto = ide_workspace::rewrite_line(&atual, inicio, linhas[0].clone());
+                for (passo, linha) in linhas.iter().enumerate().skip(1) {
+                    texto = ide_workspace::insert_line(&texto, inicio + passo, linha.clone());
+                }
+                texto
+            }
+            RestoreTarget::Insert(inicio) => {
+                let mut texto = atual.clone();
+                for (passo, linha) in linhas.iter().enumerate() {
+                    texto = ide_workspace::insert_line(&texto, inicio + passo, linha.clone());
+                }
+                texto
+            }
+        };
+        self.gravar_a_devolucao(path, &novo, format!("{quantas} linhas devolvidas"));
+    }
+
+    /// Grava o que a devolução produziu, e refaz tudo o que depende do arquivo.
+    ///
+    /// Um lugar só para a linha e para o trecho: eram três passos fáceis de
+    /// esquecer pela metade — o documento aberto, o realce e a comparação —, e
+    /// esquecer qualquer um deles deixa a tela contando o que já não é verdade.
+    fn gravar_a_devolucao(&mut self, path: &Path, novo: &str, aviso: String) {
+        if std::fs::write(path, novo).is_err() {
+            if let Some(shell) = self.ui.shell.as_mut() {
+                shell.set_status_message("Não foi possível gravar o arquivo".to_owned());
+            }
+            return;
+        }
+        let refrescado = if let Some(shell) = self.ui.shell.as_mut() {
+            let refrescado = shell.refresh_document(path, novo);
+            shell.set_status_message(aviso);
+            refrescado
+        } else {
+            false
+        };
+        if refrescado {
+            self.sync_languages();
+        }
+        self.pedir_diferenca(path.to_path_buf(), false, true);
+    }
+
     fn devolver_a_linha(&mut self, path: &Path, from: usize, target: RestoreTarget) {
         let Some(texto) = self
             .ui
@@ -1889,34 +1956,9 @@ impl NativeIde {
             RestoreTarget::Replace(linha) => ide_workspace::rewrite_line(&atual, linha, texto),
             RestoreTarget::Insert(linha) => ide_workspace::insert_line(&atual, linha, texto),
         };
-        if std::fs::write(path, &novo).is_err() {
-            if let Some(shell) = self.ui.shell.as_mut() {
-                shell.set_status_message("Não foi possível gravar o arquivo".to_owned());
-            }
-            return;
-        }
-        let refrescado = if let Some(shell) = self.ui.shell.as_mut() {
-            // O editor principal mostra este arquivo, e o arquivo mudou. Sem
-            // isto ele ficaria com o texto de antes até alguém reabri-lo.
-            let refrescado = shell.refresh_document(path, &novo);
-            shell.set_status_message(format!("Linha {} devolvida", from + 1));
-            refrescado
-        } else {
-            false
-        };
-        // E o realce vem atrás do texto. A revisão do documento subiu, e o
-        // realce guardado é o da revisão anterior — a tela o descarta, de
-        // propósito, porque colorir o texto novo com os trechos do velho pinta
-        // as palavras erradas. Quem não pedir realce novo aqui deixa o arquivo
-        // sem cor nenhuma: o realce do clique é pedido **durante** o clique, e
-        // esta troca acontece depois dele, no laço de comandos.
-        if refrescado {
-            self.sync_languages();
-        }
-        // O arquivo mudou no disco: a comparação e a margem vêm de lá, e as
-        // duas precisam ser refeitas. O observador também veria, 300 ms depois;
-        // quem clicou não pode esperar por ele para ver o que acabou de fazer.
-        self.pedir_diferenca(path.to_path_buf(), false, true);
+        // O editor principal, o realce e a comparação vêm atrás da gravação, e
+        // os três estão num lugar só — ver `gravar_a_devolucao`.
+        self.gravar_a_devolucao(path, &novo, format!("Linha {} devolvida", from + 1));
     }
 
     /// Pede a margem do arquivo que está na frente, se ela ainda não foi pedida.
@@ -1982,6 +2024,7 @@ impl NativeIde {
             // daria duas respostas para a mesma pergunta.
             let comparacao = ide_ui::GitDiff {
                 pairs: resultado.pairs,
+                staged: resultado.staged,
                 // O rótulo e o caminho são do shell, que sabe onde o projeto
                 // começa; daqui vai o conteúdo.
                 label: String::new(),
@@ -1995,7 +2038,12 @@ impl NativeIde {
             };
             if !shell.abrir_comparacao(&resultado.path, comparacao) {
                 shell.set_status_message("Não foi possível abrir a comparação".to_owned());
+                return true;
             }
+            // Os dois lados entraram na lista de documentos, e é esta chamada que
+            // os leva a quem analisa. Sem ela, a comparação ficaria sem cor até
+            // que outra coisa qualquer pedisse realce.
+            self.sync_languages();
         }
         true
     }
@@ -4246,6 +4294,7 @@ fn diferenca_do_arquivo(
         added_spans: Vec::new(),
         removed_spans: Vec::new(),
         pairs: Vec::new(),
+        staged,
         comparar,
         error: None,
     };

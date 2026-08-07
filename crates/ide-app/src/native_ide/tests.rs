@@ -36,6 +36,7 @@ fn as_margens_pedidas_em_sequencia_chegam_as_duas() {
             added_spans: Vec::new(),
             removed_spans: Vec::new(),
             pairs: Vec::new(),
+            staged: false,
             comparar: false,
             error: None,
         });
@@ -733,6 +734,96 @@ fn devolver_uma_linha_nao_deixa_o_arquivo_sem_cor() {
         colorido(&mut ide),
         "e continua colorido: a revisão subiu, e o realce veio atrás"
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// As duas colunas da comparação saem coloridas, e não só o editor.
+///
+/// Um `diff` sem cor obriga a ler com mais atenção justamente onde a atenção já
+/// está ocupada com o que mudou. Os dois lados não são abas — o arquivo de então
+/// nem existe no disco —, e por isso entram na lista de documentos por conta
+/// própria: é o que lhes dá realce, e é o que os fecha quando a janela sai.
+#[test]
+fn as_duas_colunas_da_comparacao_saem_coloridas() {
+    let root = std::env::temp_dir().join(format!("er-ide-diff-cor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let file = root.join("pedido.ts");
+    assert!(std::fs::write(&file, "export class Pedido {}
+").is_ok());
+
+    let language_host = LanguageHost::new(&root);
+    let typescript =
+        typescript_contribution::contribution(Arc::new(NativeProcessSupervisor::default()), &[]);
+    assert!(language_host.register(typescript.provider.clone()).is_ok());
+
+    let mut ide = NativeIde::default();
+    assert!(ide.languages.contributions.register(typescript).is_ok());
+    ide.languages.host = Some(Arc::new(language_host));
+    ide.ui.shell = Some(test_shell(&root));
+
+    // A janela do Git aberta, e uma comparação nela. O arquivo **não** está
+    // aberto no editor: é o caso comum, o de clicar num arquivo alterado.
+    if let Some(shell) = ide.ui.shell.as_mut() {
+        shell.toggle_git();
+        assert!(shell.abrir_comparacao(
+            &file,
+            ide_ui::GitDiff {
+                committed: "export class Compra {}
+".to_owned(),
+                current: "export class Pedido {}
+".to_owned(),
+                ..ide_ui::GitDiff::default()
+            },
+        ));
+    }
+    ide.sync_languages();
+    ide.settle_syntax();
+
+    let colors = ui_core::Theme::default().colors;
+    let quadro = ide
+        .ui
+        .shell
+        .as_mut()
+        .map(|shell| shell.paint(Size::new(1_280.0, 800.0)))
+        .unwrap_or_default();
+    let palavra_chave = |procurado: &str| {
+        quadro.iter().any(|command| {
+            matches!(
+                command,
+                ui_render_api::PaintCommand::DrawText(text)
+                    if text.text == procurado && text.color == colors.syntax_keyword
+            )
+        })
+    };
+    // Duas vezes: uma por coluna. O `export` é palavra-chave dos dois lados.
+    let vezes = quadro
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                ui_render_api::PaintCommand::DrawText(text)
+                    if text.text == "export" && text.color == colors.syntax_keyword
+            )
+        })
+        .count();
+    assert!(
+        palavra_chave("export"),
+        "a comparação sai colorida, e não em tinta única"
+    );
+    assert_eq!(vezes, 2, "os dois lados, e não só um");
+
+    // E fechar a janela tira os dois documentos da lista: quem some daqui é
+    // fechado do lado de quem analisa, e analisar o que ninguém olha é
+    // trabalho jogado fora.
+    if let Some(shell) = ide.ui.shell.as_mut() {
+        shell.toggle_git();
+        assert!(
+            shell.document_snapshots().is_empty(),
+            "sem janela e sem aba, não há documento nenhum a analisar"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&root);
 }
