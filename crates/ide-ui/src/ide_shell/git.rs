@@ -22,7 +22,7 @@ use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
     Button, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
     ComposedTreeView, GraphCell, IconTint, Label, ModalHost, SplitOrientation, SplitPane,
-    TabItem, TableColumn, Tabs, TextInput,
+    TabItem, TableColumn, Tabs, TextInput, Toolbar,
 };
 use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetId};
 use ui_host::UiHost;
@@ -93,6 +93,13 @@ const RATIO_BAIXO: f32 = 0.5;
 const TITULO_ALTURA: f32 = 20.0;
 /// Largura de um botão de ação de linha.
 const ACAO_LARGURA: f32 = 92.0;
+/// Quanto a barra do alto se separa do que vem abaixo dela.
+///
+/// Metade a mais do que o padrão da biblioteca, e o pedido é desta tela: o que
+/// vem logo abaixo é uma caixa de texto, e um campo encostado num botão parece
+/// parte dele. **Quem sabe fazer a distância é a `Toolbar`**; daqui sai só o
+/// quanto.
+const ESPACO_ABAIXO_DA_BARRA: f32 = Toolbar::SPACE_BELOW * 1.5;
 /// A altura de um botão **dentro de uma linha de lista**.
 ///
 /// É a exceção que a biblioteca prevê, e a decisão é desta tela: um botão de
@@ -309,12 +316,14 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
     // A barra de ferramentas no alto, atravessando a janela inteira: o que
     // está nela vale para o **repositório**, e não para a linha em que alguém
     // clicou. Ver a `22`.
+    // A altura da faixa é a que a barra pede — o botão mais alto **mais** o que
+    // ela separa do que vem abaixo. Escrever o número aqui seria a mesma medida
+    // em dois lugares.
     let _ = host.declare(
         MODAL_ID,
         TOOLBAR_ID,
         LayoutStyle {
-            height: Some(Button::HEIGHT),
-            padding: EdgeInsets::only(0.0, 0.0, 8.0, 0.0),
+            height: Some(Button::HEIGHT + ESPACO_ABAIXO_DA_BARRA),
             ..LayoutStyle::default()
         },
     );
@@ -745,27 +754,33 @@ impl GitSurface {
         [primeira, baixo.first(), baixo.second()]
     }
 
-    /// Os três botões da barra do alto, da esquerda para a direita.
+    /// A barra do alto, com as três ações do repositório.
     ///
-    /// **Nada aqui é medida própria**: a altura é a do botão, a largura é a
-    /// mesma das outras ações da janela, e a folga é a que separa dois botões em
-    /// qualquer lugar. Escrever números aqui seria o que a barra veio desfazer.
-    fn botoes_da_barra(faixa: Rect) -> [(WidgetId, Rect); 3] {
-        let largura = ACAO_LARGURA;
-        let vaga = |posicao: f32| {
-            Rect::new(
-                faixa.origin.x + posicao * (largura + 8.0),
-                faixa.origin.y,
-                largura,
-                Button::HEIGHT,
-            )
+    /// **Quem separa os botões e a barra do resto é a `Toolbar`**, e não esta
+    /// tela: a folga entre dois botões e o espaço abaixo da barra são aparência,
+    /// e aparência é da biblioteca. Daqui sai só *o que* está na barra — e o
+    /// pedido de um pouco mais de ar embaixo, porque o que vem logo abaixo é uma
+    /// caixa de texto e um campo encostado num botão parece parte dele.
+    ///
+    /// A ordem é a do trabalho: buscar, trazer, mandar.
+    fn barra_do_alto(&self) -> Toolbar {
+        let habilitado = self.view.has_repository();
+        let botao = |id: WidgetId, rotulo: &str| {
+            let mut botao = Button::new(id, rotulo).with_width(ACAO_LARGURA);
+            // Sem repositório não há o que buscar, trazer nem mandar, e o botão
+            // diz isso pelo próprio desenho.
+            botao.set_disabled(!habilitado);
+            botao
         };
-        [
-            // A ordem é a do trabalho: buscar, trazer, mandar.
-            (FETCH_ID, vaga(0.0)),
-            (PULL_ID, vaga(1.0)),
-            (PUSH_ID, vaga(2.0)),
-        ]
+        Toolbar::new(
+            TOOLBAR_ID,
+            vec![
+                botao(FETCH_ID, "Fetch"),
+                botao(PULL_ID, "Pull"),
+                botao(PUSH_ID, "Push"),
+            ],
+        )
+        .with_space_below(ESPACO_ABAIXO_DA_BARRA)
     }
 
     /// Onde ficam a caixa da mensagem e os dois botões.
@@ -973,21 +988,22 @@ impl GitSurface {
             }
             return None;
         }
-        let barra = area(host, TOOLBAR_ID);
-        if barra.contains(point) {
-            for (id, area_do_botao) in Self::botoes_da_barra(barra) {
-                if !area_do_botao.contains(point) {
-                    continue;
-                }
-                return Some(if id == FETCH_ID {
+        let faixa = area(host, TOOLBAR_ID);
+        if faixa.contains(point) {
+            // Quem diz qual botão está sob o ponto é a própria barra: refazer a
+            // conta aqui daria duas respostas que divergem na primeira folga
+            // diferente.
+            let mut barra = self.barra_do_alto();
+            barra.layout(context, faixa);
+            return barra.hit(point).map(|id| {
+                if id == FETCH_ID {
                     GitRequest::Fetch
                 } else if id == PULL_ID {
                     GitRequest::Pull
                 } else {
                     GitRequest::Push
-                });
-            }
-            return None;
+                }
+            });
         }
         let abas = area(host, TABS_ID);
         if abas.contains(point) {
@@ -1215,23 +1231,10 @@ impl GitSurface {
             copia.paint(paint);
         }
 
-        // A barra do alto: as três ações do repositório, com o botão inteiro.
-        let barra = area(host, TOOLBAR_ID);
-        for (id, area_do_botao) in Self::botoes_da_barra(barra) {
-            let rotulo = if id == FETCH_ID {
-                "Fetch"
-            } else if id == PULL_ID {
-                "Pull"
-            } else {
-                "Push"
-            };
-            let mut botao = Button::new(id, rotulo);
-            // Sem repositório não há o que buscar, trazer nem mandar, e o botão
-            // diz isso pelo próprio desenho.
-            botao.set_disabled(!self.view.has_repository());
-            botao.layout(layout, area_do_botao);
-            botao.paint(paint);
-        }
+        // A barra do alto: as três ações do repositório.
+        let mut barra = self.barra_do_alto();
+        barra.layout(layout, area(host, TOOLBAR_ID));
+        barra.paint(paint);
 
         let mut campo = TextInput::new(SEARCH_ID, &self.busca).with_placeholder("Procurar branch");
         campo.event(&mut EventContext::default(), &UiEvent::FocusGained);
