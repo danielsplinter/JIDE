@@ -20,8 +20,8 @@
 
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
-    Button, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
-    ComposedTreeView, GraphCell, IconTint, Label, ModalHost, SplitOrientation, SplitPane,
+    Button, ButtonAlign, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
+    ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, SplitOrientation, SplitPane,
     TabItem, TableColumn, Tabs, TextInput, Toolbar,
 };
 use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetId};
@@ -56,6 +56,8 @@ const ENTRADA_BASE: WidgetId = WidgetId(10_800);
 /// A tabela do histórico, e as células de cada linha dela.
 const TABELA_ID: WidgetId = WidgetId(10_519);
 const COMMIT_BASE: WidgetId = WidgetId(11_000);
+/// O botão que fecha a janela, no canto de cima.
+const FECHAR_ID: WidgetId = WidgetId(11_930);
 /// A barra de ferramentas do alto, e os três botões dela.
 const TOOLBAR_ID: WidgetId = WidgetId(10_530);
 const FETCH_ID: WidgetId = WidgetId(11_920);
@@ -754,6 +756,20 @@ impl GitSurface {
         [primeira, baixo.first(), baixo.second()]
     }
 
+    /// Onde fica o botão que fecha a janela.
+    ///
+    /// No canto de cima à direita, dentro da faixa do título — que é onde quem
+    /// usa qualquer janela procura por ele antes de procurar em qualquer outro
+    /// lugar.
+    fn botao_de_fechar(painel: Rect) -> Rect {
+        Rect::new(
+            painel.origin.x + painel.size.width - Button::HEIGHT - 8.0,
+            painel.origin.y + 8.0,
+            Button::HEIGHT,
+            Button::HEIGHT,
+        )
+    }
+
     /// A barra do alto, com as três ações do repositório.
     ///
     /// **Quem separa os botões e a barra do resto é a `Toolbar`**, e não esta
@@ -988,6 +1004,10 @@ impl GitSurface {
             }
             return None;
         }
+        if Self::botao_de_fechar(area(host, MODAL_ID)).contains(point) {
+            self.close();
+            return None;
+        }
         let faixa = area(host, TOOLBAR_ID);
         if faixa.contains(point) {
             // Quem diz qual botão está sob o ponto é a própria barra: refazer a
@@ -1114,10 +1134,10 @@ impl GitSurface {
             }
             return None;
         }
-        // O que sobrou é o véu, atrás do painel: ali o clique dispensa a janela.
-        if !area(host, MODAL_ID).contains(point) {
-            self.close();
-        }
+        // **O clique fora não fecha.** Esta janela é uma tela de trabalho, e não
+        // um aviso: quem está escrevendo a mensagem de um commit e erra o alvo
+        // do clique perderia o que escreveu. Fecham-na o botão do canto e o
+        // `Esc`, que são os dois gestos que se dá de propósito.
         None
     }
 
@@ -1230,6 +1250,15 @@ impl GitSurface {
             copia.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
             copia.paint(paint);
         }
+
+        // O botão de fechar, no canto de cima. Só ícone, e por isso quadrado na
+        // altura de botão — o nome acessível é obrigatório, porque um ícone não
+        // é legível por tecnologia assistiva.
+        let mut fechar = Button::icon(FECHAR_ID, Icon::Close, "Fechar")
+            .with_align(ButtonAlign::Center)
+            .with_tint(IconTint::Muted);
+        fechar.layout(layout, Self::botao_de_fechar(area(host, MODAL_ID)));
+        fechar.paint(paint);
 
         // A barra do alto: as três ações do repositório.
         let mut barra = self.barra_do_alto();
@@ -1550,12 +1579,16 @@ impl GitSurface {
 }
 
 impl super::IdeShell {
-    /// Abre o gerenciador, ou o fecha se já estava aberto.
+    /// Abre o gerenciador.
     ///
     /// Abrir pede o retrato de novo: entre a última resposta e agora o usuário
     /// pode ter commitado no terminal integrado, e uma janela que mostra o
     /// estado de dez minutos atrás não avisa que está errada — ela só está
-    /// errada. Observar o repositório sozinha é fase 4.
+    /// errada.
+    ///
+    /// **Fechar é do botão do canto e do `Esc`.** Com a janela aberta o gesto é
+    /// dela, e nem este botão a alcança: ela é tela de trabalho, e fechar sem
+    /// querer custaria a mensagem de commit que estava sendo escrita.
     pub fn toggle_git(&mut self) {
         self.git.toggle();
         if self.git.is_open() {

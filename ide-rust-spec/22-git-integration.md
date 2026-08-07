@@ -459,7 +459,13 @@ da `09` da ERLibUi, o mesmo que o diálogo de gerar código e a inspeção do
 depurador já usam pelo `ModalHost`.
 
 Começar pelo `ModalHost` é o barato: ele já traz a camada, o véu, o painel
-centrado e o `Esc` que fecha. **E havia uma pergunta que podia derrubá-lo**: a
+centrado e o `Esc` que fecha.
+
+**O clique fora não fecha, e há um botão no canto de cima que fecha.** Ela é tela
+de trabalho, e não aviso: quem está escrevendo a mensagem de um commit e erra o
+alvo do clique perderia o que escreveu. Fecham-na o botão e o `Esc`, que são os
+dois gestos que se dá de propósito — e nem o botão da barra de atividades, que a
+abriu, a alcança com ela aberta. **E havia uma pergunta que podia derrubá-lo**: a
 diferença de um arquivo abre **no editor**, e o editor está atrás do véu.
 
 **Respondida na fase 1: a janela dá lugar.** Abrir a comparação fecha o

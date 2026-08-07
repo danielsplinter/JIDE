@@ -52,10 +52,27 @@ fn o_botao_do_git_abre_o_gerenciador_e_pede_o_retrato() {
         "abrir pergunta ao repositório de novo"
     );
 
-    // O mesmo botão fecha: sem isso, quem clicou de novo fica sem saída a não
-    // ser o Esc.
+    // **Clicar fora não fecha.** Ela é tela de trabalho, e não aviso: quem está
+    // escrevendo a mensagem de um commit e erra o alvo do clique perderia o que
+    // escreveu. Nem o botão que a abriu a fecha, porque com ela aberta o gesto é
+    // dela.
     shell.pointer_down(clique, size);
-    assert!(!shell.git_surface().is_open());
+    assert!(shell.git_surface().is_open(), "o clique fora não dispensa");
+    let _ = shell.paint(size);
+    let veu = Point::new(20.0, size.height - 20.0);
+    shell.pointer_down(veu, size);
+    assert!(shell.git_surface().is_open(), "nem o clique no véu");
+
+    // Quem fecha é o botão do canto de cima.
+    let painel = git::GitSurface::areas(&shell.host).0;
+    shell.pointer_down(
+        Point::new(
+            painel.origin.x + painel.size.width - 28.0,
+            painel.origin.y + 28.0,
+        ),
+        size,
+    );
+    assert!(!shell.git_surface().is_open(), "o X fecha");
 }
 /// A busca filtra as branches, e some com o nó que ficou sem nenhuma.
 ///
