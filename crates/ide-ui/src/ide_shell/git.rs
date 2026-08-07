@@ -22,9 +22,9 @@ use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
     Button, ButtonAlign, ButtonFill, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
     ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, Panel, SplitOrientation,
-    SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar,
+    SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar, ToolbarAlign,
 };
-use ui_core::{Modifiers, Point, Rect, ScrollEvent, Size, TokenKind, UiEvent, WidgetId};
+use ui_core::{Constraints, Modifiers, Point, Spacing, Rect, ScrollEvent, Size, TokenKind, UiEvent, WidgetId};
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle};
 
@@ -120,6 +120,7 @@ const DIFF_ANTERIOR_ID: WidgetId = WidgetId(11_950);
 const DIFF_SEGUINTE_ID: WidgetId = WidgetId(11_951);
 const DIFF_LADO_ID: WidgetId = WidgetId(11_952);
 const DIFF_CONTAGEM_ID: WidgetId = WidgetId(11_953);
+const DIFF_BARRA_ID: WidgetId = WidgetId(11_954);
 /// Largura e altura das setas que flutuam sobre o texto.
 ///
 /// Menor que a altura padrão de propósito: elas moram **dentro** de uma linha de
@@ -177,9 +178,11 @@ const TITULO_ALTURA: f32 = 20.0;
 /// alvo de clique — é um risco na tela que por acaso responde.
 const DIFF_CABECALHO: f32 = 30.0;
 /// Largura dos botões que andam entre as alterações.
-const DIFF_PASSO_LARGURA: f32 = 30.0;
-/// Largura do botão que troca o lado da comparação.
-const DIFF_LADO_LARGURA: f32 = 110.0;
+///
+/// Fixa porque o conteúdo é um glifo, e glifo não cresce. As outras larguras do
+/// cabeçalho **não** são fixas: elas saem da medida do texto, que é o único jeito
+/// de dois componentes não se sobreporem quando o texto muda de tamanho.
+const DIFF_PASSO_LARGURA: f32 = 34.0;
 /// Largura de um botão de ação de linha.
 const ACAO_LARGURA: f32 = 92.0;
 /// Quanto a barra do alto se separa do que está em volta dela.
@@ -1439,30 +1442,75 @@ impl GitSurface {
         )
     }
 
-    /// Onde ficam os quatro comandos do cabeçalho: lado, contagem, e os dois passos.
+    /// A área de dentro do painel da comparação.
     ///
-    /// Da direita para a esquerda, porque é a borda direita que não se move: o
-    /// nome do arquivo cresce e encolhe, e ancorar nele faria os botões
-    /// dançarem a cada arquivo.
-    fn comandos_do_cabecalho(&self, area_do_diff: Rect) -> [Rect; 4] {
+    /// **O que sobra depois da moldura e do respiro dela.** Antes daqui, o
+    /// conteúdo era posto na área inteira: o caminho do arquivo começava no
+    /// mesmo ponto da borda, e a linha vertical à esquerda parecia parte do
+    /// texto. Quanto respirar é o painel quem diz — escrever o número aqui faria
+    /// esta tela respirar diferente da vizinha.
+    ///
+    /// Um lugar só, e não seis: a pintura, o clique, a roda e o arrasto
+    /// perguntam todos aqui. Com a conta repetida, o desenho aparece num lugar e
+    /// o clique cai noutro.
+    fn area_util_do_diff(host: &UiHost, context: &LayoutContext) -> Rect {
+        let mut painel = Self::painel_do_diff();
+        painel.layout(context, area(host, DIFF_ID));
+        painel.content()
+    }
+
+    /// O painel que emoldura a comparação.
+    fn painel_do_diff() -> Panel {
+        Panel::new(DIFF_ID, SurfaceTone::Surface).with_border()
+    }
+
+    /// A barra de comandos do cabeçalho: o lado da comparação e os dois passos.
+    ///
+    /// **Quem arruma é a barra**, com o espaçamento padrão dela: três botões
+    /// postos à mão, com larguras escritas por mim, foi o que fez "Árvore de
+    /// trabalho" passar por cima da contagem. A barra mede cada um e nenhum
+    /// encosta no vizinho.
+    ///
+    /// Encostada na borda direita, que é a que não se move: o nome do arquivo
+    /// cresce e encolhe, e ancorar nele faria os botões dançarem a cada arquivo.
+    fn barra_do_cabecalho(&self, area_do_diff: Rect, context: &LayoutContext) -> Toolbar {
+        let staged = self.diff.as_ref().is_some_and(|diff| diff.staged);
         let alto = DIFF_CABECALHO - 6.0;
-        let y = area_do_diff.origin.y + 3.0;
-        let direita = area_do_diff.origin.x + area_do_diff.size.width;
-        let seguinte = Rect::new(direita - DIFF_PASSO_LARGURA - 4.0, y, DIFF_PASSO_LARGURA, alto);
-        let anterior = Rect::new(
-            seguinte.origin.x - DIFF_PASSO_LARGURA - 2.0,
-            y,
-            DIFF_PASSO_LARGURA,
-            alto,
+        let mut barra = Toolbar::new(
+            DIFF_BARRA_ID,
+            vec![
+                Button::new(
+                    DIFF_LADO_ID,
+                    if staged {
+                        "Preparado"
+                    } else {
+                        "Árvore de trabalho"
+                    },
+                )
+                .with_height(alto)
+                .with_fill(ButtonFill::Transparent),
+                Button::new(DIFF_ANTERIOR_ID, "\u{2191}")
+                    .with_height(alto)
+                    .with_width(DIFF_PASSO_LARGURA)
+                    .with_fill(ButtonFill::Transparent),
+                Button::new(DIFF_SEGUINTE_ID, "\u{2193}")
+                    .with_height(alto)
+                    .with_width(DIFF_PASSO_LARGURA)
+                    .with_fill(ButtonFill::Transparent),
+            ],
+        )
+        .with_align(ToolbarAlign::End)
+        .with_space_below(0.0);
+        barra.layout(
+            context,
+            Rect::new(
+                area_do_diff.origin.x,
+                area_do_diff.origin.y + 3.0,
+                area_do_diff.size.width - 4.0,
+                alto,
+            ),
         );
-        let contagem = Rect::new(anterior.origin.x - 110.0, y, 106.0, alto);
-        let lado = Rect::new(
-            contagem.origin.x - DIFF_LADO_LARGURA - 6.0,
-            y,
-            DIFF_LADO_LARGURA,
-            alto,
-        );
-        [lado, contagem, anterior, seguinte]
+        barra
     }
 
     /// As alterações do arquivo, cada uma como a faixa de fileiras que ocupa.
@@ -1509,9 +1557,12 @@ impl GitSurface {
         if total == 0 {
             return "sem alterações".to_owned();
         }
-        match self.bloco_atual {
-            Some(atual) => format!("{} de {total}", atual + 1),
-            None => format!("{total} alterações"),
+        match (self.bloco_atual, total) {
+            (Some(atual), _) => format!("{} de {total}", atual + 1),
+            // Uma só não são "1 alterações": o plural errado num canto da tela é
+            // do tamanho de qualquer outro descuido.
+            (None, 1) => "1 alteração".to_owned(),
+            (None, _) => format!("{total} alterações"),
         }
     }
 
@@ -1539,7 +1590,10 @@ impl GitSurface {
                     *seta,
                     *fim,
                     Rect::new(
-                        coluna.origin.x + coluna.size.width - APLICAR_LADO * 2.0 - self.margem_das_setas() - 4.0,
+                        coluna.origin.x + coluna.size.width
+                            - APLICAR_LADO * 2.0
+                            - self.margem_das_setas()
+                            - Spacing::XS,
                         topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
                         APLICAR_LADO,
                         APLICAR_LADO,
@@ -1738,61 +1792,35 @@ impl GitSurface {
             vazio.paint(paint);
             return;
         };
-        let comandos = self.comandos_do_cabecalho(area_do_diff);
-        let mut cabecalho = Label::new(WidgetId(SUMMARY_BASE.0 + 6), titulo);
-        cabecalho.layout(
-            layout,
-            Rect::new(
-                area_do_diff.origin.x,
-                area_do_diff.origin.y + (DIFF_CABECALHO - TITULO_ALTURA) / 2.0,
-                (comandos[0].origin.x - area_do_diff.origin.x - 8.0).max(0.0),
-                TITULO_ALTURA,
-            ),
-        );
-        cabecalho.paint(paint);
+        // **Da direita para a esquerda, cada um no espaço que sobrou do
+        // anterior.** É o que impede dois componentes de ocuparem o mesmo lugar:
+        // a barra mede os botões dela, a contagem mede o texto dela, e o nome do
+        // arquivo fica com o resto — encurtado com reticências se não couber.
+        let barra = self.barra_do_cabecalho(area_do_diff, layout);
+        barra.paint(paint);
 
-        // Os comandos da comparação, à direita do nome do arquivo.
-        let staged = self.diff.as_ref().is_some_and(|diff| diff.staged);
-        let mut lado = Button::new(
-            DIFF_LADO_ID,
-            if staged {
-                "Preparado"
-            } else {
-                "Árvore de trabalho"
-            },
-        )
-        .with_height(DIFF_CABECALHO - 6.0)
-        .with_fill(ButtonFill::Transparent);
-        lado.layout(layout, comandos[0]);
-        lado.paint(paint);
-
-        let mut contagem = Label::new(DIFF_CONTAGEM_ID, self.contagem_das_alteracoes())
-            .with_tone(IconTint::Muted);
+        let meio = area_do_diff.origin.y + (DIFF_CABECALHO - TITULO_ALTURA) / 2.0;
+        let mut contagem =
+            Label::new(DIFF_CONTAGEM_ID, self.contagem_das_alteracoes()).with_tone(IconTint::Muted);
+        let largura_da_contagem = contagem
+            .measure(&layout.measuring(), Constraints::UNBOUNDED)
+            .width;
+        let contagem_x = barra.left_edge() - Toolbar::GAP - largura_da_contagem;
         contagem.layout(
             layout,
-            Rect::new(
-                comandos[1].origin.x,
-                comandos[1].origin.y + (DIFF_CABECALHO - TITULO_ALTURA) / 2.0,
-                comandos[1].size.width,
-                TITULO_ALTURA,
-            ),
+            Rect::new(contagem_x, meio, largura_da_contagem, TITULO_ALTURA),
         );
         contagem.paint(paint);
 
-        for (indice, texto) in ["\u{2191}", "\u{2193}"].into_iter().enumerate() {
-            let mut passo = Button::new(
-                if indice == 0 {
-                    DIFF_ANTERIOR_ID
-                } else {
-                    DIFF_SEGUINTE_ID
-                },
-                texto,
-            )
-            .with_height(DIFF_CABECALHO - 6.0)
-            .with_fill(ButtonFill::Transparent);
-            passo.layout(layout, comandos[2 + indice]);
-            passo.paint(paint);
-        }
+        // O caminho é comprido e o espaço é o que sobrou: reticências no fim são
+        // melhores que letras passando por baixo da contagem.
+        let sobra = (contagem_x - Toolbar::GAP - area_do_diff.origin.x).max(0.0);
+        let mut cabecalho = Label::new(WidgetId(SUMMARY_BASE.0 + 6), titulo).with_max_width(sobra);
+        cabecalho.layout(
+            layout,
+            Rect::new(area_do_diff.origin.x, meio, sobra, TITULO_ALTURA),
+        );
+        cabecalho.paint(paint);
 
         let colunas = self.colunas_da_comparacao(area_do_diff, layout);
         if let Some(listas) = self.colunas_do_diff.as_mut() {
@@ -2112,20 +2140,22 @@ impl GitSurface {
             return None;
         }
         if self.aba_da_janela == AbaDaJanela::Diff {
-            let area_do_diff = area(host, DIFF_ID);
+            let area_do_diff = Self::area_util_do_diff(host, context);
             if self.diff.is_some() && area_do_diff.contains(point) {
                 // O cabeçalho antes de tudo: ele fica acima das colunas, e um
                 // clique nele não é clique em linha nenhuma.
-                let comandos = self.comandos_do_cabecalho(area_do_diff);
-                if comandos[2].contains(point) {
+                // Quem diz qual botão está sob o ponto é a própria barra:
+                // refazer a conta aqui daria duas respostas que divergem.
+                let barra = self.barra_do_cabecalho(area_do_diff, context);
+                if barra.hit(point) == Some(DIFF_ANTERIOR_ID) {
                     self.andar_entre_alteracoes(false);
                     return None;
                 }
-                if comandos[3].contains(point) {
+                if barra.hit(point) == Some(DIFF_SEGUINTE_ID) {
                     self.andar_entre_alteracoes(true);
                     return None;
                 }
-                if comandos[0].contains(point) {
+                if barra.hit(point) == Some(DIFF_LADO_ID) {
                     // Trocar de lado é outra pergunta sobre o mesmo arquivo, e
                     // quem responde é o repositório: daqui sai o pedido.
                     let diff = self.diff.as_ref()?;
@@ -2358,7 +2388,7 @@ impl GitSurface {
         }
         let conteudo = area(host, CONTENT_ID);
         if self.aba_da_janela == AbaDaJanela::Diff {
-            let area_do_diff = area(host, DIFF_ID);
+            let area_do_diff = Self::area_util_do_diff(host, context);
             let colunas = self.colunas_da_comparacao(area_do_diff, context);
             if let Some(split) = self.split_do_diff.as_mut() {
                 split.event(&mut EventContext::default(), event);
@@ -2445,7 +2475,7 @@ impl GitSurface {
             // As duas colunas rolam juntas: comparar dois textos exige que a
             // linha 40 de um fique ao lado da linha 40 do outro, e duas rolagens
             // independentes desfazem a comparação a cada gesto.
-            let area_do_diff = area(host, DIFF_ID);
+            let area_do_diff = Self::area_util_do_diff(host, context);
             let colunas = self.colunas_da_comparacao(area_do_diff, context);
             let antes = self.rolagem_das_colunas();
             if let Some(listas) = self.colunas_do_diff.as_mut() {
@@ -2523,11 +2553,11 @@ impl GitSurface {
         abas_da_janela.paint(paint);
 
         if self.aba_da_janela == AbaDaJanela::Diff {
-            let area_do_diff = area(host, DIFF_ID);
-            let mut painel = Panel::new(DIFF_ID, SurfaceTone::Surface).with_border();
-            painel.layout(layout, area_do_diff);
+            let mut painel = Self::painel_do_diff();
+            painel.layout(layout, area(host, DIFF_ID));
             painel.paint(paint);
-            self.paint_diff(area_do_diff, layout, paint);
+            // O conteúdo vai **dentro** da moldura, e não sobre ela.
+            self.paint_diff(painel.content(), layout, paint);
             self.paint_fechar(host, layout, paint);
             return true;
         }
@@ -2815,8 +2845,8 @@ impl GitSurface {
     /// As duas colunas da comparação, para o teste apontar nelas.
     #[cfg(test)]
     pub(super) fn colunas_do_diff_para_teste(&mut self, host: &UiHost) -> [Rect; 2] {
-        let area_do_diff = area(host, DIFF_ID);
         let context = LayoutContext::default();
+        let area_do_diff = Self::area_util_do_diff(host, &context);
         self.colunas_da_comparacao(area_do_diff, &context)
     }
 
@@ -2830,10 +2860,15 @@ impl GitSurface {
         self.botoes_de_trecho(colunas[0])
     }
 
-    /// Os comandos do cabeçalho, para o teste apontar neles.
+    /// Onde cada comando do cabeçalho ficou, para o teste apontar neles.
     #[cfg(test)]
-    pub(super) fn comandos_do_cabecalho_para_teste(&self, host: &UiHost) -> [Rect; 4] {
-        self.comandos_do_cabecalho(area(host, DIFF_ID))
+    pub(super) fn comandos_do_cabecalho_para_teste(
+        &self,
+        host: &UiHost,
+        context: &LayoutContext,
+    ) -> Vec<(WidgetId, Rect)> {
+        self.barra_do_cabecalho(Self::area_util_do_diff(host, context), context)
+            .item_bounds()
     }
 
     /// A fileira escolhida em cada coluna, para o teste ver as duas concordarem.

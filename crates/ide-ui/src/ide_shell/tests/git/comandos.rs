@@ -1,6 +1,7 @@
 //! Os comandos da comparação: andar entre as alterações, trocar de lado,
 //! devolver um trecho inteiro, e o que a tela recusa comparar.
 
+use ui_components::Panel;
 use ui_core::Modifiers;
 
 use super::*;
@@ -138,9 +139,19 @@ fn o_cabecalho_troca_entre_o_preparado_e_a_arvore_de_trabalho() {
         "o cabeçalho diz de que lado é a comparação"
     );
 
-    let botao = shell
+    let contexto = shell.layout_context();
+    let comandos = shell
         .git_surface()
-        .comandos_do_cabecalho_para_teste(&shell.host)[0];
+        .comandos_do_cabecalho_para_teste(&shell.host, &contexto);
+    // Nenhum encosta no vizinho: é o que a barra garante, e o que os três
+    // botões postos à mão não garantiam.
+    for par in comandos.windows(2) {
+        assert!(
+            par[1].1.origin.x >= par[0].1.origin.x + par[0].1.size.width,
+            "os comandos não se sobrepõem: {comandos:?}"
+        );
+    }
+    let botao = comandos[0].1;
     shell.commands.retain(|_| false);
     shell.pointer_down(
         Point::new(
@@ -597,4 +608,143 @@ fn as_setas_nao_cobrem_a_trilha_da_barra() {
             "a seta acaba antes da trilha: {direita} contra {borda}"
         );
     }
+}
+
+/// Nada no cabeçalho da comparação passa por cima de nada.
+///
+/// Era o que acontecia: "Árvore de trabalho" saía por cima de "sem alterações",
+/// porque as três larguras estavam escritas à mão e o texto não cabia nelas.
+/// Agora cada um mede o que tem e ocupa o que sobrou do anterior — e o caminho
+/// do arquivo, que é o mais comprido, é encurtado com reticências em vez de
+/// passar por baixo dos outros.
+#[test]
+fn o_cabecalho_da_comparacao_nao_sobrepoe_nada() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    // Um caminho comprido de verdade, que é o caso que quebrava.
+    assert!(shell.abrir_comparacao(
+        &raiz.join("src/main/java/br/com/besta/server/command/PlayerCommandApplier.java"),
+        GitDiff {
+            committed: "a\nb\n".to_owned(),
+            current: "a\nB\n".to_owned(),
+            marks: vec![(1, GitLineChange::Added)],
+            removed: vec![1],
+            ..GitDiff::default()
+        },
+    ));
+    let desenhado = shell.paint(size);
+
+    // Todo texto do cabeçalho, com onde começa e quanto ocupa.
+    let contexto = shell.layout_context();
+    let comandos = shell
+        .git_surface()
+        .comandos_do_cabecalho_para_teste(&shell.host, &contexto);
+    let topo_do_cabecalho = comandos
+        .first()
+        .map(|(_, area)| area.origin.y)
+        .unwrap_or_default();
+    let mut faixas: Vec<(f32, f32, String)> = desenhado
+        .iter()
+        .filter_map(|comando| match comando {
+            PaintCommand::DrawText(texto)
+                // Só a faixa do cabeçalho: as colunas ficam abaixo dela.
+                if (texto.origin.y - topo_do_cabecalho).abs() < 16.0 =>
+            {
+                let largura = texto.text.chars().count() as f32 * texto.size * 0.5;
+                Some((texto.origin.x, largura, texto.text.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    faixas.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert!(faixas.len() >= 3, "há o caminho, a contagem e os botões: {faixas:?}");
+
+    for par in faixas.windows(2) {
+        assert!(
+            par[1].0 >= par[0].0 + par[0].1,
+            "\"{}\" começa depois de \"{}\" acabar: {faixas:?}",
+            par[1].2,
+            par[0].2
+        );
+    }
+
+    // O caminho recebe o que sobrou, e é ele que encurta se não couber — o
+    // encurtamento em si depende da medida da fonte, que este teste não tem.
+    assert!(
+        faixas
+            .first()
+            .is_some_and(|(x, _, texto)| texto.contains("PlayerCommandApplier")
+                && *x < faixas[1].0),
+        "o caminho vem antes de tudo, e não por baixo: {faixas:?}"
+    );
+}
+
+/// O conteúdo da comparação não encosta na moldura do painel.
+///
+/// Um painel com borda e conteúdo colado nela vira uma caixa em volta do
+/// conteúdo: o caminho do arquivo começava no mesmo ponto da linha vertical, e
+/// a linha passava a parecer parte do texto — a ponto de alguém perguntar o que
+/// ela significava. Não significava nada; faltava respiro. Quanto respirar é o
+/// painel quem diz.
+#[test]
+fn o_conteudo_da_comparacao_nao_encosta_na_moldura() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    assert!(shell.abrir_comparacao(
+        &raiz.join("alterado.java"),
+        GitDiff {
+            committed: "a\nb\n".to_owned(),
+            current: "a\nB\n".to_owned(),
+            ..GitDiff::default()
+        },
+    ));
+    let desenhado = shell.paint(size);
+
+    // A moldura é o traço mais largo da faixa da comparação.
+    let moldura = desenhado
+        .iter()
+        .filter_map(|comando| match comando {
+            PaintCommand::StrokeRect(traco) if traco.rect.size.width > 400.0 => Some(traco.rect),
+            _ => None,
+        })
+        .next_back();
+    let Some(moldura) = moldura else {
+        panic!("a comparação tem moldura");
+    };
+
+    // Nada de texto começa antes da borda esquerda mais o respiro, nem acima
+    // da borda de cima mais o respiro.
+    let dentro = |x: f32, y: f32| {
+        x >= moldura.origin.x + Panel::PADDING
+            && y >= moldura.origin.y + Panel::PADDING
+            && x <= moldura.origin.x + moldura.size.width - Panel::PADDING
+    };
+    let fora: Vec<(String, f32, f32)> = desenhado
+        .iter()
+        .filter_map(|comando| match comando {
+            PaintCommand::DrawText(texto)
+                if texto.origin.y >= moldura.origin.y
+                    && texto.origin.y <= moldura.origin.y + moldura.size.height
+                    && !dentro(texto.origin.x, texto.origin.y) =>
+            {
+                Some((texto.text.clone(), texto.origin.x, texto.origin.y))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        fora.is_empty(),
+        "nada encosta na moldura, e estes encostaram: {fora:?}"
+    );
 }
