@@ -14,7 +14,6 @@ mod documents;
 mod index;
 mod language;
 mod navigation;
-mod observador;
 mod parser;
 mod semantics;
 mod symbols;

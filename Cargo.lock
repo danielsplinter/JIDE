@@ -891,6 +891,7 @@ dependencies = [
  "ide-terminal",
  "ide-toolchain-api",
  "ide-ui",
+ "ide-watch",
  "ide-workspace",
  "language-angular",
  "language-java",
@@ -1045,6 +1046,13 @@ dependencies = [
  "ui-layout-taffy",
  "ui-render-api",
  "ui-window-api",
+]
+
+[[package]]
+name = "ide-watch"
+version = "0.1.0"
+dependencies = [
+ "notify",
 ]
 
 [[package]]
@@ -1254,7 +1262,6 @@ dependencies = [
  "ide-process",
  "ide-project",
  "ide-toolchain-api",
- "notify",
  "pollster",
  "thiserror 2.0.19",
  "tokio",

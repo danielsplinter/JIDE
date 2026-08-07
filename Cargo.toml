@@ -17,6 +17,7 @@ members = [
     "crates/language-typescript",
     "crates/ide-process",
     "crates/ide-terminal",
+    "crates/ide-watch",
     "crates/ide-toolchain-api",
     "crates/ide-ui",
     "crates/ide-workspace",

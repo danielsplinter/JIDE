@@ -29,8 +29,8 @@ use crate::branches::BranchService;
 use crate::error::{GitError, GitResult};
 use crate::model::{
     BranchName, BranchSummary, CommitId, CommitSummary, DiffLine, DiffLineKind, DiffSide, FileDiff,
-    FileState, Head, Hunk, MergeOutcome, PendingOperation, RepositoryStatus, StashEntry,
-    StatusEntry,
+    FileState, Head, Hunk, MergeOutcome, PendingOperation, RemoteName, RepositoryStatus,
+    StashEntry, StatusEntry,
 };
 use crate::working_tree::WorkingTreeService;
 
@@ -285,12 +285,16 @@ impl BranchService for CliGit {
         // O `%09` é tabulação, e nome de referência não pode conter uma: o Git
         // recusa espaço e todo caractere de controle em `refs/`. É separador que
         // não aparece no dado.
+        //
+        // O `upstream:track` vem no fim, e é ele que traz o `[ahead 2, behind 3]`
+        // — a contagem contra o que **já foi buscado**, que é o que a IDE tem
+        // para dizer sem falar com a rede.
         let saida = self
             .run(
                 &[
                     "for-each-ref",
                     "--sort=refname",
-                    "--format=%(refname:short)%09%(upstream:short)%09%(HEAD)",
+                    "--format=%(refname:short)%09%(upstream:short)%09%(HEAD)%09%(upstream:track)",
                     "refs/heads/",
                 ],
                 cancel,
@@ -497,13 +501,93 @@ fn ler_branches(saida: &str) -> Vec<BranchSummary> {
             let nome = campos.next().unwrap_or_default().trim();
             let upstream = campos.next().unwrap_or_default().trim();
             let marca = campos.next().unwrap_or_default().trim();
+            let (ahead, behind) = ler_contagem(campos.next().unwrap_or_default());
             BranchSummary {
                 name: BranchName(nome.to_owned()),
                 current: marca == "*",
                 upstream: (!upstream.is_empty()).then(|| BranchName(upstream.to_owned())),
+                ahead,
+                behind,
             }
         })
         .collect()
+}
+
+/// Lê o `[ahead 2, behind 3]` do `upstream:track`.
+///
+/// O formato tem quatro formas — vazio, só `ahead`, só `behind`, e as duas —
+/// mais o `[gone]` de quem perdeu o upstream. Procurar as palavras cobre todas
+/// sem depender da ordem, e o que não casar vira zero: uma contagem inventada
+/// seria pior do que nenhuma.
+fn ler_contagem(track: &str) -> (usize, usize) {
+    let numero = |palavra: &str| {
+        track
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .skip_while(|campo| *campo != palavra)
+            .nth(1)
+            .and_then(|valor| valor.parse::<usize>().ok())
+            .unwrap_or_default()
+    };
+    (numero("ahead"), numero("behind"))
+}
+
+#[async_trait]
+impl crate::remotes::RemoteService for CliGit {
+    async fn list(&self, cancel: &CancellationToken) -> GitResult<Vec<RemoteName>> {
+        let saida = self.run(&["--no-optional-locks", "remote"], cancel).await?;
+        Ok(String::from_utf8_lossy(&saida)
+            .lines()
+            .map(str::trim)
+            .filter(|linha| !linha.is_empty())
+            .map(|nome| RemoteName(nome.to_owned()))
+            .collect())
+    }
+
+    async fn remote_branches(&self, cancel: &CancellationToken) -> GitResult<Vec<BranchName>> {
+        let saida = self
+            .run(
+                &[
+                    "for-each-ref",
+                    "--sort=refname",
+                    "--format=%(refname:short)",
+                    "refs/remotes/",
+                ],
+                cancel,
+            )
+            .await?;
+        Ok(String::from_utf8_lossy(&saida)
+            .lines()
+            .map(str::trim)
+            .filter(|linha| !linha.is_empty())
+            // `origin/HEAD` é um apelido para a branch principal do remoto, e
+            // não uma branch: listá-lo daria uma linha que aponta para outra.
+            .filter(|linha| !linha.ends_with("/HEAD"))
+            .map(|nome| BranchName(nome.to_owned()))
+            .collect())
+    }
+
+    async fn fetch(&self) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        // `--prune`: uma branch apagada no remoto continuaria na lista para
+        // sempre, e o painel mostraria caminho para lugar nenhum.
+        self.run(&["fetch", "--prune"], &vazio).await.map(|_| ())
+    }
+
+    async fn pull(&self) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        self.run(&["pull", "--no-edit"], &vazio).await.map(|_| ())
+    }
+
+    async fn push(&self, force: bool) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        let mut args = vec!["push"];
+        if force {
+            // `--force-with-lease`, e não `--force`: o segundo apaga o que
+            // chegou lá depois da última busca, e quem clicou não sabia disso.
+            args.push("--force-with-lease");
+        }
+        self.run(&args, &vazio).await.map(|_| ())
+    }
 }
 
 /// Lê a saída de `status --porcelain=v2 -z`.
@@ -853,16 +937,30 @@ mod tests {
         assert_eq!(diff.changed_lines(), vec![(1, LineChange::Modified)]);
     }
 
+    /// A contagem sai do `upstream:track` nas quatro formas dele.
+    #[test]
+    fn a_contagem_de_commits_vem_do_track() {
+        assert_eq!(ler_contagem(""), (0, 0));
+        assert_eq!(ler_contagem("[ahead 2]"), (2, 0));
+        assert_eq!(ler_contagem("[behind 3]"), (0, 3));
+        assert_eq!(ler_contagem("[ahead 2, behind 3]"), (2, 3));
+        // Upstream que sumiu não é contagem nenhuma.
+        assert_eq!(ler_contagem("[gone]"), (0, 0));
+    }
+
     #[test]
     fn a_branch_atual_vem_marcada() {
-        let branches = ler_branches("main\torigin/main\t*\nfeature/busca\t\t\n");
+        let branches =
+            ler_branches("main\torigin/main\t*\t[ahead 2]\nfeature/busca\t\t\t\n");
         assert_eq!(branches.len(), 2);
         assert!(branches[0].current);
         assert_eq!(
             branches[0].upstream,
             Some(BranchName("origin/main".to_owned()))
         );
+        assert_eq!(branches[0].ahead, 2, "a contagem vem junto");
         assert!(!branches[1].current);
         assert_eq!(branches[1].upstream, None);
+        assert_eq!((branches[1].ahead, branches[1].behind), (0, 0));
     }
 }

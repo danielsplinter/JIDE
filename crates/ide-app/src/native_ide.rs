@@ -17,6 +17,7 @@ use crate::controllers::{
 };
 use ide_application::GitRequest;
 use crate::ui_bridge::{UiAction, UiBridge};
+use crate::watching::{ConsumidorDeFontes, ConsumidorDeGit, MudancaNoDisco};
 use crate::{
     debug, java_contribution, markup_contribution, run, style_contribution,
     typescript_contribution,
@@ -793,6 +794,7 @@ impl NativeIde {
         // Fica para depois do primeiro quadro, como o realce já fica.
         self.runtime.project_pending = Some(folder.to_path_buf());
         self.runtime.languages_pending = true;
+        self.observar_o_disco(folder);
         // O branch e a contagem entram na barra de estado assim que houver
         // resposta. É a única pergunta ao Git que a IDE faz sozinha: as outras
         // saem de quem abre o gerenciador.
@@ -803,6 +805,67 @@ impl NativeIde {
                 .set_title(&format!("ER IDE — {}", folder.display()));
             window.request_redraw();
         }
+    }
+
+    /// Começa a observar o projeto, com os consumidores registrados.
+    ///
+    /// **Um registro no sistema operacional, dois interessados.** Trocar de
+    /// projeto solta o observador anterior, e com ele o registro: o `Drop` do
+    /// campo é o que desliga.
+    fn observar_o_disco(&mut self, raiz: &Path) {
+        let (envio, recepcao) = std::sync::mpsc::channel();
+        let Some(observador) = ide_watch::FileWatcher::iniciar(raiz, Vec::new()) else {
+            // Sem observador a IDE volta a ser o que era, com o índice
+            // envelhecendo até a próxima abertura. É degradação, e não falha.
+            self.runtime.observador = None;
+            self.runtime.mudancas = None;
+            return;
+        };
+        observador.registrar(std::sync::Arc::new(ConsumidorDeFontes {
+            aviso: envio.clone(),
+        }));
+        observador.registrar(std::sync::Arc::new(ConsumidorDeGit { aviso: envio }));
+        self.runtime.observador = Some(observador);
+        self.runtime.mudancas = Some(recepcao);
+    }
+
+    /// Reage ao que mudou no disco, no quadro seguinte ao aviso.
+    ///
+    /// É o critério da fase 4: rodar `git checkout` no terminal integrado
+    /// atualiza a IDE inteira **sem ação do usuário**.
+    fn collect_disk_changes(&mut self) -> bool {
+        let Some(recepcao) = self.runtime.mudancas.as_ref() else {
+            return false;
+        };
+        let mut fontes: Vec<PathBuf> = Vec::new();
+        let mut repositorio = false;
+        // Tudo o que chegou até agora, de uma vez: dois avisos do mesmo tipo no
+        // mesmo quadro são o mesmo trabalho feito duas vezes.
+        while let Ok(mudanca) = recepcao.try_recv() {
+            match mudanca {
+                MudancaNoDisco::Fontes(lote) => fontes.extend(lote),
+                MudancaNoDisco::Repositorio => repositorio = true,
+            }
+        }
+        if fontes.is_empty() && !repositorio {
+            return false;
+        }
+        if repositorio {
+            self.refresh_git();
+        }
+        if !fontes.is_empty()
+            && let Some(host) = self.languages.host.as_ref().map(Arc::clone)
+        {
+            // Fora da thread da interface: um `checkout` traz milhares de
+            // arquivos, e reindexar um por um aqui pararia a janela pelo tempo
+            // todo. A resposta não interessa — o índice é lido de onde já está.
+            std::thread::spawn(move || {
+                for caminho in fontes {
+                    let _ = pollster::block_on(host.file_changed(&caminho));
+                }
+            });
+        }
+        true
     }
 
     /// Aponta as linguagens para a raiz nova, sem desligar nenhuma.
@@ -1600,6 +1663,9 @@ impl NativeIde {
             GitRequest::Merge(nome) => self.mexer_na_branch("merge", nome),
             GitRequest::ContinueOperation => self.mexer_na_branch("continue", String::new()),
             GitRequest::AbortOperation => self.mexer_na_branch("abort", String::new()),
+            GitRequest::Fetch => self.mexer_na_branch("fetch", String::new()),
+            GitRequest::Pull => self.mexer_na_branch("pull", String::new()),
+            GitRequest::Push => self.mexer_na_branch("push", String::new()),
             GitRequest::Stash => self.mexer_na_branch("stash", String::new()),
             GitRequest::StashPop(indice) => self.mexer_na_branch("pop", indice.to_string()),
             GitRequest::Stage(path) => self.escrever_no_git("stage", path),
@@ -3783,6 +3849,9 @@ fn retrato_do_repositorio(raiz: &std::path::Path, cancel: &CancellationToken) ->
     if let Ok(tags) = runtime.block_on(repositorio.tags().list(cancel)) {
         view.tags = tags;
     }
+    if let Ok(remotas) = runtime.block_on(repositorio.remotes().remote_branches(cancel)) {
+        view.remotes = remotas.into_iter().map(|branch| branch.0).collect();
+    }
     if let Ok(guardados) = runtime.block_on(repositorio.working_tree().stash_list(cancel)) {
         view.stashes = guardados
             .into_iter()
@@ -3795,6 +3864,8 @@ fn retrato_do_repositorio(raiz: &std::path::Path, cancel: &CancellationToken) ->
             .map(|branch| ide_ui::BranchItem {
                 name: branch.name.0,
                 current: branch.current,
+                ahead: branch.ahead,
+                behind: branch.behind,
             })
             .collect();
     }
@@ -3896,6 +3967,32 @@ fn mexer_no_repositorio(raiz: &std::path::Path, acao: &str, alvo: &str) -> Strin
                     .block_on(integracao.abort())
                     .map(|()| "Operação abortada".to_owned())
                     .map_err(|erro| erro.to_string()),
+                "fetch" | "pull" | "push" => {
+                    let remotos = repositorio.remotes();
+                    let resultado = match acao {
+                        "fetch" => runtime.block_on(remotos.fetch()),
+                        "pull" => runtime.block_on(remotos.pull()),
+                        _ => runtime.block_on(remotos.push(false)),
+                    };
+                    resultado
+                        .map(|()| match acao {
+                            "fetch" => "Referências atualizadas".to_owned(),
+                            "pull" => "Trazido do remoto".to_owned(),
+                            _ => "Enviado ao remoto".to_owned(),
+                        })
+                        // **A falha de autenticação é a que precisa de frase
+                        // própria.** Com `GIT_TERMINAL_PROMPT=0` o `git` falha
+                        // rápido em vez de ficar pendurado esperando uma senha
+                        // que ninguém vai digitar; o que sobra é dizer o que
+                        // aconteceu, e não "falha na ferramenta Git".
+                        .map_err(|erro| match erro {
+                            ide_git::GitError::AuthenticationRequired { .. } => {
+                                "O remoto pediu autenticação: configure a credencial do Git"
+                                    .to_owned()
+                            }
+                            outro => outro.to_string(),
+                        })
+                }
                 "stash" => runtime
                     .block_on(arvore.stash_push(""))
                     .map(|()| "Trabalho guardado".to_owned())
@@ -4064,6 +4161,7 @@ impl ApplicationHandler for NativeIde {
         changed |= self.collect_git_diff();
         changed |= self.collect_git_write();
         changed |= self.collect_git_history();
+        changed |= self.collect_disk_changes();
         changed |= self.collect_navigation();
         changed |= self.collect_completion();
         // Aceitar um item escreve o nome; o `import` que ele exige é a pergunta

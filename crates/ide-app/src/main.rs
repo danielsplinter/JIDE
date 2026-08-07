@@ -15,6 +15,7 @@ mod splash;
 mod style_contribution;
 mod typescript_contribution;
 mod ui_bridge;
+mod watching;
 mod window;
 
 pub(crate) use native_ide::NativeIde;

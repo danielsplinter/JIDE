@@ -13,7 +13,6 @@ ide-language-api = { path = "../ide-language-api" }
 ide-process = { path = "../ide-process" }
 ide-project = { path = "../ide-project" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }
-notify.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracing.workspace = true

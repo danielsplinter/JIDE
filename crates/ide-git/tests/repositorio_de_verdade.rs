@@ -703,3 +703,80 @@ fn o_stash_guarda_e_devolve_e_as_tags_aparecem() {
     );
     assert!(esperar(arvore.stash_list(&cancel)).unwrap_or_default().is_empty());
 }
+
+/// O ciclo com o remoto: empurrar, buscar, e a contagem de commits.
+///
+/// O "remoto" é um repositório **bare** noutra pasta desta máquina — que é o que
+/// o Git chama de remoto sem precisar de rede. Testar com rede seria testar a
+/// rede: o que precisa de verificação aqui é a nossa leitura do que o `git`
+/// responde.
+#[test]
+fn empurrar_e_buscar_movem_a_contagem_de_commits() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("remoto") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um\n");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+
+    // O remoto, ao lado, e a ligação entre os dois.
+    let remoto = repo.root().with_extension("git");
+    let _ = std::fs::remove_dir_all(&remoto);
+    let Some(caminho) = remoto.to_str() else {
+        panic!("caminho do remoto ilegível");
+    };
+    assert!(repo.git(&["init", "--bare", caminho]).is_some());
+    assert!(repo.git(&["remote", "add", "origin", caminho]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let remotos = repositorio.remotes();
+    let branches = repositorio.branches();
+    let cancel = CancellationToken::new();
+
+    assert_eq!(
+        esperar(remotos.list(&cancel)).unwrap_or_default(),
+        vec![ide_git::RemoteName("origin".to_owned())]
+    );
+
+    // Empurrar leva a branch para lá — e a primeira vez precisa dizer para onde.
+    assert!(repo.git(&["push", "--set-upstream", "origin", "main"]).is_some());
+    assert!(
+        esperar(remotos.remote_branches(&cancel))
+            .unwrap_or_default()
+            .contains(&ide_git::BranchName("origin/main".to_owned())),
+        "a branch remota aparece depois do push"
+    );
+
+    // Um commit a mais aqui, e a contagem passa a dizer que estamos à frente.
+    repo.escrever("a.txt", "dois\n");
+    assert!(repo.git(&["commit", "-am", "segundo"]).is_some());
+    let locais = esperar(branches.local(&cancel)).unwrap_or_default();
+    let Some(main) = locais.iter().find(|branch| branch.name.0 == "main") else {
+        panic!("a branch main precisa estar na lista: {locais:?}");
+    };
+    assert_eq!(
+        (main.ahead, main.behind),
+        (1, 0),
+        "um commit à frente do que já foi buscado: {main:?}"
+    );
+    assert_eq!(
+        main.upstream,
+        Some(ide_git::BranchName("origin/main".to_owned()))
+    );
+
+    // E depois de empurrar, ela volta a zero.
+    assert!(esperar(remotos.push(false)).is_ok());
+    assert!(esperar(remotos.fetch()).is_ok());
+    let locais = esperar(branches.local(&cancel)).unwrap_or_default();
+    let Some(main) = locais.iter().find(|branch| branch.name.0 == "main") else {
+        panic!("a branch main precisa estar na lista");
+    };
+    assert_eq!((main.ahead, main.behind), (0, 0), "{main:?}");
+
+    let _ = std::fs::remove_dir_all(&remoto);
+}

@@ -159,6 +159,13 @@ pub struct BranchItem {
     pub name: String,
     /// Se é para ela que `HEAD` aponta.
     pub current: bool,
+    /// Quantos commits ela tem a mais e a menos que o upstream.
+    ///
+    /// É a contagem contra o que **já foi buscado**: sem `fetch`, ela fala do
+    /// que se sabia da última vez. Prometer o número de agora exigiria falar com
+    /// a rede a cada retrato.
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 /// O que a tela sabe do repositório.
@@ -179,9 +186,10 @@ pub struct GitView {
     pub entries: Vec<GitEntry>,
     /// O histórico já carregado, do mais recente para o mais antigo.
     pub commits: Vec<CommitRow>,
-    /// As tags, e o que está guardado no `stash`.
+    /// As tags, o que está guardado no `stash`, e as branches remotas.
     pub tags: Vec<String>,
     pub stashes: Vec<String>,
+    pub remotes: Vec<String>,
     /// A operação que está no meio do caminho, se há uma.
     ///
     /// Vem do disco, e não da memória da IDE: quem rodou `git merge` no terminal
@@ -588,10 +596,7 @@ impl GitSurface {
             .iter()
             .enumerate()
             .map(|(indice, branch)| {
-                ComposedTreeItem::leaf(
-                    100 + indice as u64,
-                    linha(indice, &branch.name, branch.current),
-                )
+                ComposedTreeItem::leaf(100 + indice as u64, linha(indice, branch))
             })
             .collect();
         // O nó das branches só some quando a busca o esvaziou: um `branches`
@@ -623,9 +628,13 @@ impl GitSurface {
                 raiz(1, &format!("Tags ({})", self.view.tags.len())),
                 folhas(2_000, &self.view.tags),
             ));
-            // Remotes continua vazio: é fase 4, e um nó que só aparece quando a
-            // capacidade chega faria a tela mudar de forma.
-            raizes.push(ComposedTreeItem::leaf(3, raiz(2, "Remotes")));
+            raizes.push(ComposedTreeItem::new(
+                3,
+                // A raiz dos remotos é a única linha com botão: `fetch` é do
+                // repositório inteiro, e não de uma branch.
+                linha_do_remoto(&format!("Remotes ({})", self.view.remotes.len())),
+                folhas(4_000, &self.view.remotes),
+            ));
             raizes.push(ComposedTreeItem::new(
                 4,
                 raiz(3, &format!("Stashes ({})", self.view.stashes.len())),
@@ -776,14 +785,18 @@ impl GitSurface {
             let indice = (escolhido - 100) as usize;
             let branch = self.branches_filtradas().get(indice).copied()?;
             let nome = branch.name.clone();
-            // **A branch atual não tem botão nenhum**, e por isso a coluna não
-            // decide nada nela: sem esta linha, clicar no vazio à direita do
-            // nome da branch em que já se está pediria para trocar para ela
-            // mesma — que é o gesto que a linha nem oferece.
+            // Da direita para a esquerda: o último declarado é o mais à
+            // direita. A branch atual tem as ações do remoto; as outras, as de
+            // trocar e fundir.
             if branch.current {
+                if na_faixa(0) {
+                    return Some(GitRequest::Push);
+                }
+                if na_faixa(1) {
+                    return Some(GitRequest::Pull);
+                }
                 return None;
             }
-            // Da direita para a esquerda: "Fundir" é o último declarado.
             if na_faixa(0) {
                 return Some(GitRequest::Merge(nome));
             }
@@ -792,8 +805,12 @@ impl GitSurface {
             }
             return None;
         }
+        // A raiz dos remotos: o botão dela busca as referências.
+        if escolhido == 3 && na_faixa(0) {
+            return Some(GitRequest::Fetch);
+        }
         // Um item guardado: clicar nele o devolve para a árvore de trabalho.
-        if escolhido >= 3_000 {
+        if (3_000..4_000).contains(&escolhido) {
             return Some(GitRequest::StashPop((escolhido - 3_000) as usize));
         }
         None
@@ -1464,6 +1481,9 @@ impl super::IdeShell {
                 | GitRequest::Merge(_)
                 | GitRequest::ContinueOperation
                 | GitRequest::AbortOperation
+                // `pull` traz commits; `fetch` e `push` só mexem em referência,
+                // e a contagem à frente e atrás sai do retrato.
+                | GitRequest::Pull
         );
         // Commitar esvazia a caixa **agora**, e não quando a resposta chegar: a
         // mensagem já foi usada, e deixá-la na tela convida a commitar duas
@@ -1709,8 +1729,9 @@ fn raiz(indice: usize, nome: &str) -> ComposedRow {
 ///
 /// A marca é uma célula, e não um prefixo no texto: quem monta as células é a
 /// IDE, e um `●` colado ao nome iria junto numa cópia e numa busca.
-fn linha(indice: usize, nome: &str, atual: bool) -> ComposedRow {
-    let base = ROW_BASE.0 + 100 + indice as u64 * 4;
+fn linha(indice: usize, branch: &BranchItem) -> ComposedRow {
+    let base = ROW_BASE.0 + 100 + indice as u64 * 6;
+    let atual = branch.current;
     let mut celulas = vec![
         ComposedCell::new(
             Box::new(
@@ -1720,25 +1741,56 @@ fn linha(indice: usize, nome: &str, atual: bool) -> ComposedRow {
             CellWidth::Fixed(14.0),
         ),
         ComposedCell::new(
-            Box::new(Label::new(WidgetId(base + 1), nome)),
+            Box::new(Label::new(WidgetId(base + 1), &branch.name)),
             CellWidth::Fill,
         ),
     ];
+    // A contagem só aparece quando há o que contar: um `↑0 ↓0` fixo em toda
+    // linha seria ruído, e quem não tem upstream não tem contagem nenhuma.
+    if branch.ahead > 0 || branch.behind > 0 {
+        let mut texto = String::new();
+        if branch.ahead > 0 {
+            texto.push_str(&format!("↑{} ", branch.ahead));
+        }
+        if branch.behind > 0 {
+            texto.push_str(&format!("↓{}", branch.behind));
+        }
+        celulas.push(ComposedCell::new(
+            Box::new(
+                Label::new(WidgetId(base + 4), texto.trim_end()).with_tone(IconTint::Warning),
+            ),
+            CellWidth::Fixed(56.0),
+        ));
+    }
     // **A branch atual não oferece trocar nem fundir.** Trocar para onde já se
     // está não faz nada, e fundir uma branch nela mesma é um comando que o
     // `git` recusa — oferecer os dois seria oferecer erro.
-    if !atual {
-        for (deslocamento, rotulo, comando) in [
-            (2, "Trocar", "git.switch"),
-            (3, "Fundir", "git.merge"),
-        ] {
-            celulas.push(ComposedCell::new(
-                Box::new(
-                    Button::new(WidgetId(base + deslocamento), rotulo).with_command(comando),
-                ),
-                CellWidth::Fixed(ACAO_DA_ARVORE),
-            ));
-        }
+    // A branch atual troca as duas ações pelas do remoto: **empurrar e puxar só
+    // fazem sentido onde se está**, e trocar para onde já se está não faz nada.
+    let acoes: &[(u64, &str, &str)] = if atual {
+        &[(2, "Pull", "git.pull"), (3, "Push", "git.push")]
+    } else {
+        &[(2, "Trocar", "git.switch"), (3, "Fundir", "git.merge")]
+    };
+    for (deslocamento, rotulo, comando) in acoes {
+        celulas.push(ComposedCell::new(
+            Box::new(Button::new(WidgetId(base + deslocamento), *rotulo).with_command(*comando)),
+            CellWidth::Fixed(ACAO_DA_ARVORE),
+        ));
     }
     ComposedRow::new(celulas)
+}
+
+/// A linha da raiz dos remotos: o nome e o botão de buscar.
+fn linha_do_remoto(nome: &str) -> ComposedRow {
+    ComposedRow::new(vec![
+        ComposedCell::new(
+            Box::new(Label::new(WidgetId(ROW_BASE.0 + 2), nome)),
+            CellWidth::Fill,
+        ),
+        ComposedCell::new(
+            Box::new(Button::new(WidgetId(ROW_BASE.0 + 3), "Fetch").with_command("git.fetch")),
+            CellWidth::Fixed(ACAO_DA_ARVORE),
+        ),
+    ])
 }

@@ -602,7 +602,7 @@ IDE**.
 | aba `status`, os três painéis, as ações de linha ✅ | 1 | é o `working_tree` inteiro, que é o que a fase 1 entrega |
 | aba `history`, a tabela, o grafo ✅ | 2 | precisa do `history` e do `ComposedTable` |
 | nós `tags` e `stashes` ✅ | 3 | aparecem antes, vazios; a capacidade chega aqui |
-| nó `remotes`, à frente e atrás | 4 | é `fetch`, e sem ele não há o que contar |
+| nó `remotes`, à frente e atrás ✅ | 4 | é `fetch`, e sem ele não há o que contar |
 
 **Os nós aparecem desde o começo, mesmo sem ter o que mostrar.** Um nó que só
 existe depois que a capacidade chega faz a tela mudar de forma a cada fase; um nó
@@ -852,7 +852,7 @@ pedido sai: até lá o disco ainda é o de antes.
 *guardar ou descartar* na troca recusada — hoje a recusa chega como mensagem na
 barra de estado, e quem quiser guardar usa o `stash`, que existe.
 
-### Fase 4 — O observador vira infraestrutura, e o remoto entra
+### Fase 4 — O observador vira infraestrutura, e o remoto entra ✅
 
 Duas coisas na mesma fase porque a segunda depende da primeira: `fetch` muda
 referências sem tocar em arquivo nenhum, e sem observar `.git` a IDE não teria
@@ -869,6 +869,76 @@ commits à frente e atrás.
 **Critério:** rodar `git checkout` no terminal integrado atualiza a IDE inteira
 sem ação do usuário. E um `push` que precisa de senha pergunta, em vez de ficar
 pendurado.
+
+**Feita, com uma metade do segundo critério.** O observador virou a crate
+`ide-watch` e saiu de `language-java`; o `remotes` existe, com `fetch`, `pull`,
+`push`, as branches remotas e a contagem à frente e atrás.
+
+### O observador, agora infraestrutura
+
+Ele nasceu dentro do índice de Java porque, quando nasceu, **era** do índice de
+Java. A `21` já anotava a árvore do Explorer como segundo consumidor sem dono; o
+Git é o terceiro, e três é quando isso deixa de ser detalhe de um indexador.
+
+O que a mudança fixou como regra: **o registro no sistema operacional é um só, e
+o filtro é de cada um.** Dois observadores sobre a mesma árvore são dois
+registros — que no Linux contam duas vezes contra o limite por usuário — e duas
+rajadas para o mesmo evento, com duas reações fora de ordem.
+
+Os dois filtros são complementares, e é isso que os torna um observador só: o
+índice quer o que é código e **ignora `.git`**; o Git quer exatamente
+`.git/HEAD`, `.git/index` e `refs/` e ignora o resto. O erro que a `21` nomeou
+nunca foi ter dois filtros — é ter dois filtros para a **mesma** pergunta.
+
+Três decisões que a mudança obrigou:
+
+- **nenhum consumidor reage na linha do observador.** Os dois mandam recado por
+  canal, e quem reage é o laço de quadros. Reagir ali seria reindexar e falar
+  com o `git` enquanto a rajada seguinte chega, e o resultado apareceria na tela
+  sem ninguém ter pedido um quadro;
+- **o aviso do Git não carrega caminho.** O que mudou dentro do `.git` não diz o
+  que mostrar: quem responde é o `status`, e ele é pedido inteiro de qualquer
+  jeito. Carregar a lista daria a impressão de que ela decide algo;
+- **o filtro do Git recusa o que o `.git` tem de sobra.** Objetos, logs e os
+  temporários que o próprio `git` escreve e apaga — reagir a todos faria um
+  `commit` disparar dezenas de varreduras, uma para cada aparição do
+  `index.lock`.
+
+**O que `language-java` perdeu:** o módulo do observador, a dependência do
+`notify`, e dois testes. O da rajada mudou de casa junto com o assunto — a
+espera pelo silêncio agora tem teste em `ide-watch` —, e o do filtro passou a
+apontar para o filtro que ficou, o da varredura. O que sobrou lá é o outro lado
+do contrato, e tem teste: **avisado, o índice aprende o arquivo sem varrer o
+projeto de novo**.
+
+### O remoto
+
+`fetch --prune`, porque uma branch apagada lá continuaria na lista para sempre;
+`push --force-with-lease` quando forçado, porque o `--force` puro apaga o que
+chegou depois da última busca e quem clicou não sabia disso.
+
+A contagem à frente e atrás sai do `upstream:track` do `for-each-ref`, e é
+contra **o que já foi buscado**: sem `fetch`, ela fala do que se sabia da última
+vez. Prometer o número de agora exigiria falar com a rede a cada retrato.
+
+Na tela, a branch atual troca `Trocar` e `Fundir` por `Pull` e `Push` — empurrar
+e puxar só fazem sentido onde se está —, e o `Fetch` fica na **raiz** dos
+remotos, porque ele traz as referências todas de uma vez e pendurá-lo numa
+branch faria parecer que busca só aquela.
+
+### O que ficou pela metade, e é preciso dizer
+
+O critério pede que um `push` que precisa de senha **pergunte**. Hoje ele **não
+fica pendurado** — o `GIT_TERMINAL_PROMPT=0` que esta especificação já exigia faz
+o `git` falhar rápido —, e a falha vira uma frase que diz o que aconteceu e o que
+fazer: *"O remoto pediu autenticação: configure a credencial do Git"*.
+
+**Perguntar de verdade não foi feito.** Ele exige o `CredentialProvider` desta
+especificação implementado ponta a ponta: um `GIT_ASKPASS` que a IDE forneça, o
+diálogo que colhe a senha, e a garantia de que ela não vai para registro nenhum
+nem para o `Backend { detail }` — que é uma das três regras escritas na seção de
+credenciais. É trabalho com risco próprio, e entregá-lo pela metade seria pior
+do que a mensagem honesta que está lá.
 
 ## O que fica de fora, e por quê
 
@@ -959,4 +1029,4 @@ E número medido, como a `19`, a `20` e a `21` fizeram:
 | 1 | tempo do `diff` de um arquivo; tempo entre gravar e a margem mudar |
 | 3 | tempo do `checkout` de branch até editor, Explorer e índice em dia — **não medido**: falta o clone grande |
 | 2 | tempo até a primeira página do histórico aparecer, no de referência — **não medido**: falta um clone grande nesta máquina |
-| 4 | atraso entre `git` no terminal integrado e a IDE refletir |
+| 4 | atraso entre `git` no terminal integrado e a IDE refletir — **não medido**; o que se sabe é o piso: os 300 ms de silêncio que a `21` fixou |

@@ -7546,10 +7546,12 @@ fn o_painel_da_esquerda_tem_os_quatro_nos() {
             BranchItem {
                 name: "main".to_owned(),
                 current: true,
+            ..BranchItem::default()
             },
             BranchItem {
                 name: "feature/busca".to_owned(),
                 current: false,
+            ..BranchItem::default()
             },
         ],
         ..GitView::default()
@@ -7563,7 +7565,7 @@ fn o_painel_da_esquerda_tem_os_quatro_nos() {
     };
 
     assert!(escrito("Branches (2)"), "o nó das branches conta o que tem");
-    for nome in ["Tags (0)", "Remotes", "Stashes (0)"] {
+    for nome in ["Tags (0)", "Remotes (0)", "Stashes (0)"] {
         assert!(escrito(nome), "o nó {nome} aparece mesmo vazio");
     }
     // E o lado direito diz que não há o que mostrar, em vez de ficar vazio.
@@ -7585,14 +7587,17 @@ fn a_busca_do_gerenciador_filtra_as_branches() {
             BranchItem {
                 name: "main".to_owned(),
                 current: true,
+            ..BranchItem::default()
             },
             BranchItem {
                 name: "feature/busca".to_owned(),
                 current: false,
+            ..BranchItem::default()
             },
             BranchItem {
                 name: "feature/git".to_owned(),
                 current: false,
+            ..BranchItem::default()
             },
         ],
         ..GitView::default()
@@ -7742,6 +7747,7 @@ fn retrato_com_alteracoes(raiz: &Path) -> GitView {
         branches: vec![BranchItem {
             name: "main".to_owned(),
             current: true,
+        ..BranchItem::default()
         }],
         entries: vec![
             entrada("preparado.java", GitFileState::Staged),
@@ -7751,6 +7757,7 @@ fn retrato_com_alteracoes(raiz: &Path) -> GitView {
         commits: Vec::new(),
         tags: Vec::new(),
         stashes: Vec::new(),
+        remotes: Vec::new(),
         pending: None,
         message: None,
     }
@@ -8171,10 +8178,12 @@ fn retrato_com_branches() -> GitView {
             BranchItem {
                 name: "main".to_owned(),
                 current: true,
+            ..BranchItem::default()
             },
             BranchItem {
                 name: "feature/busca".to_owned(),
                 current: false,
+            ..BranchItem::default()
             },
         ],
         tags: vec!["v1.0".to_owned()],
@@ -8202,8 +8211,7 @@ fn as_tags_e_os_stashes_enchem_os_nos_que_estavam_vazios() {
             .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
     };
     assert!(escrito("Tags (1)") && escrito("Stashes (1)"));
-    // Remotes continua vazio: é fase 4, e ele não mente sobre isso.
-    assert!(escrito("Remotes"));
+    assert!(escrito("Remotes (0)"), "sem remoto configurado, o nó diz zero");
 }
 
 /// A linha de uma branch oferece trocar e fundir — menos a branch atual.
@@ -8415,4 +8423,97 @@ fn o_estado_intermediario_mostra_por_onde_sair() {
     let faixa = superficie.faixa_do_conflito_para_teste(&shell.host);
     shell.git = superficie;
     assert!(faixa.is_none());
+}
+
+/// A branch atual troca Trocar e Fundir por Pull e Push.
+///
+/// Empurrar e puxar só fazem sentido onde se está, e trocar para onde já se está
+/// não faz nada: a linha oferece o que cabe nela.
+#[test]
+fn a_branch_atual_oferece_o_remoto_no_lugar_da_troca() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        branches: vec![BranchItem {
+            name: "main".to_owned(),
+            current: true,
+            ahead: 2,
+            behind: 3,
+        }],
+        remotes: vec!["origin/main".to_owned()],
+        ..GitView::default()
+    });
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    // Abrir o nó das branches.
+    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
+    shell.pointer_down(
+        Point::new(arvore.origin.x + 10.0, arvore.origin.y + 12.0),
+        size,
+    );
+    let desenhado = shell.paint(size);
+    let escrito = |texto: &str| {
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+    };
+    assert!(escrito("Pull") && escrito("Push"), "as ações do remoto");
+    assert!(!escrito("Trocar") && !escrito("Fundir"));
+    // A contagem contra o que já foi buscado aparece na linha.
+    assert!(escrito("↑2 ↓3"), "os commits à frente e atrás");
+    assert!(escrito("Remotes (1)"), "e a branch remota entrou no nó");
+
+    // O botão da direita da branch atual é o Push.
+    shell.commands.retain(|_| false);
+    let direita = arvore.origin.x + arvore.size.width;
+    shell.pointer_down(
+        Point::new(direita - 32.0, arvore.origin.y + 12.0 + 24.0),
+        size,
+    );
+    assert!(
+        shell
+            .commands
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Push))),
+        "o clique empurra: {:?}",
+        shell.commands.iter().collect::<Vec<_>>()
+    );
+}
+
+/// O `fetch` é do repositório, e por isso mora na raiz dos remotos.
+///
+/// Buscar não é gesto de uma branch: ele traz as referências todas de uma vez, e
+/// pendurá-lo numa linha de branch faria parecer que ele busca só aquela.
+#[test]
+fn o_fetch_fica_na_raiz_dos_remotos() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        remotes: vec!["origin/main".to_owned()],
+        ..GitView::default()
+    });
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    shell.commands.retain(|_| false);
+
+    // As raízes na ordem: Branches, Tags, Remotes, Stashes — a terceira linha.
+    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
+    let direita = arvore.origin.x + arvore.size.width;
+    shell.pointer_down(
+        Point::new(direita - 32.0, arvore.origin.y + 12.0 + 48.0),
+        size,
+    );
+    assert!(
+        shell
+            .commands
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Fetch))),
+        "o botão da raiz busca as referências: {:?}",
+        shell.commands.iter().collect::<Vec<_>>()
+    );
 }

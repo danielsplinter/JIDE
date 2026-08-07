@@ -185,6 +185,16 @@ verificado que ele **falha** com o observador desligado.
 `language-java` a 12 linhas. Ela foi para 13 por causa de uma linha de `mod`, que
 é exatamente o que a fachada deve ter. O teto subiu com a razão escrita ao lado.
 
+**E o observador não mora mais aqui.** Este texto descreve onde ele nasceu, e
+nascer dentro do índice de Java estava certo: quando nasceu, era dele. A fase 4
+da `22` o tirou de lá — a crate `ide-watch`, com consumidores registrados —
+porque o débito que **esta** especificação anotou se realizou: a árvore do
+Explorer era o segundo consumidor sem dono, o Git virou o terceiro, e três é
+quando um observador deixa de ser detalhe de um indexador.
+
+O que mudou de lugar foi o registro e a espera pelo silêncio; o que não mudou é
+o resto desta seção. As regras continuam sendo as mesmas, e os 300 ms também.
+
 ## Fase 2 — A varredura em paralelo ✅
 
 Os segundos da conferência são perguntas independentes ao sistema de arquivos,

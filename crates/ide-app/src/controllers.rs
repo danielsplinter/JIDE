@@ -823,6 +823,14 @@ pub(super) struct RuntimeState {
     /// em branco todo esse tempo. Depois do primeiro quadro, o usuário vê a IDE
     /// montada e o realce chega em seguida.
     pub(super) languages_pending: bool,
+    /// O observador de arquivos do projeto aberto.
+    ///
+    /// **Um só, e da aplicação**: ele nasceu dentro do índice de Java, e a fase
+    /// 4 da `22` o trouxe para cá porque três áreas passaram a querer saber do
+    /// disco. Soltá-lo — trocando de projeto — para de observar o anterior.
+    pub(super) observador: Option<ide_watch::FileWatcher>,
+    /// Por onde os consumidores avisam, e o laço de quadros escuta.
+    pub(super) mudancas: Option<std::sync::mpsc::Receiver<crate::watching::MudancaNoDisco>>,
     /// A última escrita do Git mexeu no que está no disco.
     ///
     /// Trocar de branch reescreve milhares de arquivos, e quem está com um deles

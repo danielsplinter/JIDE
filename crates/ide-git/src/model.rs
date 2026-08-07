@@ -430,6 +430,14 @@ pub struct BranchSummary {
     pub current: bool,
     /// O upstream configurado, quando há.
     pub upstream: Option<BranchName>,
+    /// Quantos commits ela tem a mais e a menos que o upstream.
+    ///
+    /// **Vem do que já foi buscado, e não do remoto.** Sem `fetch`, ela é a
+    /// contagem contra o que se sabia da última vez — e é isso que a IDE tem
+    /// para dizer. Prometer o número de agora exigiria falar com a rede a cada
+    /// retrato.
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 #[cfg(test)]

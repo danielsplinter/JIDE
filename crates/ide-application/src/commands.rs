@@ -42,6 +42,12 @@ pub enum GitRequest {
     ContinueOperation,
     /// Desfaz a operação em curso e volta ao que era antes dela.
     AbortOperation,
+    /// Traz as referências do remoto, sem tocar em arquivo nenhum.
+    Fetch,
+    /// Traz e integra o que veio.
+    Pull,
+    /// Manda o que está aqui.
+    Push,
     /// Guarda o que está na árvore de trabalho.
     Stash,
     /// Devolve para a árvore o que estava guardado.

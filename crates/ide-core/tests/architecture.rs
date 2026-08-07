@@ -302,6 +302,7 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
                 "ide-debug-api",
                 "ide-domain",
                 "ide-git",
+                "ide-watch",
                 "ide-language-api",
                 "ide-language-host",
                 "ide-process",
@@ -380,6 +381,12 @@ fn protected_crates_only_depend_on_allowed_internal_boundaries() {
             "ide-git",
             BTreeSet::from(["ide-domain", "ide-process"]),
         ),
+        // O observador de arquivos. **Sem dependência nenhuma dentro do
+        // workspace**, e é isso que o torna infraestrutura: ele não sabe o que é
+        // fonte de Java nem o que é referência de Git — quem sabe é o
+        // consumidor, e o consumidor mora na raiz de composição. Ver a fase 4
+        // da `22`.
+        ("ide-watch", BTreeSet::new()),
         (
             "language-markup",
             BTreeSet::from(["ide-domain", "ide-language-api"]),
@@ -1117,7 +1124,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // consolidação que não é linguagem, e o motivo é o mesmo que valeu para
     // elas — uma capacidade com adapter próprio, atrás de traits, que ninguém
     // além da raiz de composição nomeia.
-    assert_eq!(crates.len(), 19, "a refatoração não deve pulverizar crates");
+    // 20: as 19 anteriores mais `ide-watch`. Ela **não é capacidade nova** —
+    // o observador já existia dentro de `language-java` —, é uma que mudou de
+    // dono: três áreas passaram a querer saber do disco, e o registro no sistema
+    // operacional tem de ser um só. A `21` já anotava o segundo consumidor sem
+    // dono; o Git foi o terceiro.
+    assert_eq!(crates.len(), 20, "a refatoração não deve pulverizar crates");
     // 51: as 46 anteriores mais cinco, que é o que Angular custou no grafo.
     //
     // **Duas de produção** — `ide-app -> language-angular` e
@@ -1135,9 +1147,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // O que estas três não incluem é o que importa: `ide-ui` **não** entrou no
     // grafo do Git. A tela recebe um `GitView` de `String` e `usize`, e por isso
     // a fronteira do domínio para na raiz de composição.
+    // De 58 para 59: `ide-app -> ide-watch`, e só ela. `ide-watch` não alcança
+    // nada, e `language-java` **perdeu** o `notify` — a dependência externa que
+    // ela carregava só pelo observador.
     assert!(
-        edge_count <= 58,
-        "o grafo interno ultrapassou a linha final de 58 arestas: {edge_count}"
+        edge_count <= 59,
+        "o grafo interno ultrapassou a linha final de 59 arestas: {edge_count}"
     );
     // O fan-out da raiz de composição **cresce com o número de linguagens**, e
     // é para isso que ela existe: é o único lugar que pode nomear todas. 16 é
@@ -1149,9 +1164,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
     // merece a frase: a raiz é o único lugar que pode nomear o adapter de Git,
     // e é lá que o domínio dele vira o `GitView` que a tela recebe. Fosse em
     // qualquer outro lugar, seria a fronteira da `22` vazando.
+    // 19 é 18 mais `ide-watch`. Também não é linguagem nova, e também merece a
+    // frase: o observador é o **único** lugar que pode registrar consumidores de
+    // áreas que não se conhecem, e esse lugar é a raiz.
     assert!(
-        app_fan_out <= 18,
-        "ide-app ultrapassou o fan-out final de 18: {app_fan_out}"
+        app_fan_out <= 19,
+        "ide-app ultrapassou o fan-out final de 19: {app_fan_out}"
     );
     // Era `>= 13`, absoluto, e a fase 8 mostrou que a forma estava errada: o
     // número caiu para 11 sozinho quando cinco crates viraram módulos, sem que
@@ -1174,7 +1192,13 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // mesma coisa que sempre contou: quantas peças a raiz precisa declarar
         // para montar a IDE. Uma peça que não é linguagem deve ser rara, e é
         // esta guarda que torna a próxima visível.
-        ("crates/ide-app/src/main.rs", 24),
+        //
+        // De 24 para 25: `watching`, os consumidores do observador. É a segunda
+        // peça que não é linguagem, e ela está aqui pelo motivo que a fase 4 da
+        // `22` deu: o observador é um só, e quem se registra nele são áreas que
+        // não se conhecem — o índice e o Git. O único lugar que conhece as duas
+        // é esta raiz.
+        ("crates/ide-app/src/main.rs", 25),
         // 31 desde a fase 2 da decomposição do shell: o módulo `text` reúne
         // funções que viviam duplicadas no shell e no editor. O teto existe para
         // a raiz continuar um manifesto, e uma linha de `mod` é o que ela é.
@@ -1234,12 +1258,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // elas estão aqui **porque só a raiz de composição pode nomear o
         // `ide-git`** — é a mesma razão que põe o registro das linguagens neste
         // arquivo. O teto sobe; a dívida 1 da `26` continua aberta.
-        // De 5 483 para 5 968: a fase 1 da `22` — as três escritas, a
-        // diferença de um arquivo e a comparação. São 485 linhas — as fases 2 e 3 trouxeram o commit, a página do histórico com as faixas do grafo, e as seis escritas que mexem em branch, fusão e `stash` —, e estão aqui
+        // De 5 483 para 6 066: a fase 1 da `22` — as três escritas, a
+        // diferença de um arquivo e a comparação. São 583 linhas — as fases 2, 3 e 4 trouxeram o commit, a página do histórico com as faixas do grafo, e as seis escritas que mexem em branch, fusão e `stash`, o remoto e a reação ao que muda no disco —, e estão aqui
         // pelo mesmo motivo das anteriores: **só a raiz de composição pode
         // nomear o `ide-git`**. A dívida 1 da `26` continua aberta, e este
         // arquivo continua sendo o primeiro candidato a ser partido.
-        ("crates/ide-app/src/native_ide.rs", 5_968),
+        ("crates/ide-app/src/native_ide.rs", 6_066),
         // De 7 269 para 7 315: o teste que a fase 4 da `18` pedia — o copiado do
         // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
         // primeira adição depois de nascer**, que é o que ela existe para fazer:
@@ -1287,7 +1311,13 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // de oito mil e quatrocentas linhas com este commit, e o teto anterior
         // já dizia que não subiria mais sem ele ser partido.** Subiu; a dívida
         // 4(b) da `26` deixou de ser adiável.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 8_418),
+        //
+        // De 8 418 para 8 519: a fase 4 — a branch atual trocando as ações pelas
+        // do remoto, a contagem à frente e atrás, e o `fetch` na raiz dos
+        // remotos. **Cem linhas, e é a última vez**: o item 4(b) do plano da
+        // `26` — partir este arquivo por assunto — passou de dívida a
+        // impedimento no commit anterior, e continua sendo o próximo trabalho.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 8_519),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
@@ -1576,7 +1606,13 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// no caminho de um quadro. A troca por uma marca obrigatória ao lado de
     /// cada chamada, que aquela dívida já propunha, passou de ideia a próxima
     /// coisa a fazer.*
-    const TETO: usize = 51;
+    /// *De 51 para 56: a fase 4 — `fetch`, `pull` e `push` na mesma função das
+    /// outras escritas, mais as duas leituras que o retrato ganhou (as branches
+    /// remotas e a contagem) e o `file_changed` do que mudou no disco. **Todas
+    /// em thread própria**; a do disco é a que mais precisa disso: um `checkout`
+    /// traz milhares de arquivos, e reindexar um por um no quadro pararia a
+    /// janela pelo tempo todo.*
+    const TETO: usize = 56;
 
     assert!(
         chamadas.len() <= TETO,

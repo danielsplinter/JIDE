@@ -24,6 +24,7 @@ ide-debug-api = { path = "../ide-debug-api" }
 ide-project = { path = "../ide-project" }
 ide-domain = { path = "../ide-domain" }
 ide-git = { path = "../ide-git" }
+ide-watch = { path = "../ide-watch" }
 ide-language-api = { path = "../ide-language-api" }
 ide-language-host = { path = "../ide-language-host" }
 ide-toolchain-api = { path = "../ide-toolchain-api" }

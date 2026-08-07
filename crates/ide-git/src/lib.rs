@@ -10,9 +10,10 @@
 //!
 //! # O que existe hoje
 //!
-//! A **fase 3**: tudo o que as anteriores tinham — `status`, a diferença, as
-//! escritas por caminho, o histórico e o `commit` — mais trocar e criar branch,
-//! fundir, o estado entre commits (continuar e abortar), as tags e o `stash`.
+//! A **fase 4**: tudo o que as anteriores tinham — `status`, a diferença, as
+//! escritas por caminho, o histórico, o `commit`, as branches, a fusão, as tags
+//! e o `stash` — mais o remoto: `fetch`, `pull`, `push`, as branches remotas e
+//! a contagem de commits à frente e atrás.
 //!
 //! A granularidade continua sendo **por arquivo**: preparar por trecho ou por
 //! linha é o que a `22` deixou anotado para depois das fases. E a resolução de
@@ -26,6 +27,7 @@ pub mod error;
 pub mod history;
 pub mod integration;
 pub mod model;
+pub mod remotes;
 pub mod repository;
 pub mod tags;
 pub mod working_tree;
@@ -36,6 +38,7 @@ use std::sync::Arc;
 pub use branches::BranchService;
 pub use history::HistoryService;
 pub use integration::IntegrationService;
+pub use remotes::RemoteService;
 pub use tags::TagService;
 pub use error::{GitError, GitResult};
 pub use model::{
@@ -88,6 +91,7 @@ pub fn open(path: &Path) -> GitResult<Repository> {
         Arc::clone(&adapter) as Arc<dyn BranchService>,
         Arc::clone(&adapter) as Arc<dyn HistoryService>,
         Arc::clone(&adapter) as Arc<dyn IntegrationService>,
-        adapter as Arc<dyn TagService>,
+        Arc::clone(&adapter) as Arc<dyn TagService>,
+        adapter as Arc<dyn RemoteService>,
     ))
 }
