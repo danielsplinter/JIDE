@@ -62,6 +62,20 @@ descendo — não subindo — a cada decomposição.
 avisasse**, que é exatamente o que a guarda vem impedir. O mesmo teto foi posto
 em `ide_shell/tests.rs`, com 7 269 linhas, pelo mesmo motivo.
 
+**O de `tests.rs` acabou, e não por ter sido respeitado.** Ele subiu seis vezes —
+7 269, 7 315, 7 333, 7 405, 7 434, 7 499… até 8 519 —, e nas duas últimas o
+próprio comentário do teto já dizia que ele não subiria de novo sem o arquivo ser
+partido. Foi partido: os 220 testes viraram dez arquivos por assunto — o
+Explorer, o texto, a divisão, as buscas, a completação, o terminal, o Git, a
+depuração, as janelas e a moldura —, com os ajudantes num `mod.rs` que todos
+alcançam.
+
+**E o que guarda o resultado mudou de forma.** No lugar do número há uma regra:
+nenhum arquivo daquela pasta passa de 1 400 linhas. Um teto que só sobe registra
+o que foi feito; um limite por arquivo só se respeita cortando de novo. É a
+diferença que a dívida 2 desta mesma especificação vem cobrando do teto de
+`block_on`, e aqui ela já está paga.
+
 A dívida continua aberta: o teto não decompõe nada. Ele só faz o crescimento
 parar de ser silencioso, e o número agora só pode descer sem alguém assinar
 embaixo.

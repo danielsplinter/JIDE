@@ -729,6 +729,14 @@ fn neutral_ui_sources(root: &Path) -> String {
         for entrada in entradas.flatten() {
             let caminho = entrada.path();
             if caminho.is_dir() {
+                // Uma pasta chamada `tests` é teste inteira. Ela apareceu quando
+                // os testes do shell foram partidos por assunto, e sem esta
+                // linha o guarda leria `janelas.rs` como produção — e acusaria o
+                // `java.package` que um teste **precisa** nomear para verificar
+                // o catálogo.
+                if caminho.file_name().is_some_and(|nome| nome == "tests") {
+                    continue;
+                }
                 coletar(&caminho, destino);
                 continue;
             }
@@ -1285,40 +1293,28 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // a da saída ficam abertas ao mesmo tempo, cada uma com o seu texto, e
         // `Esc` fecha só a que tem o foco. Sessenta e cinco linhas de um teste
         // novo, porque o defeito era exatamente a convivência.
-        //
-        // De 7 499 para 7 729: a fase 0 do gerenciador de Git — o botão que
-        // abre e fecha, os quatro nós, o filtro da busca, a barra de estado e a
-        // pasta que não é repositório. Seis testes, e é a última vez que este
-        // teto sobe por uma tela nova sem que o arquivo seja partido: o item
-        // 4(b) do plano da `26` é justamente parti-lo por assunto.
-        //
-        // De 7 729 para 7 937: a fase 1 do gerenciador — os três painéis
-        // empilhados, a ação de linha que pede a escrita **e** o retrato, o
-        // clique no nome que abre a comparação, e a margem do editor. Quatro
-        // testes, e o arquivo passou de sete mil e novecentas linhas: partir
-        // `tests.rs` por assunto — o item 4(b) do plano da `26` — deixou de ser
-        // dívida confortável.
-        //
-        // De 7 937 para 8 161: a fase 2 — a aba `history` pedindo a primeira
-        // página, a tabela com as cinco colunas e o grafo, o commit que limpa a
-        // caixa e recarrega as duas listas, e as duas caixas da janela que não
-        // se misturam. **Este teto não sobe mais sem o arquivo ser partido**: o
-        // item 4(b) do plano da `26` passou de dívida a impedimento.
-        //
-        // De 8 161 para 8 418: a fase 3 — os nós que deixaram de ser promessa,
-        // as ações de branch, a caixa que cria sem se misturar com a busca, e o
-        // estado intermediário com os dois botões de saída. **O arquivo passou
-        // de oito mil e quatrocentas linhas com este commit, e o teto anterior
-        // já dizia que não subiria mais sem ele ser partido.** Subiu; a dívida
-        // 4(b) da `26` deixou de ser adiável.
-        //
-        // De 8 418 para 8 519: a fase 4 — a branch atual trocando as ações pelas
-        // do remoto, a contagem à frente e atrás, e o `fetch` na raiz dos
-        // remotos. **Cem linhas, e é a última vez**: o item 4(b) do plano da
-        // `26` — partir este arquivo por assunto — passou de dívida a
-        // impedimento no commit anterior, e continua sendo o próximo trabalho.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 8_519),
     ];
+    // **Os testes do shell deixaram de ter um teto e passaram a ter uma regra.**
+    //
+    // Eles moravam num arquivo só, que chegou a 8 519 linhas com o teto subindo
+    // seis vezes — a última com a frase de que não subiria mais sem o arquivo
+    // ser partido. Foi partido por assunto, e o que guarda o resultado deixou de
+    // ser um número que só sobe: é um limite por arquivo, e a única forma de
+    // respeitá-lo é cortar de novo. É o item 4(b) do plano da `26`.
+    //
+    // 1 400 é folga sobre o maior de hoje, que tem 1 328.
+    for arquivo in rust_sources(&root.join("crates/ide-ui/src/ide_shell/tests")) {
+        let Ok(fonte) = fs::read_to_string(&arquivo) else {
+            continue;
+        };
+        let relativo = arquivo.strip_prefix(&root).unwrap_or(&arquivo);
+        assert!(
+            fonte.lines().count() <= 1_400,
+            "{} passou de 1 400 linhas: parta o assunto, e nao o teto",
+            relativo.display()
+        );
+    }
+
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
             .unwrap_or_else(|error| panic!("não foi possível ler {relative}: {error}"));
