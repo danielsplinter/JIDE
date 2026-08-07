@@ -11,7 +11,7 @@ use crate::debugging::DebugVariableView;
 use crate::ide_shell::inspection::InspectionGeometry;
 use crate::ide_shell::settings::SettingsDialogGeometry;
 use crate::search::{ContentSearchHit, TypeSearchHit};
-use ide_application::{NewItemRequest, NewItemTemplate};
+use ide_application::{GitRequest, NewItemRequest, NewItemTemplate};
 use ide_domain::{AccessorCandidate, AccessorPlan, Location, SyntaxHighlightKind, ToolRole};
 use ui_editor::TokenKind;
 
@@ -7519,7 +7519,7 @@ fn o_botao_do_git_abre_o_gerenciador_e_pede_o_retrato() {
         shell
             .commands
             .iter()
-            .any(|comando| matches!(comando, ApplicationCommand::RefreshGit)),
+            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Refresh))),
         "abrir pergunta ao repositório de novo"
     );
 
@@ -7538,12 +7538,10 @@ fn o_painel_da_esquerda_tem_os_quatro_nos() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let _ = shell.paint(size);
+    // Nada alterado: este teste é sobre os quatro nós, e o lado direito com
+    // três painéis tem teste próprio.
     shell.set_git_view(GitView {
         head: Some("main".to_owned()),
-        changed: 3,
-        staged: 1,
-        modified: 1,
-        untracked: 1,
         branches: vec![
             BranchItem {
                 name: "main".to_owned(),
@@ -7554,7 +7552,7 @@ fn o_painel_da_esquerda_tem_os_quatro_nos() {
                 current: false,
             },
         ],
-        message: None,
+        ..GitView::default()
     });
     shell.toggle_git();
     let desenhado = shell.paint(size);
@@ -7568,8 +7566,8 @@ fn o_painel_da_esquerda_tem_os_quatro_nos() {
     for nome in ["Tags", "Remotes", "Stashes"] {
         assert!(escrito(nome), "o nó {nome} aparece mesmo vazio");
     }
-    // O lado direito mostra a contagem por estado, que é o que a fase 0 tem.
-    assert!(escrito("Preparados: 1") && escrito("Não rastreados: 1"));
+    // E o lado direito diz que não há o que mostrar, em vez de ficar vazio.
+    assert!(escrito("Nada mudou desde o último commit"));
 }
 
 /// A busca filtra as branches, e some com o nó que ficou sem nenhuma.
@@ -7726,4 +7724,214 @@ fn a_divisa_do_gerenciador_se_arrasta() {
     // teve.
     shell.pointer_up();
     assert!(!shell.git_divider_hover(Point::new(10.0, 10.0)));
+}
+
+/// Um retrato com arquivos alterados, para os testes da aba `status`.
+fn retrato_com_alteracoes(raiz: &Path) -> GitView {
+    let entrada = |nome: &str, state: GitFileState| GitEntry {
+        path: raiz.join(nome),
+        label: nome.to_owned(),
+        state,
+    };
+    GitView {
+        head: Some("main".to_owned()),
+        changed: 3,
+        staged: 1,
+        modified: 1,
+        untracked: 1,
+        branches: vec![BranchItem {
+            name: "main".to_owned(),
+            current: true,
+        }],
+        entries: vec![
+            entrada("preparado.java", GitFileState::Staged),
+            entrada("alterado.java", GitFileState::Modified),
+            entrada("solto.java", GitFileState::Untracked),
+        ],
+        message: None,
+    }
+}
+
+/// A aba `status` empilha três painéis, e cada um mostra os arquivos dele.
+///
+/// A divisão dos três não é da tela: é a que o `--porcelain=v2` devolve, e a que
+/// decide o que cada ação faz na linha. Um painel só, com tudo junto, obrigaria
+/// quem olha a descobrir o estado de cada arquivo pelo ícone.
+#[test]
+fn a_aba_status_empilha_os_tres_paineis() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let desenhado = shell.paint(size);
+    let escrito = |texto: &str| {
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+    };
+
+    for titulo in ["Preparados (1)", "Alterados (1)", "Não rastreados (1)"] {
+        assert!(escrito(titulo), "falta o painel {titulo}");
+    }
+    for arquivo in ["preparado.java", "alterado.java", "solto.java"] {
+        assert!(escrito(arquivo), "falta o arquivo {arquivo}");
+    }
+    // As ações de cada painel, que não são as mesmas.
+    assert!(escrito("Despreparar") && escrito("Preparar") && escrito("Descartar"));
+
+    // Os três ficam **um embaixo do outro**, e nessa ordem.
+    let context = shell.layout_context();
+    let mut superficie = std::mem::take(&mut shell.git);
+    let faixas = superficie.faixas_do_status(&shell.host, &context);
+    shell.git = superficie;
+    assert!(
+        faixas[0].origin.y < faixas[1].origin.y && faixas[1].origin.y < faixas[2].origin.y,
+        "empilhados de cima para baixo: {faixas:?}"
+    );
+}
+
+/// A ação de uma linha vira pedido, e o pedido vem com o retrato atrás.
+///
+/// **Os dois juntos, sempre.** Preparar um arquivo e deixar a lista como estava
+/// faria quem preparou ver a linha continuar em "alterados" — e desfazer o que
+/// acabou de fazer. É o critério da fase 1 escrito como teste.
+#[test]
+fn preparar_uma_linha_pede_a_escrita_e_o_retrato_de_novo() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    shell.commands.retain(|_| false);
+
+    // O botão da direita do painel do meio: preparar o arquivo alterado.
+    let context = shell.layout_context();
+    let mut superficie = std::mem::take(&mut shell.git);
+    let faixas = superficie.faixas_do_status(&shell.host, &context);
+    shell.git = superficie;
+    let faixa = faixas[1];
+    let direita = faixa.origin.x + faixa.size.width;
+    let primeira_linha = faixa.origin.y + 20.0 + 12.0;
+    // "Preparar" é o primeiro dos dois botões: ele fica antes de "Descartar".
+    shell.pointer_down(Point::new(direita - 92.0 - 46.0, primeira_linha), size);
+
+    let pedidos: Vec<ApplicationCommand> = shell.commands.iter().cloned().collect();
+    assert!(
+        pedidos
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Stage(caminho)) if caminho.ends_with("alterado.java"))),
+        "o clique pede a preparação: {pedidos:?}"
+    );
+    assert!(
+        pedidos
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Refresh))),
+        "e pede o retrato de novo, senão a lista fica velha: {pedidos:?}"
+    );
+}
+
+/// Clicar no nome do arquivo abre a comparação, e não uma ação.
+///
+/// A coluna decide qual das três coisas o clique foi. Sem essa separação, quem
+/// quisesse ver o que mudou acabaria preparando o arquivo por engano — e
+/// preparar por engano é o começo de um commit que ninguém revisou.
+#[test]
+fn clicar_no_nome_do_arquivo_pede_a_comparacao() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    shell.commands.retain(|_| false);
+
+    let context = shell.layout_context();
+    let mut superficie = std::mem::take(&mut shell.git);
+    let faixas = superficie.faixas_do_status(&shell.host, &context);
+    shell.git = superficie;
+    let faixa = faixas[1];
+    shell.pointer_down(
+        Point::new(faixa.origin.x + 30.0, faixa.origin.y + 20.0 + 12.0),
+        size,
+    );
+
+    let pedidos: Vec<ApplicationCommand> = shell.commands.iter().cloned().collect();
+    assert!(
+        pedidos.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::ShowDiff { path, staged: false })
+                if path.ends_with("alterado.java")
+        )),
+        "o nome abre a diferença: {pedidos:?}"
+    );
+    assert!(
+        !pedidos
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Stage(_)))),
+        "e não prepara nada"
+    );
+}
+
+/// A margem do editor mostra o que mudou desde o commit.
+///
+/// E **não sobrepõe** o que já está marcado: um ponto de parada numa linha
+/// alterada continua sendo um ponto de parada, que é o que a pessoa pôs ali. A
+/// marca de versão é informação de fundo.
+#[test]
+fn a_margem_marca_as_linhas_que_o_git_diz_que_mudaram() {
+    let root = std::env::temp_dir().join(format!("er-ide-margem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(std::fs::create_dir_all(&root).is_ok());
+    let arquivo = root.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido {\n  int total;\n}\n").is_ok());
+    let Ok(mut shell) = IdeShell::open(&root) else {
+        panic!("workspace de teste não abriu");
+    };
+    let Ok(_) = shell.open_file(&arquivo) else {
+        panic!("arquivo de teste não abriu");
+    };
+    shell.set_git_line_marks(
+        arquivo.clone(),
+        vec![(1, GitLineChange::Modified), (2, GitLineChange::Added)],
+    );
+
+    let decoracoes = shell.editor_decorations(&arquivo);
+    assert_eq!(
+        decoracoes
+            .iter()
+            .filter_map(|item| item.mark.map(|mark| (item.line, mark)))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, GutterMark::LineModified),
+            (2, GutterMark::LineAdded)
+        ]
+    );
+
+    // O ponto de parada ganha da marca de versão na mesma linha.
+    shell.toggle_breakpoint(&arquivo, 1);
+    let decoracoes = shell.editor_decorations(&arquivo);
+    assert_eq!(
+        decoracoes
+            .iter()
+            .find(|item| item.line == 1)
+            .and_then(|item| item.mark),
+        Some(GutterMark::PendingBreakpoint),
+        "o ponto de parada continua visível"
+    );
+
+    // Retrato limpo apaga as marcas: commitar deixa o arquivo igual ao commit, e
+    // uma margem riscada estaria contando o trabalho de antes.
+    shell.set_git_line_marks(arquivo.clone(), Vec::new());
+    assert!(
+        shell
+            .editor_decorations(&arquivo)
+            .iter()
+            .all(|item| item.mark != Some(GutterMark::LineAdded)),
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

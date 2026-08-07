@@ -7,6 +7,27 @@ use thiserror::Error;
 
 use crate::TaskId;
 
+/// O que se pede ao repositório.
+///
+/// A tela não fala com o Git: ela pede, e quem responde é a aplicação, fora da
+/// linha de execução da interface. Ver a `22`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitRequest {
+    /// Pede o retrato do repositório de novo.
+    Refresh,
+    Stage(std::path::PathBuf),
+    Unstage(std::path::PathBuf),
+    Discard(std::path::PathBuf),
+    /// Abre a comparação de um arquivo: o commitado à esquerda, o de agora à
+    /// direita.
+    ///
+    /// `staged` diz de que lado é a pergunta — o que está preparado contra o
+    /// último commit, ou o que mudou e ainda não foi preparado. São duas
+    /// diferenças distintas sobre o mesmo arquivo, e confundi-las mostra a
+    /// errada para quem já preparou parte do trabalho.
+    ShowDiff { path: std::path::PathBuf, staged: bool },
+}
+
 /// Intenções que atravessam a fronteira entre apresentação e aplicação.
 ///
 /// A interface apenas descreve o pedido. Quem conhece providers, adapters,
@@ -34,11 +55,13 @@ pub enum ApplicationCommand {
     /// alguém escolher, a lista pode ter sido reordenada por outra janela, e
     /// uma posição passaria a apontar para outro projeto.
     OpenRecentProject(std::path::PathBuf),
-    /// Pede o retrato do repositório de novo.
+    /// O que a tela pede ao repositório.
     ///
-    /// A tela não fala com o Git: ela pede, e quem responde é a aplicação, fora
-    /// da linha de execução da interface. Ver a `22`.
-    RefreshGit,
+    /// Um comando só com um pedido dentro, e não um comando por ação: é o que a
+    /// `22` desenhou, e o motivo é que o painel emite `GitRequest` sem conhecer
+    /// serviço nenhum. Acrescentar `Commit` na fase 2 é uma variante ali, e não
+    /// mais uma no barramento inteiro.
+    Git(GitRequest),
     OpenSettings,
     OpenToolchainSettings,
     /// Abre o seletor de pasta para apontar uma instalação.

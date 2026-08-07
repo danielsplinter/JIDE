@@ -177,6 +177,27 @@ impl IdeShell {
         {
             destacar(&mut decorations, line);
         }
+        // O que o Git diz que mudou neste arquivo. Vem por último e **não
+        // sobrepõe** o que já está marcado: um ponto de parada numa linha
+        // alterada continua sendo um ponto de parada, que é o que a pessoa pôs
+        // ali. A marca de versão é informação de fundo.
+        for (linha, mudanca) in self.git_line_marks(path) {
+            let mark = match mudanca {
+                GitLineChange::Added => GutterMark::LineAdded,
+                GitLineChange::Modified => GutterMark::LineModified,
+                GitLineChange::Removed => GutterMark::LineRemoved,
+            };
+            if decorations
+                .iter()
+                .any(|item| item.line == *linha && item.mark.is_some())
+            {
+                continue;
+            }
+            match decorations.iter_mut().find(|item| item.line == *linha) {
+                Some(existente) => existente.mark = Some(mark),
+                None => decorations.push(LineDecoration::mark(*linha, mark)),
+            }
+        }
         decorations
     }
 

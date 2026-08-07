@@ -10,9 +10,10 @@
 //!
 //! # O que existe hoje
 //!
-//! A **fase 0**: descobrir, abrir, `status` e a lista de branches locais. Nada
-//! de escrita. É pouco de propósito — é a fase que prova que a fronteira se
-//! sustenta, com o menor código possível atrás dela.
+//! A **fase 1**: descobrir, abrir, `status`, a lista de branches locais, a
+//! diferença de um arquivo, e as três escritas por caminho — preparar,
+//! despreparar e descartar. A granularidade é **por arquivo**: preparar por
+//! trecho ou por linha é o que a `22` deixou anotado para depois das fases.
 
 mod adapters;
 
@@ -28,8 +29,8 @@ use std::sync::Arc;
 pub use branches::BranchService;
 pub use error::{GitError, GitResult};
 pub use model::{
-    BranchName, BranchSummary, CommitId, FileState, Head, RemoteName, RepositoryStatus,
-    StatusEntry,
+    BranchName, BranchSummary, CommitId, DiffLine, DiffLineKind, DiffSide, FileDiff, FileState,
+    Head, Hunk, LineChange, RemoteName, RepositoryStatus, StatusEntry,
 };
 pub use repository::Repository;
 pub use working_tree::WorkingTreeService;

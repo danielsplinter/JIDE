@@ -255,6 +255,14 @@ pub(super) struct LanguageController {
     /// `22` já dizia que ele é I/O caro. Perguntar na chamada seria a sétima vez
     /// do defeito que a `25` caçou cinco vezes e a completação repetiu.
     pub(super) git: SearchController<ide_ui::GitView>,
+    /// O que a última escrita do Git respondeu, para a barra de estado.
+    pub(super) git_write: SearchController<String>,
+    /// A comparação pedida: o texto de então e o que mudou.
+    ///
+    /// Separada do retrato porque são duas perguntas com tempos diferentes —
+    /// uma responde a cada ação, a outra a cada clique num arquivo — e um
+    /// controlador só faria a segunda cancelar a primeira.
+    pub(super) git_diff: SearchController<GitDiffOutcome>,
     /// A navegação em curso. Ver `navigate_to_definition`.
     pub(super) navigation: SearchController<NavigationOutcome>,
     /// Os usos de um nome, procurados fora da thread da interface.
@@ -773,6 +781,21 @@ impl<T> SearchController<T> {
             }
         }
     }
+}
+
+/// O que a comparação de um arquivo devolve.
+pub(super) struct GitDiffOutcome {
+    pub(super) path: PathBuf,
+    /// O conteúdo do arquivo no último commit.
+    pub(super) committed: String,
+    /// As linhas mudadas, para a margem do editor.
+    pub(super) marks: Vec<(usize, ide_ui::GitLineChange)>,
+    /// Se é para abrir a comparação lado a lado, ou só marcar a margem.
+    ///
+    /// A margem é pedida sozinha quando um arquivo é aberto: quem abre um
+    /// arquivo quer ver o arquivo, e não a comparação.
+    pub(super) comparar: bool,
+    pub(super) error: Option<String>,
 }
 
 #[derive(Default)]

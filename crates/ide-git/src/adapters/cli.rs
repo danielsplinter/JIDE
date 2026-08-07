@@ -18,6 +18,7 @@
 //!   subsistema console abre uma janela preta ao lado da IDE.
 
 use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
 use std::process::Stdio;
 
 use async_trait::async_trait;
@@ -27,7 +28,8 @@ use tokio::process::Command;
 use crate::branches::BranchService;
 use crate::error::{GitError, GitResult};
 use crate::model::{
-    BranchName, BranchSummary, CommitId, FileState, Head, RepositoryStatus, StatusEntry,
+    BranchName, BranchSummary, CommitId, DiffLine, DiffLineKind, DiffSide, FileDiff, FileState,
+    Head, Hunk, RepositoryStatus, StatusEntry,
 };
 use crate::working_tree::WorkingTreeService;
 
@@ -47,6 +49,16 @@ impl CliGit {
     /// `status` pela metade não devolve nada a ninguém, e o que o token evita
     /// aqui é a resposta que já não interessa continuar sendo processada.
     async fn run(&self, args: &[&str], cancel: &CancellationToken) -> GitResult<Vec<u8>> {
+        let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+        self.run_os(&args, cancel).await
+    }
+
+    /// O mesmo, para quem tem caminho em vez de texto.
+    ///
+    /// Caminho no Windows não é UTF-8, e converter com perda faria um arquivo
+    /// alterado virar um arquivo que o `git` não acha. É a armadilha que a `22`
+    /// registrou nos riscos, e o `OsStr` é o que a evita.
+    async fn run_os(&self, args: &[&OsStr], cancel: &CancellationToken) -> GitResult<Vec<u8>> {
         if cancel.is_cancelled() {
             return Err(GitError::Cancelled);
         }
@@ -77,6 +89,34 @@ impl CliGit {
             return Ok(saida.stdout);
         }
         Err(classificar(&String::from_utf8_lossy(&saida.stderr)))
+    }
+}
+
+impl CliGit {
+    /// O caminho como o `git` o espera: relativo à raiz do repositório.
+    ///
+    /// Absoluto também funciona na maioria dos comandos, mas não em todos — o
+    /// `show` de uma revisão não aceita —, e um caminho só evita descobrir isso
+    /// comando a comando.
+    fn relativo(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_path_buf()
+    }
+
+    /// Roda um comando de escrita sobre uma lista de caminhos.
+    ///
+    /// Sem token: cancelar uma escrita pela metade deixaria o repositório num
+    /// estado que ninguém pediu. Ver o contrato em `working_tree`.
+    async fn escrever(&self, args: &[&str], paths: &[PathBuf]) -> GitResult<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let relativos: Vec<PathBuf> = paths.iter().map(|path| self.relativo(path)).collect();
+        let mut todos: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+        todos.extend(relativos.iter().map(|path| path.as_os_str()));
+        let vazio = CancellationToken::new();
+        self.run_os(&todos, &vazio).await.map(|_| ())
     }
 }
 
@@ -122,6 +162,60 @@ impl WorkingTreeService for CliGit {
             )
             .await?;
         Ok(ler_status(&String::from_utf8_lossy(&saida), &self.root))
+    }
+
+    async fn diff(
+        &self,
+        path: &Path,
+        side: DiffSide,
+        cancel: &CancellationToken,
+    ) -> GitResult<FileDiff> {
+        let relativo = self.relativo(path);
+        let mut args = vec!["--no-optional-locks", "diff", "--no-color", "--unified=3"];
+        if side == DiffSide::Index {
+            args.push("--cached");
+        }
+        args.push("--");
+        let Some(relativo) = relativo.to_str() else {
+            return Err(GitError::Backend {
+                detail: "caminho que não é UTF-8".to_owned(),
+            });
+        };
+        args.push(relativo);
+        let saida = self.run(&args, cancel).await?;
+        let mut diff = ler_diff(&String::from_utf8_lossy(&saida));
+        diff.path = path.to_path_buf();
+        Ok(diff)
+    }
+
+    async fn committed_text(&self, path: &Path, cancel: &CancellationToken) -> GitResult<String> {
+        let relativo = self.relativo(path);
+        let Some(relativo) = relativo.to_str() else {
+            return Err(GitError::Backend {
+                detail: "caminho que não é UTF-8".to_owned(),
+            });
+        };
+        // As barras são invertidas de propósito: `git show` fala revisão e
+        // caminho no vocabulário dele, e no Windows o separador do sistema não
+        // é o que ele espera depois dos dois-pontos.
+        let alvo = format!("HEAD:{}", relativo.replace('\\', "/"));
+        let saida = self.run(&["--no-optional-locks", "show", &alvo], cancel).await?;
+        Ok(String::from_utf8_lossy(&saida).into_owned())
+    }
+
+    async fn stage(&self, paths: &[PathBuf]) -> GitResult<()> {
+        self.escrever(&["add", "--"], paths).await
+    }
+
+    async fn unstage(&self, paths: &[PathBuf]) -> GitResult<()> {
+        // `restore --staged` e não `reset HEAD`: num repositório sem commit
+        // nenhum, `HEAD` não existe e o segundo falha com uma mensagem sobre
+        // revisão desconhecida, que não é o que aconteceu.
+        self.escrever(&["restore", "--staged", "--"], paths).await
+    }
+
+    async fn discard(&self, paths: &[PathBuf]) -> GitResult<()> {
+        self.escrever(&["restore", "--"], paths).await
     }
 }
 
@@ -282,9 +376,89 @@ fn montar_head(nome: Option<String>, oid: Option<String>) -> Option<Head> {
     Some(Head::Branch(BranchName(nome)))
 }
 
+/// Lê um diff unificado: os cabeçalhos `@@` e as linhas de cada trecho.
+///
+/// O que **não** se lê é tão importante quanto o que se lê: `diff --git`,
+/// `index`, `---` e `+++` são cabeçalho de arquivo, e uma linha começada por
+/// `+` dentro deles seria `+++ b/arquivo` virando linha acrescentada. Por isso
+/// nada conta antes do primeiro `@@`.
+fn ler_diff(saida: &str) -> FileDiff {
+    let mut diff = FileDiff::default();
+    let mut atual: Option<Hunk> = None;
+    let mut proxima_linha = 0usize;
+    for linha in saida.lines() {
+        if let Some(cabecalho) = linha.strip_prefix("@@") {
+            if let Some(hunk) = atual.take() {
+                diff.hunks.push(hunk);
+            }
+            let (velho, novo) = numeros_do_cabecalho(cabecalho);
+            proxima_linha = novo;
+            atual = Some(Hunk {
+                old_start: velho,
+                new_start: novo,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        let Some(hunk) = atual.as_mut() else {
+            continue;
+        };
+        // "\ No newline at end of file" não é linha de conteúdo.
+        if linha.starts_with('\\') {
+            continue;
+        }
+        let (kind, texto) = match linha.as_bytes().first() {
+            Some(b'+') => (DiffLineKind::Added, &linha[1..]),
+            Some(b'-') => (DiffLineKind::Removed, &linha[1..]),
+            Some(b' ') => (DiffLineKind::Context, &linha[1..]),
+            // Linha vazia num diff é contexto vazio: o `git` corta o espaço à
+            // direita, e descartá-la desalinharia tudo abaixo dela.
+            None => (DiffLineKind::Context, ""),
+            _ => continue,
+        };
+        let new_line = (kind != DiffLineKind::Removed).then(|| {
+            let numero = proxima_linha;
+            proxima_linha += 1;
+            numero
+        });
+        hunk.lines.push(DiffLine {
+            kind,
+            text: texto.to_owned(),
+            new_line,
+        });
+    }
+    if let Some(hunk) = atual {
+        diff.hunks.push(hunk);
+    }
+    diff
+}
+
+/// As duas primeiras linhas do cabeçalho `@@ -a,b +c,d @@`, contadas de zero.
+fn numeros_do_cabecalho(cabecalho: &str) -> (usize, usize) {
+    let mut velho = 0;
+    let mut novo = 0;
+    for campo in cabecalho.split_whitespace() {
+        let numero = |texto: &str| {
+            texto
+                .split(',')
+                .next()
+                .and_then(|inicio| inicio.parse::<usize>().ok())
+                // O `git` conta a partir de um, e o editor a partir de zero.
+                .map_or(0, |valor| valor.saturating_sub(1))
+        };
+        if let Some(resto) = campo.strip_prefix('-') {
+            velho = numero(resto);
+        } else if let Some(resto) = campo.strip_prefix('+') {
+            novo = numero(resto);
+        }
+    }
+    (velho, novo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::LineChange;
 
     /// A leitura do formato, sem processo nenhum.
     ///
@@ -344,6 +518,92 @@ mod tests {
             status.head,
             Some(Head::Unborn(BranchName("main".to_owned())))
         );
+    }
+
+    /// O cabeçalho do arquivo não vira linha acrescentada.
+    ///
+    /// `+++ b/arquivo` começa com `+`, e um leitor que contasse tudo o tomaria
+    /// como conteúdo — deslocando cada marca da margem em uma linha.
+    #[test]
+    fn o_cabecalho_do_arquivo_nao_entra_no_diff() {
+        let saida = concat!(
+            "diff --git a/Pedido.java b/Pedido.java\n",
+            "index 1111111..2222222 100644\n",
+            "--- a/Pedido.java\n",
+            "+++ b/Pedido.java\n",
+            "@@ -1,3 +1,4 @@\n",
+            " class Pedido {\n",
+            "+    int total;\n",
+            " }\n"
+        );
+        let diff = ler_diff(saida);
+        assert_eq!(diff.hunks.len(), 1);
+        assert_eq!(diff.hunks[0].lines.len(), 3, "{:?}", diff.hunks[0].lines);
+        assert_eq!(
+            diff.changed_lines(),
+            vec![(1, LineChange::Added)],
+            "a segunda linha do arquivo, contada de zero"
+        );
+    }
+
+    /// Uma remoção marca a linha que ficou no lugar dela.
+    ///
+    /// Ela não tem linha própria no arquivo de agora: o que sobrou é a fronteira
+    /// entre duas linhas. Sem marcar a de cima, apagar um bloco não deixaria
+    /// sinal nenhum na margem.
+    #[test]
+    fn a_remocao_marca_a_linha_que_ficou() {
+        let saida = concat!(
+            "@@ -1,4 +1,2 @@\n",
+            " class Pedido {\n",
+            "-    int total;\n",
+            "-    int desconto;\n",
+            " }\n"
+        );
+        let diff = ler_diff(saida);
+        assert_eq!(
+            diff.changed_lines(),
+            vec![(1, LineChange::Removed)],
+            "a linha que ficou no lugar do que saiu"
+        );
+    }
+
+    /// Dois trechos distantes viram dois `Hunk`, e cada um começa onde deve.
+    #[test]
+    fn cada_trecho_comeca_na_linha_que_o_cabecalho_diz() {
+        let saida = concat!(
+            "@@ -1,2 +1,3 @@\n",
+            " um\n",
+            "+dois\n",
+            "@@ -40,2 +41,3 @@\n",
+            " quarenta\n",
+            "+quarenta e um\n"
+        );
+        let diff = ler_diff(saida);
+        assert_eq!(diff.hunks.len(), 2);
+        assert_eq!(diff.hunks[1].new_start, 40, "o `git` conta de um, o editor de zero");
+        assert_eq!(
+            diff.changed_lines(),
+            vec![(1, LineChange::Added), (41, LineChange::Added)]
+        );
+    }
+
+    /// Trocar uma linha por outra é **uma** marca, e não duas.
+    ///
+    /// É o caso mais comum de todos — editar uma linha —, e contá-lo como uma
+    /// remoção mais um acréscimo encheria a margem de sinais onde houve uma
+    /// alteração só.
+    #[test]
+    fn linha_trocada_e_uma_marca_so() {
+        let saida = concat!(
+            "@@ -1,3 +1,3 @@\n",
+            " um\n",
+            "-dois\n",
+            "+DOIS\n",
+            " tres\n"
+        );
+        let diff = ler_diff(saida);
+        assert_eq!(diff.changed_lines(), vec![(1, LineChange::Modified)]);
     }
 
     #[test]

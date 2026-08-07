@@ -6,6 +6,7 @@ pub mod events;
 pub mod workspace;
 
 pub use commands::{
+    GitRequest,
     ApplicationCommand, Command, CommandError, CommandRegistry, DebugRequest, FileOccurrences,
     NavigationRequest, NewItemRequest, NewItemTemplateId, OpenDocumentRequest,
     RenameDocumentRequest, SaveDocumentRequest, SearchScope,

@@ -1033,7 +1033,9 @@ impl IdeShell {
             SurfaceKind::Rename => self.rename_pointer_down(point, size),
             SurfaceKind::Git => {
                 let context = self.layout_context();
-                self.git.pointer_down(&mut self.host, &context, point);
+                if let Some(pedido) = self.git.pointer_down(&mut self.host, &context, point) {
+                    self.pedir_ao_git(pedido);
+                }
             }
             SurfaceKind::Generate => self.generate_pointer_down(point, size),
             SurfaceKind::TypeSearch => self.type_search_pointer_down(point, size),
@@ -1702,7 +1704,7 @@ mod editor_area;
 mod explorer_area;
 mod generate;
 mod git;
-pub use git::{BranchItem, GitView};
+pub use git::{BranchItem, GitEntry, GitFileState, GitLineChange, GitView};
 mod inspection;
 mod menu_bar;
 mod new_item;

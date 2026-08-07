@@ -1234,7 +1234,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // elas estão aqui **porque só a raiz de composição pode nomear o
         // `ide-git`** — é a mesma razão que põe o registro das linguagens neste
         // arquivo. O teto sobe; a dívida 1 da `26` continua aberta.
-        ("crates/ide-app/src/native_ide.rs", 5_483),
+        // De 5 483 para 5 671: a fase 1 da `22` — as três escritas, a
+        // diferença de um arquivo e a comparação. São 188 linhas, e estão aqui
+        // pelo mesmo motivo das anteriores: **só a raiz de composição pode
+        // nomear o `ide-git`**. A dívida 1 da `26` continua aberta, e este
+        // arquivo continua sendo o primeiro candidato a ser partido.
+        ("crates/ide-app/src/native_ide.rs", 5_671),
         // De 7 269 para 7 315: o teste que a fase 4 da `18` pedia — o copiado do
         // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
         // primeira adição depois de nascer**, que é o que ela existe para fazer:
@@ -1262,7 +1267,14 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // pasta que não é repositório. Seis testes, e é a última vez que este
         // teto sobe por uma tela nova sem que o arquivo seja partido: o item
         // 4(b) do plano da `26` é justamente parti-lo por assunto.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 7_729),
+        //
+        // De 7 729 para 7 937: a fase 1 do gerenciador — os três painéis
+        // empilhados, a ação de linha que pede a escrita **e** o retrato, o
+        // clique no nome que abre a comparação, e a margem do editor. Quatro
+        // testes, e o arquivo passou de sete mil e novecentas linhas: partir
+        // `tests.rs` por assunto — o item 4(b) do plano da `26` — deixou de ser
+        // dívida confortável.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 7_937),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
@@ -1528,7 +1540,13 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// thread da janela seria a sétima vez do defeito que a `25` caçou cinco.
     /// São **duas** esperas, e não uma — o estado e a lista de branches —, na
     /// mesma função e no mesmo runtime.*
-    const TETO: usize = 34;
+    /// *De 34 para 39: a fase 1 da `22`. São cinco, e **as cinco estão em
+    /// thread própria**: três escritas — preparar, despreparar, descartar — na
+    /// função que a thread chama, e duas leituras da diferença, o `diff` e o
+    /// texto commitado. Nenhuma delas é alcançada pelo laço de quadros: quem
+    /// pede manda o pedido e recolhe a resposta no quadro seguinte, como a
+    /// completação e a busca já fazem.*
+    const TETO: usize = 39;
 
     assert!(
         chamadas.len() <= TETO,

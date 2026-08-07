@@ -11,10 +11,11 @@ use crate::bootstrap::{java_source, project_sources, requested_root, startup_roo
 use crate::bridges::position_at_offset;
 use crate::splash;
 use crate::controllers::{
-    CompletionOutcome, DebugController as AppDebugController, DocumentController, ImportedProject,
-    LanguageController, NavigationOutcome, NativeWindowState, ProjectController, RuntimeState,
-    TaskController as AppTaskController, TypeSearchOutcome, WorkspaceController,
+    CompletionOutcome, DebugController as AppDebugController, DocumentController, GitDiffOutcome,
+    ImportedProject, LanguageController, NavigationOutcome, NativeWindowState, ProjectController,
+    RuntimeState, TaskController as AppTaskController, TypeSearchOutcome, WorkspaceController,
 };
+use ide_application::GitRequest;
 use crate::ui_bridge::{UiAction, UiBridge};
 use crate::{
     debug, java_contribution, markup_contribution, run, style_contribution,
@@ -519,6 +520,10 @@ impl NativeIde {
             if let Some(shell) = self.ui.shell.as_mut() {
                 shell.set_status_message(format!("Opened {}", request.path.display()));
             }
+            // A margem do arquivo aberto mostra o que mudou desde o commit. É a
+            // diferença **sem** a comparação lado a lado: quem abre um arquivo
+            // quer ver o arquivo, e não uma tela dividida que ninguém pediu.
+            self.pedir_diferenca(request.path.clone(), false, false);
         }
     }
 
@@ -1578,6 +1583,98 @@ impl NativeIde {
         std::thread::spawn(move || {
             let _ = sender.send(retrato_do_repositorio(&raiz, &cancel));
         });
+    }
+
+    /// O que a tela pediu ao repositório.
+    ///
+    /// As escritas vão para uma thread e voltam pela mesma porta do retrato: a
+    /// tela já mandou o `Refresh` junto do pedido, e é ele que refaz a lista.
+    fn handle_git(&mut self, request: GitRequest) {
+        match request {
+            GitRequest::Refresh => self.refresh_git(),
+            GitRequest::ShowDiff { path, staged } => self.pedir_diferenca(path, staged, true),
+            GitRequest::Stage(path) => self.escrever_no_git("stage", path),
+            GitRequest::Unstage(path) => self.escrever_no_git("unstage", path),
+            GitRequest::Discard(path) => self.escrever_no_git("discard", path),
+        }
+    }
+
+    /// Manda uma escrita para a thread, e conta o que ela respondeu.
+    ///
+    /// **Sem cancelamento**, como o contrato da `22` diz: cancelar uma escrita
+    /// pela metade deixaria o repositório num estado que ninguém pediu.
+    fn escrever_no_git(&mut self, acao: &'static str, path: PathBuf) {
+        let Some(raiz) = self
+            .ui
+            .shell
+            .as_ref()
+            .map(|shell| shell.workspace_root().to_path_buf())
+        else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // Canal próprio, e não o das ferramentas: a saída de um build é texto
+        // que vai para o painel, e isto é uma linha da barra de estado. Dividir
+        // o canal faria uma escrita do Git aparecer como saída de compilação.
+        let _cancel = self.languages.git_write.start(receiver);
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(format!("Git: {acao}…"));
+        }
+        std::thread::spawn(move || {
+            let resultado = escrever_no_repositorio(&raiz, acao, &path);
+            let _ = sender.send(resultado.unwrap_or_else(|erro| format!("Git falhou: {erro}")));
+        });
+    }
+
+    /// Conta o que a escrita respondeu, se ela já respondeu.
+    fn collect_git_write(&mut self) -> bool {
+        let Some(mensagem) = self.languages.git_write.collect() else {
+            return false;
+        };
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(mensagem);
+        }
+        true
+    }
+
+    /// Pede a diferença de um arquivo: as marcas da margem, e talvez a
+    /// comparação lado a lado.
+    fn pedir_diferenca(&mut self, path: PathBuf, staged: bool, comparar: bool) {
+        let Some(raiz) = self
+            .ui
+            .shell
+            .as_ref()
+            .map(|shell| shell.workspace_root().to_path_buf())
+        else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = self.languages.git_diff.start(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(diferenca_do_arquivo(&raiz, path, staged, comparar, &cancel));
+        });
+    }
+
+    /// Instala a comparação e as marcas, se já chegaram.
+    fn collect_git_diff(&mut self) -> bool {
+        let Some(resultado) = self.languages.git_diff.collect() else {
+            return false;
+        };
+        let Some(shell) = self.ui.shell.as_mut() else {
+            return false;
+        };
+        if let Some(erro) = resultado.error {
+            shell.set_status_message(erro);
+            return true;
+        }
+        shell.set_git_line_marks(resultado.path.clone(), resultado.marks);
+        if resultado.comparar {
+            let atual = std::fs::read_to_string(&resultado.path).unwrap_or_default();
+            if !shell.abrir_comparacao(&resultado.path, atual, resultado.committed) {
+                shell.set_status_message("Não foi possível abrir a comparação".to_owned());
+            }
+        }
+        true
     }
 
     /// Instala o retrato, se já chegou. Não espera por nada.
@@ -3210,7 +3307,7 @@ impl NativeIde {
                         }
                     }
                 }
-                UiAction::RefreshGit => self.refresh_git(),
+                UiAction::Git(request) => self.handle_git(request),
                 UiAction::OpenProject => self.choose_project(),
                 UiAction::DuplicateWorkspace => self.duplicate_workspace(),
                 UiAction::OpenRecentProject(path) => self.open_recent_project(&path),
@@ -3563,6 +3660,97 @@ fn retrato_do_repositorio(raiz: &std::path::Path, cancel: &CancellationToken) ->
     view
 }
 
+/// Roda uma escrita do Git e devolve o que dizer na barra de estado.
+///
+/// Está aqui pelo mesmo motivo de `retrato_do_repositorio`: é a raiz de
+/// composição, o único lugar que pode nomear o `ide-git`.
+fn escrever_no_repositorio(
+    raiz: &std::path::Path,
+    acao: &str,
+    path: &std::path::Path,
+) -> Result<String, String> {
+    let repositorio = ide_git::open(raiz).map_err(|erro| erro.to_string())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|erro| erro.to_string())?;
+    let arvore = repositorio.working_tree();
+    let caminhos = vec![path.to_path_buf()];
+    let (resultado, feito) = match acao {
+        "stage" => (runtime.block_on(arvore.stage(&caminhos)), "preparado"),
+        "unstage" => (runtime.block_on(arvore.unstage(&caminhos)), "despreparado"),
+        _ => (runtime.block_on(arvore.discard(&caminhos)), "descartado"),
+    };
+    resultado.map_err(|erro| erro.to_string())?;
+    let nome = path
+        .file_name()
+        .map(|nome| nome.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    Ok(format!("{nome} {feito}"))
+}
+
+/// A diferença de um arquivo: o texto de então e as linhas que mudaram.
+fn diferenca_do_arquivo(
+    raiz: &std::path::Path,
+    path: PathBuf,
+    staged: bool,
+    comparar: bool,
+    cancel: &CancellationToken,
+) -> GitDiffOutcome {
+    let mut saida = GitDiffOutcome {
+        path: path.clone(),
+        committed: String::new(),
+        marks: Vec::new(),
+        comparar,
+        error: None,
+    };
+    let repositorio = match ide_git::open(raiz) {
+        Ok(repositorio) => repositorio,
+        // Fora de repositório não há diferença nenhuma, e isso não é erro: é a
+        // resposta certa para a maioria das pastas.
+        Err(_) => return saida,
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        saida.error = Some("Não foi possível falar com o Git".to_owned());
+        return saida;
+    };
+    let arvore = repositorio.working_tree();
+    let lado = if staged {
+        ide_git::DiffSide::Index
+    } else {
+        ide_git::DiffSide::WorkingTree
+    };
+    match runtime.block_on(arvore.diff(&path, lado, cancel)) {
+        Ok(diff) => {
+            saida.marks = diff
+                .changed_lines()
+                .into_iter()
+                .map(|(linha, mudanca)| {
+                    let mudanca = match mudanca {
+                        ide_git::LineChange::Added => ide_ui::GitLineChange::Added,
+                        ide_git::LineChange::Modified => ide_ui::GitLineChange::Modified,
+                        ide_git::LineChange::Removed => ide_ui::GitLineChange::Removed,
+                    };
+                    (linha, mudanca)
+                })
+                .collect();
+        }
+        Err(erro) => saida.error = Some(erro.to_string()),
+    }
+    if comparar {
+        match runtime.block_on(arvore.committed_text(&path, cancel)) {
+            Ok(texto) => saida.committed = texto,
+            // Arquivo que nunca foi commitado não tem lado esquerdo, e comparar
+            // com nada é comparar com o vazio — que é a verdade.
+            Err(_) => saida.committed = String::new(),
+        }
+    }
+    saida
+}
+
 impl ApplicationHandler for NativeIde {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -3577,6 +3765,8 @@ impl ApplicationHandler for NativeIde {
         changed |= self.advance_project_loading();
         changed |= self.collect_references();
         changed |= self.collect_git();
+        changed |= self.collect_git_diff();
+        changed |= self.collect_git_write();
         changed |= self.collect_navigation();
         changed |= self.collect_completion();
         // Aceitar um item escreve o nome; o `import` que ele exige é a pergunta

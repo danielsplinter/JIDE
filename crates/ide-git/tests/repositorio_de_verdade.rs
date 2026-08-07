@@ -49,6 +49,12 @@ impl RepoDeTeste {
         repo.git(&["init", "--initial-branch=main"])?;
         repo.git(&["config", "user.email", "teste@exemplo"])?;
         repo.git(&["config", "user.name", "Teste"])?;
+        // Sem isto, o `checkout` de uma máquina com `core.autocrlf=true` devolve
+        // o arquivo com CRLF, e o teste acusaria a nossa leitura por uma
+        // conversão que é configuração de quem está rodando. O fim de linha é um
+        // risco real desta especificação, e o lugar de tratá-lo é o produto —
+        // não o teste que mede outra coisa.
+        repo.git(&["config", "core.autocrlf", "false"])?;
         Some(repo)
     }
 
@@ -209,4 +215,160 @@ fn uma_pasta_sem_git_nao_e_repositorio_e_nao_falha() {
         "abrir o que não é repositório responde, e não explode"
     );
     let _ = std::fs::remove_dir_all(&pasta);
+}
+
+/// O ciclo da fase 1: ver o que mudou, preparar um, descartar outro.
+///
+/// É o critério da fase escrito como teste, e ele é um só de propósito: preparar
+/// e descartar em testes separados não afirmaria o que importa — que **a lista
+/// não fica velha depois de cada ação**. Quem prepara e vê o arquivo continuar
+/// em "alterados" desfaz o que acabou de fazer.
+#[test]
+fn preparar_e_descartar_mudam_o_que_o_status_responde() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("escritas") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um
+dois
+tres
+");
+    repo.escrever("b.txt", "b
+");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+
+    repo.escrever("a.txt", "um
+DOIS
+tres
+");
+    repo.escrever("b.txt", "b alterado
+");
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let arvore = repositorio.working_tree();
+    let cancel = CancellationToken::new();
+    let caminho_a = repo.root().join("a.txt");
+    let caminho_b = repo.root().join("b.txt");
+
+    // A diferença de `a.txt` diz qual linha mudou.
+    let Ok(diff) = esperar(arvore.diff(&caminho_a, ide_git::DiffSide::WorkingTree, &cancel)) else {
+        panic!("a diferença não respondeu");
+    };
+    assert_eq!(
+        diff.changed_lines(),
+        vec![(1, ide_git::LineChange::Modified)],
+        "a segunda linha trocada, contada de zero: {:?}",
+        diff.hunks
+    );
+
+    // Preparar `a.txt` o tira de "alterados" e o põe em "preparados".
+    assert!(esperar(arvore.stage(std::slice::from_ref(&caminho_a))).is_ok());
+    let Ok(status) = esperar(arvore.status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(status.count(ide_git::FileState::Staged), 1);
+    assert!(
+        status
+            .entries
+            .iter()
+            .any(|entry| entry.path == caminho_a && entry.state == ide_git::FileState::Staged),
+        "{:?}",
+        status.entries
+    );
+
+    // Despreparar o devolve para "alterados", sem tocar no arquivo.
+    assert!(esperar(arvore.unstage(std::slice::from_ref(&caminho_a))).is_ok());
+    let Ok(status) = esperar(arvore.status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(status.count(ide_git::FileState::Staged), 0);
+    assert_eq!(
+        std::fs::read_to_string(&caminho_a).unwrap_or_default(),
+        "um
+DOIS
+tres
+",
+        "despreparar não mexe no que está escrito"
+    );
+
+    // Descartar `b.txt` devolve o arquivo ao que estava commitado.
+    assert!(esperar(arvore.discard(std::slice::from_ref(&caminho_b))).is_ok());
+    assert_eq!(
+        std::fs::read_to_string(&caminho_b).unwrap_or_default(),
+        "b
+",
+        "descartar traz de volta o conteúdo do commit"
+    );
+    let Ok(status) = esperar(arvore.status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(status.changed_files(), 1, "sobrou só o a.txt: {:?}", status.entries);
+}
+
+/// O conteúdo commitado vem como texto, para o lado esquerdo da comparação.
+///
+/// Como texto e não como caminho: o arquivo de então não existe no disco, e
+/// materializá-lo num temporário daria a quem abrisse uma cópia editável do
+/// passado — que salva por cima de nada, e some sem avisar.
+#[test]
+fn o_conteudo_commitado_vem_como_texto() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("commitado") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "antes
+");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+    repo.escrever("a.txt", "depois
+");
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let cancel = CancellationToken::new();
+    let Ok(texto) = esperar(
+        repositorio
+            .working_tree()
+            .committed_text(&repo.root().join("a.txt"), &cancel),
+    ) else {
+        panic!("o conteúdo commitado não respondeu");
+    };
+    assert_eq!(texto, "antes
+");
+}
+
+/// Descartar não alcança o que o Git não rastreia.
+///
+/// Seria apagar o arquivo do disco, e não há de onde trazê-lo de volta. O `git`
+/// responde sem erro e sem fazer nada, e é isso que se afirma aqui: a IDE não
+/// pode achar que descartou.
+#[test]
+fn descartar_nao_apaga_arquivo_nao_rastreado() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("solto") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um
+");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+    repo.escrever("solto.txt", "nunca foi commitado
+");
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let solto = repo.root().join("solto.txt");
+    let _ = esperar(repositorio.working_tree().discard(std::slice::from_ref(&solto)));
+    assert!(solto.exists(), "o arquivo continua no disco");
 }

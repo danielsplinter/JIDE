@@ -11,7 +11,7 @@ use ide_ui::IdeShell;
 
 pub(super) enum UiAction {
     OpenDocument(OpenDocumentRequest),
-    RefreshGit,
+    Git(ide_application::GitRequest),
     SaveDocument(SaveDocumentRequest),
     ReloadWorkspace,
     LoadDirectory(std::path::PathBuf),
@@ -55,7 +55,7 @@ impl From<ApplicationCommand> for UiAction {
             ApplicationCommand::OpenProject => Self::OpenProject,
             ApplicationCommand::DuplicateWorkspace => Self::DuplicateWorkspace,
             ApplicationCommand::OpenRecentProject(path) => Self::OpenRecentProject(path),
-            ApplicationCommand::RefreshGit => Self::RefreshGit,
+            ApplicationCommand::Git(request) => Self::Git(request),
             ApplicationCommand::OpenSettings => Self::OpenSettings,
             ApplicationCommand::OpenToolchainSettings => Self::OpenToolchainSettings,
             ApplicationCommand::BrowseTool { section, role } => {

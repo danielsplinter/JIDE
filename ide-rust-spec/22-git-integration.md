@@ -459,12 +459,15 @@ da `09` da ERLibUi, o mesmo que o diálogo de gerar código e a inspeção do
 depurador já usam pelo `ModalHost`.
 
 Começar pelo `ModalHost` é o barato: ele já traz a camada, o véu, o painel
-centrado e o `Esc` que fecha. **E há uma pergunta que pode derrubá-lo**, que fica
-registrada agora em vez de aparecer como surpresa na fase 1: a diferença de um
-arquivo abre **no editor**, e o editor está atrás do véu. Ou o gerenciador dá
-lugar quando a diferença abre, ou ele deixa de ser modal. A escolha se faz quando
-a fase 1 existir e alguém tiver as duas coisas na frente; o conteúdo da janela não
-muda por causa dela, e é isso que torna adiar barato.
+centrado e o `Esc` que fecha. **E havia uma pergunta que podia derrubá-lo**: a
+diferença de um arquivo abre **no editor**, e o editor está atrás do véu.
+
+**Respondida na fase 1: a janela dá lugar.** Abrir a comparação fecha o
+gerenciador, porque quem escolheu ver a diferença quer ver a diferença — e
+porque a alternativa, uma janela flutuante sobre o código que ela está
+explicando, cobre justamente o que se foi olhar. O conteúdo da janela não mudou
+por causa disso, que é o que tornava adiar barato, e continua não mudando se um
+dia ela virar painel encaixado.
 
 Dentro, a janela é uma divisão horizontal: navegação à esquerda, trabalho à
 direita, com a divisa arrastável — `SplitPane`, como a divisão do editor da `28`.
@@ -596,7 +599,7 @@ IDE**.
 | pedaço | fase | por quê |
 |---|---|---|
 | botão, janela, divisão, nó `branches`, busca ✅ | 0 | é leitura pura, e prova a tela com o menor código atrás |
-| aba `status`, os três painéis, as ações de linha | 1 | é o `working_tree` inteiro, que é o que a fase 1 entrega |
+| aba `status`, os três painéis, as ações de linha ✅ | 1 | é o `working_tree` inteiro, que é o que a fase 1 entrega |
 | aba `history`, a tabela, o grafo | 2 | precisa do `history` e do `ComposedTable` |
 | nós `tags` e `stashes` | 3 | aparecem antes, vazios; a capacidade chega aqui |
 | nó `remotes`, à frente e atrás | 4 | é `fetch`, e sem ele não há o que contar |
@@ -653,10 +656,11 @@ Cinco coisas que a implementação obrigou a resolver, e uma que ela não resolv
   isso já existia em `place_overlay`, escrito para a janela de configurações;
 - **o tempo no projeto de referência não foi medido.** O `camel-main` desta
   máquina não é repositório — veio como pasta, e não como clone —, e medir num
-  projeto que não tem `.git` não é medir. O que deu para medir é o **próprio
-  repositório da IDE**: 228 arquivos versionados, 32–37 ms por `status`, três
-  execuções. É pequeno demais para dizer qualquer coisa sobre 26 mil, e por isso
-  o critério continua aberto.
+  projeto que não tem `.git` não é medir. O que deu para medir foram dois
+  repositórios pequenos: o **próprio da IDE**, 228 arquivos versionados, 32–37 ms;
+  e o **gameServer**, 116 arquivos, 29–33 ms. Três execuções cada. Os dois são
+  pequenos demais para dizer qualquer coisa sobre 26 mil, e por isso o critério
+  continua aberto — falta um clone grande nesta máquina.
 
 E o que a fronteira custou, dito por número: **três arestas** no grafo —
 `ide-git -> ide-domain`, `ide-git -> ide-process` e `ide-app -> ide-git`. `ide-ui`
@@ -665,7 +669,7 @@ tradução acontece na raiz de composição. A guarda que a seção de verifica�
 pedia existe e passa: nenhuma crate fora de `ide-git` escreve
 `Command::new("git")`, `git2::` ou `gix::`.
 
-### Fase 1 — Ver e escolher o que muda
+### Fase 1 — Ver e escolher o que muda ✅
 
 `working_tree` inteiro: `diff`, `stage`, `unstage`, `discard`. O painel de
 alterações, a diferença lado a lado reusando o editor, e a marcação na margem.
@@ -676,6 +680,56 @@ A granularidade é **por arquivo**. Preparar por hunk ou por linha é o que a
 **Critério:** dá para ver o que mudou num arquivo, preparar parte dos arquivos e
 descartar outro, sem sair da IDE e sem que a lista fique velha depois de cada
 ação.
+
+**Feita.** A aba `status` do gerenciador empilha os três painéis, cada linha traz
+as ações daquele painel, a margem do editor mostra o que mudou desde o commit, e
+clicar no nome de um arquivo abre a comparação com o texto de então ao lado.
+
+Seis decisões que a implementação obrigou a tomar:
+
+- **a janela dá lugar quando a diferença abre**, e é a resposta à pergunta que a
+  fase 0 deixou registrada. O gerenciador é modal, o editor está atrás do véu, e
+  quem escolheu ver a diferença quer ver a diferença. Continua valendo o que
+  estava escrito: o conteúdo da janela não muda se um dia ela deixar de ser
+  modal;
+- **o texto de então não vira arquivo no disco.** Ele entra como documento de
+  memória, que a sessão do editor já sabia abrir. Um temporário daria a quem
+  abrisse uma cópia editável do passado — que salva por cima de nada e some sem
+  avisar;
+- **trocar uma linha é uma marca na margem, e não duas.** No diff são duas
+  linhas, uma removida e uma acrescentada; na tela é uma linha só, e ela mudou.
+  Contar as duas encheria a margem de sinais onde houve uma alteração só. A
+  remoção sem substituição marca a linha que ficou no lugar — sem isso, apagar um
+  bloco não deixaria sinal nenhum;
+- **a marca de versão não cobre o ponto de parada.** Ela é informação de fundo; o
+  ponto de parada é o que a pessoa pôs ali;
+- **"não rastreado" não tem "Descartar"**, e a ausência é a decisão: descartar o
+  que o Git não conhece seria apagá-lo do disco, e não há de onde trazê-lo de
+  volta. Quem quiser apagá-lo apaga pelo Explorer, onde apagar é o que se espera
+  de apagar. O `discard` do domínio também não o alcança, e tem teste dizendo
+  isso;
+- **cada ação de linha manda dois comandos**: a escrita e o retrato de novo. É o
+  critério da fase escrito como código — preparar um arquivo e deixar a lista
+  como estava faria quem preparou ver a linha continuar em "alterados", e
+  desfazer o que acabou de fazer.
+
+E três defesas que vieram do que a especificação já previa nos riscos:
+
+- **`--no-optional-locks` em toda leitura**, inclusive no `diff`;
+- **os caminhos vão como `OsStr`**, e não como texto: caminho no Windows não é
+  UTF-8, e converter com perda faria um arquivo alterado virar um que o `git`
+  não acha;
+- **`git restore --staged`, e não `reset HEAD`**: num repositório sem commit
+  nenhum o `HEAD` não existe, e o segundo falharia com uma mensagem sobre
+  revisão desconhecida — que não é o que aconteceu.
+
+**O fim de linha continua sendo risco, e agora tem prova.** O teste de descarte
+falhou na primeira execução porque o `checkout` desta máquina devolveu CRLF onde
+o teste escrevera LF. Os testes passaram a fixar `core.autocrlf=false` no
+repositório que criam — para medirem a nossa leitura, e não a configuração de
+quem roda. **No produto isso não está tratado**: um projeto com `autocrlf=true`
+vai mostrar arquivos alterados que ninguém mudou, e a IDE vai ser acusada por
+isso.
 
 ### Fase 2 — Commitar
 
