@@ -372,3 +372,126 @@ fn descartar_nao_apaga_arquivo_nao_rastreado() {
     let _ = esperar(repositorio.working_tree().discard(std::slice::from_ref(&solto)));
     assert!(solto.exists(), "o arquivo continua no disco");
 }
+
+/// O ciclo completo da fase 2: editar, preparar, commitar, e ver no histórico.
+///
+/// É o critério da fase escrito como teste — "um ciclo completo de trabalho
+/// acontece dentro da IDE" —, e ele passa pelo `working_tree` **e** pelo
+/// `history`: commitar sem ver o commit aparecer não prova nada.
+#[test]
+fn editar_preparar_e_commitar_aparece_no_historico() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("commit") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um\n");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let cancel = CancellationToken::new();
+    let arvore = repositorio.working_tree();
+    let historico = repositorio.history();
+
+    repo.escrever("a.txt", "dois\n");
+    assert!(esperar(arvore.stage(std::slice::from_ref(&repo.root().join("a.txt")))).is_ok());
+    let Ok(id) = esperar(historico.commit("segundo", false)) else {
+        panic!("o commit não aconteceu");
+    };
+    assert!(!id.0.is_empty(), "o commit devolve o hash dele");
+
+    let Ok(pagina) = esperar(historico.log(0, 10, &cancel)) else {
+        panic!("o histórico não respondeu");
+    };
+    assert_eq!(pagina.len(), 2, "{pagina:?}");
+    assert_eq!(pagina[0].summary, "segundo", "o mais recente vem primeiro");
+    assert_eq!(pagina[0].id, id);
+    assert_eq!(pagina[0].author, "Teste");
+    assert!(
+        pagina[0].date.len() >= 16,
+        "a data vem pronta: {:?}",
+        pagina[0].date
+    );
+    assert_eq!(pagina[0].parents, vec![pagina[1].id.clone()]);
+
+    // E a árvore fica limpa: o que foi commitado saiu da lista.
+    let Ok(status) = esperar(arvore.status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(status.changed_files(), 0, "{:?}", status.entries);
+}
+
+/// `amend` reescreve o commit anterior em vez de criar outro.
+///
+/// O teste afirma as duas coisas que distinguem uma coisa da outra: a mensagem
+/// muda, e o número de commits **não**.
+#[test]
+fn amend_reescreve_em_vez_de_acrescentar() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("amend") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um\n");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "mensagem errada"]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let historico = repositorio.history();
+    assert!(esperar(historico.commit("mensagem certa", true)).is_ok());
+
+    let cancel = CancellationToken::new();
+    let Ok(pagina) = esperar(historico.log(0, 10, &cancel)) else {
+        panic!("o histórico não respondeu");
+    };
+    assert_eq!(pagina.len(), 1, "continua sendo um commit só");
+    assert_eq!(pagina[0].summary, "mensagem certa");
+}
+
+/// O histórico vem por páginas, e a página seguinte continua de onde a outra
+/// parou.
+///
+/// Um repositório de verdade tem dezenas de milhares de commits, e carregar
+/// todos para mostrar quarenta linhas é o oposto do que a `19` e a `20` fizeram
+/// no índice.
+#[test]
+fn o_historico_vem_por_paginas() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("paginas") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    for numero in 1..=5 {
+        repo.escrever("a.txt", &format!("versão {numero}\n"));
+        assert!(repo.git(&["add", "."]).is_some());
+        assert!(repo.git(&["commit", "-m", &format!("commit {numero}")]).is_some());
+    }
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let historico = repositorio.history();
+    let cancel = CancellationToken::new();
+    let Ok(primeira) = esperar(historico.log(0, 2, &cancel)) else {
+        panic!("a primeira página não respondeu");
+    };
+    let Ok(segunda) = esperar(historico.log(2, 2, &cancel)) else {
+        panic!("a segunda página não respondeu");
+    };
+    assert_eq!(primeira.len(), 2);
+    assert_eq!(segunda.len(), 2);
+    assert_eq!(primeira[0].summary, "commit 5");
+    assert_eq!(segunda[0].summary, "commit 3", "a segunda continua de onde a primeira parou");
+    assert!(
+        primeira.iter().all(|commit| !segunda.contains(commit)),
+        "nenhuma linha aparece nas duas páginas"
+    );
+}

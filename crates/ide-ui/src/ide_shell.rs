@@ -1112,7 +1112,9 @@ impl IdeShell {
             }
             SurfaceKind::Git => {
                 let context = self.layout_context();
-                self.git.scroll(&self.host, &context, point, delta_lines);
+                if let Some(pedido) = self.git.scroll(&self.host, &context, point, delta_lines) {
+                    self.pedir_ao_git(pedido);
+                }
                 true
             }
             SurfaceKind::Settings => true,
@@ -1704,7 +1706,9 @@ mod editor_area;
 mod explorer_area;
 mod generate;
 mod git;
-pub use git::{BranchItem, GitEntry, GitFileState, GitLineChange, GitView};
+pub use git::{
+    BranchItem, CommitRow, GitEntry, GitFileState, GitLineChange, GitView, PAGINA_DO_HISTORICO,
+};
 mod inspection;
 mod menu_bar;
 mod new_item;

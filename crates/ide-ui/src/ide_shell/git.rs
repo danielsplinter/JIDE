@@ -20,8 +20,9 @@
 
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
-    Button, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTreeItem, ComposedTreeView,
-    IconTint, Label, ModalHost, SplitOrientation, SplitPane, TabItem, Tabs, TextInput,
+    Button, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
+    ComposedTreeView, GraphCell, IconTint, Label, ModalHost, SplitOrientation, SplitPane,
+    TabItem, TableColumn, Tabs, TextInput,
 };
 use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetId};
 use ui_host::UiHost;
@@ -52,6 +53,13 @@ const LISTA_BASE: WidgetId = WidgetId(10_515);
 const TITULO_BASE: WidgetId = WidgetId(10_518);
 /// As linhas dos três painéis: rótulo e botões.
 const ENTRADA_BASE: WidgetId = WidgetId(10_800);
+/// A tabela do histórico, e as células de cada linha dela.
+const TABELA_ID: WidgetId = WidgetId(10_519);
+const COMMIT_BASE: WidgetId = WidgetId(11_000);
+/// A caixa da mensagem de commit e os dois botões dela.
+const MENSAGEM_ID: WidgetId = WidgetId(11_900);
+const COMMIT_ID: WidgetId = WidgetId(11_901);
+const AMEND_ID: WidgetId = WidgetId(11_902);
 
 /// A janela é larga: à esquerda a navegação, à direita o trabalho.
 const PANEL_SIZE: Size = Size::new(920.0, 560.0);
@@ -70,6 +78,14 @@ const RATIO_BAIXO: f32 = 0.5;
 const TITULO_ALTURA: f32 = 20.0;
 /// Largura de um botão de ação de linha.
 const ACAO_LARGURA: f32 = 92.0;
+/// Altura da faixa de commit, embaixo dos três painéis.
+const COMMIT_ALTURA: f32 = 64.0;
+/// Quantos commits cabem numa página do histórico.
+///
+/// Uma página é o que se pede de cada vez, e não o que se mostra: a tabela é
+/// virtualizada, e rolar até o fim pede a seguinte. Um repositório de verdade
+/// tem dezenas de milhares de commits.
+pub const PAGINA_DO_HISTORICO: usize = 100;
 
 /// Em que painel um arquivo aparece.
 ///
@@ -91,6 +107,25 @@ pub struct GitEntry {
     /// O caminho **relativo à raiz**, que é o que se lê na linha.
     pub label: String,
     pub state: GitFileState,
+}
+
+/// Um commit, como a tabela do histórico o mostra.
+///
+/// As faixas do grafo vêm calculadas: **a IDE calcula, a biblioteca desenha**.
+/// A tela recebe o resultado da conta, e não o histórico para refazê-la.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CommitRow {
+    /// O hash inteiro; a tabela mostra o começo dele.
+    pub hash: String,
+    pub summary: String,
+    pub author: String,
+    pub date: String,
+    /// Em que faixa o ponto fica, quantas faixas há, o que atravessa e para
+    /// onde vão os pais.
+    pub lane: usize,
+    pub lanes: usize,
+    pub passing: Vec<usize>,
+    pub parents: Vec<usize>,
 }
 
 /// O que a margem do editor mostra numa linha.
@@ -125,6 +160,8 @@ pub struct GitView {
     pub branches: Vec<BranchItem>,
     /// Os arquivos alterados, na ordem em que os três painéis os mostram.
     pub entries: Vec<GitEntry>,
+    /// O histórico já carregado, do mais recente para o mais antigo.
+    pub commits: Vec<CommitRow>,
     /// O que dizer quando não há repositório, ou quando o Git falhou.
     ///
     /// Uma pasta sem `.git` é resposta legítima, e não erro: a janela abre e
@@ -174,6 +211,15 @@ pub(super) struct GitSurface {
     /// As três listas, mantidas entre quadros pelo mesmo motivo da árvore: a
     /// rolagem e a seleção são delas.
     listas: Option<[ComposedList; 3]>,
+    /// A tabela do histórico, mantida pelo mesmo motivo.
+    tabela: Option<ComposedTable>,
+    /// O que se está escrevendo como mensagem do commit.
+    mensagem: String,
+    /// Se o cursor está na caixa da mensagem.
+    ///
+    /// Sem isso, digitar no gerenciador iria sempre para a busca das branches —
+    /// e quem clicou na caixa da mensagem veria a letra aparecer noutro lugar.
+    escrevendo: bool,
     aba: Aba,
     /// As linhas mudadas de cada arquivo aberto, para a margem do editor.
     ///
@@ -315,6 +361,77 @@ impl GitSurface {
         self.view = view;
         self.rebuild();
         self.rebuild_listas();
+        self.rebuild_tabela();
+    }
+
+    /// Monta a tabela do histórico: cinco colunas, uma linha por commit.
+    ///
+    /// A coluna `Nó` recebe a célula do grafo, com as faixas que a aplicação
+    /// calculou. O `Hash` aparece abreviado — quem copia hash copia o inteiro,
+    /// e ele está guardado na linha.
+    fn rebuild_tabela(&mut self) {
+        let largura_do_grafo = self
+            .view
+            .commits
+            .iter()
+            .map(|commit| commit.lanes.max(1))
+            .max()
+            .unwrap_or(1);
+        let linhas = self
+            .view
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(indice, commit)| linha_de_commit(indice, commit, largura_do_grafo))
+            .collect();
+        match self.tabela.as_mut() {
+            Some(tabela) => tabela.set_rows(linhas),
+            None => {
+                self.tabela = Some(
+                    ComposedTable::new(
+                        TABELA_ID,
+                        vec![
+                            TableColumn::new("Nó", CellWidth::Fixed(GRAFO_LARGURA)),
+                            TableColumn::new("Description", CellWidth::Fill),
+                            TableColumn::new("Date", CellWidth::Fixed(130.0)),
+                            TableColumn::new("Author", CellWidth::Fixed(140.0)),
+                            TableColumn::new("Hash", CellWidth::Fixed(80.0)),
+                        ],
+                        linhas,
+                    )
+                    .with_row_height(ROW_HEIGHT),
+                );
+            }
+        }
+    }
+
+    /// Quantos commits ainda faltam pedir, se a rolagem chegou perto do fim.
+    ///
+    /// **A tabela é virtualizada e o histórico vem por páginas**: um repositório
+    /// de verdade tem dezenas de milhares de commits, e carregar todos para
+    /// mostrar quarenta linhas é o oposto do que a `19` e a `20` fizeram no
+    /// índice.
+    fn precisa_de_mais_historico(&self) -> bool {
+        let Some(tabela) = self.tabela.as_ref() else {
+            return false;
+        };
+        if self.view.commits.is_empty() || !tabela.scrolls() {
+            return false;
+        }
+        // Uma tela antes do fim: pedir só ao chegar nele faria a rolagem parar
+        // e esperar.
+        let fim = self.view.commits.len() as f32 * ROW_HEIGHT;
+        tabela.scroll_offset() + ROW_HEIGHT * 20.0 >= fim
+    }
+
+    /// A mensagem que se está escrevendo, para o teste ver o que foi digitado.
+    #[cfg(test)]
+    pub(super) fn mensagem(&self) -> &str {
+        &self.mensagem
+    }
+
+    pub(super) fn limpar_mensagem(&mut self) {
+        self.mensagem.clear();
     }
 
     /// Monta as três listas da aba `status`, uma por estado.
@@ -367,12 +484,34 @@ impl GitSurface {
         if texto.chars().any(char::is_control) {
             return;
         }
+        // Duas caixas na mesma janela, e o cursor decide qual recebe. Sem essa
+        // pergunta, escrever a mensagem do commit filtraria as branches.
+        if self.escrevendo {
+            self.mensagem.push_str(texto);
+            return;
+        }
         self.busca.push_str(texto);
         self.rebuild();
     }
 
-    /// `Backspace` na busca. Devolve `true` quando a tecla era daqui.
+    /// Tecla na janela. Devolve `true` quando ela era daqui.
     pub(super) fn key(&mut self, key: &str) -> bool {
+        if self.escrevendo {
+            match key {
+                "Backspace" => {
+                    self.mensagem.pop();
+                    return true;
+                }
+                // A mensagem de commit tem mais de uma linha: a primeira é o
+                // resumo, e o resto é o corpo. `Enter` escreve, e não confirma —
+                // confirmar é o botão, que é o gesto que não se dá sem querer.
+                "Enter" => {
+                    self.mensagem.push('\n');
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         if key != "Backspace" {
             return false;
         }
@@ -473,6 +612,15 @@ impl GitSurface {
     /// da divisão do editor. Com a conta em dois lugares, o clique cai num
     /// painel e o desenho aparece no outro.
     fn faixas(&mut self, conteudo: Rect, context: &LayoutContext) -> [Rect; 3] {
+        // A faixa do commit sai da altura antes de tudo: ela é fixa, e os três
+        // painéis repartem o que sobra. Tirá-la depois faria a divisa de baixo
+        // cair dentro da caixa da mensagem.
+        let conteudo = Rect::new(
+            conteudo.origin.x,
+            conteudo.origin.y,
+            conteudo.size.width,
+            (conteudo.size.height - COMMIT_ALTURA).max(0.0),
+        );
         let alto = self
             .split_alto
             .get_or_insert_with(|| {
@@ -485,6 +633,35 @@ impl GitSurface {
         });
         baixo.layout(context, resto);
         [primeira, baixo.first(), baixo.second()]
+    }
+
+    /// Onde ficam a caixa da mensagem e os dois botões.
+    ///
+    /// Embaixo dos três painéis, e não em cima: a ordem na tela é a do trabalho
+    /// — escolher o que entra, depois dizer o que se fez.
+    fn faixa_do_commit(conteudo: Rect) -> Rect {
+        Rect::new(
+            conteudo.origin.x,
+            conteudo.origin.y + (conteudo.size.height - COMMIT_ALTURA).max(0.0),
+            conteudo.size.width,
+            COMMIT_ALTURA.min(conteudo.size.height),
+        )
+    }
+
+    /// Os dois botões da faixa de commit, da direita para a esquerda.
+    fn botoes_do_commit(faixa: Rect) -> [(WidgetId, Rect); 2] {
+        let y = faixa.origin.y + faixa.size.height - 30.0;
+        let direita = faixa.origin.x + faixa.size.width;
+        [
+            (
+                COMMIT_ID,
+                Rect::new(direita - ACAO_LARGURA, y, ACAO_LARGURA, 26.0),
+            ),
+            (
+                AMEND_ID,
+                Rect::new(direita - ACAO_LARGURA * 2.0 - 8.0, y, ACAO_LARGURA, 26.0),
+            ),
+        ]
     }
 
     /// A área da lista dentro de uma faixa: o que sobra abaixo do título.
@@ -571,6 +748,11 @@ impl GitSurface {
             } else {
                 Aba::History
             };
+            // O histórico é caro e só é pedido quando alguém vai olhá-lo: quem
+            // abre o gerenciador para preparar um arquivo não paga por ele.
+            if self.aba == Aba::History && self.view.commits.is_empty() {
+                return Some(GitRequest::LoadHistory { ja_carregados: 0 });
+            }
             return None;
         }
         let arvore = area(host, TREE_ID);
@@ -585,7 +767,39 @@ impl GitSurface {
             return None;
         }
         let conteudo = area(host, CONTENT_ID);
+        if self.aba == Aba::History && conteudo.contains(point) {
+            if let Some(tabela) = self.tabela.as_mut() {
+                tabela.layout(context, conteudo);
+                tabela.event(
+                    &mut EventContext::default(),
+                    &UiEvent::PointerDown(primary_pointer(point)),
+                );
+            }
+            return None;
+        }
         if self.aba == Aba::Status && conteudo.contains(point) {
+            let faixa_do_commit = Self::faixa_do_commit(conteudo);
+            if faixa_do_commit.contains(point) {
+                for (id, area_do_botao) in Self::botoes_do_commit(faixa_do_commit) {
+                    if !area_do_botao.contains(point) {
+                        continue;
+                    }
+                    // Mensagem vazia não commita: o `git` recusaria, e a recusa
+                    // chegaria como falha da ferramenta em vez de como o que é.
+                    if self.mensagem.trim().is_empty() && id == COMMIT_ID {
+                        return None;
+                    }
+                    self.escrevendo = false;
+                    return Some(GitRequest::Commit {
+                        message: self.mensagem.clone(),
+                        amend: id == AMEND_ID,
+                    });
+                }
+                // O resto da faixa é a caixa da mensagem.
+                self.escrevendo = true;
+                return None;
+            }
+            self.escrevendo = false;
             let faixas = self.faixas(conteudo, context);
             // As duas divisas primeiro: elas ficam **entre** as faixas, e um
             // clique nelas cairia na lista de baixo se a pergunta viesse depois.
@@ -656,7 +870,14 @@ impl GitSurface {
             .unwrap_or_default()
     }
 
-    pub(super) fn scroll(&mut self, host: &UiHost, context: &LayoutContext, point: Point, linhas: f32) {
+    /// A roda dentro da janela. Devolve o pedido que ela provocou, se provocou.
+    pub(super) fn scroll(
+        &mut self,
+        host: &UiHost,
+        context: &LayoutContext,
+        point: Point,
+        linhas: f32,
+    ) -> Option<GitRequest> {
         let evento = UiEvent::Scroll(ScrollEvent {
             position: point,
             delta_x: 0.0,
@@ -668,13 +889,24 @@ impl GitSurface {
                 tree.layout(context, arvore);
                 tree.event(&mut EventContext::default(), &evento);
             }
-            return;
+            return None;
+        }
+        let conteudo = area(host, CONTENT_ID);
+        if self.aba == Aba::History {
+            if let Some(tabela) = self.tabela.as_mut() {
+                tabela.layout(context, conteudo);
+                tabela.event(&mut EventContext::default(), &evento);
+            }
+            // Perto do fim, a página seguinte: pedir só ao chegar nele faria a
+            // rolagem parar e esperar.
+            return self.precisa_de_mais_historico().then_some(GitRequest::LoadHistory {
+                ja_carregados: self.view.commits.len(),
+            });
         }
         // A roda é do painel sob o ponteiro, e não do primeiro que a aceite:
         // três listas empilhadas com uma barra cada só se distinguem pela área.
-        let conteudo = area(host, CONTENT_ID);
-        if self.aba != Aba::Status || !conteudo.contains(point) {
-            return;
+        if !conteudo.contains(point) {
+            return None;
         }
         let faixas = self.faixas(conteudo, context);
         for (indice, faixa) in faixas.into_iter().enumerate() {
@@ -686,8 +918,9 @@ impl GitSurface {
                 lista.layout(context, area_da_lista);
                 lista.event(&mut EventContext::default(), &evento);
             }
-            return;
+            return None;
         }
+        None
     }
 
     pub(super) fn paint(
@@ -734,7 +967,24 @@ impl GitSurface {
         abas.paint(paint);
 
         let conteudo = area(host, CONTENT_ID);
-        if self.aba == Aba::Status && self.view.has_repository() && self.view.changed > 0 {
+        if self.aba == Aba::History && self.view.has_repository() {
+            if self.view.commits.is_empty() {
+                let mut vazio = Label::new(
+                    SUMMARY_BASE,
+                    "Sem commits ainda".to_owned(),
+                )
+                .with_tone(IconTint::Muted);
+                vazio.layout(layout, conteudo);
+                vazio.paint(paint);
+                return true;
+            }
+            if let Some(tabela) = self.tabela.as_mut() {
+                tabela.layout(layout, conteudo);
+                tabela.paint(paint);
+            }
+            return true;
+        }
+        if self.aba == Aba::Status && self.view.has_repository() {
             self.paint_status(conteudo, layout, paint);
             return true;
         }
@@ -763,6 +1013,17 @@ impl GitSurface {
     /// nada preparado — sem ele, quem olha não sabe se a lista está vazia ou se
     /// a IDE não respondeu.
     fn paint_status(&mut self, conteudo: Rect, layout: &LayoutContext, paint: &mut PaintContext) {
+        self.paint_commit(conteudo, layout, paint);
+        if self.view.changed == 0 {
+            let mut limpo = Label::new(
+                WidgetId(SUMMARY_BASE.0 + 9),
+                "Nada mudou desde o último commit".to_owned(),
+            )
+            .with_tone(IconTint::Muted);
+            limpo.layout(layout, conteudo);
+            limpo.paint(paint);
+            return;
+        }
         let faixas = self.faixas(conteudo, layout);
         for (indice, (estado, faixa)) in ESTADOS.into_iter().zip(faixas).enumerate() {
             let quantos = self
@@ -797,6 +1058,33 @@ impl GitSurface {
         }
     }
 
+    /// A caixa da mensagem e os dois botões, embaixo dos três painéis.
+    ///
+    /// A caixa é um `TextInput` da biblioteca, como as outras da IDE: o que
+    /// muda é onde ela fica e quem lê o que se digitou.
+    fn paint_commit(&mut self, conteudo: Rect, layout: &LayoutContext, paint: &mut PaintContext) {
+        let faixa = Self::faixa_do_commit(conteudo);
+        let mut campo = TextInput::new(MENSAGEM_ID, &self.mensagem)
+            .with_placeholder("Mensagem do commit");
+        if self.escrevendo {
+            campo.event(&mut EventContext::default(), &UiEvent::FocusGained);
+        }
+        campo.layout(
+            layout,
+            Rect::new(faixa.origin.x, faixa.origin.y, faixa.size.width, 28.0),
+        );
+        campo.paint(paint);
+        for (id, area_do_botao) in Self::botoes_do_commit(faixa) {
+            let rotulo = if id == COMMIT_ID { "Commit" } else { "Amend" };
+            let mut botao = Button::new(id, rotulo);
+            // Sem mensagem não há o que commitar, e o botão diz isso pelo
+            // próprio desenho em vez de deixar o `git` recusar depois.
+            botao.set_disabled(id == COMMIT_ID && self.mensagem.trim().is_empty());
+            botao.layout(layout, area_do_botao);
+            botao.paint(paint);
+        }
+    }
+
     /// O que o lado direito diz quando não há três painéis para mostrar.
     ///
     /// Repositório nenhum, Git que falhou, ou árvore limpa: são os três casos em
@@ -812,11 +1100,17 @@ impl GitSurface {
             Aba::Status if self.view.changed == 0 => {
                 vec!["Nada mudou desde o último commit".to_owned()]
             }
-            // Com alteração, quem desenha é `paint_status`: estas linhas são o
+            // Com repositório, quem desenha é `paint_status`: estas linhas são o
             // que sobra para os casos em que não há painel nenhum a mostrar.
             Aba::Status => vec![format!("{} arquivo(s) alterado(s)", self.view.changed)],
-            Aba::History => vec!["O histórico ainda não é mostrado aqui".to_owned()],
+            Aba::History => vec!["Sem commits ainda".to_owned()],
         }
+    }
+
+    /// Onde ficam a caixa da mensagem e os botões, para o teste apontar neles.
+    #[cfg(test)]
+    pub(super) fn faixa_do_commit_para_teste(&self, host: &UiHost) -> Rect {
+        Self::faixa_do_commit(area(host, CONTENT_ID))
     }
 
     /// As três faixas da aba `status`, para o teste apontar um gesto nelas.
@@ -875,11 +1169,30 @@ impl super::IdeShell {
     /// desfazer o que acabou de fazer. É o critério da fase 1: a lista não fica
     /// velha depois de cada ação.
     pub(super) fn pedir_ao_git(&mut self, pedido: GitRequest) {
-        let precisa_de_retrato = !matches!(pedido, GitRequest::ShowDiff { .. });
+        let precisa_de_retrato = !matches!(
+            pedido,
+            GitRequest::ShowDiff { .. } | GitRequest::LoadHistory { .. }
+        );
+        // Commitar esvazia a caixa **agora**, e não quando a resposta chegar: a
+        // mensagem já foi usada, e deixá-la na tela convida a commitar duas
+        // vezes o mesmo texto.
+        let commitou = matches!(pedido, GitRequest::Commit { .. });
+        if commitou {
+            self.git.limpar_mensagem();
+        }
         self.commands.push(ApplicationCommand::Git(pedido));
         if precisa_de_retrato {
             self.commands
                 .push(ApplicationCommand::Git(GitRequest::Refresh));
+        }
+        if commitou {
+            // O histórico ganhou uma linha, e a de cima pode ter sido reescrita
+            // por um `amend`: recarregar do começo é a única resposta certa
+            // para os dois casos.
+            self.commands
+                .push(ApplicationCommand::Git(GitRequest::LoadHistory {
+                    ja_carregados: 0,
+                }));
         }
     }
 
@@ -1051,6 +1364,45 @@ fn linha_de_arquivo(estado: GitFileState, indice: usize, caminho: &str) -> Compo
         ));
     }
     ComposedRow::new(celulas)
+}
+
+/// Largura da coluna do grafo.
+///
+/// Fixa, e não `Natural`: a coluna do grafo mediria a linha mais larga da página
+/// inteira, e uma fusão distante empurraria a descrição de todas as outras.
+const GRAFO_LARGURA: f32 = 72.0;
+
+/// A linha de um commit: o grafo, a descrição, a data, o autor e o hash.
+///
+/// **Quem monta as células é a IDE**, e a célula do grafo recebe as faixas já
+/// calculadas: a biblioteca desenha o ponto e o traço, e não sabe o que é um
+/// commit.
+fn linha_de_commit(indice: usize, commit: &CommitRow, lanes: usize) -> ComposedRow {
+    let base = COMMIT_BASE.0 + indice as u64 * 8;
+    let hash = commit.hash.chars().take(7).collect::<String>();
+    let rotulo = |deslocamento: u64, texto: &str, tom: IconTint| {
+        ComposedCell::new(
+            Box::new(Label::new(WidgetId(base + deslocamento), texto).with_tone(tom)),
+            CellWidth::Fill,
+        )
+    };
+    ComposedRow::new(vec![
+        ComposedCell::new(
+            Box::new(
+                GraphCell::new(WidgetId(base), commit.lane, lanes.max(commit.lanes))
+                    .with_passing(commit.passing.clone())
+                    .with_parents(commit.parents.clone())
+                    // A primeira linha da página não tem commit acima: um traço
+                    // saindo dela prometeria o que não está na tela.
+                    .with_incoming(indice > 0),
+            ),
+            CellWidth::Fixed(GRAFO_LARGURA),
+        ),
+        rotulo(1, &commit.summary, IconTint::Text),
+        rotulo(2, &commit.date, IconTint::Muted),
+        rotulo(3, &commit.author, IconTint::Muted),
+        rotulo(4, &hash, IconTint::Muted),
+    ])
 }
 
 /// Uma linha de raiz: só o nome, que é o que um agrupador tem.

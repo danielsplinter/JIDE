@@ -10,15 +10,17 @@
 //!
 //! # O que existe hoje
 //!
-//! A **fase 1**: descobrir, abrir, `status`, a lista de branches locais, a
-//! diferença de um arquivo, e as três escritas por caminho — preparar,
-//! despreparar e descartar. A granularidade é **por arquivo**: preparar por
-//! trecho ou por linha é o que a `22` deixou anotado para depois das fases.
+//! A **fase 2**: tudo o que a fase 1 tinha — `status`, branches locais, a
+//! diferença de um arquivo e as três escritas por caminho — mais o histórico
+//! por páginas e o `commit`, com `amend`. A granularidade continua sendo **por
+//! arquivo**: preparar por trecho ou por linha é o que a `22` deixou anotado
+//! para depois das fases.
 
 mod adapters;
 
 pub mod branches;
 pub mod error;
+pub mod history;
 pub mod model;
 pub mod repository;
 pub mod working_tree;
@@ -27,10 +29,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use branches::BranchService;
+pub use history::HistoryService;
 pub use error::{GitError, GitResult};
 pub use model::{
-    BranchName, BranchSummary, CommitId, DiffLine, DiffLineKind, DiffSide, FileDiff, FileState,
-    Head, Hunk, LineChange, RemoteName, RepositoryStatus, StatusEntry,
+    BranchName, BranchSummary, CommitId, CommitSummary, DiffLine, DiffLineKind, DiffSide, FileDiff,
+    FileState, GraphRow, Head, Hunk, LineChange, RemoteName, RepositoryStatus, StatusEntry,
+    graph_rows,
 };
 pub use repository::Repository;
 pub use working_tree::WorkingTreeService;
@@ -74,6 +78,7 @@ pub fn open(path: &Path) -> GitResult<Repository> {
     Ok(Repository::new(
         root,
         Arc::clone(&adapter) as Arc<dyn WorkingTreeService>,
-        adapter as Arc<dyn BranchService>,
+        Arc::clone(&adapter) as Arc<dyn BranchService>,
+        adapter as Arc<dyn HistoryService>,
     ))
 }

@@ -28,8 +28,8 @@ use tokio::process::Command;
 use crate::branches::BranchService;
 use crate::error::{GitError, GitResult};
 use crate::model::{
-    BranchName, BranchSummary, CommitId, DiffLine, DiffLineKind, DiffSide, FileDiff, FileState,
-    Head, Hunk, RepositoryStatus, StatusEntry,
+    BranchName, BranchSummary, CommitId, CommitSummary, DiffLine, DiffLineKind, DiffSide, FileDiff,
+    FileState, Head, Hunk, RepositoryStatus, StatusEntry,
 };
 use crate::working_tree::WorkingTreeService;
 
@@ -238,6 +238,84 @@ impl BranchService for CliGit {
             .await?;
         Ok(ler_branches(&String::from_utf8_lossy(&saida)))
     }
+}
+
+#[async_trait]
+impl crate::history::HistoryService for CliGit {
+    async fn log(
+        &self,
+        pular: usize,
+        quantos: usize,
+        cancel: &CancellationToken,
+    ) -> GitResult<Vec<CommitSummary>> {
+        // Os separadores são os do ASCII: unidade (0x1f) entre os campos e
+        // registro (0x1e) entre os commits. Mensagem de commit tem quebra de
+        // linha e tabulação dentro, e qualquer separador que se possa digitar
+        // apareceria no dado — foi o que já obrigou o `status` a usar `-z`.
+        let formato = "--format=%H%x1f%P%x1f%an%x1f%ad%x1f%s%x1e";
+        let pular = format!("--skip={pular}");
+        let quantos = format!("--max-count={quantos}");
+        let saida = self
+            .run(
+                &[
+                    "--no-optional-locks",
+                    "log",
+                    "--date=format:%Y-%m-%d %H:%M",
+                    formato,
+                    &pular,
+                    &quantos,
+                ],
+                cancel,
+            )
+            .await?;
+        Ok(ler_log(&String::from_utf8_lossy(&saida)))
+    }
+
+    async fn commit(&self, message: &str, amend: bool) -> GitResult<CommitId> {
+        let vazio = CancellationToken::new();
+        let mut args = vec!["commit", "--message", message];
+        if amend {
+            args.push("--amend");
+        }
+        self.run(&args, &vazio).await?;
+        // O `commit` não devolve o hash; perguntá-lo em seguida é o que dá a
+        // quem chamou algo para guardar — e é barato, porque `HEAD` é leitura
+        // de referência e não varredura.
+        let saida = self.run(&["rev-parse", "HEAD"], &vazio).await?;
+        Ok(CommitId(String::from_utf8_lossy(&saida).trim().to_owned()))
+    }
+}
+
+/// Lê a saída do `log`, separada por unidade e por registro.
+fn ler_log(saida: &str) -> Vec<CommitSummary> {
+    saida
+        .split('\u{1e}')
+        .filter(|registro| !registro.trim().is_empty())
+        .filter_map(|registro| {
+            // O `git` põe uma quebra de linha entre um registro e o próximo;
+            // ela vira o começo do registro seguinte, e sem tirá-la o hash
+            // chegaria com um `\n` na frente.
+            let mut campos = registro.trim_start().split('\u{1f}');
+            let id = campos.next()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let pais = campos.next().unwrap_or_default();
+            let autor = campos.next().unwrap_or_default();
+            let data = campos.next().unwrap_or_default();
+            let resumo = campos.next().unwrap_or_default();
+            Some(CommitSummary {
+                id: CommitId(id.to_owned()),
+                parents: pais
+                    .split_whitespace()
+                    .map(|pai| CommitId(pai.to_owned()))
+                    .collect(),
+                author: autor.to_owned(),
+                date: data.to_owned(),
+                summary: resumo.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Lê a saída de `for-each-ref`: nome, upstream e o `*` da atual.

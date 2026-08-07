@@ -1234,12 +1234,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // elas estão aqui **porque só a raiz de composição pode nomear o
         // `ide-git`** — é a mesma razão que põe o registro das linguagens neste
         // arquivo. O teto sobe; a dívida 1 da `26` continua aberta.
-        // De 5 483 para 5 671: a fase 1 da `22` — as três escritas, a
-        // diferença de um arquivo e a comparação. São 188 linhas, e estão aqui
+        // De 5 483 para 5 826: a fase 1 da `22` — as três escritas, a
+        // diferença de um arquivo e a comparação. São 343 linhas — a fase 2 trouxe o commit e a página do histórico com as faixas do grafo —, e estão aqui
         // pelo mesmo motivo das anteriores: **só a raiz de composição pode
         // nomear o `ide-git`**. A dívida 1 da `26` continua aberta, e este
         // arquivo continua sendo o primeiro candidato a ser partido.
-        ("crates/ide-app/src/native_ide.rs", 5_671),
+        ("crates/ide-app/src/native_ide.rs", 5_826),
         // De 7 269 para 7 315: o teste que a fase 4 da `18` pedia — o copiado do
         // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
         // primeira adição depois de nascer**, que é o que ela existe para fazer:
@@ -1274,7 +1274,13 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // testes, e o arquivo passou de sete mil e novecentas linhas: partir
         // `tests.rs` por assunto — o item 4(b) do plano da `26` — deixou de ser
         // dívida confortável.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 7_937),
+        //
+        // De 7 937 para 8 161: a fase 2 — a aba `history` pedindo a primeira
+        // página, a tabela com as cinco colunas e o grafo, o commit que limpa a
+        // caixa e recarrega as duas listas, e as duas caixas da janela que não
+        // se misturam. **Este teto não sobe mais sem o arquivo ser partido**: o
+        // item 4(b) do plano da `26` passou de dívida a impedimento.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 8_161),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
@@ -1546,7 +1552,11 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// texto commitado. Nenhuma delas é alcançada pelo laço de quadros: quem
     /// pede manda o pedido e recolhe a resposta no quadro seguinte, como a
     /// completação e a busca já fazem.*
-    const TETO: usize = 39;
+    /// *De 39 para 41: a fase 2 da `22`, o `commit` e a página do histórico.
+    /// **As duas em thread própria**, nas funções que a thread chama, e as duas
+    /// falam com um processo: gravar um commit e ler o `log` de um repositório
+    /// grande não são perguntas de quadro.*
+    const TETO: usize = 41;
 
     assert!(
         chamadas.len() <= TETO,

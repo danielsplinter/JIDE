@@ -600,7 +600,7 @@ IDE**.
 |---|---|---|
 | botão, janela, divisão, nó `branches`, busca ✅ | 0 | é leitura pura, e prova a tela com o menor código atrás |
 | aba `status`, os três painéis, as ações de linha ✅ | 1 | é o `working_tree` inteiro, que é o que a fase 1 entrega |
-| aba `history`, a tabela, o grafo | 2 | precisa do `history` e do `ComposedTable` |
+| aba `history`, a tabela, o grafo ✅ | 2 | precisa do `history` e do `ComposedTable` |
 | nós `tags` e `stashes` | 3 | aparecem antes, vazios; a capacidade chega aqui |
 | nó `remotes`, à frente e atrás | 4 | é `fetch`, e sem ele não há o que contar |
 
@@ -731,13 +731,62 @@ quem roda. **No produto isso não está tratado**: um projeto com `autocrlf=true
 vai mostrar arquivos alterados que ninguém mudou, e a IDE vai ser acusada por
 isso.
 
-### Fase 2 — Commitar
+### Fase 2 — Commitar ✅
 
 `history`: `commit`, `amend`, `log`. A caixa de mensagem, e o histórico como
 lista.
 
 **Critério:** um ciclo completo de trabalho — editar, ver, preparar, commitar —
 acontece dentro da IDE.
+
+**Feita.** A caixa da mensagem fica embaixo dos três painéis da aba `status`,
+com **Commit** e **Amend** ao lado; a aba `history` mostra a tabela com as cinco
+colunas e o grafo. O ciclo inteiro tem teste contra repositório de verdade:
+editar, preparar, commitar, e o commit aparecer no histórico com o hash que a
+chamada devolveu.
+
+Sete decisões, e a primeira é de arquitetura:
+
+- **o grafo é conta aqui e traço lá.** `graph_rows` reparte os commits em
+  faixas — quem ocupa qual, o que atravessa a linha sem parar nela, para onde
+  vão os pais —, e a `GraphCell` da ERLibUi desenha o ponto e a linha a partir
+  disso. É a mesma divisão do ícone, e é o que impede o grafo de ser a primeira
+  coisa que a IDE desenharia por conta própria;
+- **as faixas que esperam o mesmo commit convergem.** Duas linhas que vêm do
+  mesmo pai o esperam em faixas diferentes; soltar só a primeira deixava a outra
+  esperando para sempre um commit que já passou, e a largura do grafo nunca mais
+  descia. Foi um teste que pegou, com quatro commits;
+- **o `log` vem por páginas, e a conta das faixas é sobre o que está na tela.**
+  Refazer a conta a cada página faria o traço saltar de coluna entre a linha 100
+  e a 101;
+- **a coluna do grafo tem largura fixa.** `Natural` mediria a linha mais larga
+  da página inteira, e uma fusão distante empurraria a descrição de todas as
+  outras;
+- **`Enter` na mensagem escreve, e não confirma.** A primeira linha é o resumo e
+  o resto é o corpo; confirmar é o botão, que é o gesto que não se dá sem
+  querer. E sem mensagem o **Commit** nasce desabilitado, em vez de deixar o
+  `git` recusar depois — recusa da ferramenta chega como falha, e não como o que
+  é;
+- **commitar limpa a caixa no mesmo gesto**, e pede o retrato **e** o histórico
+  do começo. A mensagem já foi usada, e deixá-la na tela convida a commitar duas
+  vezes o mesmo texto; o `amend` reescreve a linha de cima, e recarregar do
+  começo é a única resposta certa para os dois casos;
+- **duas caixas na mesma janela, e o cursor decide qual recebe.** Escrever a
+  mensagem não pode filtrar as branches, e procurar uma branch não pode escrever
+  no commit. É a terceira vez que esta IDE resolve a mesma pergunta, e agora ela
+  já nasce resolvida.
+
+**O que a ERLibUi ganhou**, e nenhuma das duas peças sabe o que é Git: o
+`ComposedTable`, com as colunas declaradas na tabela, `Natural` como máximo da
+coluna, cabeçalho que não rola e seleção por linha; e a `GraphCell`. Entrou
+junto o papel `Table` na acessibilidade — uma tabela anunciada como lista faria
+a linha inteira chegar como uma frase só, e a relação entre os campos se
+perderia.
+
+**Um defeito latente ficou registrado e não corrigido**: o `ComposedList` engole
+a ação de uma célula ao soltar o ponteiro, devolvendo `Handled` no lugar de
+`Action`. Hoje não quebra nada porque a ação também sai por `emit`, que é o
+caminho que o anfitrião lê. A tabela nova já nasce tratando isso.
 
 ### Fase 3 — Branches e integração
 
@@ -860,5 +909,5 @@ E número medido, como a `19`, a `20` e a `21` fizeram:
 | 0 | tempo do `status` no projeto de referência, repositório limpo e sujo |
 | 1 | tempo do `diff` de um arquivo; tempo entre gravar e a margem mudar |
 | 3 | tempo do `checkout` de branch até editor, Explorer e índice em dia |
-| 2 | tempo até a primeira página do histórico aparecer, no de referência |
+| 2 | tempo até a primeira página do histórico aparecer, no de referência — **não medido**: falta um clone grande nesta máquina |
 | 4 | atraso entre `git` no terminal integrado e a IDE refletir |

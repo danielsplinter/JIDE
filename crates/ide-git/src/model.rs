@@ -250,6 +250,129 @@ impl FileDiff {
     }
 }
 
+/// Um commit, como a tabela do histórico o mostra.
+///
+/// **A data vem pronta, e não como número.** Formatá-la exigiria fuso e
+/// calendário aqui dentro; o `git` já sabe fazer isso, e o formato curto é o
+/// mesmo em qualquer máquina porque quem pede diz qual quer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitSummary {
+    pub id: CommitId,
+    /// A primeira linha da mensagem, que é o que a coluna mostra.
+    pub summary: String,
+    pub author: String,
+    /// Data local, já formatada como `2026-08-06 19:14`.
+    pub date: String,
+    /// Os pais deste commit.
+    ///
+    /// Dois pais é uma fusão, e é disso que o grafo é feito: sem eles não há
+    /// como saber de onde para onde vai cada traço.
+    pub parents: Vec<CommitId>,
+}
+
+/// Onde um commit fica no grafo, e o que sai dele.
+///
+/// **A conta é da IDE, e o traço é da biblioteca.** Qual faixa cada commit
+/// ocupa sai do histórico — é aritmética sobre pais e filhos —, e isso não é
+/// desenho. Ver a `22`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GraphRow {
+    /// Em que faixa o ponto deste commit fica, contada da esquerda.
+    pub lane: usize,
+    /// Quantas faixas estão ocupadas nesta linha.
+    ///
+    /// É a largura que o desenho precisa reservar: sem ela, a coluna do grafo
+    /// teria de ser medida linha a linha.
+    pub width: usize,
+    /// As faixas que atravessam esta linha sem parar nela.
+    pub passing: Vec<usize>,
+    /// Para que faixas os pais deste commit seguem.
+    pub parents: Vec<usize>,
+}
+
+/// Reparte os commits em faixas, na ordem em que a tabela os mostra.
+///
+/// O algoritmo é o mesmo de todo visualizador de histórico, e é simples de
+/// propósito: cada linha tem uma lista de faixas esperando por um commit, o
+/// commit ocupa a primeira que o espera — ou uma nova, se ninguém o esperava —,
+/// e os pais dele passam a ser esperados.
+///
+/// **Uma página é uma página.** Um pai que está na página seguinte deixa a faixa
+/// aberta, e é o que se quer: o traço sai pela borda de baixo, como sai numa
+/// tela que continua rolando.
+#[must_use]
+pub fn graph_rows(commits: &[CommitSummary]) -> Vec<GraphRow> {
+    // Cada posição é uma faixa, e o que está nela é o commit esperado ali.
+    let mut faixas: Vec<Option<CommitId>> = Vec::new();
+    let mut linhas = Vec::with_capacity(commits.len());
+    for commit in commits {
+        let minha = match faixas.iter().position(|faixa| faixa.as_ref() == Some(&commit.id)) {
+            Some(indice) => indice,
+            None => {
+                let vaga = faixas.iter().position(Option::is_none);
+                match vaga {
+                    Some(indice) => indice,
+                    None => {
+                        faixas.push(None);
+                        faixas.len() - 1
+                    }
+                }
+            }
+        };
+        // **Todas as faixas que esperavam este commit convergem para a dele.**
+        // Duas linhas que vêm do mesmo pai o esperam em faixas diferentes; sem
+        // soltar as outras, a faixa fica esperando para sempre um commit que já
+        // passou, e a largura do grafo nunca mais desce.
+        for faixa in &mut faixas {
+            if faixa.as_ref() == Some(&commit.id) {
+                *faixa = None;
+            }
+        }
+        // As que atravessam: ocupadas por outro commit, e não por este.
+        let passing = faixas
+            .iter()
+            .enumerate()
+            .filter(|(indice, faixa)| *indice != minha && faixa.is_some())
+            .map(|(indice, _)| indice)
+            .collect();
+        // O primeiro pai continua na faixa deste commit; os outros abrem faixa.
+        faixas[minha] = commit.parents.first().cloned();
+        let mut destinos = Vec::new();
+        if !commit.parents.is_empty() {
+            destinos.push(minha);
+        }
+        for pai in commit.parents.iter().skip(1) {
+            let existente = faixas.iter().position(|faixa| faixa.as_ref() == Some(pai));
+            let indice = match existente {
+                Some(indice) => indice,
+                None => match faixas.iter().position(Option::is_none) {
+                    Some(indice) => {
+                        faixas[indice] = Some(pai.clone());
+                        indice
+                    }
+                    None => {
+                        faixas.push(Some(pai.clone()));
+                        faixas.len() - 1
+                    }
+                },
+            };
+            destinos.push(indice);
+        }
+        // Faixas que ninguém mais espera saem do fim, para a largura não crescer
+        // para sempre num histórico longo.
+        while faixas.last().is_some_and(Option::is_none) {
+            faixas.pop();
+        }
+        linhas.push(GraphRow {
+            lane: minha,
+            width: faixas.len().max(minha + 1),
+            passing,
+            parents: destinos,
+        });
+    }
+    linhas
+}
+
 /// Uma branch, como o painel da esquerda a mostra.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchSummary {
@@ -258,4 +381,84 @@ pub struct BranchSummary {
     pub current: bool,
     /// O upstream configurado, quando há.
     pub upstream: Option<BranchName>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commit(id: &str, pais: &[&str]) -> CommitSummary {
+        CommitSummary {
+            id: CommitId(id.to_owned()),
+            summary: format!("commit {id}"),
+            author: "Teste".to_owned(),
+            date: "2026-08-06 19:14".to_owned(),
+            parents: pais.iter().map(|pai| CommitId((*pai).to_owned())).collect(),
+        }
+    }
+
+    /// Uma linha reta ocupa uma faixa só, do começo ao fim.
+    ///
+    /// É o caso de quase todo repositório, e é o que impede a coluna do grafo de
+    /// reservar largura que ninguém usa.
+    #[test]
+    fn um_historico_sem_fusao_cabe_numa_faixa() {
+        let commits = [commit("c", &["b"]), commit("b", &["a"]), commit("a", &[])];
+        let linhas = graph_rows(&commits);
+        assert!(linhas.iter().all(|linha| linha.lane == 0));
+        assert!(linhas.iter().all(|linha| linha.width == 1), "{linhas:?}");
+        // O último não tem pai, e por isso não deixa faixa aberta.
+        assert!(linhas[2].parents.is_empty());
+    }
+
+    /// Uma fusão abre a segunda faixa, e ela fecha quando os dois lados se
+    /// encontram.
+    ///
+    /// **A largura precisa voltar a um.** Sem soltar a faixa que ninguém mais
+    /// espera, um histórico longo empurraria a coluna do grafo até engolir a
+    /// descrição.
+    #[test]
+    fn uma_fusao_abre_uma_faixa_e_o_encontro_a_fecha() {
+        // m funde d (linha de cima) com b (linha de baixo); os dois vêm de a.
+        let commits = [
+            commit("m", &["d", "b"]),
+            commit("d", &["a"]),
+            commit("b", &["a"]),
+            commit("a", &[]),
+        ];
+        let linhas = graph_rows(&commits);
+        assert_eq!(linhas[0].lane, 0);
+        assert_eq!(
+            linhas[0].parents,
+            vec![0, 1],
+            "o primeiro pai segue na faixa, o segundo abre outra"
+        );
+        assert_eq!(linhas[0].width, 2);
+        assert_eq!(linhas[1].lane, 0, "d continua na faixa da esquerda");
+        assert_eq!(linhas[2].lane, 1, "b está na faixa que a fusão abriu");
+        assert_eq!(
+            linhas[3].width, 1,
+            "com os dois lados no mesmo pai, a segunda faixa fecha: {linhas:?}"
+        );
+    }
+
+    /// O que atravessa a linha sem parar nela é o que o traço precisa saber.
+    ///
+    /// Sem essa lista, a faixa da direita sumiria na altura de um commit da
+    /// esquerda, e o traço apareceria cortado.
+    #[test]
+    fn as_faixas_que_atravessam_ficam_registradas() {
+        let commits = [
+            commit("m", &["d", "b"]),
+            commit("d", &["a"]),
+            commit("b", &["a"]),
+            commit("a", &[]),
+        ];
+        let linhas = graph_rows(&commits);
+        assert_eq!(
+            linhas[1].passing,
+            vec![1],
+            "na altura de d, a faixa de b atravessa: {linhas:?}"
+        );
+    }
 }

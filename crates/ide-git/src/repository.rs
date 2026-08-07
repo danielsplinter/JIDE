@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::branches::BranchService;
+use crate::history::HistoryService;
 use crate::working_tree::WorkingTreeService;
 
 /// Um repositório aberto.
@@ -19,6 +20,7 @@ pub struct Repository {
     root: PathBuf,
     working_tree: Arc<dyn WorkingTreeService>,
     branches: Arc<dyn BranchService>,
+    history: Arc<dyn HistoryService>,
 }
 
 impl Repository {
@@ -26,11 +28,13 @@ impl Repository {
         root: PathBuf,
         working_tree: Arc<dyn WorkingTreeService>,
         branches: Arc<dyn BranchService>,
+        history: Arc<dyn HistoryService>,
     ) -> Self {
         Self {
             root,
             working_tree,
             branches,
+            history,
         }
     }
 
@@ -48,6 +52,11 @@ impl Repository {
     #[must_use]
     pub fn branches(&self) -> Arc<dyn BranchService> {
         Arc::clone(&self.branches)
+    }
+
+    #[must_use]
+    pub fn history(&self) -> Arc<dyn HistoryService> {
+        Arc::clone(&self.history)
     }
 }
 

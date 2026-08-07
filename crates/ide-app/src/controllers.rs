@@ -257,6 +257,11 @@ pub(super) struct LanguageController {
     pub(super) git: SearchController<ide_ui::GitView>,
     /// O que a última escrita do Git respondeu, para a barra de estado.
     pub(super) git_write: SearchController<String>,
+    /// A página do histórico pedida.
+    ///
+    /// Controlador próprio pelo mesmo motivo do `diff`: são perguntas com tempos
+    /// diferentes, e um controlador só faria a página cancelar o retrato.
+    pub(super) git_history: SearchController<Vec<ide_ui::CommitRow>>,
     /// A comparação pedida: o texto de então e o que mudou.
     ///
     /// Separada do retrato porque são duas perguntas com tempos diferentes —

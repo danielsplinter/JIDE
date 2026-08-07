@@ -1593,6 +1593,8 @@ impl NativeIde {
         match request {
             GitRequest::Refresh => self.refresh_git(),
             GitRequest::ShowDiff { path, staged } => self.pedir_diferenca(path, staged, true),
+            GitRequest::Commit { message, amend } => self.commitar(message, amend),
+            GitRequest::LoadHistory { ja_carregados } => self.pedir_historico(ja_carregados),
             GitRequest::Stage(path) => self.escrever_no_git("stage", path),
             GitRequest::Unstage(path) => self.escrever_no_git("unstage", path),
             GitRequest::Discard(path) => self.escrever_no_git("discard", path),
@@ -1624,6 +1626,69 @@ impl NativeIde {
             let resultado = escrever_no_repositorio(&raiz, acao, &path);
             let _ = sender.send(resultado.unwrap_or_else(|erro| format!("Git falhou: {erro}")));
         });
+    }
+
+    /// Grava o que está preparado, fora da thread da interface.
+    fn commitar(&mut self, message: String, amend: bool) {
+        let Some(raiz) = self
+            .ui
+            .shell
+            .as_ref()
+            .map(|shell| shell.workspace_root().to_path_buf())
+        else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _cancel = self.languages.git_write.start(receiver);
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message("Git: commitando…".to_owned());
+        }
+        std::thread::spawn(move || {
+            let _ = sender.send(commitar_no_repositorio(&raiz, &message, amend));
+        });
+    }
+
+    /// Pede uma página do histórico.
+    ///
+    /// `ja_carregados` é de onde a página começa: quem rola pede a seguinte, e
+    /// o resultado é **acrescentado** ao que já está na tela. Zero recomeça, que
+    /// é o que um commit novo exige.
+    fn pedir_historico(&mut self, ja_carregados: usize) {
+        let Some(raiz) = self
+            .ui
+            .shell
+            .as_ref()
+            .map(|shell| shell.workspace_root().to_path_buf())
+        else {
+            return;
+        };
+        let anteriores = if ja_carregados == 0 {
+            Vec::new()
+        } else {
+            self.ui
+                .shell
+                .as_ref()
+                .map(|shell| shell.git_view().commits.clone())
+                .unwrap_or_default()
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = self.languages.git_history.start(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(pagina_do_historico(&raiz, ja_carregados, anteriores, &cancel));
+        });
+    }
+
+    /// Instala a página do histórico, se ela já chegou.
+    fn collect_git_history(&mut self) -> bool {
+        let Some(commits) = self.languages.git_history.collect() else {
+            return false;
+        };
+        if let Some(shell) = self.ui.shell.as_mut() {
+            let mut view = shell.git_view().clone();
+            view.commits = commits;
+            shell.set_git_view(view);
+        }
+        true
     }
 
     /// Conta o que a escrita respondeu, se ela já respondeu.
@@ -3689,6 +3754,95 @@ fn escrever_no_repositorio(
     Ok(format!("{nome} {feito}"))
 }
 
+/// Grava o commit e devolve o que dizer na barra de estado.
+fn commitar_no_repositorio(raiz: &std::path::Path, mensagem: &str, amend: bool) -> String {
+    let resultado = ide_git::open(raiz).map_err(|erro| erro.to_string()).and_then(
+        |repositorio| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|erro| erro.to_string())?;
+            runtime
+                .block_on(repositorio.history().commit(mensagem, amend))
+                .map_err(|erro| erro.to_string())
+        },
+    );
+    match resultado {
+        Ok(id) => format!("Commit {} gravado", id.short()),
+        Err(erro) => format!("Git falhou: {erro}"),
+    }
+}
+
+/// Uma página do histórico, já com as faixas do grafo calculadas.
+///
+/// **A conta das faixas é feita aqui**, e não na tela: ela é aritmética sobre
+/// pais e filhos, e a tela recebe o resultado. Quem desenha o ponto e o traço é
+/// a ERLibUi. Ver a `22`.
+fn pagina_do_historico(
+    raiz: &std::path::Path,
+    ja_carregados: usize,
+    anteriores: Vec<ide_ui::CommitRow>,
+    cancel: &CancellationToken,
+) -> Vec<ide_ui::CommitRow> {
+    let Ok(repositorio) = ide_git::open(raiz) else {
+        return anteriores;
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return anteriores;
+    };
+    let pagina = runtime.block_on(repositorio.history().log(
+        ja_carregados,
+        ide_ui::PAGINA_DO_HISTORICO,
+        cancel,
+    ));
+    let Ok(pagina) = pagina else {
+        return anteriores;
+    };
+    // As faixas são calculadas sobre o histórico inteiro que está na tela, e não
+    // sobre a página: uma faixa aberta na página anterior continua aberta, e
+    // recomeçar a conta a cada página faria o traço saltar de coluna.
+    let mut todos: Vec<ide_git::CommitSummary> = anteriores
+        .iter()
+        .map(|linha| ide_git::CommitSummary {
+            id: ide_git::CommitId(linha.hash.clone()),
+            summary: linha.summary.clone(),
+            author: linha.author.clone(),
+            date: linha.date.clone(),
+            // Os pais só interessam por identidade, e a tela guarda a faixa e
+            // não o hash deles: a conta é refeita com o que a página nova traz.
+            parents: Vec::new(),
+        })
+        .collect();
+    let inicio = todos.len();
+    todos.extend(pagina);
+    let faixas = ide_git::graph_rows(&todos);
+    todos
+        .into_iter()
+        .zip(faixas)
+        .enumerate()
+        .map(|(indice, (commit, faixa))| {
+            if indice < inicio {
+                // O que já estava na tela mantém o que tinha: refazer a conta
+                // sem os pais deles daria faixa zero para todo mundo.
+                return anteriores[indice].clone();
+            }
+            ide_ui::CommitRow {
+                hash: commit.id.0,
+                summary: commit.summary,
+                author: commit.author,
+                date: commit.date,
+                lane: faixa.lane,
+                lanes: faixa.width,
+                passing: faixa.passing,
+                parents: faixa.parents,
+            }
+        })
+        .collect()
+}
+
 /// A diferença de um arquivo: o texto de então e as linhas que mudaram.
 fn diferenca_do_arquivo(
     raiz: &std::path::Path,
@@ -3767,6 +3921,7 @@ impl ApplicationHandler for NativeIde {
         changed |= self.collect_git();
         changed |= self.collect_git_diff();
         changed |= self.collect_git_write();
+        changed |= self.collect_git_history();
         changed |= self.collect_navigation();
         changed |= self.collect_completion();
         // Aceitar um item escreve o nome; o `import` que ele exige é a pergunta

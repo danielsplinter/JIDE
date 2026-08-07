@@ -26,6 +26,17 @@ pub enum GitRequest {
     /// diferenças distintas sobre o mesmo arquivo, e confundi-las mostra a
     /// errada para quem já preparou parte do trabalho.
     ShowDiff { path: std::path::PathBuf, staged: bool },
+    /// Grava o que está preparado.
+    ///
+    /// `amend` reescreve o commit anterior em vez de criar um novo: é o mesmo
+    /// gesto com uma opção, e separá-lo em dois comandos daria dois caminhos
+    /// para a mesma coisa — e o segundo envelheceria.
+    Commit { message: String, amend: bool },
+    /// Pede mais uma página do histórico.
+    ///
+    /// `ja_carregados` é quantos commits a tela já tem: quem rola pede a página
+    /// seguinte, e o número diz de onde ela começa.
+    LoadHistory { ja_carregados: usize },
 }
 
 /// Intenções que atravessam a fronteira entre apresentação e aplicação.
