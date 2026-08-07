@@ -9,11 +9,14 @@
 use std::path::{Path, PathBuf};
 
 use ide_application::{NewItemRequest, NewItemTemplate};
+
+use super::{JANELA_TITULO_ALTO};
 use ui_api::{LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
 use ui_components::{Button, IconTint, Label, ModalHost, TextInput};
 use ui_core::{
-    KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetAction, WidgetId,
+    KeyEvent, Modifiers, Point, Rect, Size, Spacing, TextInputEvent, UiEvent, WidgetAction,
+    WidgetId,
 };
 use ui_host::{Node, UiHost};
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
@@ -81,7 +84,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             width: Some(PANEL_SIZE.width),
             height: Some(PANEL_SIZE.height),
-            padding: EdgeInsets::only(76.0, 24.0, 14.0, 24.0),
+            padding: EdgeInsets::only(JANELA_TITULO_ALTO, Spacing::XL, Spacing::MD, Spacing::XL),
             ..LayoutStyle::default()
         },
     );
@@ -122,7 +125,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             direction: LayoutDirection::Row,
             main_align: MainAlign::End,
             height: Some(34.0),
-            gap: 10.0,
+            gap: Spacing::SM,
             ..LayoutStyle::default()
         },
     );
@@ -376,7 +379,14 @@ impl NewItemSurface {
                 paint,
                 MESSAGE_ID,
                 message,
-                Point::new(name.origin.x, name.origin.y + 44.0),
+                // Abaixo do campo, e o campo diz onde acaba: a altura dele
+                // está ali, na área que ele recebeu. Um número escrito aqui
+                // seria a soma de duas coisas — a altura e a folga — que
+                // deixaria de bater assim que uma das duas mudasse.
+                Point::new(
+                    name.origin.x,
+                    name.origin.y + name.size.height + Spacing::SM,
+                ),
                 IconTint::Danger,
             );
         }

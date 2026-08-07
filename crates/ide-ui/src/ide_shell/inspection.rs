@@ -9,14 +9,24 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use ide_workspace::TextBuffer;
+
+/// O que a janela gasta com moldura, título e faixa de ações.
+const CHROME_DA_JANELA: f32 = 112.0;
+/// Onde a mensagem fica, acima da faixa de ações.
+const MENSAGEM_ACIMA: f32 = 22.0;
+/// Onde a legenda de um campo fica: uma linha acima dele.
+const LEGENDA_ACIMA: f32 = 16.0;
+/// A segunda e a quarta linha de um bloco de detalhe, contadas do topo dele.
+const SEGUNDA_LINHA: f32 = 26.0;
+const QUARTA_LINHA: f32 = 56.0;
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
 use ui_components::{Button, IconTint, Label, ModalHost, TreeItem, TreeView};
-use ui_core::{Point, Rect, Size, UiEvent, WidgetAction, WidgetId};
+use ui_core::{Point, Rect, Size, Spacing, UiEvent, WidgetAction, WidgetId};
 use ui_host::{Node, UiHost};
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 
-use super::{INSPECTION_DETAIL_FRACTION, INSPECTION_LIST_FRACTION};
+use super::{JANELA_TITULO, INSPECTION_DETAIL_FRACTION, INSPECTION_LIST_FRACTION};
 use super::primary_pointer;
 use crate::debugging::DebugVariableView;
 use crate::editor::{EditorCapabilities, EditorPane};
@@ -154,8 +164,8 @@ impl Default for InspectionSurface {
 /// as mesmas de antes, e agora dividem a largura uma vez só, em vez de aparecer
 /// no cálculo de cada peça.
 pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
-    let content_height = (PANEL_SIZE.height - 112.0).max(80.0);
-    let list_width = (PANEL_SIZE.width - 32.0) * INSPECTION_LIST_FRACTION;
+    let content_height = (PANEL_SIZE.height - CHROME_DA_JANELA).max(80.0);
+    let list_width = (PANEL_SIZE.width - Spacing::LG * 2.0) * INSPECTION_LIST_FRACTION;
     let detail_height = (content_height * INSPECTION_DETAIL_FRACTION).max(60.0);
     let _ = host.declare(
         layer,
@@ -163,8 +173,8 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             width: Some(PANEL_SIZE.width),
             height: Some(PANEL_SIZE.height),
-            padding: EdgeInsets::only(56.0, 16.0, 14.0, 16.0),
-            gap: 8.0,
+            padding: EdgeInsets::only(JANELA_TITULO, Spacing::LG, Spacing::MD, Spacing::LG),
+            gap: Spacing::SM,
             ..LayoutStyle::default()
         },
     );
@@ -174,7 +184,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             direction: LayoutDirection::Row,
             height: Some(content_height),
-            gap: 16.0,
+            gap: Spacing::LG,
             ..LayoutStyle::default()
         },
     );
@@ -191,7 +201,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         RIGHT_ID,
         LayoutStyle {
             flex_grow: 1.0,
-            gap: 18.0,
+            gap: Spacing::LG,
             ..LayoutStyle::default()
         },
     );
@@ -218,7 +228,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             direction: LayoutDirection::Row,
             main_align: MainAlign::End,
             height: Some(34.0),
-            gap: 10.0,
+            gap: Spacing::SM,
             ..LayoutStyle::default()
         },
     );
@@ -274,9 +284,9 @@ fn message_area(host: &UiHost) -> Rect {
     let panel = area(host, MODAL_ID);
     let actions = area(host, ACTIONS_ID);
     Rect::new(
-        panel.origin.x + 16.0,
-        actions.origin.y - 22.0,
-        (panel.size.width - 32.0).max(80.0),
+        panel.origin.x + Spacing::LG,
+        actions.origin.y - MENSAGEM_ACIMA,
+        (panel.size.width - Spacing::LG * 2.0).max(80.0),
         18.0,
     )
 }
@@ -697,7 +707,7 @@ impl InspectionSurface {
                     paint,
                     TYPE_ID,
                     entry.type_name.as_deref().unwrap_or("tipo desconhecido"),
-                    Point::new(detail.origin.x, detail.origin.y + 26.0),
+                    Point::new(detail.origin.x, detail.origin.y + SEGUNDA_LINHA),
                     13.0,
                     IconTint::Muted,
                 );
@@ -706,7 +716,7 @@ impl InspectionSurface {
                     paint,
                     VALUE_ID,
                     &entry.value,
-                    Point::new(detail.origin.x, detail.origin.y + 56.0),
+                    Point::new(detail.origin.x, detail.origin.y + QUARTA_LINHA),
                     14.0,
                     IconTint::Text,
                 );
@@ -727,7 +737,7 @@ impl InspectionSurface {
             paint,
             SOURCE_CAPTION_ID,
             "Código a executar no quadro atual",
-            Point::new(source.origin.x, source.origin.y - 16.0),
+            Point::new(source.origin.x, source.origin.y - LEGENDA_ACIMA),
             13.0,
             IconTint::Muted,
         );

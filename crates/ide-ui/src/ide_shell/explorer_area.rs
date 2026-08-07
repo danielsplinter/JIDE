@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Quanto da largura da janela fica para o editor quando a lateral cresce.
+///
+/// É uma reserva, e não um espaçamento: diz de quanto do editor não se abre mão.
+const SIDEBAR_RESERVA: f32 = 320.0;
+
 impl IdeShell {
     /// Abre a pasta e todas as que levam até ela.
     ///
@@ -53,7 +58,7 @@ impl IdeShell {
             ACTIVITY_WIDTH,
             EXPLORER_TOP,
             self.sidebar_width(size),
-            (geo.content_bottom - 12.0 - EXPLORER_TOP).max(0.0),
+            (geo.content_bottom - self.espaco().md - EXPLORER_TOP).max(0.0),
         )
     }
 
@@ -216,7 +221,7 @@ impl IdeShell {
         );
         splitter.set_range(
             ACTIVITY_WIDTH + SIDEBAR_MIN_WIDTH,
-            ACTIVITY_WIDTH + (size.width - 320.0).max(SIDEBAR_MIN_WIDTH),
+            ACTIVITY_WIDTH + (size.width - SIDEBAR_RESERVA).max(SIDEBAR_MIN_WIDTH),
         );
         splitter.set_position(ACTIVITY_WIDTH + self.sidebar_width(size));
         splitter
@@ -413,7 +418,7 @@ impl IdeShell {
         }
         self.explorer.sidebar_width.clamp(
             SIDEBAR_MIN_WIDTH,
-            (size.width - 320.0).max(SIDEBAR_MIN_WIDTH),
+            (size.width - SIDEBAR_RESERVA).max(SIDEBAR_MIN_WIDTH),
         )
     }
 
@@ -456,7 +461,9 @@ impl IdeShell {
         let folga = (ACTIVITY_WIDTH - Button::HEIGHT) / 2.0;
         Rect::new(
             folga,
-            TITLE_HEIGHT + 8.0 + ordem * (Button::HEIGHT + 8.0),
+            // Sem `self`, e por isso o degrau padrão da escala em vez do do
+            // tema: é geometria de chapa, perguntada antes de haver janela.
+            TITLE_HEIGHT + Spacing::SM + ordem * (Button::HEIGHT + Spacing::SM),
             Button::HEIGHT,
             Button::HEIGHT,
         )
@@ -721,7 +728,7 @@ impl IdeShell {
 
     pub(super) fn explorer_visible_lines(&self) -> usize {
         let geo = self.geometry();
-        ((geo.content_bottom - 12.0 - EXPLORER_TOP) / EXPLORER_ROW_HEIGHT)
+        ((geo.content_bottom - self.espaco().md - EXPLORER_TOP) / EXPLORER_ROW_HEIGHT)
             .floor()
             .max(1.0) as usize
     }
@@ -730,7 +737,7 @@ impl IdeShell {
         let geo = self.geometry();
         Rect::new(
             ACTIVITY_WIDTH,
-            geo.content_bottom - 12.0,
+            geo.content_bottom - self.espaco().md,
             self.sidebar_width(size),
             12.0,
         )
@@ -739,10 +746,11 @@ impl IdeShell {
     pub(super) fn explorer_vertical_scrollbar_rect(&self, size: Size) -> Rect {
         let geo = self.geometry();
         Rect::new(
-            ACTIVITY_WIDTH + self.sidebar_width(size) - 16.0,
+            ACTIVITY_WIDTH + self.sidebar_width(size) - self.espaco().lg,
             EXPLORER_TOP - EXPLORER_ROW_HEIGHT,
             10.0,
-            (geo.content_bottom - 12.0 - EXPLORER_TOP + EXPLORER_ROW_HEIGHT).max(0.0),
+            (geo.content_bottom - self.espaco().md - EXPLORER_TOP + EXPLORER_ROW_HEIGHT)
+                .max(0.0),
         )
     }
 

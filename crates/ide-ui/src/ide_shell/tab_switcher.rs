@@ -7,9 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
+use super::{JANELA_TITULO};
 use ui_api::{LayoutContext, PaintContext, Widget};
 use ui_components::{ListView, ModalHost};
-use ui_core::{Point, Rect, Size, WidgetId};
+use ui_core::{Point, Rect, Size, Spacing, WidgetId};
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutStyle};
 
@@ -29,7 +30,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             width: Some(PANEL_SIZE.width),
             height: Some(PANEL_SIZE.height),
-            padding: EdgeInsets::only(56.0, 16.0, 16.0, 16.0),
+            padding: EdgeInsets::only(JANELA_TITULO, Spacing::LG, Spacing::LG, Spacing::LG),
             ..LayoutStyle::default()
         },
     );

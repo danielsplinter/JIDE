@@ -1,6 +1,11 @@
 //! O painel de terminais: abas, rolagem, seleção e o que é enviado.
 
 use super::*;
+
+/// Quanto do editor não se abre mão quando o terminal cresce.
+const EDITOR_MINIMO: f32 = 100.0;
+/// O lado do botão que recolhe o terminal.
+const RECOLHER_LADO: f32 = 22.0;
 use ui_core::FontId;
 
 impl IdeShell {
@@ -172,7 +177,7 @@ impl IdeShell {
         let geometry = self.geometry();
         let editor_x = ACTIVITY_WIDTH + self.sidebar_width(size);
         let maximum =
-            (geometry.content_bottom - geometry.content_top - 100.0).max(TERMINAL_MIN_HEIGHT);
+            (geometry.content_bottom - geometry.content_top - EDITOR_MINIMO).max(TERMINAL_MIN_HEIGHT);
         let mut splitter = self.terminal.splitter.clone();
         splitter.layout(
             &self.layout_context(),
@@ -483,7 +488,12 @@ impl IdeShell {
     /// a conta em dois lugares, o roteador manda o gesto para um lugar e o
     /// desenho põe o botão em outro.
     pub(super) fn terminal_toggle_rect(&self, size: Size) -> Rect {
-        Rect::new(size.width - 30.0, self.geometry().editor_bottom + 4.0, 22.0, 22.0)
+        Rect::new(
+            size.width - RECOLHER_LADO - Spacing::SM,
+            self.geometry().editor_bottom + Spacing::XS,
+            RECOLHER_LADO,
+            RECOLHER_LADO,
+        )
     }
 
     pub(super) fn terminal_toggle_pointer_down(&mut self, point: Point, size: Size) -> bool {

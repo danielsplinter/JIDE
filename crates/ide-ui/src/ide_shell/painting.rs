@@ -6,6 +6,21 @@
 use super::*;
 use ui_components::{Label, Panel, Spinner, SurfaceTone};
 
+/// Onde um título de seção fica acima do que ele nomeia.
+///
+/// Não é espaçamento: é a altura da linha em que o título é desenhado, e por
+/// isso tem nome próprio em vez de sair da escala. O que ela separa do
+/// conteúdo, aí sim, é espaçamento.
+/// A espessura de uma divisória.
+///
+/// Não é espaçamento: é a linha em si. Um ponto, como em toda borda desta tela.
+const BORDA: f32 = 1.0;
+const TITULO_DA_SECAO: f32 = 20.0;
+/// Onde o aviso de "nenhum arquivo aberto" fica dentro do editor vazio.
+///
+/// Recuado do canto porque ele não é conteúdo do arquivo: está no lugar de um.
+const AVISO_VAZIO: Point = Point::new(55.0, 30.0);
+
 impl IdeShell {
     /// Desenha um texto solto com a `Label` da biblioteca.
     ///
@@ -111,12 +126,24 @@ impl IdeShell {
         }
     }
 
+    /// Os espaçamentos em vigor, que vêm do tema.
+    ///
+    /// **A tela não escolhe número.** Um `+ 12.0` escrito aqui e um `+ 14.0` na
+    /// tela vizinha é como duas coisas que deviam se alinhar deixam de se
+    /// alinhar — e ninguém percebe até virar print.
+    pub(super) const fn espaco(&self) -> SpacingTokens {
+        self.context.theme.spacing
+    }
+
     /// Contexto de layout com a medição disponível, quando houver.
     pub(super) fn layout_context(&self) -> LayoutContext {
-        match self.context.text_metrics.as_ref() {
+        // O tema vai junto: espaçamento é decisão de arranjo, e é do tema que
+        // ele sai quando a tela não escolhe outro.
+        let context = match self.context.text_metrics.as_ref() {
             Some(metrics) => LayoutContext::with_text_metrics(Arc::clone(metrics)),
             None => LayoutContext::default(),
-        }
+        };
+        context.with_theme(self.context.theme)
     }
 
     /// Desenha uma barra com o componente da biblioteca.
@@ -211,14 +238,17 @@ impl IdeShell {
             DEBUG_PANEL_SURFACE_ID,
             panel,
             SurfaceTone::Surface,
-            EdgeInsets::only(0.0, 0.0, 0.0, 1.0),
+            EdgeInsets::only(0.0, 0.0, 0.0, BORDA),
         );
         commands.push(PaintCommand::PushClip(panel));
         self.paint_label(
             &mut commands,
             DEBUG_STATUS_ID,
             &self.debug_panel.view.status,
-            Point::new(panel.origin.x + 12.0, panel.origin.y + 10.0),
+            Point::new(
+                panel.origin.x + self.espaco().md,
+                panel.origin.y + self.espaco().sm,
+            ),
             13.0,
             if self.debug_panel.view.is_stopped() {
                 IconTint::Accent
@@ -243,7 +273,10 @@ impl IdeShell {
             &mut commands,
             DEBUG_FRAMES_TITLE_ID,
             "Pilha de chamadas",
-            Point::new(panel.origin.x + 12.0, geometry.frames.origin.y - 20.0),
+            Point::new(
+                panel.origin.x + self.espaco().md,
+                geometry.frames.origin.y - TITULO_DA_SECAO,
+            ),
             12.0,
             IconTint::Muted,
         );
@@ -258,7 +291,10 @@ impl IdeShell {
             &mut commands,
             DEBUG_VARS_TITLE_ID,
             "Variáveis",
-            Point::new(panel.origin.x + 12.0, geometry.variables.origin.y - 20.0),
+            Point::new(
+                panel.origin.x + self.espaco().md,
+                geometry.variables.origin.y - TITULO_DA_SECAO,
+            ),
             12.0,
             IconTint::Muted,
         );
@@ -369,7 +405,7 @@ impl IdeShell {
                     geo.terminal_height,
                 ),
                 SurfaceTone::Surface,
-                EdgeInsets::all(1.0),
+                EdgeInsets::all(BORDA),
             ),
         ] {
             self.paint_surface_band(&mut commands, id, area, tone, borders);
@@ -385,14 +421,20 @@ impl IdeShell {
             (
                 CHROME_EXPLORER_ID,
                 "EXPLORER",
-                Point::new(ACTIVITY_WIDTH + 14.0, TITLE_HEIGHT + 14.0),
+                Point::new(
+                    ACTIVITY_WIDTH + self.espaco().md,
+                    TITLE_HEIGHT + self.espaco().md,
+                ),
                 12.0,
                 IconTint::Muted,
             ),
             (
                 CHROME_WORKSPACE_ID,
                 self.explorer.workspace_name.as_str(),
-                Point::new(ACTIVITY_WIDTH + 14.0, TITLE_HEIGHT + 42.0),
+                Point::new(
+                    ACTIVITY_WIDTH + self.espaco().md,
+                    TITLE_HEIGHT + self.espaco().md + TITULO_DA_SECAO,
+                ),
                 14.0,
                 IconTint::Text,
             ),
@@ -435,7 +477,8 @@ impl IdeShell {
                 ACTIVITY_WIDTH,
                 EXPLORER_TOP - EXPLORER_ROW_HEIGHT,
                 self.sidebar_width(size),
-                (geo.content_bottom - EXPLORER_TOP + EXPLORER_ROW_HEIGHT - 12.0).max(0.0),
+                (geo.content_bottom - EXPLORER_TOP + EXPLORER_ROW_HEIGHT - self.espaco().md)
+                .max(0.0),
             )));
             // A árvore é um componente: recuo, marcador de expansão,
             // virtualização, seleção e deslocamento horizontal pertencem a ela.
@@ -500,7 +543,7 @@ impl IdeShell {
                 &mut commands,
                 EDITOR_EMPTY_ID,
                 "Select a file in Explorer",
-                Point::new(editor_x + 55.0, geo.content_top + 30.0),
+                Point::new(editor_x + AVISO_VAZIO.x, geo.content_top + AVISO_VAZIO.y),
                 16.0,
                 IconTint::Muted,
             );
@@ -585,7 +628,7 @@ impl IdeShell {
                 &mut commands,
                 TERMINAL_COLLAPSED_ID,
                 "Terminal",
-                Point::new(editor_x + 10.0, geo.editor_bottom + 8.0),
+                Point::new(editor_x + self.espaco().sm, geo.editor_bottom + self.espaco().sm),
                 13.0,
                 IconTint::Text,
             );
@@ -667,7 +710,7 @@ impl IdeShell {
         let mut menu_bar = self.menu.bar.clone();
         menu_bar.layout(
             &self.layout_context(),
-            Rect::new(82.0, 0.0, (size.width - 82.0).max(0.0), TITLE_HEIGHT),
+            Rect::new(MENU_X, 0.0, (size.width - MENU_X).max(0.0), TITLE_HEIGHT),
         );
         let mut menu_paint = self.paint_context();
         menu_bar.paint(&mut menu_paint);

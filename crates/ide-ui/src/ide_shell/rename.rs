@@ -13,12 +13,16 @@ use std::{
 use ide_domain::{Location, TextRange};
 // A moldura, o campo e a lista são da biblioteca: a IDE não desenha caixa de
 // texto nem trilha de rolagem à mão.
+use super::{JANELA_TITULO_ALTO};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
 use ui_components::{Button, IconTint, Label, ListView, ModalHost, TextInput};
-use ui_core::{
-    KeyEvent, Modifiers, Point, Rect, Size, TextInputEvent, UiEvent, WidgetAction, WidgetId,
-};
+/// A folga entre duas peças da janela: é ela que abriga a legenda da de baixo.
+///
+/// Altura de uma legenda mais o respiro, e não um degrau da escala — que é o que
+/// ela mede.
+const FOLGA_ENTRE_CAMPOS: f32 = 34.0;
+use ui_core::{KeyEvent, Modifiers, Point, Rect, Size, Spacing, TextInputEvent, UiEvent, WidgetAction, WidgetId};
 use ui_host::{Node, UiHost};
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 
@@ -442,10 +446,10 @@ fn panel_style() -> LayoutStyle {
     LayoutStyle {
         width: Some(PANEL_SIZE.width),
         height: Some(PANEL_SIZE.height),
-        padding: EdgeInsets::only(76.0, 24.0, 14.0, 24.0),
+        padding: EdgeInsets::only(JANELA_TITULO_ALTO, Spacing::XL, Spacing::MD, Spacing::XL),
         // A folga entre as peças é a mesma em toda a janela: é ela que abriga a
         // legenda de cada uma.
-        gap: 34.0,
+        gap: FOLGA_ENTRE_CAMPOS,
         ..LayoutStyle::default()
     }
 }
@@ -463,7 +467,7 @@ fn actions_style() -> LayoutStyle {
         direction: LayoutDirection::Row,
         main_align: MainAlign::End,
         height: Some(34.0),
-        gap: 10.0,
+        gap: Spacing::SM,
         ..LayoutStyle::default()
     }
 }

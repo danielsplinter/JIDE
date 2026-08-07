@@ -5,6 +5,18 @@
 //! ele não tratou significa.
 
 use super::*;
+
+/// Espessura das barras de rolagem que o shell desenha por conta própria.
+///
+/// É a medida da barra, e não um espaçamento: a escala não tem opinião sobre
+/// quanto uma barra de rolagem mede.
+const BARRA_ESPESSURA: f32 = 10.0;
+/// O que a trilha horizontal perde para os cantos e para a barra vertical.
+const BARRA_LATERAL_FOLGA: f32 = 28.0;
+/// Onde a primeira linha de texto começa dentro da área do editor.
+const EDITOR_PRIMEIRA_LINHA: f32 = 36.0;
+/// Altura reservada à lista de completação, para ela não nascer fora da tela.
+const LISTA_DE_COMPLETACAO_ALTURA: f32 = 190.0;
 use crate::editor::Posicao;
 
 /// Quantas letras de um nome abrem a lista de completação sozinhas.
@@ -231,7 +243,7 @@ impl IdeShell {
                 (
                     track,
                     self.editor_area.pane.content_width(),
-                    (track.size.width - 28.0).max(1.0),
+                    (track.size.width - BARRA_LATERAL_FOLGA).max(1.0),
                     self.editor_area.pane.scroll_x(),
                 )
             }
@@ -240,7 +252,7 @@ impl IdeShell {
                 (
                     track,
                     self.explorer_content_width(size),
-                    (track.size.width - 28.0).max(1.0),
+                    (track.size.width - BARRA_LATERAL_FOLGA).max(1.0),
                     self.explorer.scroll_x,
                 )
             }
@@ -315,9 +327,9 @@ impl IdeShell {
         let area = self.editor_view_rect(size);
         Rect::new(
             area.origin.x,
-            geo.editor_bottom - 10.0,
-            (area.size.width - 10.0).max(0.0),
-            10.0,
+            geo.editor_bottom - BARRA_ESPESSURA,
+            (area.size.width - BARRA_ESPESSURA).max(0.0),
+            BARRA_ESPESSURA,
         )
     }
 
@@ -707,9 +719,9 @@ impl IdeShell {
         // de baixo: dividida a área, a borda da direita não é mais a da janela.
         let area = self.editor_view_rect(size);
         Rect::new(
-            area.origin.x + area.size.width - 10.0,
+            area.origin.x + area.size.width - BARRA_ESPESSURA,
             geo.content_top,
-            10.0,
+            BARRA_ESPESSURA,
             geo.editor_height,
         )
     }
@@ -784,10 +796,10 @@ impl IdeShell {
                 .min(limite)
                 .max(editor_x + EDITOR_GUTTER),
             (geo.content_top
-                + 36.0
+                + EDITOR_PRIMEIRA_LINHA
                 + line.saturating_sub(self.editor_area.pane.scroll_line()) as f32
                     * EDITOR_LINE_HEIGHT)
-                .min(geo.editor_bottom - 190.0),
+                .min(geo.editor_bottom - LISTA_DE_COMPLETACAO_ALTURA),
         ))
     }
 

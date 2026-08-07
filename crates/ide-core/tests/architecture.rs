@@ -1349,6 +1349,115 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         );
     }
 
+    // **Nenhuma tela escolhe espaçamento por conta própria.**
+    //
+    // A ERLibUi tem uma escala — `Spacing`, cinco degraus —, e o tema diz quanto
+    // cada degrau vale. Antes desta guarda a `ide-ui` tinha 52 deslocamentos
+    // escritos à mão: `+ 12.0` numa tela, `+ 14.0` na vizinha, `- 10.0` na
+    // terceira. Coisas que deviam se alinhar não se alinhavam, e ninguém
+    // descobria até virar print — foi assim que o cabeçalho da comparação do Git
+    // passou por cima da contagem e encostou na moldura.
+    //
+    // A regra é sobre **deslocamento**, e não sobre número: somar ou subtrair um
+    // literal de uma coordenada é o que produz espaçamento. Um `const` com nome
+    // continua permitido, e é a outra saída certa — há medidas que não são
+    // espaçamento nenhum, como a espessura de uma barra de rolagem ou a largura
+    // reservada ao editor, e essas se declaram uma vez, com nome e razão.
+    // Sem dependência de expressão regular: o padrão é curto o bastante para se
+    // reconhecer à mão, e a guarda não precisa de mais do que isto.
+    /// Um número escrito na linha que não seja zero.
+    ///
+    /// Zero passa: `EdgeInsets::only(0.0, ...)` diz "nada deste lado", e nada
+    /// não é uma escolha de espaçamento.
+    fn tem_numero_proprio(linha: &str) -> bool {
+        let letras: Vec<char> = linha.chars().collect();
+        let mut indice = 0;
+        while indice < letras.len() {
+            if !letras[indice].is_ascii_digit() {
+                indice += 1;
+                continue;
+            }
+            let comeco = indice;
+            while letras.get(indice).is_some_and(char::is_ascii_digit) {
+                indice += 1;
+            }
+            let inteiro: String = letras[comeco..indice].iter().collect();
+            if letras.get(indice) == Some(&'.') && inteiro != "0" {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn tem_deslocamento(linha: &str) -> bool {
+        let letras: Vec<char> = linha.chars().collect();
+        for (indice, letra) in letras.iter().enumerate() {
+            if *letra != '+' && *letra != '-' {
+                continue;
+            }
+            let mut adiante = indice + 1;
+            while letras.get(adiante).is_some_and(|c| *c == ' ') {
+                adiante += 1;
+            }
+            let comeco = adiante;
+            while letras.get(adiante).is_some_and(char::is_ascii_digit) {
+                adiante += 1;
+            }
+            if adiante > comeco && letras.get(adiante) == Some(&'.') {
+                return true;
+            }
+        }
+        false
+    }
+    for arquivo in rust_sources(&root.join("crates/ide-ui/src")) {
+        // Teste aponta um gesto num ponto qualquer da tela, e o ponto é dele.
+        if arquivo
+            .components()
+            .any(|parte| parte.as_os_str() == "tests")
+        {
+            continue;
+        }
+        let Ok(fonte) = fs::read_to_string(&arquivo) else {
+            continue;
+        };
+        let relativo = arquivo.strip_prefix(&root).unwrap_or(&arquivo);
+        let mut em_teste = false;
+        for (numero, linha) in fonte.lines().enumerate() {
+            let limpa = linha.trim();
+            if limpa.starts_with("mod tests") {
+                em_teste = true;
+            }
+            if em_teste
+                || limpa.starts_with("//")
+                || limpa.starts_with("const ")
+                || limpa.starts_with("pub const ")
+            {
+                continue;
+            }
+            assert!(
+                !tem_deslocamento(linha),
+                "{}:{}: deslocamento escrito à mão — use `theme.spacing` ou um `const` com nome: {}",
+                relativo.display(),
+                numero + 1,
+                limpa
+            );
+            // **A outra forma do mesmo defeito.** O `gap` e o `padding` de um
+            // arranjo são espaçamento tanto quanto um `+ 12.0`, e a primeira
+            // versão desta guarda não os via: eram 44 sítios a mais, e foi
+            // preciso alguém perguntar o que era um número com nome bonito para
+            // eles aparecerem.
+            let literal_de_arranjo = limpa.starts_with("gap:")
+                || (limpa.contains("EdgeInsets::") && limpa.contains(':'));
+            assert!(
+                !(literal_de_arranjo && tem_numero_proprio(limpa)),
+                "{}:{}: espaçamento de arranjo escrito à mão — use `Spacing` ou um `const` com nome: {}",
+                relativo.display(),
+                numero + 1,
+                limpa
+            );
+        }
+    }
+
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
             .unwrap_or_else(|error| panic!("não foi possível ler {relative}: {error}"));

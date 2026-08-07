@@ -80,7 +80,7 @@ use context_menu::{AlvoDoMenu, ContextMenuSurface};
 use routing::Alvo;
 use ui_core::{
     ColorTokens, CommandId, EventResult, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
-    Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
+    Rect, Size, Spacing, SpacingTokens, Theme, UiEvent, WidgetAction, WidgetId,
 };
 use ui_editor::{CodeEditor, GutterMark, LineDecoration};
 use ui_host::UiHost;
@@ -93,6 +93,25 @@ pub(super) const ACTIVITY_WIDTH: f32 = 48.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 pub(super) const TITLE_HEIGHT: f32 = 36.0;
+/// Onde a barra de menus começa, à direita dos controles da janela.
+///
+/// A moldura e o menu precisam do mesmo número, e por isso ele mora onde as
+/// duas o veem: escrito duas vezes, ele diverge na primeira mudança.
+const MENU_X: f32 = 82.0;
+/// A faixa que uma janela modal reserva no alto para o título dela.
+///
+/// **Não é espaçamento, é a altura de uma peça** — e por isso tem nome em vez
+/// de sair da escala. Estava escrita em cinco janelas, e em duas delas com dois
+/// pontos de diferença que ninguém escolheu: uma sozinha é uma tela desalinhada
+/// das outras quatro, e ninguém descobre por que.
+const JANELA_TITULO: f32 = 56.0;
+/// A mesma faixa, nas janelas que ainda trazem uma legenda sob o título.
+const JANELA_TITULO_ALTO: f32 = 74.0;
+/// A faixa que o painel de depuração reserva para a linha de estado.
+///
+/// Altura de uma peça, e não espaçamento: encolhê-la para um degrau da escala
+/// subiu os botões dez pontos e o teste do passo a passo pegou.
+const DEBUG_STATUS_ALTURA: f32 = 34.0;
 pub(super) const TAB_HEIGHT: f32 = 38.0;
 const EXPLORER_ROW_HEIGHT: f32 = 23.0;
 const EXPLORER_TOP: f32 = 106.0;
@@ -377,7 +396,7 @@ fn declare_frame(host: &mut UiHost) {
             main_align: MainAlign::End,
             cross_align: CrossAlign::Center,
             gap: ACTION_BUTTON_GAP,
-            padding: EdgeInsets::only(0.0, 10.0, 0.0, 0.0),
+            padding: EdgeInsets::only(0.0, Spacing::SM, 0.0, 0.0),
             flex_grow: 1.0,
             ..LayoutStyle::default()
         },
@@ -438,8 +457,8 @@ fn declare_frame(host: &mut UiHost) {
         LayoutStyle {
             direction: LayoutDirection::Row,
             height: Some(26.0),
-            gap: 4.0,
-            padding: EdgeInsets::only(0.0, 4.0, 0.0, 4.0),
+            gap: Spacing::XS,
+            padding: EdgeInsets::only(0.0, Spacing::XS, 0.0, Spacing::XS),
             ..LayoutStyle::default()
         },
     );
@@ -508,7 +527,7 @@ fn declare_frame(host: &mut UiHost) {
         SEARCH_POPUP_TERMINAL_ID,
         LayoutStyle {
             width: Some(SEARCH_BOX_TERMINAL_WIDTH),
-            height: Some(TERMINAL_TAB_HEIGHT - 4.0),
+            height: Some(TERMINAL_TAB_HEIGHT - Spacing::XS),
             ..LayoutStyle::default()
         },
     );
@@ -841,7 +860,7 @@ impl IdeShell {
                 direction: LayoutDirection::Row,
                 main_align: MainAlign::End,
                 cross_align: CrossAlign::Start,
-                padding: EdgeInsets::only(12.0, 0.0, 0.0, 12.0),
+                padding: EdgeInsets::only(Spacing::MD, 0.0, 0.0, Spacing::MD),
                 // Cada faixa aparece quando a busca é da área dela. As duas
                 // nunca estão na tela ao mesmo tempo: a barra é uma, e o alvo
                 // diz onde ela mora.
@@ -986,7 +1005,7 @@ impl IdeShell {
             LayoutStyle {
                 hidden: !self.debug_panel.view.attached,
                 width: Some(DEBUG_PANEL_WIDTH),
-                padding: EdgeInsets::only(34.0, 6.0, 0.0, 6.0),
+                padding: EdgeInsets::only(DEBUG_STATUS_ALTURA, Spacing::XS, 0.0, Spacing::XS),
                 ..LayoutStyle::default()
             },
         );

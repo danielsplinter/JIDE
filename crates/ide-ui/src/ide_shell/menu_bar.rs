@@ -19,7 +19,7 @@ impl IdeShell {
     pub(super) fn menu_bar_pointer_move(&mut self, point: Point, size: Size) -> bool {
         self.menu.bar.layout(
             &self.layout_context(),
-            Rect::new(82.0, 0.0, (size.width - 82.0).max(0.0), TITLE_HEIGHT),
+            Rect::new(MENU_X, 0.0, (size.width - MENU_X).max(0.0), TITLE_HEIGHT),
         );
         let resultado = self.menu.bar.event(
             &mut EventContext::default(),
@@ -32,7 +32,7 @@ impl IdeShell {
     pub(super) fn menu_bar_pointer_down(&mut self, point: Point, size: Size) -> bool {
         self.menu.bar.layout(
             &self.layout_context(),
-            Rect::new(82.0, 0.0, (size.width - 82.0).max(0.0), TITLE_HEIGHT),
+            Rect::new(MENU_X, 0.0, (size.width - MENU_X).max(0.0), TITLE_HEIGHT),
         );
         let mut menu_context = EventContext::default();
         let menu_result = self.menu.bar.event(

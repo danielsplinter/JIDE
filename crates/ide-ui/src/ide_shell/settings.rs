@@ -6,13 +6,28 @@
 //! superfícies, ela decide e o shell executa.
 
 use ide_application::SettingsSection;
+
+/// Onde a legenda de um campo fica: uma linha acima dele.
+const LEGENDA_ACIMA: f32 = 16.0;
+/// Onde o título de uma seção fica: duas linhas acima do primeiro campo.
+const TITULO_ACIMA: f32 = 34.0;
+/// Uma linha de texto de legenda, para o que se empilha abaixo de um campo.
+///
+/// É medida de texto, e não espaçamento: duas dicas seguidas ficam a uma linha
+/// uma da outra.
+const LINHA_DE_LEGENDA: f32 = 18.0;
 use ui_api::{EventContext, EventResult, LayoutContext, PaintContext, Widget};
 use ui_components::{
     Button, ComboBox, ComboBoxItem, IconTint, Label, ListSelection, ListView, ModalHost, Panel,
     SurfaceTone, TextInput,
 };
+/// A folga entre duas peças da janela: é ela que abriga a legenda da de baixo.
+const FOLGA_ENTRE_CAMPOS: f32 = 20.0;
+/// A folga entre duas seções, maior porque separa assuntos e não campos.
+const FOLGA_ENTRE_SECOES: f32 = 46.0;
 use ui_core::{
-    ColorTokens, KeyEvent, Modifiers, Point, Rect, Size, Theme, UiEvent, WidgetAction, WidgetId,
+    ColorTokens, KeyEvent, Modifiers, Point, Rect, Size, Spacing, Theme, UiEvent, WidgetAction,
+    WidgetId,
 };
 use ui_render_api::PaintCommand;
 
@@ -45,7 +60,7 @@ impl SettingsDialogGeometry {
         )
     }
 }
-use super::{click_widget, primary_pointer};
+use super::{JANELA_TITULO, JANELA_TITULO_ALTO, click_widget, primary_pointer};
 use ide_domain::ToolRole;
 
 use crate::settings::SettingsPage;
@@ -103,7 +118,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             width: Some(PANEL_SIZE.width),
             height: Some(PANEL_SIZE.height),
             // O alto é do título, que o `ModalHost` desenha.
-            padding: EdgeInsets::only(52.0, 0.0, 0.0, 0.0),
+            padding: EdgeInsets::only(JANELA_TITULO, 0.0, 0.0, 0.0),
             ..LayoutStyle::default()
         },
     );
@@ -114,7 +129,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             width: Some(210.0),
             // A lista não encosta no título: os 12 do alto são o respiro que a
             // barra sempre teve.
-            padding: EdgeInsets::only(12.0, 0.0, 0.0, 0.0),
+            padding: EdgeInsets::only(Spacing::MD, 0.0, 0.0, 0.0),
             ..LayoutStyle::default()
         },
     );
@@ -123,7 +138,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         RIGHT_ID,
         LayoutStyle {
             flex_grow: 1.0,
-            padding: EdgeInsets::only(0.0, 16.0, 14.0, 0.0),
+            padding: EdgeInsets::only(0.0, Spacing::LG, Spacing::MD, 0.0),
             ..LayoutStyle::default()
         },
     );
@@ -142,7 +157,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             direction: LayoutDirection::Row,
             main_align: MainAlign::End,
             height: Some(34.0),
-            gap: 10.0,
+            gap: Spacing::SM,
             ..LayoutStyle::default()
         },
     );
@@ -162,8 +177,8 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         PAGE_ID,
         CHOICES_ID,
         LayoutStyle {
-            padding: EdgeInsets::only(74.0, 12.0, 0.0, 28.0),
-            gap: 46.0,
+            padding: EdgeInsets::only(JANELA_TITULO_ALTO, Spacing::MD, 0.0, Spacing::XL),
+            gap: FOLGA_ENTRE_SECOES,
             ..LayoutStyle::default()
         },
     );
@@ -177,7 +192,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             LayoutStyle {
                 direction: LayoutDirection::Row,
                 height: Some(36.0),
-                gap: 10.0,
+                gap: Spacing::SM,
                 ..LayoutStyle::default()
             },
         );
@@ -206,8 +221,8 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         DEBUG_FORM_ID,
         LayoutStyle {
             hidden: true,
-            padding: EdgeInsets::only(74.0, 0.0, 0.0, 28.0),
-            gap: 20.0,
+            padding: EdgeInsets::only(JANELA_TITULO_ALTO, 0.0, 0.0, Spacing::XL),
+            gap: FOLGA_ENTRE_CAMPOS,
             ..LayoutStyle::default()
         },
     );
@@ -217,7 +232,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             direction: LayoutDirection::Row,
             height: Some(36.0),
-            gap: 12.0,
+            gap: Spacing::MD,
             ..LayoutStyle::default()
         },
     );
@@ -500,8 +515,8 @@ impl SettingsSurface {
             CHOICES_ID,
             LayoutStyle {
                 hidden: self.page == SettingsPage::Debug,
-                padding: EdgeInsets::only(74.0, 12.0, 0.0, 28.0),
-                gap: 46.0,
+                padding: EdgeInsets::only(JANELA_TITULO_ALTO, Spacing::MD, 0.0, Spacing::XL),
+                gap: FOLGA_ENTRE_SECOES,
                 ..LayoutStyle::default()
             },
         );
@@ -509,8 +524,8 @@ impl SettingsSurface {
             DEBUG_FORM_ID,
             LayoutStyle {
                 hidden: self.page != SettingsPage::Debug,
-                padding: EdgeInsets::only(74.0, 0.0, 0.0, 28.0),
-                gap: 20.0,
+                padding: EdgeInsets::only(JANELA_TITULO_ALTO, 0.0, 0.0, Spacing::XL),
+                gap: FOLGA_ENTRE_CAMPOS,
                 ..LayoutStyle::default()
             },
         );
@@ -869,7 +884,10 @@ impl SettingsSurface {
                 &mut component_paint,
                 MESSAGE_ID,
                 message,
-                Point::new(geometry.combo.origin.x, geometry.combo.origin.y + 54.0),
+                Point::new(
+                    geometry.combo.origin.x,
+                    geometry.combo.origin.y + geometry.combo.size.height + Spacing::MD,
+                ),
                 13.0,
                 IconTint::Danger,
             );
@@ -895,7 +913,7 @@ impl SettingsSurface {
             paint,
             TITLE_ID,
             section.map_or("Ferramenta", |section| section.title.as_str()),
-            Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 34.0),
+            Point::new(geometry.combo.origin.x, geometry.combo.origin.y - TITULO_ACIMA),
             17.0,
             IconTint::Text,
         );
@@ -904,7 +922,7 @@ impl SettingsSurface {
             paint,
             CAPTION_ID,
             section.map_or("Toolchain", |section| section.field_caption.as_str()),
-            Point::new(geometry.combo.origin.x, geometry.combo.origin.y - 16.0),
+            Point::new(geometry.combo.origin.x, geometry.combo.origin.y - LEGENDA_ACIMA),
             13.0,
             IconTint::Muted,
         );
@@ -929,7 +947,7 @@ impl SettingsSurface {
             &caption,
             Point::new(
                 geometry.secondary_combo.origin.x,
-                geometry.secondary_combo.origin.y - 16.0,
+                geometry.secondary_combo.origin.y - LEGENDA_ACIMA,
             ),
             13.0,
             IconTint::Muted,
@@ -950,33 +968,47 @@ impl SettingsSurface {
         let origin = geometry.debug_host.origin;
         // Título e explicações são `Label`: o tom diz o papel, e o tema resolve a
         // cor. Escritos como texto cru, ficavam de fora dos dois.
-        let mut paint = PaintContext::with_theme(Theme { colors });
+        let mut paint = PaintContext::with_theme(Theme {
+            colors,
+            ..Theme::default()
+        });
         for (id, texto, origem, tamanho, tom) in [
             (
                 DEBUG_TITLE_ID,
                 "Depuração",
-                Point::new(origin.x, origin.y - 34.0),
+                Point::new(origin.x, origin.y - TITULO_ACIMA),
                 17.0,
                 IconTint::Text,
             ),
             (
                 DEBUG_CAPTION_ID,
                 "Host e porta de depuração do processo em execução",
-                Point::new(origin.x, origin.y - 16.0),
+                Point::new(origin.x, origin.y - LEGENDA_ACIMA),
                 13.0,
                 IconTint::Muted,
             ),
             (
                 DEBUG_HINT_ID,
                 "Inicie o servidor com -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8000",
-                Point::new(origin.x, geometry.debug_attach.origin.y + 48.0),
+                Point::new(
+                    origin.x,
+                    geometry.debug_attach.origin.y
+                        + geometry.debug_attach.size.height
+                        + Spacing::MD,
+                ),
                 12.0,
                 IconTint::Muted,
             ),
             (
                 DEBUG_HINT_SCOPE_ID,
                 "Vale para qualquer processo depurado: servidor, container ou ferramenta.",
-                Point::new(origin.x, geometry.debug_attach.origin.y + 66.0),
+                Point::new(
+                    origin.x,
+                    geometry.debug_attach.origin.y
+                        + geometry.debug_attach.size.height
+                        + Spacing::MD
+                        + LINHA_DE_LEGENDA,
+                ),
                 12.0,
                 IconTint::Muted,
             ),

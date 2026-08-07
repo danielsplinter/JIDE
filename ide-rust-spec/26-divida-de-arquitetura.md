@@ -131,6 +131,53 @@ dizendo em que thread ele roda, e a guarda recusa os sem marca. Ela para de
 medir um número que só cresce e passa a cobrar a frase que hoje é voluntária.
 Isso é trabalho de verdade, e por isso está registrado em vez de feito.
 
+## Dívida 5 — a tela escolhia o próprio espaçamento ✅
+
+Eram **96 espaçamentos escritos à mão** na `ide-ui`, em duas formas:
+
+- **52 deslocamentos** — `+ 12.0` numa tela, `+ 14.0` na vizinha, `- 10.0` na
+  terceira;
+- **44 no arranjo** — `gap: 10.0`, `padding: EdgeInsets::only(56.0, 16.0, …)`.
+
+Cada um escolhido por quem escrevia aquela linha naquele dia, e nenhum se
+conferindo com nada.
+
+*A segunda forma só apareceu porque alguém perguntou.* A primeira varredura
+pegou os deslocamentos, e eu dei o assunto por encerrado; a pergunta foi sobre um
+`const AVISO_ABAIXO: f32 = 44.0` que eu tinha acabado de escrever — um número
+mágico com nome bonito, que eu não tinha derivado de nada. Ele devia sair da
+altura do campo, que estava ali na área que o campo recebeu. **Renomear não é
+resolver**, e foi puxando esse fio que os outros 44 apareceram.
+
+Não era teoria. Foi assim que o cabeçalho da comparação do Git passou por cima da
+contagem — três larguras escritas por mim, e o texto não cabia nelas — e foi
+assim que o caminho do arquivo encostou na moldura do painel, a ponto de a linha
+vertical parecer parte do texto.
+
+A causa era da biblioteca: a `10` previa `spacing` entre os tokens do tema desde
+o começo, e ele nunca existiu. **Quem monta uma tela não tinha a que recorrer.**
+
+Fechada em três passos:
+
+1. a ERLibUi ganhou a escala — `Spacing`, cinco degraus — e o tema passou a
+   carregá-la, com a tela podendo escolher outra ou não escolher nada;
+2. as 52 telas passaram a pedir `theme.spacing` ou a declarar um `const` com
+   nome, para o que não é espaçamento: a espessura de uma barra de rolagem, a
+   largura reservada ao editor, a linha em que uma legenda fica;
+3. **uma guarda impede a volta**, nas duas formas: somar ou subtrair um literal
+   de uma coordenada, e escrever número em `gap` ou `padding`. O teste aponta o
+   arquivo, a linha e o que usar no lugar.
+
+*O que continua com nome próprio*, e deve continuar: a espessura de uma barra de
+rolagem, a largura reservada ao editor, a faixa de título de uma janela, a linha
+em que uma legenda fica. Nada disso é espaçamento — são medidas de peças, e uma
+peça se declara uma vez, com nome e razão. Foi tentando encaixar duas delas na
+escala que eu subi os botões do painel de depuração dez pontos, e o teste do
+passo a passo pegou.
+
+*A guarda é do tipo que não sobe.* Não há número a levantar: ou o deslocamento
+tem nome, ou não passa.
+
 ## Dívida 3 — o serviço guarda estado que pode envelhecer ⬜
 
 O auto-import precisa devolver ao analisador a identificação da entrada que ele

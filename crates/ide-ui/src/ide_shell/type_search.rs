@@ -5,9 +5,10 @@
 //! fila de comandos: o que sai daqui é a consulta a refazer ou o lugar a abrir.
 
 use ide_domain::Location;
+use super::{JANELA_TITULO};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{ListView, ModalHost, Spinner, TextInput};
-use ui_core::{Point, Rect, Size, UiEvent, WidgetId};
+use ui_core::{Point, Rect, Size, Spacing, UiEvent, WidgetId};
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutStyle};
 
@@ -35,8 +36,8 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             width: Some(PANEL_SIZE.width),
             height: Some(PANEL_SIZE.height),
-            padding: EdgeInsets::only(56.0, 16.0, 16.0, 16.0),
-            gap: 12.0,
+            padding: EdgeInsets::only(JANELA_TITULO, Spacing::LG, Spacing::LG, Spacing::LG),
+            gap: Spacing::MD,
             ..LayoutStyle::default()
         },
     );

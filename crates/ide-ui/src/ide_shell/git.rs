@@ -18,13 +18,17 @@
 //! entre uma coisa e outra é o que impede esta janela de crescer para dentro do
 //! domínio, e o custo dela são três campos de `String`.
 
+use super::{JANELA_TITULO};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
     Button, ButtonAlign, ButtonFill, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
     ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, Panel, SplitOrientation,
     SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar, ToolbarAlign,
 };
-use ui_core::{Constraints, Modifiers, Point, Spacing, Rect, ScrollEvent, Size, TokenKind, UiEvent, WidgetId};
+use ui_core::{
+    Constraints, Modifiers, Point, Rect, ScrollEvent, Size, Spacing, Theme, TokenKind, UiEvent,
+    WidgetId,
+};
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle};
 
@@ -127,6 +131,10 @@ const DIFF_BARRA_ID: WidgetId = WidgetId(11_954);
 /// texto, e um botão de quarenta pontos cobriria as duas vizinhas. Não menor do
 /// que isto: um alvo de clique tem de ser alvo.
 const APLICAR_LADO: f32 = 26.0;
+/// Quantas linhas ficam acima da alteração quando se salta até ela.
+///
+/// Uma alteração encostada na borda de cima não deixa ver de onde ela vem.
+const FOLGA_ACIMA_DA_ALTERACAO: f32 = 2.0;
 /// O tamanho do glifo das setas.
 ///
 /// Maior que o padrão dos botões, e por isso pedido: o padrão encolhe para
@@ -172,11 +180,11 @@ const RATIO_ALTO: f32 = 0.33;
 const RATIO_BAIXO: f32 = 0.5;
 /// Altura do título de cada painel.
 const TITULO_ALTURA: f32 = 20.0;
-/// A faixa do alto da comparação: o título e os comandos dela.
+/// A altura dos botões do cabeçalho da comparação.
 ///
-/// Mais alta que a do resumo porque tem botões, e botão de vinte pontos não é
-/// alvo de clique — é um risco na tela que por acaso responde.
-const DIFF_CABECALHO: f32 = 30.0;
+/// Menor que a padrão porque a faixa é estreita, e é decisão desta tela: a
+/// biblioteca oferece quarenta, e oferece também como pedir outro.
+const DIFF_COMANDO_ALTURA: f32 = 24.0;
 /// Largura dos botões que andam entre as alterações.
 ///
 /// Fixa porque o conteúdo é um glifo, e glifo não cresce. As outras larguras do
@@ -557,7 +565,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             width: Some(PANEL_SIZE.width),
             height: Some(PANEL_SIZE.height),
-            padding: EdgeInsets::only(56.0, 16.0, 16.0, 16.0),
+            padding: EdgeInsets::only(JANELA_TITULO, Spacing::LG, Spacing::LG, Spacing::LG),
             ..LayoutStyle::default()
         },
     );
@@ -612,7 +620,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         SIDE_ID,
         LayoutStyle {
             width: Some(PANEL_SIZE.width * RATIO_INICIAL),
-            gap: 8.0,
+            gap: Spacing::SM,
             ..LayoutStyle::default()
         },
     );
@@ -647,11 +655,11 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         WORK_ID,
         LayoutStyle {
             flex_grow: 1.0,
-            gap: 8.0,
+            gap: Spacing::SM,
             // A folga da esquerda é a faixa da divisa: sem ela o conteúdo
             // encostaria na linha que se arrasta, e o clique de um viraria o do
             // outro.
-            padding: EdgeInsets::only(0.0, 0.0, 0.0, 10.0),
+            padding: EdgeInsets::only(0.0, 0.0, 0.0, Spacing::SM),
             ..LayoutStyle::default()
         },
     );
@@ -1004,11 +1012,12 @@ impl GitSurface {
             SplitPane::new(DIFF_SPLIT_ID, SplitOrientation::Horizontal, 0.5)
         });
         // O título fica acima das duas colunas, e a divisa reparte o que sobra.
+        let cabecalho = Self::altura_do_cabecalho(context.theme());
         let corpo = Rect::new(
             area_do_diff.origin.x,
-            area_do_diff.origin.y + DIFF_CABECALHO,
+            area_do_diff.origin.y + cabecalho,
             area_do_diff.size.width,
-            (area_do_diff.size.height - DIFF_CABECALHO).max(0.0),
+            (area_do_diff.size.height - cabecalho).max(0.0),
         );
         split.layout(context, corpo);
         [split.first(), split.second()]
@@ -1304,7 +1313,7 @@ impl GitSurface {
             SIDE_ID,
             LayoutStyle {
                 width: Some(largura),
-                gap: 8.0,
+                gap: Spacing::SM,
                 ..LayoutStyle::default()
             },
         );
@@ -1361,8 +1370,8 @@ impl GitSurface {
     /// lugar.
     fn botao_de_fechar(painel: Rect) -> Rect {
         Rect::new(
-            painel.origin.x + painel.size.width - Button::HEIGHT - 8.0,
-            painel.origin.y + 8.0,
+            painel.origin.x + painel.size.width - Button::HEIGHT - Spacing::SM,
+            painel.origin.y + Spacing::SM,
             Button::HEIGHT,
             Button::HEIGHT,
         )
@@ -1378,7 +1387,7 @@ impl GitSurface {
     /// Só as que estão na vista. Rolar a coluna não pode deixar uma seta presa na
     /// borda falando de uma linha que já saiu da tela, e desenhar as de fora
     /// custaria uma por linha do arquivo.
-    fn botoes_de_aplicar(&self, coluna: Rect) -> Vec<(Devolucao, Rect)> {
+    fn botoes_de_aplicar(&self, coluna: Rect, theme: &Theme) -> Vec<(Devolucao, Rect)> {
         let (primeira, ultima) = self.faixa_visivel(coluna);
         let comeco = self
             .setas_do_diff
@@ -1393,7 +1402,7 @@ impl GitSurface {
                 Some((
                     *seta,
                     Rect::new(
-                        coluna.origin.x + coluna.size.width - APLICAR_LADO - self.margem_das_setas(),
+                        coluna.origin.x + coluna.size.width - APLICAR_LADO - self.margem_das_setas(theme),
                         topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
                         APLICAR_LADO,
                         APLICAR_LADO,
@@ -1442,6 +1451,15 @@ impl GitSurface {
         )
     }
 
+    /// A altura da faixa do alto da comparação.
+    ///
+    /// O botão mais o respiro de dentro de um controle, dos dois lados. Sai do
+    /// tema porque é espaçamento: um tema que respire mais faz a faixa crescer
+    /// junto, sem esta tela saber de nada.
+    fn altura_do_cabecalho(theme: &Theme) -> f32 {
+        DIFF_COMANDO_ALTURA + theme.spacing.xs * 2.0
+    }
+
     /// A área de dentro do painel da comparação.
     ///
     /// **O que sobra depois da moldura e do respiro dela.** Antes daqui, o
@@ -1456,7 +1474,7 @@ impl GitSurface {
     fn area_util_do_diff(host: &UiHost, context: &LayoutContext) -> Rect {
         let mut painel = Self::painel_do_diff();
         painel.layout(context, area(host, DIFF_ID));
-        painel.content()
+        painel.content(context.theme())
     }
 
     /// O painel que emoldura a comparação.
@@ -1475,7 +1493,7 @@ impl GitSurface {
     /// cresce e encolhe, e ancorar nele faria os botões dançarem a cada arquivo.
     fn barra_do_cabecalho(&self, area_do_diff: Rect, context: &LayoutContext) -> Toolbar {
         let staged = self.diff.as_ref().is_some_and(|diff| diff.staged);
-        let alto = DIFF_CABECALHO - 6.0;
+        let alto = DIFF_COMANDO_ALTURA;
         let mut barra = Toolbar::new(
             DIFF_BARRA_ID,
             vec![
@@ -1505,8 +1523,8 @@ impl GitSurface {
             context,
             Rect::new(
                 area_do_diff.origin.x,
-                area_do_diff.origin.y + 3.0,
-                area_do_diff.size.width - 4.0,
+                area_do_diff.origin.y + context.theme().spacing.xs,
+                area_do_diff.size.width,
                 alto,
             ),
         );
@@ -1542,7 +1560,7 @@ impl GitSurface {
         let (comeco, _) = self.blocos_do_diff[escolhido];
         // Duas linhas de folga acima: uma alteração encostada na borda de cima
         // não deixa ver de onde ela vem.
-        let alvo = (comeco as f32 - 2.0).max(0.0) * ROW_HEIGHT;
+        let alvo = (comeco as f32 - FOLGA_ACIMA_DA_ALTERACAO).max(0.0) * ROW_HEIGHT;
         if let Some(listas) = self.colunas_do_diff.as_mut() {
             for lista in listas.iter_mut() {
                 lista.set_scroll_offset(alvo);
@@ -1574,7 +1592,7 @@ impl GitSurface {
     ///
     /// Fica ao lado da seta da linha, com a barra a mais no desenho: é o mesmo
     /// gesto, para mais coisa de uma vez.
-    fn botoes_de_trecho(&self, coluna: Rect) -> Vec<(Devolucao, usize, Rect)> {
+    fn botoes_de_trecho(&self, coluna: Rect, theme: &Theme) -> Vec<(Devolucao, usize, Rect)> {
         let (primeira, ultima) = self.faixa_visivel(coluna);
         let comeco = self
             .trechos_do_diff
@@ -1592,8 +1610,8 @@ impl GitSurface {
                     Rect::new(
                         coluna.origin.x + coluna.size.width
                             - APLICAR_LADO * 2.0
-                            - self.margem_das_setas()
-                            - Spacing::XS,
+                            - self.margem_das_setas(theme)
+                            - theme.spacing.xs,
                         topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
                         APLICAR_LADO,
                         APLICAR_LADO,
@@ -1735,12 +1753,12 @@ impl GitSurface {
     /// setas cobriam quatro dos dez pontos da trilha, e ali o clique passava a
     /// ser delas — a barra deixava de se arrastar naquele trecho. Quanto a barra
     /// ocupa é a lista quem diz.
-    fn margem_das_setas(&self) -> f32 {
+    fn margem_das_setas(&self, theme: &Theme) -> f32 {
         self.colunas_do_diff
             .as_ref()
             .and_then(|colunas| colunas.first())
             .map_or(0.0, ComposedList::gutter)
-            + 6.0
+            + theme.spacing.sm
     }
 
     /// Onde uma fileira aparece na coluna, se aparecer inteira.
@@ -1799,7 +1817,8 @@ impl GitSurface {
         let barra = self.barra_do_cabecalho(area_do_diff, layout);
         barra.paint(paint);
 
-        let meio = area_do_diff.origin.y + (DIFF_CABECALHO - TITULO_ALTURA) / 2.0;
+        let meio = area_do_diff.origin.y
+            + (Self::altura_do_cabecalho(layout.theme()) - TITULO_ALTURA) / 2.0;
         let mut contagem =
             Label::new(DIFF_CONTAGEM_ID, self.contagem_das_alteracoes()).with_tone(IconTint::Muted);
         let largura_da_contagem = contagem
@@ -1835,7 +1854,7 @@ impl GitSurface {
         }
         // E as setas depois dela: elas flutuam sobre o texto, e o que flutua é
         // desenhado por cima do que está embaixo.
-        for (devolucao, _, area_do_botao) in self.botoes_de_trecho(colunas[0]) {
+        for (devolucao, _, area_do_botao) in self.botoes_de_trecho(colunas[0], layout.theme()) {
             let mut trecho = Button::new(
                 WidgetId(APLICAR_BASE.0 + 500_000 + devolucao.fileira as u64),
                 "⇒",
@@ -1852,7 +1871,7 @@ impl GitSurface {
             trecho.layout(layout, area_do_botao);
             trecho.paint(paint);
         }
-        for (devolucao, area_do_botao) in self.botoes_de_aplicar(colunas[0]) {
+        for (devolucao, area_do_botao) in self.botoes_de_aplicar(colunas[0], layout.theme()) {
             // Um identificador por fileira: dois botões com o mesmo id seriam o
             // mesmo botão para a moldura, e o estado de um cairia no outro.
             let mut aplicar = Button::new(
@@ -1945,7 +1964,7 @@ impl GitSurface {
             (
                 AMEND_ID,
                 Rect::new(
-                    direita - ACAO_LARGURA * 2.0 - 8.0,
+                    direita - ACAO_LARGURA * 2.0 - Spacing::SM,
                     y,
                     ACAO_LARGURA,
                     Button::HEIGHT,
@@ -2040,7 +2059,7 @@ impl GitSurface {
 
     /// Os dois botões de saída, da direita para a esquerda.
     fn botoes_do_conflito(faixa: Rect) -> [(WidgetId, Rect); 2] {
-        let y = faixa.origin.y + 3.0;
+        let y = faixa.origin.y + Spacing::XS;
         let direita = faixa.origin.x + faixa.size.width;
         [
             (
@@ -2050,7 +2069,7 @@ impl GitSurface {
             (
                 CONTINUAR_ID,
                 Rect::new(
-                    direita - ACAO_LARGURA * 2.0 - 8.0,
+                    direita - ACAO_LARGURA * 2.0 - Spacing::SM,
                     y,
                     ACAO_LARGURA,
                     Button::HEIGHT,
@@ -2170,7 +2189,7 @@ impl GitSurface {
                 // um clique nelas cairia na linha de baixo se a pergunta viesse
                 // depois.
                 if let Some((devolucao, _, _)) = self
-                    .botoes_de_trecho(colunas[0])
+                    .botoes_de_trecho(colunas[0], context.theme())
                     .into_iter()
                     .find(|(_, _, area)| area.contains(point))
                     && let Some(caminho) = self.caminho_do_diff()
@@ -2182,7 +2201,7 @@ impl GitSurface {
                     });
                 }
                 if let Some((devolucao, _)) = self
-                    .botoes_de_aplicar(colunas[0])
+                    .botoes_de_aplicar(colunas[0], context.theme())
                     .into_iter()
                     .find(|(_, area)| area.contains(point))
                     && let Some(caminho) = self.caminho_do_diff()
@@ -2557,7 +2576,7 @@ impl GitSurface {
             painel.layout(layout, area(host, DIFF_ID));
             painel.paint(paint);
             // O conteúdo vai **dentro** da moldura, e não sobre ela.
-            self.paint_diff(painel.content(), layout, paint);
+            self.paint_diff(painel.content(layout.theme()), layout, paint);
             self.paint_fechar(host, layout, paint);
             return true;
         }
@@ -2591,7 +2610,7 @@ impl GitSurface {
             Rect::new(
                 nova.origin.x,
                 nova.origin.y,
-                (nova.size.width - ACAO_LARGURA - 4.0).max(0.0),
+                (nova.size.width - ACAO_LARGURA - Spacing::XS).max(0.0),
                 nova.size.height,
             ),
         );
@@ -2752,7 +2771,12 @@ impl GitSurface {
         let mut rotulo = Label::new(WidgetId(SUMMARY_BASE.0 + 8), texto).with_tone(IconTint::Warning);
         rotulo.layout(
             layout,
-            Rect::new(faixa.origin.x, faixa.origin.y + 4.0, faixa.size.width, 20.0),
+            Rect::new(
+                faixa.origin.x,
+                faixa.origin.y + Spacing::XS,
+                faixa.size.width,
+                TITULO_ALTURA,
+            ),
         );
         rotulo.paint(paint);
         for (id, area_do_botao) in Self::botoes_do_conflito(faixa) {
@@ -2857,7 +2881,7 @@ impl GitSurface {
         host: &UiHost,
     ) -> Vec<(Devolucao, usize, Rect)> {
         let colunas = self.colunas_do_diff_para_teste(host);
-        self.botoes_de_trecho(colunas[0])
+        self.botoes_de_trecho(colunas[0], &Theme::default())
     }
 
     /// Onde cada comando do cabeçalho ficou, para o teste apontar neles.
@@ -2886,7 +2910,7 @@ impl GitSurface {
         host: &UiHost,
     ) -> Vec<(Devolucao, Rect)> {
         let colunas = self.colunas_do_diff_para_teste(host);
-        self.botoes_de_aplicar(colunas[0])
+        self.botoes_de_aplicar(colunas[0], &Theme::default())
     }
 
     /// As abas da janela, para o teste apontar nelas.

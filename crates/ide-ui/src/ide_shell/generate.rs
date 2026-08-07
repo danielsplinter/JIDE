@@ -5,13 +5,14 @@
 //! renomear, ela decide e o shell executa: a fronteira é o [`GenerateOutcome`].
 
 use ide_domain::{AccessorCandidate, AccessorKind, AccessorPlan, TextPosition};
+use super::{JANELA_TITULO};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_commands::CommandEvent;
 use ui_components::{
     Button, CellWidth, Checkbox, ComposedCell, ComposedList, ComposedRow, Label,
     ModalHost,
 };
-use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetAction, WidgetId};
+use ui_core::{Point, Rect, ScrollEvent, Size, Spacing, UiEvent, WidgetAction, WidgetId};
 use ui_host::{Node, UiHost};
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle, MainAlign};
 
@@ -77,8 +78,8 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             width: Some(PANEL_SIZE.width),
             height: Some(PANEL_SIZE.height),
-            padding: EdgeInsets::only(56.0, 16.0, 14.0, 16.0),
-            gap: 12.0,
+            padding: EdgeInsets::only(JANELA_TITULO, Spacing::LG, Spacing::MD, Spacing::LG),
+            gap: Spacing::MD,
             ..LayoutStyle::default()
         },
     );
@@ -97,7 +98,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             direction: LayoutDirection::Row,
             main_align: MainAlign::End,
             height: Some(36.0),
-            gap: 10.0,
+            gap: Spacing::SM,
             ..LayoutStyle::default()
         },
     );
