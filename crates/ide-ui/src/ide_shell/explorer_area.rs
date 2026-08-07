@@ -443,14 +443,23 @@ impl IdeShell {
     /// Um lugar só para o desenho e para o clique: com a conta em dois lugares,
     /// clicar na borda de um faria uma coisa e o desenho mostraria outra.
     pub(super) fn activity_rect(id: WidgetId) -> Rect {
-        let topo = if id == ACTIVITY_SEARCH_ID {
-            TITLE_HEIGHT + 8.0
+        // Altura de botão, como qualquer botão: a faixa tem 48 pontos, e os 40
+        // dele cabem com quatro de folga de cada lado. Eram 24 por 24, escritos
+        // à mão, e um botão menor que o padrão sem ninguém ter pedido.
+        let ordem = if id == ACTIVITY_SEARCH_ID {
+            0.0
         } else if id == ACTIVITY_SIDEBAR_ID {
-            TITLE_HEIGHT + 52.0
+            1.0
         } else {
-            TITLE_HEIGHT + 88.0
+            2.0
         };
-        Rect::new(12.0, topo, 24.0, 24.0)
+        let folga = (ACTIVITY_WIDTH - Button::HEIGHT) / 2.0;
+        Rect::new(
+            folga,
+            TITLE_HEIGHT + 8.0 + ordem * (Button::HEIGHT + 8.0),
+            Button::HEIGHT,
+            Button::HEIGHT,
+        )
     }
 
     /// Clique na barra de atividades. Devolve `true` quando foi de um botão.

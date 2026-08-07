@@ -88,10 +88,19 @@ const RATIO_BAIXO: f32 = 0.5;
 const TITULO_ALTURA: f32 = 20.0;
 /// Largura de um botão de ação de linha.
 const ACAO_LARGURA: f32 = 92.0;
+/// A altura de um botão **dentro de uma linha de lista**.
+///
+/// É a exceção que a biblioteca prevê, e a decisão é desta tela: um botão de
+/// altura padrão faria cada linha ter quarenta pontos, e um painel de arquivos
+/// alterados mostraria três de cada vez. Todo botão fora de linha usa o padrão.
+const ALTURA_NA_LINHA: f32 = ROW_HEIGHT - 2.0;
 /// Altura da faixa de commit, embaixo dos três painéis.
-const COMMIT_ALTURA: f32 = 64.0;
+///
+/// A caixa da mensagem, a folga e um botão de altura padrão: as três medidas
+/// vêm de quem as define, e o botão define a dele.
+const COMMIT_ALTURA: f32 = 28.0 + 8.0 + Button::HEIGHT;
 /// Altura da faixa do conflito, no alto da aba `status`.
-const CONFLITO_ALTURA: f32 = 30.0;
+const CONFLITO_ALTURA: f32 = Button::HEIGHT + 6.0;
 /// Largura de um botão de linha da árvore.
 ///
 /// Menor que o das ações de arquivo: a coluna da esquerda é estreita, e dois
@@ -332,7 +341,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         SIDE_ID,
         NOVA_ID,
         LayoutStyle {
-            height: Some(26.0),
+            height: Some(Button::HEIGHT),
             ..LayoutStyle::default()
         },
     );
@@ -443,8 +452,8 @@ impl GitSurface {
                         vec![
                             TableColumn::new("Nó", CellWidth::Fixed(GRAFO_LARGURA)),
                             TableColumn::new("Description", CellWidth::Fill),
-                            TableColumn::new("Date", CellWidth::Fixed(130.0)),
-                            TableColumn::new("Author", CellWidth::Fixed(140.0)),
+                            TableColumn::new("Date", CellWidth::Fixed(160.0)),
+                            TableColumn::new("Author", CellWidth::Fixed(80.0)),
                             TableColumn::new("Hash", CellWidth::Fixed(80.0)),
                         ],
                         linhas,
@@ -734,16 +743,23 @@ impl GitSurface {
 
     /// Os dois botões da faixa de commit, da direita para a esquerda.
     fn botoes_do_commit(faixa: Rect) -> [(WidgetId, Rect); 2] {
-        let y = faixa.origin.y + faixa.size.height - 30.0;
+        // A altura é a do botão, e não um número escrito aqui: dois lugares com
+        // o mesmo número divergem na primeira mudança.
+        let y = faixa.origin.y + faixa.size.height - Button::HEIGHT;
         let direita = faixa.origin.x + faixa.size.width;
         [
             (
                 COMMIT_ID,
-                Rect::new(direita - ACAO_LARGURA, y, ACAO_LARGURA, 26.0),
+                Rect::new(direita - ACAO_LARGURA, y, ACAO_LARGURA, Button::HEIGHT),
             ),
             (
                 AMEND_ID,
-                Rect::new(direita - ACAO_LARGURA * 2.0 - 8.0, y, ACAO_LARGURA, 26.0),
+                Rect::new(
+                    direita - ACAO_LARGURA * 2.0 - 8.0,
+                    y,
+                    ACAO_LARGURA,
+                    Button::HEIGHT,
+                ),
             ),
         ]
     }
@@ -843,16 +859,21 @@ impl GitSurface {
 
     /// Os dois botões de saída, da direita para a esquerda.
     fn botoes_do_conflito(faixa: Rect) -> [(WidgetId, Rect); 2] {
-        let y = faixa.origin.y + 2.0;
+        let y = faixa.origin.y + 3.0;
         let direita = faixa.origin.x + faixa.size.width;
         [
             (
                 ABORTAR_ID,
-                Rect::new(direita - ACAO_LARGURA, y, ACAO_LARGURA, 24.0),
+                Rect::new(direita - ACAO_LARGURA, y, ACAO_LARGURA, Button::HEIGHT),
             ),
             (
                 CONTINUAR_ID,
-                Rect::new(direita - ACAO_LARGURA * 2.0 - 8.0, y, ACAO_LARGURA, 24.0),
+                Rect::new(
+                    direita - ACAO_LARGURA * 2.0 - 8.0,
+                    y,
+                    ACAO_LARGURA,
+                    Button::HEIGHT,
+                ),
             ),
         ]
     }
@@ -1679,7 +1700,8 @@ fn linha_de_arquivo(estado: GitFileState, indice: usize, caminho: &str) -> Compo
         celulas.push(ComposedCell::new(
             Box::new(
                 Button::new(WidgetId(base + 1 + posicao as u64), acao.rotulo())
-                    .with_command(acao.comando()),
+                    .with_command(acao.comando())
+                    .with_height(ALTURA_NA_LINHA),
             ),
             CellWidth::Fixed(ACAO_LARGURA),
         ));
@@ -1795,7 +1817,11 @@ fn linha(indice: usize, branch: &BranchItem) -> ComposedRow {
     };
     for (deslocamento, rotulo, comando) in acoes {
         celulas.push(ComposedCell::new(
-            Box::new(Button::new(WidgetId(base + deslocamento), *rotulo).with_command(*comando)),
+            Box::new(
+                Button::new(WidgetId(base + deslocamento), *rotulo)
+                    .with_command(*comando)
+                    .with_height(ALTURA_NA_LINHA),
+            ),
             CellWidth::Fixed(ACAO_DA_ARVORE),
         ));
     }
@@ -1810,7 +1836,11 @@ fn linha_do_remoto(nome: &str) -> ComposedRow {
             CellWidth::Fill,
         ),
         ComposedCell::new(
-            Box::new(Button::new(WidgetId(ROW_BASE.0 + 3), "Fetch").with_command("git.fetch")),
+            Box::new(
+                Button::new(WidgetId(ROW_BASE.0 + 3), "Fetch")
+                    .with_command("git.fetch")
+                    .with_height(ALTURA_NA_LINHA),
+            ),
             CellWidth::Fixed(ACAO_DA_ARVORE),
         ),
     ])
