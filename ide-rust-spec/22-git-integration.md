@@ -928,10 +928,15 @@ A contagem à frente e atrás sai do `upstream:track` do `for-each-ref`, e é
 contra **o que já foi buscado**: sem `fetch`, ela fala do que se sabia da última
 vez. Prometer o número de agora exigiria falar com a rede a cada retrato.
 
-Na tela, a branch atual troca `Trocar` e `Fundir` por `Pull` e `Push` — empurrar
-e puxar só fazem sentido onde se está —, e o `Fetch` fica na **raiz** dos
-remotos, porque ele traz as referências todas de uma vez e pendurá-lo numa
-branch faria parecer que busca só aquela.
+Na tela, os três moram numa **barra no alto da janela**, e não numa linha da
+árvore: `Fetch` traz as referências todas de uma vez, e `Pull` e `Push` falam
+sempre da branch em que se está. Pendurá-los na linha de uma branch fazia parecer
+que valiam só para aquela — e a branch atual, que era onde eles estavam, passou a
+não oferecer ação nenhuma, porque trocar para onde já se está não faz nada e
+fundir uma branch nela mesma é comando que o `git` recusa.
+
+A barra é o lugar do que vale para o **repositório**; a linha, o lugar do que
+vale para ela. É a mesma divisão que já separava o `Fetch` do `Trocar`.
 
 ### O que ficou pela metade, e é preciso dizer
 

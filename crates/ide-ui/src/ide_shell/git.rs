@@ -56,6 +56,11 @@ const ENTRADA_BASE: WidgetId = WidgetId(10_800);
 /// A tabela do histórico, e as células de cada linha dela.
 const TABELA_ID: WidgetId = WidgetId(10_519);
 const COMMIT_BASE: WidgetId = WidgetId(11_000);
+/// A barra de ferramentas do alto, e os três botões dela.
+const TOOLBAR_ID: WidgetId = WidgetId(10_530);
+const FETCH_ID: WidgetId = WidgetId(11_920);
+const PULL_ID: WidgetId = WidgetId(11_921);
+const PUSH_ID: WidgetId = WidgetId(11_922);
 /// A caixa do nome da branch nova, e o botão que a cria.
 const NOVA_ID: WidgetId = WidgetId(11_910);
 const CRIAR_ID: WidgetId = WidgetId(11_911);
@@ -298,6 +303,18 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             width: Some(PANEL_SIZE.width),
             height: Some(PANEL_SIZE.height),
             padding: EdgeInsets::only(56.0, 16.0, 16.0, 16.0),
+            ..LayoutStyle::default()
+        },
+    );
+    // A barra de ferramentas no alto, atravessando a janela inteira: o que
+    // está nela vale para o **repositório**, e não para a linha em que alguém
+    // clicou. Ver a `22`.
+    let _ = host.declare(
+        MODAL_ID,
+        TOOLBAR_ID,
+        LayoutStyle {
+            height: Some(Button::HEIGHT),
+            padding: EdgeInsets::only(0.0, 0.0, 8.0, 0.0),
             ..LayoutStyle::default()
         },
     );
@@ -728,6 +745,29 @@ impl GitSurface {
         [primeira, baixo.first(), baixo.second()]
     }
 
+    /// Os três botões da barra do alto, da esquerda para a direita.
+    ///
+    /// **Nada aqui é medida própria**: a altura é a do botão, a largura é a
+    /// mesma das outras ações da janela, e a folga é a que separa dois botões em
+    /// qualquer lugar. Escrever números aqui seria o que a barra veio desfazer.
+    fn botoes_da_barra(faixa: Rect) -> [(WidgetId, Rect); 3] {
+        let largura = ACAO_LARGURA;
+        let vaga = |posicao: f32| {
+            Rect::new(
+                faixa.origin.x + posicao * (largura + 8.0),
+                faixa.origin.y,
+                largura,
+                Button::HEIGHT,
+            )
+        };
+        [
+            // A ordem é a do trabalho: buscar, trazer, mandar.
+            (FETCH_ID, vaga(0.0)),
+            (PULL_ID, vaga(1.0)),
+            (PUSH_ID, vaga(2.0)),
+        ]
+    }
+
     /// Onde ficam a caixa da mensagem e os dois botões.
     ///
     /// Embaixo dos três painéis, e não em cima: a ordem na tela é a do trabalho
@@ -801,18 +841,13 @@ impl GitSurface {
             let indice = (escolhido - 100) as usize;
             let branch = self.branches_filtradas().get(indice).copied()?;
             let nome = branch.name.clone();
-            // Da direita para a esquerda: o último declarado é o mais à
-            // direita. A branch atual tem as ações do remoto; as outras, as de
-            // trocar e fundir.
+            // **A branch atual não tem botão nenhum**, e por isso a coluna não
+            // decide nada nela: sem esta linha, clicar no vazio à direita do
+            // nome pediria uma ação que a linha nem oferece.
             if branch.current {
-                if na_faixa(0) {
-                    return Some(GitRequest::Push);
-                }
-                if na_faixa(1) {
-                    return Some(GitRequest::Pull);
-                }
                 return None;
             }
+            // Da direita para a esquerda: o último declarado é o mais à direita.
             if na_faixa(0) {
                 return Some(GitRequest::Merge(nome));
             }
@@ -820,10 +855,6 @@ impl GitSurface {
                 return Some(GitRequest::SwitchBranch(nome));
             }
             return None;
-        }
-        // A raiz dos remotos: o botão dela busca as referências.
-        if escolhido == 3 && na_faixa(0) {
-            return Some(GitRequest::Fetch);
         }
         // Um item guardado: clicar nele o devolve para a árvore de trabalho.
         if (3_000..4_000).contains(&escolhido) {
@@ -939,6 +970,22 @@ impl GitSurface {
                     &mut EventContext::default(),
                     &UiEvent::PointerDown(primary_pointer(point)),
                 );
+            }
+            return None;
+        }
+        let barra = area(host, TOOLBAR_ID);
+        if barra.contains(point) {
+            for (id, area_do_botao) in Self::botoes_da_barra(barra) {
+                if !area_do_botao.contains(point) {
+                    continue;
+                }
+                return Some(if id == FETCH_ID {
+                    GitRequest::Fetch
+                } else if id == PULL_ID {
+                    GitRequest::Pull
+                } else {
+                    GitRequest::Push
+                });
             }
             return None;
         }
@@ -1166,6 +1213,24 @@ impl GitSurface {
             let mut copia = modal.clone();
             copia.layout(layout, Rect::new(0.0, 0.0, size.width, size.height));
             copia.paint(paint);
+        }
+
+        // A barra do alto: as três ações do repositório, com o botão inteiro.
+        let barra = area(host, TOOLBAR_ID);
+        for (id, area_do_botao) in Self::botoes_da_barra(barra) {
+            let rotulo = if id == FETCH_ID {
+                "Fetch"
+            } else if id == PULL_ID {
+                "Pull"
+            } else {
+                "Push"
+            };
+            let mut botao = Button::new(id, rotulo);
+            // Sem repositório não há o que buscar, trazer nem mandar, e o botão
+            // diz isso pelo próprio desenho.
+            botao.set_disabled(!self.view.has_repository());
+            botao.layout(layout, area_do_botao);
+            botao.paint(paint);
         }
 
         let mut campo = TextInput::new(SEARCH_ID, &self.busca).with_placeholder("Procurar branch");
@@ -1421,6 +1486,12 @@ impl GitSurface {
             .as_ref()
             .map(ComposedTable::row_heights)
             .unwrap_or_default()
+    }
+
+    /// A barra do alto, para o teste apontar nos botões dela.
+    #[cfg(test)]
+    pub(super) fn barra_para_teste(&self, host: &UiHost) -> Rect {
+        area(host, TOOLBAR_ID)
     }
 
     /// A faixa do estado intermediário, para o teste apontar nos botões dela.
@@ -1808,10 +1879,12 @@ fn linha(indice: usize, branch: &BranchItem) -> ComposedRow {
     // **A branch atual não oferece trocar nem fundir.** Trocar para onde já se
     // está não faz nada, e fundir uma branch nela mesma é um comando que o
     // `git` recusa — oferecer os dois seria oferecer erro.
-    // A branch atual troca as duas ações pelas do remoto: **empurrar e puxar só
-    // fazem sentido onde se está**, e trocar para onde já se está não faz nada.
+    // **A branch atual não oferece nada**: trocar para onde já se está não faz
+    // nada, e fundir uma branch nela mesma é comando que o `git` recusa. O que
+    // ela tinha — puxar e empurrar — subiu para a barra do alto, porque é ação
+    // do repositório e não da linha.
     let acoes: &[(u64, &str, &str)] = if atual {
-        &[(2, "Pull", "git.pull"), (3, "Push", "git.push")]
+        &[]
     } else {
         &[(2, "Trocar", "git.switch"), (3, "Fundir", "git.merge")]
     };
@@ -1828,20 +1901,14 @@ fn linha(indice: usize, branch: &BranchItem) -> ComposedRow {
     ComposedRow::new(celulas)
 }
 
-/// A linha da raiz dos remotos: o nome e o botão de buscar.
+/// A linha da raiz dos remotos: só o nome.
+///
+/// O `Fetch` morava aqui e subiu para a barra do alto: ele traz as referências
+/// **todas** de uma vez, e um botão na linha de um nó fazia parecer que buscava
+/// só aquele.
 fn linha_do_remoto(nome: &str) -> ComposedRow {
-    ComposedRow::new(vec![
-        ComposedCell::new(
-            Box::new(Label::new(WidgetId(ROW_BASE.0 + 2), nome)),
-            CellWidth::Fill,
-        ),
-        ComposedCell::new(
-            Box::new(
-                Button::new(WidgetId(ROW_BASE.0 + 3), "Fetch")
-                    .with_command("git.fetch")
-                    .with_height(ALTURA_NA_LINHA),
-            ),
-            CellWidth::Fixed(ACAO_DA_ARVORE),
-        ),
-    ])
+    ComposedRow::new(vec![ComposedCell::new(
+        Box::new(Label::new(WidgetId(ROW_BASE.0 + 2), nome)),
+        CellWidth::Fill,
+    )])
 }

@@ -839,12 +839,13 @@ fn o_estado_intermediario_mostra_por_onde_sair() {
     shell.git = superficie;
     assert!(faixa.is_none());
 }
-/// A branch atual troca Trocar e Fundir por Pull e Push.
+/// As três ações do repositório moram na barra do alto.
 ///
-/// Empurrar e puxar só fazem sentido onde se está, e trocar para onde já se está
-/// não faz nada: a linha oferece o que cabe nela.
+/// **Elas não são da linha em que alguém clicou.** `Fetch` traz as referências
+/// todas de uma vez, e `Pull` e `Push` falam sempre da branch em que se está —
+/// pendurá-los numa linha fazia parecer que valiam só para aquela.
 #[test]
-fn a_branch_atual_oferece_o_remoto_no_lugar_da_troca() {
+fn a_barra_do_alto_tem_as_tres_acoes_do_repositorio() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let _ = shell.paint(size);
@@ -860,6 +861,70 @@ fn a_branch_atual_oferece_o_remoto_no_lugar_da_troca() {
         ..GitView::default()
     });
     shell.toggle_git();
+    let desenhado = shell.paint(size);
+    let escrito = |texto: &str| {
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+    };
+    assert!(escrito("Fetch") && escrito("Pull") && escrito("Push"));
+
+    // Eles estão **acima** da árvore e das abas, e não dentro delas.
+    let barra = shell.git_surface().barra_para_teste(&shell.host);
+    let (_, _, arvore, abas) = git::GitSurface::areas(&shell.host);
+    assert!(
+        barra.origin.y + barra.size.height <= arvore.origin.y + 0.01
+            && barra.origin.y + barra.size.height <= abas.origin.y + 0.01,
+        "a barra fica no alto: {barra:?} contra {arvore:?} e {abas:?}"
+    );
+
+    // O primeiro botão busca; o terceiro empurra.
+    for (posicao, esperado) in [(0.0, GitRequest::Fetch), (2.0, GitRequest::Push)] {
+        shell.commands.retain(|_| false);
+        shell.pointer_down(
+            Point::new(
+                barra.origin.x + posicao * 100.0 + 40.0,
+                barra.origin.y + 20.0,
+            ),
+            size,
+        );
+        assert!(
+            shell
+                .commands
+                .iter()
+                .any(|comando| matches!(comando, ApplicationCommand::Git(pedido) if *pedido == esperado)),
+            "o botão {posicao} pede {esperado:?}: {:?}",
+            shell.commands.iter().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// A branch atual não oferece ação nenhuma na linha dela.
+///
+/// Trocar para onde já se está não faz nada, e fundir uma branch nela mesma é
+/// comando que o `git` recusa. O que ela tinha subiu para a barra.
+#[test]
+fn a_branch_atual_nao_oferece_acao_na_linha() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        branches: vec![
+            BranchItem {
+                name: "main".to_owned(),
+                current: true,
+                ahead: 2,
+                behind: 3,
+            },
+            BranchItem {
+                name: "outra".to_owned(),
+                ..BranchItem::default()
+            },
+        ],
+        ..GitView::default()
+    });
+    shell.toggle_git();
     let _ = shell.paint(size);
 
     // Abrir o nó das branches.
@@ -869,64 +934,29 @@ fn a_branch_atual_oferece_o_remoto_no_lugar_da_troca() {
         size,
     );
     let desenhado = shell.paint(size);
-    let escrito = |texto: &str| {
+    let quantos = |texto: &str| {
         desenhado
             .iter()
-            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+            .filter(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+            .count()
     };
-    assert!(escrito("Pull") && escrito("Push"), "as ações do remoto");
-    assert!(!escrito("Trocar") && !escrito("Fundir"));
-    // A contagem contra o que já foi buscado aparece na linha.
-    assert!(escrito("↑2 ↓3"), "os commits à frente e atrás");
-    assert!(escrito("Remotes (1)"), "e a branch remota entrou no nó");
+    assert_eq!(quantos("Trocar"), 1, "só a branch que não é a atual oferece");
+    assert_eq!(quantos("Fundir"), 1);
+    // A contagem contra o que já foi buscado continua na linha da atual.
+    assert_eq!(quantos("↑2 ↓3"), 1);
 
-    // O botão da direita da branch atual é o Push.
+    // E o clique no vazio à direita da atual não pede nada.
     shell.commands.retain(|_| false);
-    let direita = arvore.origin.x + arvore.size.width;
     shell.pointer_down(
-        Point::new(direita - 32.0, arvore.origin.y + 12.0 + 24.0),
+        Point::new(
+            arvore.origin.x + arvore.size.width - 32.0,
+            arvore.origin.y + 12.0 + 24.0,
+        ),
         size,
     );
     assert!(
-        shell
-            .commands
-            .iter()
-            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Push))),
-        "o clique empurra: {:?}",
-        shell.commands.iter().collect::<Vec<_>>()
-    );
-}
-/// O `fetch` é do repositório, e por isso mora na raiz dos remotos.
-///
-/// Buscar não é gesto de uma branch: ele traz as referências todas de uma vez, e
-/// pendurá-lo numa linha de branch faria parecer que ele busca só aquela.
-#[test]
-fn o_fetch_fica_na_raiz_dos_remotos() {
-    let mut shell = test_shell();
-    let size = Size::new(1280.0, 800.0);
-    let _ = shell.paint(size);
-    shell.set_git_view(GitView {
-        head: Some("main".to_owned()),
-        remotes: vec!["origin/main".to_owned()],
-        ..GitView::default()
-    });
-    shell.toggle_git();
-    let _ = shell.paint(size);
-    shell.commands.retain(|_| false);
-
-    // As raízes na ordem: Branches, Tags, Remotes, Stashes — a terceira linha.
-    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
-    let direita = arvore.origin.x + arvore.size.width;
-    shell.pointer_down(
-        Point::new(direita - 32.0, arvore.origin.y + 12.0 + 48.0),
-        size,
-    );
-    assert!(
-        shell
-            .commands
-            .iter()
-            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Fetch))),
-        "o botão da raiz busca as referências: {:?}",
+        shell.commands.iter().next().is_none(),
+        "{:?}",
         shell.commands.iter().collect::<Vec<_>>()
     );
 }
