@@ -1393,6 +1393,15 @@ impl GitSurface {
         }
     }
 
+    /// A altura de cada linha do histórico, para o teste ver a linha crescer.
+    #[cfg(test)]
+    pub(super) fn alturas_do_historico(&self) -> Vec<f32> {
+        self.tabela
+            .as_ref()
+            .map(ComposedTable::row_heights)
+            .unwrap_or_default()
+    }
+
     /// A faixa do estado intermediário, para o teste apontar nos botões dela.
     #[cfg(test)]
     pub(super) fn faixa_do_conflito_para_teste(&self, host: &UiHost) -> Option<Rect> {
@@ -1698,6 +1707,11 @@ fn linha_de_commit(indice: usize, commit: &CommitRow, lanes: usize) -> ComposedR
             CellWidth::Fill,
         )
     };
+    // **A descrição quebra; as outras três, não.** Mensagem de commit é a única
+    // coluna sem tamanho previsível — data, autor e hash cabem sempre —, e é a
+    // única em que o resto da linha some por baixo da coluna vizinha quando não
+    // cabe. Quem decide isto é a IDE: a biblioteca não sabe se há para onde
+    // crescer, e a linha da tabela cresce junto com a célula mais alta.
     ComposedRow::new(vec![
         ComposedCell::new(
             Box::new(
@@ -1710,7 +1724,14 @@ fn linha_de_commit(indice: usize, commit: &CommitRow, lanes: usize) -> ComposedR
             ),
             CellWidth::Fixed(GRAFO_LARGURA),
         ),
-        rotulo(1, &commit.summary, IconTint::Text),
+        ComposedCell::new(
+            Box::new(
+                Label::new(WidgetId(base + 1), &commit.summary)
+                    .with_tone(IconTint::Text)
+                    .with_wrap(true),
+            ),
+            CellWidth::Fill,
+        ),
         rotulo(2, &commit.date, IconTint::Muted),
         rotulo(3, &commit.author, IconTint::Muted),
         rotulo(4, &hash, IconTint::Muted),

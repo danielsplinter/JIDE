@@ -536,6 +536,13 @@ desenharia por conta própria.
 As outras quatro são texto. `Hash` aparece abreviada, e o que se copia é a
 inteira — quem copia hash vai colar num comando.
 
+**A descrição quebra em várias linhas; as outras três, não.** Mensagem de commit
+é a única coluna sem tamanho previsível — data, autor e hash cabem sempre —, e
+era a única em que o texto sumia por baixo da coluna vizinha. Quem liga a quebra
+é a IDE, e não a biblioteca: só quem monta a tela sabe se há para onde crescer. A
+linha da tabela cresce junto, porque quebrar sem crescer poria a segunda linha
+fora da célula.
+
 **A tabela é virtualizada e o histórico vem por páginas.** Um repositório de
 verdade tem dezenas de milhares de commits, e carregar o `log` inteiro para
 mostrar quarenta linhas é o oposto do que a `19` e a `20` fizeram no índice.

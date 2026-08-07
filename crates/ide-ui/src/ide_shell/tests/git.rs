@@ -930,3 +930,76 @@ fn o_fetch_fica_na_raiz_dos_remotos() {
         shell.commands.iter().collect::<Vec<_>>()
     );
 }
+
+/// A descrição de um commit comprido quebra, e a linha da tabela cresce.
+///
+/// **Quem decide quebrar é a IDE**, e só nesta coluna: data, autor e hash cabem
+/// sempre, e a descrição é a única em que o texto sumia por baixo da coluna
+/// vizinha. A altura vem junto — quebrar sem crescer poria a segunda linha fora
+/// da célula.
+#[test]
+fn a_descricao_comprida_quebra_e_a_linha_cresce() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let commit = |hash: &str, resumo: &str| CommitRow {
+        hash: hash.to_owned(),
+        summary: resumo.to_owned(),
+        author: "Teste".to_owned(),
+        date: "2026-08-07 10:00".to_owned(),
+        lane: 0,
+        lanes: 1,
+        passing: Vec::new(),
+        parents: vec![0],
+    };
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        commits: vec![
+            commit("aaa1111", "curto"),
+            commit(
+                "bbb2222",
+                "uma mensagem de commit bem comprida, dessas que explicam o porquê da                  mudança inteira numa linha só e não cabem na coluna de jeito nenhum",
+            ),
+        ],
+        ..GitView::default()
+    });
+    shell.toggle_git();
+    // O quadro entre abrir e clicar: sem ele a moldura da janela ainda não foi
+    // arranjada, e a faixa de abas não tem área para receber o gesto.
+    let _ = shell.paint(size);
+    // A aba da direita é a do histórico.
+    let (_, _, _, abas) = git::GitSurface::areas(&shell.host);
+    shell.pointer_down(
+        Point::new(
+            abas.origin.x + abas.size.width * 0.75,
+            abas.origin.y + abas.size.height / 2.0,
+        ),
+        size,
+    );
+    let desenhado = shell.paint(size);
+
+    // O texto da descrição sai em mais de um pedaço, e nenhum deles é a
+    // mensagem inteira.
+    let pedacos: Vec<&str> = desenhado
+        .iter()
+        .filter_map(|comando| match comando {
+            PaintCommand::DrawText(texto) if texto.text.contains("mensagem")
+                || texto.text.contains("mudança") =>
+            {
+                Some(texto.text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        pedacos.len() > 1,
+        "a descrição desce para a linha seguinte: {pedacos:?}"
+    );
+
+    // E a linha de baixo é mais alta que a de cima, que coube inteira.
+    let alturas = shell.git_surface().alturas_do_historico();
+    assert!(
+        alturas.len() >= 2 && alturas[1] > alturas[0],
+        "a linha que quebrou cresceu: {alturas:?}"
+    );
+}
