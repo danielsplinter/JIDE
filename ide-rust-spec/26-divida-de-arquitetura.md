@@ -76,9 +76,20 @@ o que foi feito; um limite por arquivo só se respeita cortando de novo. É a
 diferença que a dívida 2 desta mesma especificação vem cobrando do teto de
 `block_on`, e aqui ela já está paga.
 
-A dívida continua aberta: o teto não decompõe nada. Ele só faz o crescimento
-parar de ser silencioso, e o número agora só pode descer sem alguém assinar
-embaixo.
+**E o teto do `native_ide.rs` desceu pela primeira vez: de 6 260 para 5 160.** O
+que saiu foram os testes — 1 185 linhas, quase um quinto do arquivo — para
+`native_ide/tests.rs`, com o mesmo limite de 1 400 dos testes do shell. Boa parte
+de cada uma das seis subidas do teto era teste novo, e não produto novo: o número
+media as duas coisas somadas e por isso media mal. Agora ele mede a raiz de
+composição, que é o que a dívida fala.
+
+*A raiz é um binário, e binário não tem `lib`*: os testes não podiam virar um
+teste de integração em `tests/` — de lá não se alcança `NativeIde` nem os campos
+dela. Ficaram como módulo de teste do próprio arquivo, num arquivo próprio.
+
+A dívida continua aberta: o teto não decompõe nada, e o que foi partido foi o
+teste, não o produto. Ele só faz o crescimento parar de ser silencioso, e o
+número agora só pode descer sem alguém assinar embaixo.
 
 ## Dívida 2 — o teto de `block_on` subiu cinco vezes, e nunca desceu 🟥
 

@@ -22,7 +22,7 @@ pub use ide_application::{
 };
 /// A identidade que o Explorer dá a um caminho, para a aplicação usar a mesma.
 pub use explorer::id as explorer_id;
-pub use ide_shell::{BranchItem, CommitRow, GitDiff, GitEntry, GitFileState, GitLineChange, GitSpan, GitView, IdeShell, PAGINA_DO_HISTORICO};
+pub use ide_shell::{BranchItem, CommitRow, GitDiff, GitEntry, GitFileState, GitLineChange, GitLinePair, GitSpan, GitView, IdeShell, PAGINA_DO_HISTORICO};
 pub use search::{ContentSearchHit, TypeSearchHit};
 pub use settings::SettingsPage;
 pub use shell::ShellFocus;

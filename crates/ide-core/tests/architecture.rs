@@ -1271,7 +1271,28 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // pelo mesmo motivo das anteriores: **só a raiz de composição pode
         // nomear o `ide-git`**. A dívida 1 da `26` continua aberta, e este
         // arquivo continua sendo o primeiro candidato a ser partido.
-        ("crates/ide-app/src/native_ide.rs", 6_260),
+        //
+        // **E de 6 260 para 5 160: o número desceu, que é o que esta guarda
+        // sempre disse que devia acontecer.** Os testes saíram para
+        // `native_ide/tests.rs` — eram 1 185 linhas, quase um quinto do arquivo,
+        // e boa parte de cada subida do teto era teste novo, não produto novo.
+        // O teto volta a medir o que quis medir desde o começo: o tamanho da
+        // raiz de composição. Ela continua sendo o primeiro candidato a ser
+        // partido, e a dívida 1 da `26` continua aberta — mas agora o número
+        // que a mede não está inflado pelo que a testa.
+        //
+        // E de 5 160 para 5 190: o emparelhamento das duas colunas da
+        // comparação — as fileiras que o domínio calcula, traduzidas para o que
+        // a tela entende — e a devolução que sabe **inserir** além de trocar.
+        // São 27 linhas, e estão aqui pela razão de sempre: só a raiz de
+        // composição pode nomear o `ide-git` e a `ide-ui` na mesma linha. É
+        // produto, e não teste — que era exatamente o que a descida anterior
+        // veio separar.
+        ("crates/ide-app/src/native_ide.rs", 5_190),
+        // Os testes da raiz, no arquivo de onde saíram. O teto é o mesmo tipo de
+        // acordo: 1 400, igual ao dos testes do shell, e pelo mesmo motivo —
+        // acima disso ninguém acha o teste certo, e edita o errado.
+        ("crates/ide-app/src/native_ide/tests.rs", 1_400),
         // De 7 269 para 7 315: o teste que a fase 4 da `18` pedia — o copiado do
         // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
         // primeira adição depois de nascer**, que é o que ela existe para fazer:

@@ -198,7 +198,101 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
 }
 
+/// Uma fileira da comparação lado a lado: que linha aparece de cada lado.
+///
+/// **Os dois lados são opcionais, e é aí que está o assunto.** Uma linha que só
+/// existe no arquivo de então tem `new` vazio, e uma que só existe no de agora
+/// tem `old` vazio: é o buraco que a tela desenha em branco, do lado que não
+/// tem nada a mostrar. Sem ele, as duas colunas escorregam uma em relação à
+/// outra na primeira inserção e nunca mais se reencontram.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinePair {
+    /// A linha no arquivo de então, contada do zero.
+    pub old: Option<usize>,
+    /// A linha no arquivo de agora, contada do zero.
+    pub new: Option<usize>,
+}
+
 impl FileDiff {
+    /// As fileiras da comparação lado a lado, do começo ao fim dos dois arquivos.
+    ///
+    /// # Por que isto não é "cada texto numerado do zero"
+    ///
+    /// Era, e estava errado. Enquanto a alteração fosse **troca** de linha os
+    /// dois lados coincidiam por acaso — mesma quantidade de linhas, mesmos
+    /// números. Uma inserção ou uma remoção desloca tudo o que vem abaixo, e a
+    /// partir dali a linha 40 de um lado fica ao lado de uma linha 40 do outro
+    /// que não tem nada com ela. Quem lê compara coisas que não se comparam, e
+    /// quem devolve uma linha escreve por cima de uma linha alheia.
+    ///
+    /// # Como as linhas se emparelham
+    ///
+    /// Igual à de [`FileDiff::added_spans`], e **tem** de ser igual: uma corrida
+    /// de remoções seguida de uma de acréscimos é uma troca, e as linhas se
+    /// casam pela ordem — a primeira removida com a primeira acrescentada. As
+    /// duas listas são lidas pela mesma regra, e o trecho colorido de uma linha
+    /// cairia numa fileira sem par se as duas divergissem.
+    ///
+    /// O que sobra de uma corrida mais longa que a outra fica sem par, e é o
+    /// buraco. Entre um trecho e o seguinte os dois lados andam juntos, e o
+    /// mesmo vale para o rabo depois do último — daí os comprimentos, que o
+    /// diff não conhece: ele só fala do que mudou.
+    #[must_use]
+    pub fn aligned_lines(&self, old_len: usize, new_len: usize) -> Vec<LinePair> {
+        let mut pares = Vec::new();
+        let mut antiga = 0usize;
+        let mut nova = 0usize;
+        let juntos = |pares: &mut Vec<LinePair>, antiga: &mut usize, nova: &mut usize, ate: usize| {
+            while *antiga < ate {
+                pares.push(LinePair {
+                    old: Some(*antiga),
+                    new: Some(*nova),
+                });
+                *antiga += 1;
+                *nova += 1;
+            }
+        };
+        for hunk in &self.hunks {
+            // O que está entre o trecho anterior e este não mudou: os dois lados
+            // andam no mesmo passo.
+            juntos(&mut pares, &mut antiga, &mut nova, hunk.old_start);
+            let mut removidas: Vec<usize> = Vec::new();
+            let mut acrescentadas: Vec<usize> = Vec::new();
+            for linha in &hunk.lines {
+                match linha.kind {
+                    DiffLineKind::Removed => {
+                        removidas.push(antiga);
+                        antiga += 1;
+                    }
+                    DiffLineKind::Added => {
+                        acrescentadas.push(linha.new_line.unwrap_or(nova));
+                        nova += 1;
+                    }
+                    DiffLineKind::Context => {
+                        casar(&mut pares, &mut removidas, &mut acrescentadas);
+                        pares.push(LinePair {
+                            old: Some(antiga),
+                            new: Some(nova),
+                        });
+                        antiga += 1;
+                        nova += 1;
+                    }
+                }
+            }
+            casar(&mut pares, &mut removidas, &mut acrescentadas);
+        }
+        // E o rabo, depois do último trecho.
+        juntos(&mut pares, &mut antiga, &mut nova, old_len);
+        while nova < new_len {
+            pares.push(LinePair {
+                old: None,
+                new: Some(nova),
+            });
+            nova += 1;
+        }
+        pares
+    }
+
     /// As linhas do arquivo **de então** que saíram.
     ///
     /// Contadas no lado esquerdo da comparação, e não no direito: uma linha
@@ -549,6 +643,21 @@ impl FileDiff {
     }
 }
 
+/// Casa uma corrida de remoções com a de acréscimos que a segue.
+///
+/// Pela ordem, que é a mesma regra de [`emparelhar`]: quem sobrar de um lado
+/// fica sem par, e é o buraco que a tela desenha em branco.
+fn casar(pares: &mut Vec<LinePair>, removidas: &mut Vec<usize>, acrescentadas: &mut Vec<usize>) {
+    for indice in 0..removidas.len().max(acrescentadas.len()) {
+        pares.push(LinePair {
+            old: removidas.get(indice).copied(),
+            new: acrescentadas.get(indice).copied(),
+        });
+    }
+    removidas.clear();
+    acrescentadas.clear();
+}
+
 /// Empareja as linhas de uma troca e devolve o que difere em cada uma.
 fn emparelhar(
     removidas: &[(usize, &str)],
@@ -635,6 +744,139 @@ mod tests {
         }
     }
 
+
+    fn linha(kind: DiffLineKind, texto: &str, nova: Option<usize>) -> DiffLine {
+        DiffLine {
+            kind,
+            text: texto.to_owned(),
+            new_line: nova,
+        }
+    }
+
+    /// Uma remoção sem acréscimo abre um buraco do lado de agora.
+    ///
+    /// É o caso que quebrava as duas colunas: `a b c` viram `a c`, e sem o
+    /// buraco o `c` da esquerda ficava ao lado de nada — pior, a linha 1 da
+    /// esquerda (`b`) ficava ao lado da linha 1 da direita (`c`), e devolver o
+    /// `b` escrevia por cima do `c`.
+    #[test]
+    fn uma_remocao_abre_um_buraco_do_lado_de_agora() {
+        let diff = FileDiff {
+            path: PathBuf::from("a.txt"),
+            hunks: vec![Hunk {
+                old_start: 1,
+                new_start: 1,
+                lines: vec![linha(DiffLineKind::Removed, "b", None)],
+            }],
+        };
+        assert_eq!(
+            diff.aligned_lines(3, 2),
+            vec![
+                LinePair {
+                    old: Some(0),
+                    new: Some(0)
+                },
+                LinePair {
+                    old: Some(1),
+                    new: None
+                },
+                LinePair {
+                    old: Some(2),
+                    new: Some(1)
+                },
+            ],
+            "o `c` dos dois lados volta a ficar na mesma fileira"
+        );
+    }
+
+    /// Uma inserção abre o buraco do outro lado, e o rabo continua casado.
+    #[test]
+    fn uma_insercao_abre_o_buraco_do_lado_de_entao() {
+        let diff = FileDiff {
+            path: PathBuf::from("a.txt"),
+            hunks: vec![Hunk {
+                old_start: 0,
+                new_start: 0,
+                lines: vec![linha(DiffLineKind::Added, "nova", Some(0))],
+            }],
+        };
+        assert_eq!(
+            diff.aligned_lines(2, 3),
+            vec![
+                LinePair {
+                    old: None,
+                    new: Some(0)
+                },
+                LinePair {
+                    old: Some(0),
+                    new: Some(1)
+                },
+                LinePair {
+                    old: Some(1),
+                    new: Some(2)
+                },
+            ]
+        );
+    }
+
+    /// Uma troca ocupa **uma** fileira, e não duas empilhadas.
+    ///
+    /// É a mesma regra que colore os trechos: a primeira removida com a primeira
+    /// acrescentada. Se as duas divergissem, o trecho verde de uma linha cairia
+    /// numa fileira que não tem o vermelho correspondente ao lado.
+    #[test]
+    fn a_troca_ocupa_uma_fileira_so() {
+        let diff = FileDiff {
+            path: PathBuf::from("a.txt"),
+            hunks: vec![Hunk {
+                old_start: 0,
+                new_start: 0,
+                lines: vec![
+                    linha(DiffLineKind::Removed, "velho", None),
+                    linha(DiffLineKind::Removed, "sai", None),
+                    linha(DiffLineKind::Added, "novo", Some(0)),
+                ],
+            }],
+        };
+        assert_eq!(
+            diff.aligned_lines(2, 1),
+            vec![
+                LinePair {
+                    old: Some(0),
+                    new: Some(0)
+                },
+                // A segunda removida não tem par: sobrou de uma corrida mais
+                // longa, e o lado de agora fica vazio nesta fileira.
+                LinePair {
+                    old: Some(1),
+                    new: None
+                },
+            ]
+        );
+    }
+
+    /// Sem alteração nenhuma, as fileiras são o arquivo inteiro casado.
+    #[test]
+    fn sem_alteracao_as_fileiras_sao_o_arquivo_casado() {
+        let diff = FileDiff::default();
+        assert_eq!(
+            diff.aligned_lines(3, 3),
+            vec![
+                LinePair {
+                    old: Some(0),
+                    new: Some(0)
+                },
+                LinePair {
+                    old: Some(1),
+                    new: Some(1)
+                },
+                LinePair {
+                    old: Some(2),
+                    new: Some(2)
+                },
+            ]
+        );
+    }
 
     /// Trocar uma palavra marca a palavra, e não a linha inteira.
     ///

@@ -804,6 +804,11 @@ pub(super) struct GitDiffOutcome {
     /// Os trechos que mudaram dentro das linhas, de cada lado.
     pub(super) added_spans: Vec<ide_ui::GitSpan>,
     pub(super) removed_spans: Vec<ide_ui::GitSpan>,
+    /// As fileiras da comparação: que linha de cada lado ocupa cada altura.
+    ///
+    /// Calculadas pelo domínio, que é quem sabe ler um `diff`. Vêm vazias
+    /// quando não se pediu a comparação: a margem do editor não precisa delas.
+    pub(super) pairs: Vec<ide_ui::GitLinePair>,
     /// Se é para abrir a comparação lado a lado, ou só marcar a margem.
     ///
     /// A margem é pedida sozinha quando um arquivo é aberto: quem abre um

@@ -1,5 +1,7 @@
 //! A aba `Diff`: a comparação, os realces e a margem do editor.
 
+use ide_application::RestoreTarget;
+
 use super::*;
 
 /// Clicar no nome do arquivo abre a comparação, e não uma ação.
@@ -415,13 +417,13 @@ fn a_tela_diz_de_que_arquivo_falta_a_margem() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
-/// O botão da coluna de então devolve a linha escolhida para o arquivo de agora.
+/// As setas da coluna de então aparecem em **todas** as linhas marcadas.
 ///
-/// Ele **acompanha a linha escolhida**, encostado na borda direita: um botão
-/// parado no alto não diria de qual linha está falando. Sem linha escolhida ele
-/// não existe — apareceria oferecendo uma ação sobre nada.
+/// Elas não acompanham a escolha: quem lê uma comparação quer devolver duas ou
+/// três linhas seguidas, e uma seta só, atrás de um clique de seleção, faria
+/// dobrar os cliques de cada devolução.
 #[test]
-fn o_botao_da_esquerda_devolve_a_linha_escolhida() {
+fn as_setas_da_esquerda_ficam_em_todas_as_linhas_marcadas() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let _ = shell.paint(size);
@@ -442,40 +444,27 @@ fn o_botao_da_esquerda_devolve_a_linha_escolhida() {
 }
 ".to_owned(),
             marks: vec![(1, GitLineChange::Added)],
-            removed: vec![1],
+            removed: vec![0, 1],
             ..GitDiff::default()
         },
     ));
-    let _ = shell.paint(size);
 
-    // Sem linha escolhida, botão nenhum.
+    // Sem escolher nada: as duas linhas marcadas já têm a sua seta.
     let desenhado = shell.paint(size);
-    let seta = |quadro: &[PaintCommand]| {
-        quadro
-            .iter()
-            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == "→"))
-    };
-    assert!(!seta(&desenhado), "sem linha escolhida não há botão");
+    let setas = desenhado
+        .iter()
+        .filter(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == "→"))
+        .count();
+    assert_eq!(setas, 2, "uma seta por linha marcada, sem escolher nenhuma");
 
-    // Escolher a segunda linha da coluna da esquerda.
     let mut superficie = std::mem::take(&mut shell.git);
-    let coluna = superficie.colunas_do_diff_para_teste(&shell.host)[0];
+    let botoes = superficie.botoes_de_aplicar_para_teste(&shell.host);
     shell.git = superficie;
-    shell.pointer_down(
-        Point::new(coluna.origin.x + 30.0, coluna.origin.y + 24.0 + 12.0),
-        size,
-    );
-    let desenhado = shell.paint(size);
-    assert!(seta(&desenhado), "com a linha escolhida, o botão aparece");
+    assert_eq!(botoes.len(), 2, "as setas são as das linhas marcadas");
 
-    // E o clique nele pede a devolução daquela linha.
+    // E o clique numa delas pede a devolução daquela linha, e não da escolhida.
     shell.commands.retain(|_| false);
-    let mut superficie = std::mem::take(&mut shell.git);
-    let botao = superficie.botao_de_aplicar_para_teste(&shell.host);
-    shell.git = superficie;
-    let Some(botao) = botao else {
-        panic!("o botão precisa ter área");
-    };
+    let botao = botoes[1].1;
     shell.pointer_down(
         Point::new(
             botao.origin.x + botao.size.width / 2.0,
@@ -486,9 +475,10 @@ fn o_botao_da_esquerda_devolve_a_linha_escolhida() {
     assert!(
         shell.commands.iter().any(|comando| matches!(
             comando,
-            ApplicationCommand::Git(GitRequest::RestoreLine { path, line: 1 }) if path == &arquivo
+            ApplicationCommand::Git(GitRequest::RestoreLine { path, from: 1, target })
+                if path == &arquivo && *target == RestoreTarget::Replace(1)
         )),
-        "o botão devolve a linha escolhida: {:?}",
+        "a linha existe dos dois lados, e a devolução é uma troca: {:?}",
         shell.commands.iter().collect::<Vec<_>>()
     );
 
@@ -497,5 +487,243 @@ fn o_botao_da_esquerda_devolve_a_linha_escolhida() {
         shell.git_diff_line(1).as_deref(),
         Some("    int velho;"),
         "o texto devolvido é o do commit"
+    );
+}
+
+/// Uma linha que só existe do lado de então é **acrescentada**, e não trocada.
+///
+/// É o caso que apagava código. `a b c` viram `a c`: sem as fileiras, a linha 1
+/// da esquerda (`b`) ficava ao lado da linha 1 da direita (`c`), e devolver o
+/// `b` mandava escrevê-lo por cima do `c`. O `c` sumia, sem aviso e sem
+/// desfazer.
+#[test]
+fn a_linha_que_so_existe_do_lado_de_entao_e_acrescentada() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    let arquivo = raiz.join("alterado.java");
+    assert!(shell.abrir_comparacao(
+        &arquivo,
+        GitDiff {
+            committed: "a
+b
+c
+".to_owned(),
+            current: "a
+c
+".to_owned(),
+            removed: vec![1],
+            // As fileiras que o domínio calculou: o `c` dos dois lados volta a
+            // ficar na mesma altura, e a do meio tem o lado direito vazio.
+            pairs: vec![
+                GitLinePair {
+                    old: Some(0),
+                    new: Some(0),
+                },
+                GitLinePair {
+                    old: Some(1),
+                    new: None,
+                },
+                GitLinePair {
+                    old: Some(2),
+                    new: Some(1),
+                },
+            ],
+            ..GitDiff::default()
+        },
+    ));
+    let _ = shell.paint(size);
+
+    let mut superficie = std::mem::take(&mut shell.git);
+    let botoes = superficie.botoes_de_aplicar_para_teste(&shell.host);
+    shell.git = superficie;
+    assert_eq!(botoes.len(), 1, "só o `b` saiu");
+
+    shell.commands.retain(|_| false);
+    let botao = botoes[0].1;
+    shell.pointer_down(
+        Point::new(
+            botao.origin.x + botao.size.width / 2.0,
+            botao.origin.y + botao.size.height / 2.0,
+        ),
+        size,
+    );
+    assert!(
+        shell.commands.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::RestoreLine { path, from: 1, target })
+                if path == &arquivo && *target == RestoreTarget::Insert(1)
+        )),
+        "acrescentar na posição 1, e não trocar a linha 1 — que é o `c`: {:?}",
+        shell.commands.iter().collect::<Vec<_>>()
+    );
+}
+
+/// As duas colunas mostram o mesmo número de fileiras, e por isso se conferem.
+///
+/// Enquanto cada coluna era o seu texto numerado do zero, um arquivo de três
+/// linhas ficava ao lado de um de duas e tudo abaixo da remoção escorregava uma
+/// altura. Comparar exige que a mesma altura fale da mesma coisa.
+#[test]
+fn as_duas_colunas_tem_a_mesma_quantidade_de_fileiras() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    assert!(shell.abrir_comparacao(
+        &raiz.join("alterado.java"),
+        GitDiff {
+            committed: "a
+b
+c
+".to_owned(),
+            current: "a
+c
+".to_owned(),
+            removed: vec![1],
+            pairs: vec![
+                GitLinePair {
+                    old: Some(0),
+                    new: Some(0),
+                },
+                GitLinePair {
+                    old: Some(1),
+                    new: None,
+                },
+                GitLinePair {
+                    old: Some(2),
+                    new: Some(1),
+                },
+            ],
+            ..GitDiff::default()
+        },
+    ));
+    let desenhado = shell.paint(size);
+
+    // O `c` aparece duas vezes, e na mesma altura: um de cada lado.
+    let alturas: Vec<f32> = desenhado
+        .iter()
+        .filter_map(|comando| match comando {
+            PaintCommand::DrawText(texto) if texto.text == "c" => Some(texto.origin.y),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(alturas.len(), 2, "o `c` está nos dois lados: {alturas:?}");
+    assert!(
+        (alturas[0] - alturas[1]).abs() < 0.5,
+        "e na mesma altura, que é o que faz duas colunas se conferirem: {alturas:?}"
+    );
+
+    // E o número de linha mostrado é o do arquivo, não o da fileira: o `c` é a
+    // linha 3 de um lado e a 2 do outro.
+    let numeros: Vec<String> = desenhado
+        .iter()
+        .filter_map(|comando| match comando {
+            PaintCommand::DrawText(texto) if texto.text.trim() == "3" => {
+                Some(texto.text.trim().to_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(numeros.len(), 1, "só a coluna de então chega à linha 3");
+}
+
+/// Arrastar a barra de uma coluna arrasta a outra junto.
+///
+/// A roda do mouse chega às duas e elas já andavam juntas. O arrasto, não: quem
+/// arrasta segura *uma* barra, e a outra coluna nem sabia que houve gesto — a
+/// linha 40 de um lado ia parar ao lado de outra qualquer, e a comparação
+/// deixava de comparar no meio do gesto.
+#[test]
+fn arrastar_a_barra_de_uma_coluna_leva_a_outra_junto() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    // Texto comprido nos dois lados: sem o que rolar, não há gesto a testar.
+    let comprido = |marca: &str| {
+        (0..200)
+            .map(|numero| format!("{marca} linha {numero}"))
+            .collect::<Vec<_>>()
+            .join("
+")
+    };
+    assert!(shell.abrir_comparacao(
+        &raiz.join("alterado.java"),
+        GitDiff {
+            committed: comprido("entao"),
+            current: comprido("agora"),
+            ..GitDiff::default()
+        },
+    ));
+    let _ = shell.paint(size);
+
+    let mut superficie = std::mem::take(&mut shell.git);
+    let colunas = superficie.colunas_do_diff_para_teste(&shell.host);
+    shell.git = superficie;
+    assert_eq!(shell.git_surface().rolagem_do_diff(), [0.0, 0.0]);
+
+    // A trilha da coluna da esquerda fica encostada na borda direita dela.
+    let alca = Point::new(
+        colunas[0].origin.x + colunas[0].size.width - 4.0,
+        colunas[0].origin.y + 20.0,
+    );
+    shell.pointer_down(alca, size);
+    shell.pointer_move(Point::new(alca.x, alca.y + 150.0), size);
+
+    let [esquerda, direita] = shell.git_surface().rolagem_do_diff();
+    assert!(
+        esquerda > 0.0,
+        "arrastar a alça rola a coluna de então: {esquerda}"
+    );
+    assert!(
+        (esquerda - direita).abs() < 0.5,
+        "e a de agora vai junto, ou as duas deixam de se conferir: {esquerda} e {direita}"
+    );
+}
+
+/// Devolver uma linha muda o editor principal daquele arquivo, sem roubar o foco.
+///
+/// O texto que a janela do Git grava é o texto que o editor mostra. Antes ele
+/// ficava com o de antes até alguém reabrir o arquivo — a resposta velha
+/// parecida com a certa, que é a pior de todas. E o foco tem de ficar onde
+/// estava: a janela do Git não fechou, e quem clicou continua nela.
+#[test]
+fn refrescar_um_documento_troca_o_texto_sem_mudar_o_foco() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let raiz = shell.workspace_root().to_path_buf();
+    let arquivo = raiz.join("alterado.java");
+    shell.show_document(&arquivo, "class Pedido {\n    int novo;\n}\n");
+    let _ = shell.paint(size);
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    let foco = shell.focus();
+
+    assert!(
+        shell.refresh_document(&arquivo, "class Pedido {\n    int velho;\n}\n"),
+        "o arquivo está aberto, então há o que refrescar"
+    );
+    assert_eq!(
+        shell.active_text(),
+        Some("class Pedido {\n    int velho;\n}\n"),
+        "o editor mostra o que foi gravado"
+    );
+    assert_eq!(shell.focus(), foco, "o foco continua onde estava");
+
+    assert!(
+        !shell.refresh_document(&raiz.join("fechado.java"), "nada"),
+        "arquivo que não está aberto não tem o que refrescar, e não é erro"
     );
 }

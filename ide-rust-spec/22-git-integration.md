@@ -578,6 +578,71 @@ daquele lugar — preparar, despreparar, descartar —, e ação em linha é cé
 Clicar num arquivo mostra a diferença dele. Onde, é a pergunta da janela que
 ficou registrada acima.
 
+#### A aba `diff`: duas colunas que se conferem
+
+A comparação abre em duas colunas — o arquivo de então à esquerda, o de agora à
+direita — e as duas mostram o **mesmo número de fileiras**. Cada fileira tem a
+linha de então à esquerda e a de agora à direita, ou um vazio apagado do lado que
+não tem par: uma linha removida não tem nada à direita, uma acrescentada não tem
+nada à esquerda.
+
+*Isto não é enfeite.* Enquanto cada coluna era o seu texto numerado do zero, os
+dois lados coincidiam por acaso — só enquanto a alteração fosse **troca** de
+linha. Uma inserção ou uma remoção desloca tudo o que vem abaixo, e a partir dali
+a linha 40 de um lado ficava ao lado de uma linha 40 do outro que não tinha nada
+com ela. Quem lia comparava coisas que não se comparam, e quem devolvia uma linha
+**escrevia por cima de uma linha alheia** — perda de código, sem aviso e sem
+desfazer.
+
+Quem emparelha é o domínio, em `FileDiff::aligned_lines`: a tela não sabe ler um
+`diff`. A regra é a mesma que colore os trechos — uma corrida de remoções seguida
+de uma de acréscimos é uma troca, e as linhas se casam pela ordem —, e **tem** de
+ser a mesma, ou o trecho verde de uma linha cairia numa fileira sem o vermelho
+correspondente ao lado.
+
+**As duas colunas rolam juntas em qualquer gesto**: a roda, o arrasto da alça e o
+clique na trilha. A roda chega às duas sozinha; nos outros dois quem arrasta
+segura *uma* barra, e é a janela que põe a outra na mesma altura — a `ComposedList`
+não pode adivinhar que tem uma irmã, e por isso a ERLibUi expõe
+`set_scroll_offset`/`set_scroll_x` e quem as pôs lado a lado decide. **Na coluna da esquerda, cada linha que saiu tem uma seta `→`**,
+encostada na borda direita, flutuando sobre o texto: fundo transparente, para não
+esconder o que se está lendo para decidir se clica; borda visível, porque é ela
+que diz que ali se clica.
+
+*Uma seta por linha marcada, e todas ao mesmo tempo.* Ela chegou a acompanhar a
+linha escolhida, e era pior: obrigava a escolher antes de agir, e quem lê uma
+comparação quer devolver duas ou três linhas seguidas sem clicar duas vezes em
+cada uma. Só aparecem as que estão na vista — uma seta presa na borda falando de
+uma linha que já saiu da tela mentiria, e desenhar as de fora custaria uma por
+linha do arquivo.
+
+O clique emite `RestoreLine { path, from, target }`. **Os dois números são
+diferentes, e confundi-los apaga código**: `from` é a linha no arquivo de então, e
+`target` diz o que fazer do lado de agora — `Replace(n)` quando a linha existe dos
+dois lados, `Insert(n)` quando ela só existe do lado de então. Devolver uma linha
+*removida* é acrescentar, e não trocar: trocar destruiria a linha que ocupa aquela
+posição hoje, que ninguém mandou tocar.
+
+A aplicação grava a linha no arquivo — pela `rewrite_line`, que guarda o fim de linha que o arquivo já usava,
+porque escrever `\n` num arquivo com `\r\n` marcaria *todas* as linhas como
+alteradas — e faz três coisas em seguida:
+
+1. **refresca o documento aberto**, se ele estiver aberto, sem abrir, sem ativar e
+   sem tirar o foco: a janela do Git não fechou, e quem clicou continua nela. Sem
+   isto o editor principal ficaria com o texto de antes até alguém reabrir o
+   arquivo — a resposta velha parecida com a certa;
+2. **pede realce novo**. A troca sobe a revisão do documento, e o realce
+   guardado é o da revisão anterior — a tela o descarta de propósito, senão
+   coloriria as palavras erradas. Quem não pedir aqui deixa o arquivo *sem cor
+   nenhuma*: o realce do clique é pedido **durante** o clique, e esta troca
+   acontece depois dele, no laço de comandos;
+3. pede a comparação de novo, para as duas colunas e as setas refletirem o que
+   ficou;
+4. pede a margem de novo, pelo mesmo caminho.
+
+O observador de disco também veria a gravação, 300 ms depois. Quem clicou não
+pode esperar por ele para ver o que acabou de fazer.
+
 ### O que o gerenciador não faz
 
 Ele não fala com o Git. Emite `GitRequest` pelo barramento, como o painel de

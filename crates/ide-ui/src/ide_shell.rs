@@ -1707,7 +1707,7 @@ mod explorer_area;
 mod generate;
 mod git;
 pub use git::{
-    BranchItem, CommitRow, GitDiff, GitEntry, GitFileState, GitLineChange, GitSpan, GitView,
+    BranchItem, CommitRow, GitDiff, GitEntry, GitFileState, GitLineChange, GitLinePair, GitSpan, GitView,
     PAGINA_DO_HISTORICO,
 };
 mod inspection;

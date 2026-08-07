@@ -57,6 +57,58 @@ impl TextBuffer {
     }
 }
 
+/// Troca o conteúdo de uma linha, respeitando o fim de linha do arquivo.
+///
+/// **O fim de linha é o do arquivo, e não o da máquina.** Reescrever com `\n` um
+/// arquivo que usa `\r\n` marcaria *todas* as linhas como alteradas: devolver
+/// uma linha viraria um diff inteiro, e quem pediu a devolução de uma linha veria
+/// o arquivo inteiro ficar verde.
+///
+/// Uma linha além do fim é acrescentada: é o caso de devolver a última linha de
+/// um arquivo que encolheu.
+///
+/// Vive aqui, e não na aplicação, porque é manipulação de texto e tem o mesmo
+/// dono que [`rewrite_occurrences`] — e porque assim se testa sem gravar nada.
+#[must_use]
+pub fn rewrite_line(text: &str, line: usize, replacement: String) -> String {
+    let quebra = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let terminava_com_quebra = text.ends_with('\n');
+    let mut linhas: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
+    if line < linhas.len() {
+        linhas[line] = replacement;
+    } else {
+        linhas.push(replacement);
+    }
+    let mut novo = linhas.join(quebra);
+    if terminava_com_quebra {
+        novo.push_str(quebra);
+    }
+    novo
+}
+
+/// Acrescenta uma linha numa posição, respeitando o fim de linha do arquivo.
+///
+/// **Irmã de [`rewrite_line`], e diferente dela no que importa.** Devolver ao
+/// arquivo uma linha que *saiu* dele não é trocar a linha que está naquela
+/// posição — essa é outra linha, que ninguém mandou tocar. É acrescentar, e
+/// empurrar o resto para baixo.
+///
+/// Posição além do fim entra no fim, que é onde ela cabe.
+#[must_use]
+pub fn insert_line(text: &str, at: usize, novo: String) -> String {
+    let quebra = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    // Arquivo vazio não tem quebra para copiar, e a linha acrescentada precisa
+    // terminar: sem isto, a seguinte grudaria nela.
+    let terminava_com_quebra = text.is_empty() || text.ends_with('\n');
+    let mut linhas: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
+    linhas.insert(at.min(linhas.len()), novo);
+    let mut resultado = linhas.join(quebra);
+    if terminava_com_quebra {
+        resultado.push_str(quebra);
+    }
+    resultado
+}
+
 /// Troca um nome nas posições dadas, do fim para o começo do texto.
 ///
 /// Do fim para o começo porque trocar no começo moveria as posições seguintes:
@@ -254,6 +306,37 @@ pub enum BufferError {
 mod tests {
     use super::*;
 
+    /// A troca de uma linha guarda o fim de linha que o arquivo já usava.
+    ///
+    /// É o que separa "uma linha mudou" de "o arquivo inteiro mudou": num
+    /// arquivo com CRLF, escrever LF marca todas as linhas como alteradas.
+    #[test]
+    fn trocar_uma_linha_guarda_o_fim_de_linha_do_arquivo() {
+        let unix = "um\ndois\ntres\n";
+        assert_eq!(
+            rewrite_line(unix, 1, "DOIS".to_owned()),
+            "um\nDOIS\ntres\n"
+        );
+
+        let windows = "um\r\ndois\r\ntres\r\n";
+        assert_eq!(
+            rewrite_line(windows, 1, "DOIS".to_owned()),
+            "um\r\nDOIS\r\ntres\r\n",
+            "o arquivo usava CRLF, e continua usando"
+        );
+
+        // Sem quebra no fim, continua sem: acrescentar uma seria uma alteração
+        // que ninguém pediu, na última linha.
+        assert_eq!(rewrite_line("um\ndois", 0, "UM".to_owned()), "UM\ndois");
+
+        // Linha além do fim: o arquivo encolheu, e a linha volta no fim dele.
+        assert_eq!(
+            rewrite_line("um\n", 5, "novo".to_owned()),
+            "um\nnovo\n",
+            "devolver uma linha que já não existe a acrescenta"
+        );
+    }
+
     #[test]
     fn unicode_edits_require_valid_boundaries() {
         let mut buffer = TextBuffer::new("ação");
@@ -261,6 +344,35 @@ mod tests {
         assert!(buffer.replace(0..3, "A").is_ok());
         assert_eq!(buffer.text(), "Aão");
         assert!(buffer.is_dirty());
+    }
+
+    /// Acrescentar não é trocar: a linha de baixo continua onde estava.
+    ///
+    /// É o caso da linha que foi *removida* e volta pela seta da comparação.
+    /// Trocá-la pela que está naquela posição apagaria conteúdo que ninguém
+    /// mandou tocar.
+    #[test]
+    fn acrescentar_uma_linha_empurra_o_resto_para_baixo() {
+        assert_eq!(
+            insert_line("a\nc\n", 1, "b".to_owned()),
+            "a\nb\nc\n",
+            "o `c` continua no arquivo"
+        );
+        assert_eq!(
+            insert_line("a\r\nc\r\n", 1, "b".to_owned()),
+            "a\r\nb\r\nc\r\n",
+            "e o fim de linha do arquivo é respeitado"
+        );
+        assert_eq!(
+            insert_line("", 0, "primeira".to_owned()),
+            "primeira\n",
+            "arquivo vazio ganha a linha, terminada"
+        );
+        assert_eq!(
+            insert_line("a\n", 9, "fim".to_owned()),
+            "a\nfim\n",
+            "posição além do fim entra no fim"
+        );
     }
 
     #[test]

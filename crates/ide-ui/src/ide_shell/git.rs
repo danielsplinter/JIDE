@@ -28,7 +28,7 @@ use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetId};
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle};
 
-use ide_application::{ApplicationCommand, GitRequest};
+use ide_application::{ApplicationCommand, GitRequest, RestoreTarget};
 
 use super::primary_pointer;
 
@@ -61,8 +61,14 @@ const JANELA_TABS_ID: WidgetId = WidgetId(10_531);
 const DIFF_ID: WidgetId = WidgetId(10_532);
 /// A divisa que reparte as duas colunas da comparação.
 const DIFF_SPLIT_ID: WidgetId = WidgetId(10_533);
-/// O botão que leva a linha da esquerda para a direita.
-const APLICAR_ID: WidgetId = WidgetId(11_940);
+/// As setas que levam uma linha da esquerda para a direita: uma por linha.
+///
+/// Longe de tudo de propósito. As duas colunas da comparação já reservam cem mil
+/// identificadores cada uma a partir de `DIFF_LINHA_BASE`, e uma base de setas
+/// logo acima dos botões da barra colidiria com elas na sexagésima linha do
+/// arquivo — dois widgets com o mesmo identificador são o mesmo widget para a
+/// moldura, e o estado de um cairia no outro.
+const APLICAR_BASE: WidgetId = WidgetId(1_000_000);
 /// Largura e altura do botão que flutua sobre o texto.
 ///
 /// Menor que a altura padrão de propósito: ele mora **dentro** de uma linha de
@@ -196,6 +202,31 @@ pub struct GitSpan {
     pub end: usize,
 }
 
+/// O que uma seta devolve, e para onde.
+///
+/// Os três juntos porque separados não dizem nada: a fileira é onde a seta é
+/// desenhada, `from` é a linha que sai do arquivo de então, e `target` é o que
+/// fazer com ela do lado de agora — trocar, ou entrar como linha nova.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Devolucao {
+    pub(super) fileira: usize,
+    pub(super) from: usize,
+    pub(super) target: RestoreTarget,
+}
+
+/// Uma fileira da comparação: que linha aparece de cada lado.
+///
+/// **Os dois lados são opcionais.** Uma linha que só existe no arquivo de então
+/// tem `new` vazio, e o lado direito daquela fileira fica em branco; uma que só
+/// existe no de agora tem `old` vazio. É o que impede as duas colunas de
+/// escorregarem uma em relação à outra na primeira inserção. Quem calcula é o
+/// domínio, em `FileDiff::aligned_lines`: a tela não sabe ler um `diff`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GitLinePair {
+    pub old: Option<usize>,
+    pub new: Option<usize>,
+}
+
 /// A comparação de um arquivo, como a aba `Diff` a mostra.
 ///
 /// Os dois textos inteiros, e não os trechos: quem olha uma diferença costuma
@@ -226,6 +257,12 @@ pub struct GitDiff {
     pub added_spans: Vec<GitSpan>,
     /// Os trechos removidos, dentro das linhas do arquivo de então.
     pub removed_spans: Vec<GitSpan>,
+    /// As fileiras: que linha de cada lado ocupa cada altura da tela.
+    ///
+    /// Vazio quer dizer "não sei emparelhar", e aí as duas colunas voltam a ser
+    /// cada texto numerado do zero — que é o certo quando não há diferença
+    /// nenhuma, e o menos errado quando a resposta do Git não veio.
+    pub pairs: Vec<GitLinePair>,
 }
 
 /// O que a margem do editor mostra numa linha.
@@ -573,7 +610,13 @@ impl GitSurface {
         self.rebuild_diff();
     }
 
-    /// Monta as duas colunas da comparação, uma linha por linha de texto.
+    /// Monta as duas colunas da comparação, uma fileira por par de linhas.
+    ///
+    /// **Fileira, e não linha de texto.** As duas colunas mostram o mesmo número
+    /// de fileiras, e cada uma delas tem a linha de então à esquerda e a de agora
+    /// à direita — ou um vazio, do lado que não tem par. Enquanto cada coluna era
+    /// o seu texto numerado do zero, a primeira inserção deslocava tudo o que
+    /// vinha abaixo e as duas nunca mais se reencontravam.
     ///
     /// O lado direito é tingido pelo que mudou: é a mesma marcação da margem do
     /// editor, e ela já vem calculada de quem leu o repositório.
@@ -599,11 +642,24 @@ impl GitSurface {
         };
         let trechos_de_agora = trechos(&diff.added_spans);
         let trechos_de_entao = trechos(&diff.removed_spans);
+        let fileiras = self.fileiras();
+        let Some(diff) = self.diff.as_ref() else {
+            return;
+        };
         let coluna = |texto: &str, base: u64, de_agora: bool| {
-            let linhas = texto
-                .lines()
+            let linhas: Vec<String> = texto.lines().map(ToOwned::to_owned).collect();
+            let linhas = fileiras
+                .iter()
                 .enumerate()
-                .map(|(numero, linha)| {
+                .map(|(fileira, par)| {
+                    // Qual linha do texto esta fileira mostra — e nenhuma, se o
+                    // lado está vazio. A fileira existe do mesmo jeito: é ela
+                    // que segura o outro lado na altura certa.
+                    let numero = if de_agora { par.new } else { par.old };
+                    let Some(numero) = numero else {
+                        return Self::fileira_vazia(base, fileira);
+                    };
+                    let linha = linhas.get(numero).cloned().unwrap_or_default();
                     // A mesma cor nos dois lados: o azul só diz que esta linha
                     // entrou na comparação.
                     let mudou = if de_agora {
@@ -624,11 +680,13 @@ impl GitSurface {
                     };
                     let celulas = vec![
                         // O número da linha antes do texto, como no editor: sem
-                        // ele, duas colunas lado a lado não se conferem.
+                        // ele, duas colunas lado a lado não se conferem. E é o
+                        // número do **arquivo**, não o da fileira: é por ele que
+                        // se acha a linha no editor.
                         ComposedCell::new(
                             Box::new(
                                 Label::new(
-                                    WidgetId(base + numero as u64 * 2),
+                                    WidgetId(base + fileira as u64 * 2),
                                     format!("{:>4}", numero + 1),
                                 )
                                 .with_tone(IconTint::Muted),
@@ -638,7 +696,7 @@ impl GitSurface {
                         ComposedCell::new(
                             Box::new({
                                 let rotulo =
-                                    Label::new(WidgetId(base + numero as u64 * 2 + 1), linha);
+                                    Label::new(WidgetId(base + fileira as u64 * 2 + 1), linha);
                                 match trecho {
                                     Some((inicio, fim, tint)) => {
                                         rotulo.with_marked_range(inicio, fim, tint)
@@ -664,6 +722,29 @@ impl GitSurface {
             coluna(&diff.committed, DIFF_LINHA_BASE.0, false),
             coluna(&diff.current, DIFF_LINHA_BASE.0 + 100_000, true),
         ]);
+    }
+
+    /// A fileira do lado que não tem nada a mostrar.
+    ///
+    /// Ela existe para segurar o outro lado na altura certa, e por isso não pode
+    /// ser simplesmente omitida. O fundo apagado a distingue de uma linha em
+    /// branco do arquivo: uma diz "aqui não há nada deste lado", a outra é
+    /// conteúdo, e confundir as duas é ler o arquivo errado.
+    fn fileira_vazia(base: u64, fileira: usize) -> ComposedRow {
+        ComposedRow::new(vec![
+            ComposedCell::new(
+                Box::new(Label::new(WidgetId(base + fileira as u64 * 2), String::new())),
+                CellWidth::Fixed(40.0),
+            ),
+            ComposedCell::new(
+                Box::new(Label::new(
+                    WidgetId(base + fileira as u64 * 2 + 1),
+                    String::new(),
+                )),
+                CellWidth::Natural,
+            ),
+        ])
+        .with_highlight(IconTint::Muted)
     }
 
     /// As duas colunas da comparação, repartidas pela divisa.
@@ -1029,29 +1110,126 @@ impl GitSurface {
         )
     }
 
-    /// Onde fica o botão que leva a linha da esquerda para a direita.
+    /// Onde ficam as setas que levam uma linha da esquerda para a direita.
     ///
-    /// **Ele acompanha a linha escolhida**, encostado na borda direita da coluna
-    /// de então: é a linha de onde o texto sai, e um botão parado no alto não
-    /// diria de qual linha ele está falando.
+    /// **Uma por linha marcada, e todas ao mesmo tempo.** A seta chegou a
+    /// acompanhar a linha escolhida, e era pior: obrigava a escolher antes de
+    /// agir, e quem lê uma comparação quer devolver duas ou três linhas seguidas
+    /// sem clicar duas vezes em cada uma.
     ///
-    /// Sem linha escolhida não há botão: ele apareceria oferecendo uma ação que
-    /// não se sabe sobre o quê.
-    fn botao_de_aplicar(&self, coluna: Rect) -> Option<Rect> {
-        let lista = self.colunas_do_diff.as_ref()?.first()?;
-        let escolhida = lista.selected()?;
-        let topo = coluna.origin.y + escolhida as f32 * ROW_HEIGHT - lista.scroll_offset();
-        // Fora da vista, nenhum botão: rolar a coluna não pode deixá-lo preso na
-        // borda falando de uma linha que já saiu da tela.
-        if topo < coluna.origin.y || topo + ROW_HEIGHT > coluna.origin.y + coluna.size.height {
-            return None;
+    /// Só as que estão na vista. Rolar a coluna não pode deixar uma seta presa na
+    /// borda falando de uma linha que já saiu da tela, e desenhar as de fora
+    /// custaria uma por linha do arquivo.
+    fn botoes_de_aplicar(&self, coluna: Rect) -> Vec<(Devolucao, Rect)> {
+        let Some(diff) = self.diff.as_ref() else {
+            return Vec::new();
+        };
+        let Some(lista) = self.colunas_do_diff.as_ref().and_then(|colunas| colunas.first()) else {
+            return Vec::new();
+        };
+        let removidas: std::collections::HashSet<usize> = diff.removed.iter().copied().collect();
+        let rolagem = lista.scroll_offset();
+        let mut botoes = Vec::new();
+        // Quantas linhas do arquivo de agora vieram antes desta fileira: é onde
+        // uma linha que só existe do lado de então entra, se for devolvida.
+        let mut adiante = 0usize;
+        for (fileira, par) in self.fileiras().iter().enumerate() {
+            let Some(antiga) = par.old else {
+                adiante = par.new.map_or(adiante, |nova| nova + 1);
+                continue;
+            };
+            if let Some(nova) = par.new {
+                adiante = nova + 1;
+            }
+            if !removidas.contains(&antiga) {
+                continue;
+            }
+            let topo = coluna.origin.y + fileira as f32 * ROW_HEIGHT - rolagem;
+            // Fora da vista, nenhuma seta: rolar a coluna não pode deixar uma
+            // presa na borda falando de uma linha que já saiu da tela.
+            if topo < coluna.origin.y
+                || topo + ROW_HEIGHT > coluna.origin.y + coluna.size.height
+            {
+                continue;
+            }
+            botoes.push((
+                Devolucao {
+                    fileira,
+                    from: antiga,
+                    target: par.new.map_or(RestoreTarget::Insert(adiante), |nova| {
+                        RestoreTarget::Replace(nova)
+                    }),
+                },
+                Rect::new(
+                    coluna.origin.x + coluna.size.width - APLICAR_LADO - 6.0,
+                    topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
+                    APLICAR_LADO,
+                    APLICAR_LADO,
+                ),
+            ));
         }
-        Some(Rect::new(
-            coluna.origin.x + coluna.size.width - APLICAR_LADO - 6.0,
-            topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
-            APLICAR_LADO,
-            APLICAR_LADO,
-        ))
+        botoes
+    }
+
+    /// Põe as duas colunas na mesma altura depois de um gesto.
+    ///
+    /// **A roda já chegava às duas; o arrasto da barra, não.** Quem arrasta
+    /// segura *uma* barra, e a outra coluna não recebe o gesto — ela ficava para
+    /// trás, e a comparação deixava de comparar: a linha 40 de um lado ao lado
+    /// de outra qualquer do outro.
+    ///
+    /// Quem mudou manda, e o lado é o de baixo. Se as duas mudaram — a roda —,
+    /// já estão iguais e o segundo `if` não faz nada.
+    fn casar_a_rolagem(&mut self, antes: [(f32, f32); 2]) {
+        let Some(listas) = self.colunas_do_diff.as_mut() else {
+            return;
+        };
+        let depois = [
+            (listas[0].scroll_offset(), listas[0].scroll_x()),
+            (listas[1].scroll_offset(), listas[1].scroll_x()),
+        ];
+        if depois[0] != antes[0] {
+            listas[1].set_scroll_offset(depois[0].0);
+            listas[1].set_scroll_x(depois[0].1);
+        } else if depois[1] != antes[1] {
+            listas[0].set_scroll_offset(depois[1].0);
+            listas[0].set_scroll_x(depois[1].1);
+        }
+    }
+
+    /// Onde as duas colunas estão agora, para saber qual delas se mexeu.
+    fn rolagem_das_colunas(&self) -> [(f32, f32); 2] {
+        self.colunas_do_diff.as_ref().map_or(
+            [(0.0, 0.0); 2],
+            |listas| {
+                [
+                    (listas[0].scroll_offset(), listas[0].scroll_x()),
+                    (listas[1].scroll_offset(), listas[1].scroll_x()),
+                ]
+            },
+        )
+    }
+
+    /// As fileiras da comparação, ou o casamento ingênuo quando não há nenhuma.
+    ///
+    /// Um lugar só: a pintura e a seta têm de concordar sobre que altura mostra
+    /// que linha, e duas contas iguais escritas em dois lugares divergem na
+    /// primeira correção.
+    fn fileiras(&self) -> Vec<GitLinePair> {
+        let Some(diff) = self.diff.as_ref() else {
+            return Vec::new();
+        };
+        if !diff.pairs.is_empty() {
+            return diff.pairs.clone();
+        }
+        let de_entao = diff.committed.lines().count();
+        let de_agora = diff.current.lines().count();
+        (0..de_entao.max(de_agora))
+            .map(|numero| GitLinePair {
+                old: (numero < de_entao).then_some(numero),
+                new: (numero < de_agora).then_some(numero),
+            })
+            .collect()
     }
 
     /// O caminho do arquivo que está sendo comparado.
@@ -1062,11 +1240,6 @@ impl GitSurface {
     /// A comparação que está na tela, para quem precisa do texto dela.
     pub(super) fn view_diff(&self) -> Option<&GitDiff> {
         self.diff.as_ref()
-    }
-
-    /// A linha escolhida na coluna de então, se há uma.
-    fn linha_escolhida(&self) -> Option<usize> {
-        self.colunas_do_diff.as_ref()?.first()?.selected()
     }
 
     /// A comparação, quando há uma pedida.
@@ -1107,11 +1280,16 @@ impl GitSurface {
         if let Some(split) = self.split_do_diff.as_ref() {
             split.paint(paint);
         }
-        // E o botão depois dela: ele flutua sobre o texto, e o que flutua é
+        // E as setas depois dela: elas flutuam sobre o texto, e o que flutua é
         // desenhado por cima do que está embaixo.
-        if let Some(area_do_botao) = self.botao_de_aplicar(colunas[0]) {
-            let mut aplicar = Button::new(APLICAR_ID, "→")
-                // Fundo transparente: ele está **sobre** o texto que se está
+        for (devolucao, area_do_botao) in self.botoes_de_aplicar(colunas[0]) {
+            // Um identificador por fileira: dois botões com o mesmo id seriam o
+            // mesmo botão para a moldura, e o estado de um cairia no outro.
+            let mut aplicar = Button::new(
+                WidgetId(APLICAR_BASE.0 + devolucao.fileira as u64),
+                "→",
+            )
+                // Fundo transparente: a seta está **sobre** o texto que se está
                 // lendo para decidir se clica, e um fundo cheio esconderia
                 // justamente isso. A borda continua, e é ela que diz que ali se
                 // clica.
@@ -1393,17 +1571,19 @@ impl GitSurface {
             let area_do_diff = area(host, DIFF_ID);
             if self.diff.is_some() && area_do_diff.contains(point) {
                 let colunas = self.colunas_da_comparacao(area_do_diff, context);
-                // O botão antes das colunas: ele flutua sobre a de então, e um
-                // clique nele cairia na linha de baixo se a pergunta viesse
+                // As setas antes das colunas: elas flutuam sobre a de então, e
+                // um clique nelas cairia na linha de baixo se a pergunta viesse
                 // depois.
-                if let Some(area_do_botao) = self.botao_de_aplicar(colunas[0])
-                    && area_do_botao.contains(point)
-                    && let Some(linha) = self.linha_escolhida()
+                if let Some((devolucao, _)) = self
+                    .botoes_de_aplicar(colunas[0])
+                    .into_iter()
+                    .find(|(_, area)| area.contains(point))
                     && let Some(caminho) = self.caminho_do_diff()
                 {
                     return Some(GitRequest::RestoreLine {
                         path: caminho,
-                        line: linha,
+                        from: devolucao.from,
+                        target: devolucao.target,
                     });
                 }
                 if let Some(split) = self.split_do_diff.as_mut()
@@ -1415,6 +1595,9 @@ impl GitSurface {
                     );
                     return None;
                 }
+                // Clicar na trilha da barra salta a rolagem, e é gesto como
+                // qualquer outro: as duas colunas andam juntas depois dele.
+                let antes = self.rolagem_das_colunas();
                 if let Some(listas) = self.colunas_do_diff.as_mut() {
                     for (lista, coluna) in listas.iter_mut().zip(colunas) {
                         if coluna.contains(point) {
@@ -1427,6 +1610,8 @@ impl GitSurface {
                         }
                     }
                 }
+                self.casar_a_rolagem(antes);
+
             }
             return None;
         }
@@ -1590,12 +1775,15 @@ impl GitSurface {
             if let Some(split) = self.split_do_diff.as_mut() {
                 split.event(&mut EventContext::default(), event);
             }
+            let antes = self.rolagem_das_colunas();
             if let Some(listas) = self.colunas_do_diff.as_mut() {
                 for (lista, coluna) in listas.iter_mut().zip(colunas) {
                     lista.layout(context, coluna);
                     lista.event(&mut EventContext::default(), event);
                 }
             }
+            self.casar_a_rolagem(antes);
+
             return;
         }
         // A árvore da esquerda: ela tem barra vertical própria.
@@ -1671,12 +1859,14 @@ impl GitSurface {
             // independentes desfazem a comparação a cada gesto.
             let area_do_diff = area(host, DIFF_ID);
             let colunas = self.colunas_da_comparacao(area_do_diff, context);
+            let antes = self.rolagem_das_colunas();
             if let Some(listas) = self.colunas_do_diff.as_mut() {
                 for (lista, coluna) in listas.iter_mut().zip(colunas) {
                     lista.layout(context, coluna);
                     lista.event(&mut EventContext::default(), &evento);
                 }
             }
+            self.casar_a_rolagem(antes);
             return None;
         }
         let arvore = area(host, TREE_ID);
@@ -2024,6 +2214,16 @@ impl GitSurface {
             .map_or(0.0, |tree| tree.scroll_offset().y)
     }
 
+    /// Onde as duas colunas da comparação estão, para o teste ver se andam juntas.
+    #[cfg(test)]
+    pub(super) fn rolagem_do_diff(&self) -> [f32; 2] {
+        self.colunas_do_diff
+            .as_ref()
+            .map_or([0.0; 2], |listas| {
+                [listas[0].scroll_offset(), listas[1].scroll_offset()]
+            })
+    }
+
     /// As duas colunas da comparação, para o teste apontar nelas.
     #[cfg(test)]
     pub(super) fn colunas_do_diff_para_teste(&mut self, host: &UiHost) -> [Rect; 2] {
@@ -2032,11 +2232,14 @@ impl GitSurface {
         self.colunas_da_comparacao(area_do_diff, &context)
     }
 
-    /// O botão que devolve a linha, para o teste clicar nele.
+    /// As setas que devolvem linhas, para o teste clicar nelas.
     #[cfg(test)]
-    pub(super) fn botao_de_aplicar_para_teste(&mut self, host: &UiHost) -> Option<Rect> {
+    pub(super) fn botoes_de_aplicar_para_teste(
+        &mut self,
+        host: &UiHost,
+    ) -> Vec<(Devolucao, Rect)> {
         let colunas = self.colunas_do_diff_para_teste(host);
-        self.botao_de_aplicar(colunas[0])
+        self.botoes_de_aplicar(colunas[0])
     }
 
     /// As abas da janela, para o teste apontar nelas.
@@ -2204,6 +2407,35 @@ impl super::IdeShell {
         marks: Vec<(usize, GitLineChange)>,
     ) {
         self.git.marcas.insert(path, marks);
+    }
+
+    /// Reescreve um documento aberto com o texto que está no disco.
+    ///
+    /// **Sem abrir, sem ativar e sem tirar o foco de quem pediu.** Devolver uma
+    /// linha grava o arquivo, e o editor principal continuaria mostrando o texto
+    /// de antes; abrir pelo caminho de sempre traria o foco junto, e quem clicou
+    /// está na janela do Git, que não fechou.
+    ///
+    /// Devolve `false` quando o arquivo não está aberto: aí não há o que
+    /// refrescar, e isso não é erro.
+    pub fn refresh_document(&mut self, path: &std::path::Path, text: &str) -> bool {
+        let Some(id) = self
+            .editor_area
+            .session
+            .tabs()
+            .find(|documento| documento.path == path)
+            .map(|documento| documento.id)
+        else {
+            return false;
+        };
+        let Some(documento) = self.editor_area.session.document_mut(id) else {
+            return false;
+        };
+        // `replace` do texto inteiro, e não um buffer novo: é ele que faz a
+        // revisão subir, e é pela revisão que o editor sabe que precisa se
+        // refazer.
+        let tamanho = documento.buffer.text().len();
+        documento.buffer.replace(0..tamanho, text).is_ok()
     }
 
     /// A linha do arquivo **de então**, como a comparação a mostra.

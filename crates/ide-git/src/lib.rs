@@ -43,7 +43,7 @@ pub use tags::TagService;
 pub use error::{GitError, GitResult};
 pub use model::{
     BranchName, BranchSummary, CommitId, CommitSummary, DiffLine, DiffLineKind, DiffSide, FileDiff,
-    FileState, GraphRow, Head, Hunk, LineChange, LineSpan, MergeOutcome, PendingOperation,
+    FileState, GraphRow, Head, Hunk, LineChange, LinePair, LineSpan, MergeOutcome, PendingOperation,
     RemoteName,
     RepositoryStatus, StashEntry, StatusEntry, graph_rows,
 };

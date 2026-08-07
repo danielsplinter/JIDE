@@ -7,7 +7,22 @@ use thiserror::Error;
 
 use crate::TaskId;
 
-/// O que se pede ao repositório.
+/// Onde uma linha devolvida entra no arquivo de agora.
+///
+/// **Substituir e inserir são coisas diferentes, e confundi-las apaga código.**
+/// Quando a linha existe dos dois lados, devolvê-la é trocar o conteúdo. Quando
+/// ela só existe no arquivo de então — foi removida —, devolvê-la é *acrescentar*
+/// uma linha: trocar a que está naquela posição destruiria uma linha que ninguém
+/// mandou tocar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestoreTarget {
+    /// Troca o conteúdo desta linha do arquivo de agora.
+    Replace(usize),
+    /// Entra como linha nova nesta posição do arquivo de agora.
+    Insert(usize),
+}
+
+/// O que a IDE pede ao Git.
 ///
 /// A tela não fala com o Git: ela pede, e quem responde é a aplicação, fora da
 /// linha de execução da interface. Ver a `22`.
@@ -53,7 +68,16 @@ pub enum GitRequest {
     /// É desfazer o que se fez naquela linha, e nada mais: o `restore` do Git é
     /// por arquivo, e quem só quer uma linha de volta não deveria ter de
     /// escolher entre perder o resto e não ter jeito.
-    RestoreLine { path: std::path::PathBuf, line: usize },
+    ///
+    /// `from` é a linha no arquivo **de então**, e `target` diz o que fazer com
+    /// ela do lado de agora. Os dois números são necessários e são diferentes:
+    /// uma inserção acima desloca tudo o que vem abaixo, e usar o mesmo número
+    /// dos dois lados escrevia por cima de uma linha alheia.
+    RestoreLine {
+        path: std::path::PathBuf,
+        from: usize,
+        target: RestoreTarget,
+    },
     /// Guarda o que está na árvore de trabalho.
     Stash,
     /// Devolve para a árvore o que estava guardado.
