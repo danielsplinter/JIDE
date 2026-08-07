@@ -56,6 +56,12 @@ const ENTRADA_BASE: WidgetId = WidgetId(10_800);
 /// A tabela do histórico, e as células de cada linha dela.
 const TABELA_ID: WidgetId = WidgetId(10_519);
 const COMMIT_BASE: WidgetId = WidgetId(11_000);
+/// A caixa do nome da branch nova, e o botão que a cria.
+const NOVA_ID: WidgetId = WidgetId(11_910);
+const CRIAR_ID: WidgetId = WidgetId(11_911);
+/// Os dois botões do estado intermediário: continuar e abortar.
+const CONTINUAR_ID: WidgetId = WidgetId(11_912);
+const ABORTAR_ID: WidgetId = WidgetId(11_913);
 /// A caixa da mensagem de commit e os dois botões dela.
 const MENSAGEM_ID: WidgetId = WidgetId(11_900);
 const COMMIT_ID: WidgetId = WidgetId(11_901);
@@ -80,6 +86,13 @@ const TITULO_ALTURA: f32 = 20.0;
 const ACAO_LARGURA: f32 = 92.0;
 /// Altura da faixa de commit, embaixo dos três painéis.
 const COMMIT_ALTURA: f32 = 64.0;
+/// Altura da faixa do conflito, no alto da aba `status`.
+const CONFLITO_ALTURA: f32 = 30.0;
+/// Largura de um botão de linha da árvore.
+///
+/// Menor que o das ações de arquivo: a coluna da esquerda é estreita, e dois
+/// botões do tamanho dos outros não deixariam nome de branch nenhum aparecer.
+const ACAO_DA_ARVORE: f32 = 64.0;
 /// Quantos commits cabem numa página do histórico.
 ///
 /// Uma página é o que se pede de cada vez, e não o que se mostra: a tabela é
@@ -162,6 +175,14 @@ pub struct GitView {
     pub entries: Vec<GitEntry>,
     /// O histórico já carregado, do mais recente para o mais antigo.
     pub commits: Vec<CommitRow>,
+    /// As tags, e o que está guardado no `stash`.
+    pub tags: Vec<String>,
+    pub stashes: Vec<String>,
+    /// A operação que está no meio do caminho, se há uma.
+    ///
+    /// Vem do disco, e não da memória da IDE: quem rodou `git merge` no terminal
+    /// integrado deixou o repositório assim, e a tela precisa dizer isso.
+    pub pending: Option<String>,
     /// O que dizer quando não há repositório, ou quando o Git falhou.
     ///
     /// Uma pasta sem `.git` é resposta legítima, e não erro: a janela abre e
@@ -215,6 +236,13 @@ pub(super) struct GitSurface {
     tabela: Option<ComposedTable>,
     /// O que se está escrevendo como mensagem do commit.
     mensagem: String,
+    /// O nome que se está escrevendo para a branch nova.
+    ///
+    /// Caixa própria, e não a da busca: procurar e nomear são duas coisas, e uma
+    /// caixa que fizesse as duas criaria branch com o texto de um filtro.
+    nome_novo: String,
+    /// Se o cursor está na caixa do nome da branch nova.
+    nomeando: bool,
     /// Se o cursor está na caixa da mensagem.
     ///
     /// Sem isso, digitar no gerenciador iria sempre para a busca das branches —
@@ -283,6 +311,16 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         TREE_ID,
         LayoutStyle {
             flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
+    );
+    // A faixa de criar branch fica **embaixo** da árvore: criar é o que se faz
+    // depois de olhar o que já existe, e no alto ela disputaria com a busca.
+    let _ = host.declare(
+        SIDE_ID,
+        NOVA_ID,
+        LayoutStyle {
+            height: Some(26.0),
             ..LayoutStyle::default()
         },
     );
@@ -484,10 +522,14 @@ impl GitSurface {
         if texto.chars().any(char::is_control) {
             return;
         }
-        // Duas caixas na mesma janela, e o cursor decide qual recebe. Sem essa
+        // Três caixas na mesma janela, e o cursor decide qual recebe. Sem essa
         // pergunta, escrever a mensagem do commit filtraria as branches.
         if self.escrevendo {
             self.mensagem.push_str(texto);
+            return;
+        }
+        if self.nomeando {
+            self.nome_novo.push_str(texto);
             return;
         }
         self.busca.push_str(texto);
@@ -511,6 +553,13 @@ impl GitSurface {
                 }
                 _ => return false,
             }
+        }
+        if self.nomeando {
+            if key != "Backspace" {
+                return false;
+            }
+            self.nome_novo.pop();
+            return true;
         }
         if key != "Backspace" {
             return false;
@@ -552,15 +601,32 @@ impl GitSurface {
                 filhos,
             ));
         }
-        // Os três que ainda não têm o que mostrar aparecem quando não há busca:
-        // com filtro, "Tags" vazio seria um nó que não casa com o que se digitou.
+        // Os outros três nós. O filtro é das branches, e por isso eles só
+        // aparecem sem busca: "Tags" cheio depois de digitar um nome de branch
+        // diria que aquelas tags casaram com o que se procurou.
         if filtro.is_empty() {
-            for (indice, (id, nome)) in [(2, "Tags"), (3, "Remotes"), (4, "Stashes")]
-                .into_iter()
-                .enumerate()
-            {
-                raizes.push(ComposedTreeItem::leaf(id, raiz(indice + 1, nome)));
-            }
+            let folhas = |base: u64, itens: &[String]| -> Vec<ComposedTreeItem> {
+                itens
+                    .iter()
+                    .enumerate()
+                    .map(|(indice, texto)| {
+                        ComposedTreeItem::leaf(base + indice as u64, raiz(10, texto))
+                    })
+                    .collect()
+            };
+            raizes.push(ComposedTreeItem::new(
+                2,
+                raiz(1, &format!("Tags ({})", self.view.tags.len())),
+                folhas(2_000, &self.view.tags),
+            ));
+            // Remotes continua vazio: é fase 4, e um nó que só aparece quando a
+            // capacidade chega faria a tela mudar de forma.
+            raizes.push(ComposedTreeItem::leaf(3, raiz(2, "Remotes")));
+            raizes.push(ComposedTreeItem::new(
+                4,
+                raiz(3, &format!("Stashes ({})", self.view.stashes.len())),
+                folhas(3_000, &self.view.stashes),
+            ));
         }
         match self.tree.as_mut() {
             // `set_roots` preserva expansão e seleção por identidade: sem ele,
@@ -612,14 +678,19 @@ impl GitSurface {
     /// da divisão do editor. Com a conta em dois lugares, o clique cai num
     /// painel e o desenho aparece no outro.
     fn faixas(&mut self, conteudo: Rect, context: &LayoutContext) -> [Rect; 3] {
-        // A faixa do commit sai da altura antes de tudo: ela é fixa, e os três
-        // painéis repartem o que sobra. Tirá-la depois faria a divisa de baixo
-        // cair dentro da caixa da mensagem.
+        // As faixas fixas saem da altura antes de tudo — a do conflito no alto e
+        // a do commit embaixo —, e os três painéis repartem o que sobra.
+        // Tirá-las depois faria a divisa cair dentro delas.
+        let alto = if self.view.pending.is_some() {
+            CONFLITO_ALTURA
+        } else {
+            0.0
+        };
         let conteudo = Rect::new(
             conteudo.origin.x,
-            conteudo.origin.y,
+            conteudo.origin.y + alto,
             conteudo.size.width,
-            (conteudo.size.height - COMMIT_ALTURA).max(0.0),
+            (conteudo.size.height - COMMIT_ALTURA - alto).max(0.0),
         );
         let alto = self
             .split_alto
@@ -672,6 +743,97 @@ impl GitSurface {
             faixa.size.width,
             (faixa.size.height - TITULO_ALTURA).max(0.0),
         )
+    }
+
+    /// O clique na árvore: uma ação de linha, ou só a seleção.
+    ///
+    /// A coluna decide, como nos três painéis: os botões têm largura fixa, dita
+    /// aqui e usada pelo desenho.
+    fn clique_na_arvore(
+        &mut self,
+        arvore: Rect,
+        context: &LayoutContext,
+        point: Point,
+    ) -> Option<GitRequest> {
+        let tree = self.tree.as_mut()?;
+        tree.layout(context, arvore);
+        tree.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        let escolhido = tree.selected()?;
+        let direita = arvore.origin.x + arvore.size.width;
+        let na_faixa = |posicao: usize| {
+            let fim = direita - posicao as f32 * ACAO_DA_ARVORE;
+            point.x >= fim - ACAO_DA_ARVORE && point.x < fim
+        };
+        // As branches filtradas, na mesma ordem em que a árvore as montou.
+        if (100..1_000).contains(&escolhido) {
+            let indice = (escolhido - 100) as usize;
+            let branch = self.branches_filtradas().get(indice).copied()?;
+            let nome = branch.name.clone();
+            // **A branch atual não tem botão nenhum**, e por isso a coluna não
+            // decide nada nela: sem esta linha, clicar no vazio à direita do
+            // nome da branch em que já se está pediria para trocar para ela
+            // mesma — que é o gesto que a linha nem oferece.
+            if branch.current {
+                return None;
+            }
+            // Da direita para a esquerda: "Fundir" é o último declarado.
+            if na_faixa(0) {
+                return Some(GitRequest::Merge(nome));
+            }
+            if na_faixa(1) {
+                return Some(GitRequest::SwitchBranch(nome));
+            }
+            return None;
+        }
+        // Um item guardado: clicar nele o devolve para a árvore de trabalho.
+        if escolhido >= 3_000 {
+            return Some(GitRequest::StashPop((escolhido - 3_000) as usize));
+        }
+        None
+    }
+
+    /// As branches que a busca deixou passar, na ordem da árvore.
+    fn branches_filtradas(&self) -> Vec<&BranchItem> {
+        let filtro = self.busca.to_lowercase();
+        self.view
+            .branches
+            .iter()
+            .filter(|branch| filtro.is_empty() || branch.name.to_lowercase().contains(&filtro))
+            .collect()
+    }
+
+    /// A faixa do estado intermediário, no alto da aba `status`.
+    ///
+    /// Ela só existe quando há operação em curso — e é isso que impede a IDE de
+    /// ficar presa num estado do qual não se sai: enquanto houver, os dois
+    /// botões de saída estão na tela.
+    fn faixa_do_conflito(&self, conteudo: Rect) -> Option<Rect> {
+        self.view.pending.as_ref()?;
+        Some(Rect::new(
+            conteudo.origin.x,
+            conteudo.origin.y,
+            conteudo.size.width,
+            CONFLITO_ALTURA,
+        ))
+    }
+
+    /// Os dois botões de saída, da direita para a esquerda.
+    fn botoes_do_conflito(faixa: Rect) -> [(WidgetId, Rect); 2] {
+        let y = faixa.origin.y + 2.0;
+        let direita = faixa.origin.x + faixa.size.width;
+        [
+            (
+                ABORTAR_ID,
+                Rect::new(direita - ACAO_LARGURA, y, ACAO_LARGURA, 24.0),
+            ),
+            (
+                CONTINUAR_ID,
+                Rect::new(direita - ACAO_LARGURA * 2.0 - 8.0, y, ACAO_LARGURA, 24.0),
+            ),
+        ]
     }
 
     /// O clique num dos três painéis: uma ação de linha, ou a diferença.
@@ -755,16 +917,27 @@ impl GitSurface {
             }
             return None;
         }
-        let arvore = area(host, TREE_ID);
-        if arvore.contains(point)
-            && let Some(tree) = self.tree.as_mut()
-        {
-            tree.layout(context, arvore);
-            tree.event(
-                &mut EventContext::default(),
-                &UiEvent::PointerDown(primary_pointer(point)),
-            );
+        let nova = area(host, NOVA_ID);
+        if nova.contains(point) {
+            // Os últimos pontos da faixa são o botão; o resto é a caixa.
+            let botao = nova.origin.x + nova.size.width - ACAO_LARGURA;
+            if point.x >= botao {
+                let nome = self.nome_novo.trim().to_owned();
+                self.nomeando = false;
+                if nome.is_empty() {
+                    return None;
+                }
+                self.nome_novo.clear();
+                return Some(GitRequest::CreateBranch(nome));
+            }
+            self.nomeando = true;
+            self.escrevendo = false;
             return None;
+        }
+        let arvore = area(host, TREE_ID);
+        if arvore.contains(point) {
+            self.nomeando = false;
+            return self.clique_na_arvore(arvore, context, point);
         }
         let conteudo = area(host, CONTENT_ID);
         if self.aba == Aba::History && conteudo.contains(point) {
@@ -778,6 +951,20 @@ impl GitSurface {
             return None;
         }
         if self.aba == Aba::Status && conteudo.contains(point) {
+            if let Some(faixa) = self.faixa_do_conflito(conteudo)
+                && faixa.contains(point)
+            {
+                for (id, area_do_botao) in Self::botoes_do_conflito(faixa) {
+                    if area_do_botao.contains(point) {
+                        return Some(if id == ABORTAR_ID {
+                            GitRequest::AbortOperation
+                        } else {
+                            GitRequest::ContinueOperation
+                        });
+                    }
+                }
+                return None;
+            }
             let faixa_do_commit = Self::faixa_do_commit(conteudo);
             if faixa_do_commit.contains(point) {
                 for (id, area_do_botao) in Self::botoes_do_commit(faixa_do_commit) {
@@ -950,6 +1137,35 @@ impl GitSurface {
             tree.paint(paint);
         }
 
+        // A faixa de criar branch, embaixo da árvore.
+        let nova = area(host, NOVA_ID);
+        let mut nome = TextInput::new(NOVA_ID, &self.nome_novo).with_placeholder("Nova branch");
+        if self.nomeando {
+            nome.event(&mut EventContext::default(), &UiEvent::FocusGained);
+        }
+        nome.layout(
+            layout,
+            Rect::new(
+                nova.origin.x,
+                nova.origin.y,
+                (nova.size.width - ACAO_LARGURA - 4.0).max(0.0),
+                nova.size.height,
+            ),
+        );
+        nome.paint(paint);
+        let mut criar = Button::new(CRIAR_ID, "Criar");
+        criar.set_disabled(self.nome_novo.trim().is_empty());
+        criar.layout(
+            layout,
+            Rect::new(
+                nova.origin.x + nova.size.width - ACAO_LARGURA,
+                nova.origin.y,
+                ACAO_LARGURA,
+                nova.size.height,
+            ),
+        );
+        criar.paint(paint);
+
         let _ = self.divisa(host, layout);
         if let Some(split) = self.split.as_ref() {
             split.paint(paint);
@@ -1013,6 +1229,7 @@ impl GitSurface {
     /// nada preparado — sem ele, quem olha não sabe se a lista está vazia ou se
     /// a IDE não respondeu.
     fn paint_status(&mut self, conteudo: Rect, layout: &LayoutContext, paint: &mut PaintContext) {
+        self.paint_conflito(conteudo, layout, paint);
         self.paint_commit(conteudo, layout, paint);
         if self.view.changed == 0 {
             let mut limpo = Label::new(
@@ -1020,7 +1237,15 @@ impl GitSurface {
                 "Nada mudou desde o último commit".to_owned(),
             )
             .with_tone(IconTint::Muted);
-            limpo.layout(layout, conteudo);
+            let sobra = self.faixa_do_conflito(conteudo).map_or(conteudo, |faixa| {
+                Rect::new(
+                    conteudo.origin.x,
+                    faixa.origin.y + faixa.size.height,
+                    conteudo.size.width,
+                    (conteudo.size.height - faixa.size.height).max(0.0),
+                )
+            });
+            limpo.layout(layout, sobra);
             limpo.paint(paint);
             return;
         }
@@ -1055,6 +1280,46 @@ impl GitSurface {
             .flatten()
         {
             split.paint(paint);
+        }
+    }
+
+    /// A faixa do estado intermediário, quando há um.
+    ///
+    /// Ela diz **qual** operação está no meio do caminho e **quantos** arquivos
+    /// faltam resolver, e traz os dois botões de saída. Enquanto ela estiver na
+    /// tela, há por onde sair — que é o critério da fase.
+    fn paint_conflito(&mut self, conteudo: Rect, layout: &LayoutContext, paint: &mut PaintContext) {
+        let Some(faixa) = self.faixa_do_conflito(conteudo) else {
+            return;
+        };
+        let Some(operacao) = self.view.pending.clone() else {
+            return;
+        };
+        let conflitos = self
+            .view
+            .entries
+            .iter()
+            .filter(|entrada| entrada.state == GitFileState::Conflicted)
+            .count();
+        let texto = if conflitos == 0 {
+            format!("{operacao} em curso")
+        } else {
+            format!("{operacao} em curso — {conflitos} arquivo(s) em conflito")
+        };
+        let mut rotulo = Label::new(WidgetId(SUMMARY_BASE.0 + 8), texto).with_tone(IconTint::Warning);
+        rotulo.layout(
+            layout,
+            Rect::new(faixa.origin.x, faixa.origin.y + 4.0, faixa.size.width, 20.0),
+        );
+        rotulo.paint(paint);
+        for (id, area_do_botao) in Self::botoes_do_conflito(faixa) {
+            let rotulo = if id == ABORTAR_ID { "Abortar" } else { "Continuar" };
+            let mut botao = Button::new(id, rotulo);
+            // Continuar com conflito por resolver não conclui nada: o `git`
+            // recusa, e a recusa chegaria como falha da ferramenta.
+            botao.set_disabled(id == CONTINUAR_ID && conflitos > 0);
+            botao.layout(layout, area_do_botao);
+            botao.paint(paint);
         }
     }
 
@@ -1105,6 +1370,18 @@ impl GitSurface {
             Aba::Status => vec![format!("{} arquivo(s) alterado(s)", self.view.changed)],
             Aba::History => vec!["Sem commits ainda".to_owned()],
         }
+    }
+
+    /// A faixa do estado intermediário, para o teste apontar nos botões dela.
+    #[cfg(test)]
+    pub(super) fn faixa_do_conflito_para_teste(&self, host: &UiHost) -> Option<Rect> {
+        self.faixa_do_conflito(area(host, CONTENT_ID))
+    }
+
+    /// O nome que se está escrevendo para a branch nova.
+    #[cfg(test)]
+    pub(super) fn nome_novo(&self) -> &str {
+        &self.nome_novo
     }
 
     /// Onde ficam a caixa da mensagem e os botões, para o teste apontar neles.
@@ -1173,6 +1450,17 @@ impl super::IdeShell {
             pedido,
             GitRequest::ShowDiff { .. } | GitRequest::LoadHistory { .. }
         );
+        // Trocar de branch, fundir e sair de uma operação mudam **o histórico
+        // que está na tela**, e não só a lista de arquivos: a linha de cima
+        // passa a ser outra. Recarregar do começo é a única resposta certa.
+        let mexeu_no_historico = matches!(
+            pedido,
+            GitRequest::SwitchBranch(_)
+                | GitRequest::CreateBranch(_)
+                | GitRequest::Merge(_)
+                | GitRequest::ContinueOperation
+                | GitRequest::AbortOperation
+        );
         // Commitar esvazia a caixa **agora**, e não quando a resposta chegar: a
         // mensagem já foi usada, e deixá-la na tela convida a commitar duas
         // vezes o mesmo texto.
@@ -1185,7 +1473,7 @@ impl super::IdeShell {
             self.commands
                 .push(ApplicationCommand::Git(GitRequest::Refresh));
         }
-        if commitou {
+        if commitou || mexeu_no_historico {
             // O histórico ganhou uma linha, e a de cima pode ter sido reescrita
             // por um `amend`: recarregar do começo é a única resposta certa
             // para os dois casos.
@@ -1418,8 +1706,8 @@ fn raiz(indice: usize, nome: &str) -> ComposedRow {
 /// A marca é uma célula, e não um prefixo no texto: quem monta as células é a
 /// IDE, e um `●` colado ao nome iria junto numa cópia e numa busca.
 fn linha(indice: usize, nome: &str, atual: bool) -> ComposedRow {
-    let base = ROW_BASE.0 + 100 + indice as u64 * 2;
-    ComposedRow::new(vec![
+    let base = ROW_BASE.0 + 100 + indice as u64 * 4;
+    let mut celulas = vec![
         ComposedCell::new(
             Box::new(
                 Label::new(WidgetId(base), if atual { "●" } else { "" })
@@ -1429,7 +1717,24 @@ fn linha(indice: usize, nome: &str, atual: bool) -> ComposedRow {
         ),
         ComposedCell::new(
             Box::new(Label::new(WidgetId(base + 1), nome)),
-            CellWidth::Natural,
+            CellWidth::Fill,
         ),
-    ])
+    ];
+    // **A branch atual não oferece trocar nem fundir.** Trocar para onde já se
+    // está não faz nada, e fundir uma branch nela mesma é um comando que o
+    // `git` recusa — oferecer os dois seria oferecer erro.
+    if !atual {
+        for (deslocamento, rotulo, comando) in [
+            (2, "Trocar", "git.switch"),
+            (3, "Fundir", "git.merge"),
+        ] {
+            celulas.push(ComposedCell::new(
+                Box::new(
+                    Button::new(WidgetId(base + deslocamento), rotulo).with_command(comando),
+                ),
+                CellWidth::Fixed(ACAO_DA_ARVORE),
+            ));
+        }
+    }
+    ComposedRow::new(celulas)
 }

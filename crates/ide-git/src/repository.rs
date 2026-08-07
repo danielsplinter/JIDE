@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use crate::branches::BranchService;
 use crate::history::HistoryService;
+use crate::integration::IntegrationService;
+use crate::tags::TagService;
 use crate::working_tree::WorkingTreeService;
 
 /// Um repositório aberto.
@@ -21,6 +23,8 @@ pub struct Repository {
     working_tree: Arc<dyn WorkingTreeService>,
     branches: Arc<dyn BranchService>,
     history: Arc<dyn HistoryService>,
+    integration: Arc<dyn IntegrationService>,
+    tags: Arc<dyn TagService>,
 }
 
 impl Repository {
@@ -29,12 +33,16 @@ impl Repository {
         working_tree: Arc<dyn WorkingTreeService>,
         branches: Arc<dyn BranchService>,
         history: Arc<dyn HistoryService>,
+        integration: Arc<dyn IntegrationService>,
+        tags: Arc<dyn TagService>,
     ) -> Self {
         Self {
             root,
             working_tree,
             branches,
             history,
+            integration,
+            tags,
         }
     }
 
@@ -57,6 +65,16 @@ impl Repository {
     #[must_use]
     pub fn history(&self) -> Arc<dyn HistoryService> {
         Arc::clone(&self.history)
+    }
+
+    #[must_use]
+    pub fn integration(&self) -> Arc<dyn IntegrationService> {
+        Arc::clone(&self.integration)
+    }
+
+    #[must_use]
+    pub fn tags(&self) -> Arc<dyn TagService> {
+        Arc::clone(&self.tags)
     }
 }
 

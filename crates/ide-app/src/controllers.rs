@@ -823,6 +823,12 @@ pub(super) struct RuntimeState {
     /// em branco todo esse tempo. Depois do primeiro quadro, o usuário vê a IDE
     /// montada e o realce chega em seguida.
     pub(super) languages_pending: bool,
+    /// A última escrita do Git mexeu no que está no disco.
+    ///
+    /// Trocar de branch reescreve milhares de arquivos, e quem está com um deles
+    /// aberto veria o texto de antes. A recarga acontece **quando a resposta
+    /// chega**, e não quando o pedido sai: até lá o disco ainda é o de antes.
+    pub(super) git_mexeu_no_disco: bool,
     /// Projeto recém-aberto cuja ferramenta e importação ainda não rodaram.
     ///
     /// Pelo mesmo motivo de `languages_pending`, e com um custo maior: detectar

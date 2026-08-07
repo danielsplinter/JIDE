@@ -10,19 +10,24 @@
 //!
 //! # O que existe hoje
 //!
-//! A **fase 2**: tudo o que a fase 1 tinha — `status`, branches locais, a
-//! diferença de um arquivo e as três escritas por caminho — mais o histórico
-//! por páginas e o `commit`, com `amend`. A granularidade continua sendo **por
-//! arquivo**: preparar por trecho ou por linha é o que a `22` deixou anotado
-//! para depois das fases.
+//! A **fase 3**: tudo o que as anteriores tinham — `status`, a diferença, as
+//! escritas por caminho, o histórico e o `commit` — mais trocar e criar branch,
+//! fundir, o estado entre commits (continuar e abortar), as tags e o `stash`.
+//!
+//! A granularidade continua sendo **por arquivo**: preparar por trecho ou por
+//! linha é o que a `22` deixou anotado para depois das fases. E a resolução de
+//! conflito acontece como edição de texto normal — que é como o conflito já
+//! está gravado no arquivo.
 
 mod adapters;
 
 pub mod branches;
 pub mod error;
 pub mod history;
+pub mod integration;
 pub mod model;
 pub mod repository;
+pub mod tags;
 pub mod working_tree;
 
 use std::path::{Path, PathBuf};
@@ -30,11 +35,13 @@ use std::sync::Arc;
 
 pub use branches::BranchService;
 pub use history::HistoryService;
+pub use integration::IntegrationService;
+pub use tags::TagService;
 pub use error::{GitError, GitResult};
 pub use model::{
     BranchName, BranchSummary, CommitId, CommitSummary, DiffLine, DiffLineKind, DiffSide, FileDiff,
-    FileState, GraphRow, Head, Hunk, LineChange, RemoteName, RepositoryStatus, StatusEntry,
-    graph_rows,
+    FileState, GraphRow, Head, Hunk, LineChange, MergeOutcome, PendingOperation, RemoteName,
+    RepositoryStatus, StashEntry, StatusEntry, graph_rows,
 };
 pub use repository::Repository;
 pub use working_tree::WorkingTreeService;
@@ -79,6 +86,8 @@ pub fn open(path: &Path) -> GitResult<Repository> {
         root,
         Arc::clone(&adapter) as Arc<dyn WorkingTreeService>,
         Arc::clone(&adapter) as Arc<dyn BranchService>,
-        adapter as Arc<dyn HistoryService>,
+        Arc::clone(&adapter) as Arc<dyn HistoryService>,
+        Arc::clone(&adapter) as Arc<dyn IntegrationService>,
+        adapter as Arc<dyn TagService>,
     ))
 }

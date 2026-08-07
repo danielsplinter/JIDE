@@ -32,6 +32,20 @@ pub enum GitRequest {
     /// gesto com uma opção, e separá-lo em dois comandos daria dois caminhos
     /// para a mesma coisa — e o segundo envelheceria.
     Commit { message: String, amend: bool },
+    /// Passa a trabalhar noutra branch.
+    SwitchBranch(String),
+    /// Cria uma branch e vai para ela.
+    CreateBranch(String),
+    /// Traz para a branch atual o que está na outra.
+    Merge(String),
+    /// Conclui a operação em curso com o que está preparado.
+    ContinueOperation,
+    /// Desfaz a operação em curso e volta ao que era antes dela.
+    AbortOperation,
+    /// Guarda o que está na árvore de trabalho.
+    Stash,
+    /// Devolve para a árvore o que estava guardado.
+    StashPop(usize),
     /// Pede mais uma página do histórico.
     ///
     /// `ja_carregados` é quantos commits a tela já tem: quem rola pede a página

@@ -7563,7 +7563,7 @@ fn o_painel_da_esquerda_tem_os_quatro_nos() {
     };
 
     assert!(escrito("Branches (2)"), "o nó das branches conta o que tem");
-    for nome in ["Tags", "Remotes", "Stashes"] {
+    for nome in ["Tags (0)", "Remotes", "Stashes (0)"] {
         assert!(escrito(nome), "o nó {nome} aparece mesmo vazio");
     }
     // E o lado direito diz que não há o que mostrar, em vez de ficar vazio.
@@ -7749,6 +7749,9 @@ fn retrato_com_alteracoes(raiz: &Path) -> GitView {
             entrada("solto.java", GitFileState::Untracked),
         ],
         commits: Vec::new(),
+        tags: Vec::new(),
+        stashes: Vec::new(),
+        pending: None,
         message: None,
     }
 }
@@ -8158,4 +8161,258 @@ fn as_duas_caixas_do_gerenciador_nao_se_misturam() {
         "main",
         "o que estava na busca continua lá"
     );
+}
+
+/// Um retrato com duas branches, tags e um item guardado.
+fn retrato_com_branches() -> GitView {
+    GitView {
+        head: Some("main".to_owned()),
+        branches: vec![
+            BranchItem {
+                name: "main".to_owned(),
+                current: true,
+            },
+            BranchItem {
+                name: "feature/busca".to_owned(),
+                current: false,
+            },
+        ],
+        tags: vec!["v1.0".to_owned()],
+        stashes: vec!["no meio do caminho".to_owned()],
+        ..GitView::default()
+    }
+}
+
+/// Os quatro nós deixam de ser promessa: tags e stashes têm conteúdo.
+///
+/// Eles apareceram vazios desde a fase 0 de propósito — um nó que só existe
+/// quando a capacidade chega faria a tela mudar de forma a cada fase. A fase 3 é
+/// quem lhes devia o conteúdo.
+#[test]
+fn as_tags_e_os_stashes_enchem_os_nos_que_estavam_vazios() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(retrato_com_branches());
+    shell.toggle_git();
+    let desenhado = shell.paint(size);
+    let escrito = |texto: &str| {
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+    };
+    assert!(escrito("Tags (1)") && escrito("Stashes (1)"));
+    // Remotes continua vazio: é fase 4, e ele não mente sobre isso.
+    assert!(escrito("Remotes"));
+}
+
+/// A linha de uma branch oferece trocar e fundir — menos a branch atual.
+///
+/// Trocar para onde já se está não faz nada, e fundir uma branch nela mesma é um
+/// comando que o `git` recusa: oferecer os dois seria oferecer erro.
+#[test]
+fn a_branch_atual_nao_oferece_trocar_nem_fundir() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(retrato_com_branches());
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    // Abrir o nó das branches para ver as linhas.
+    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
+    shell.pointer_down(
+        Point::new(arvore.origin.x + 10.0, arvore.origin.y + 12.0),
+        size,
+    );
+    let desenhado = shell.paint(size);
+    let quantos = |texto: &str| {
+        desenhado
+            .iter()
+            .filter(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
+            .count()
+    };
+    assert_eq!(quantos("Trocar"), 1, "só a branch que não é a atual oferece");
+    assert_eq!(quantos("Fundir"), 1);
+}
+
+/// Trocar de branch pede a troca, o retrato e o histórico do começo.
+///
+/// **Os três juntos.** A troca reescreve os arquivos, muda o que está alterado e
+/// muda qual é a linha de cima do histórico: mostrar qualquer um dos três como
+/// estava seria mostrar a branch anterior.
+#[test]
+fn trocar_de_branch_pede_a_troca_e_recarrega_o_que_mudou() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(retrato_com_branches());
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
+    shell.pointer_down(
+        Point::new(arvore.origin.x + 10.0, arvore.origin.y + 12.0),
+        size,
+    );
+    let _ = shell.paint(size);
+    shell.commands.retain(|_| false);
+
+    // A terceira linha é a outra branch — a primeira é o nó, a segunda é a
+    // branch atual —, e o botão "Trocar" é o penúltimo dela.
+    let direita = arvore.origin.x + arvore.size.width;
+    shell.pointer_down(
+        Point::new(direita - 64.0 - 32.0, arvore.origin.y + 12.0 + 48.0),
+        size,
+    );
+
+    let pedidos: Vec<ApplicationCommand> = shell.commands.iter().cloned().collect();
+    assert!(
+        pedidos.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::SwitchBranch(nome)) if nome == "feature/busca"
+        )),
+        "o clique pede a troca: {pedidos:?}"
+    );
+    assert!(
+        pedidos
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Refresh))),
+        "e o retrato"
+    );
+    assert!(
+        pedidos.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::LoadHistory { ja_carregados: 0 })
+        )),
+        "e o histórico do começo, porque a linha de cima é outra"
+    );
+}
+
+/// A caixa do nome cria a branch, e não se mistura com a busca.
+///
+/// Procurar e nomear são duas coisas: uma caixa que fizesse as duas criaria
+/// branch com o texto de um filtro.
+#[test]
+fn a_caixa_do_nome_cria_a_branch_sem_mexer_na_busca() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(retrato_com_branches());
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    // Primeiro a busca, que é onde o cursor nasce.
+    shell.text_input("feat");
+    assert_eq!(shell.git_surface().query(), "feat");
+
+    // Depois a caixa do nome, embaixo da árvore.
+    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
+    let faixa_do_nome = Point::new(
+        arvore.origin.x + 20.0,
+        arvore.origin.y + arvore.size.height + 12.0,
+    );
+    shell.pointer_down(faixa_do_nome, size);
+    shell.text_input("feature/git");
+    assert_eq!(shell.git_surface().nome_novo(), "feature/git");
+    assert_eq!(
+        shell.git_surface().query(),
+        "feat",
+        "o filtro continua sendo o que era"
+    );
+    let _ = shell.paint(size);
+    shell.commands.retain(|_| false);
+
+    // E o botão cria.
+    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
+    shell.pointer_down(
+        Point::new(
+            arvore.origin.x + arvore.size.width - 40.0,
+            arvore.origin.y + arvore.size.height + 12.0,
+        ),
+        size,
+    );
+    assert!(
+        shell.commands.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::CreateBranch(nome)) if nome == "feature/git"
+        )),
+        "o botão cria a branch com o nome digitado"
+    );
+    assert!(
+        shell.git_surface().nome_novo().is_empty(),
+        "e a caixa esvazia, porque o nome já foi usado"
+    );
+}
+
+/// Com uma operação no meio do caminho, a saída está sempre na tela.
+///
+/// É o critério da fase: a IDE não fica presa num estado do qual não se sai.
+/// E **continuar** só aparece habilitado quando não há mais conflito — o `git`
+/// recusaria, e a recusa chegaria como falha da ferramenta.
+#[test]
+fn o_estado_intermediario_mostra_por_onde_sair() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        changed: 1,
+        pending: Some("Merge".to_owned()),
+        entries: vec![GitEntry {
+            path: raiz.join("Pedido.java"),
+            label: "Pedido.java".to_owned(),
+            state: GitFileState::Conflicted,
+        }],
+        ..GitView::default()
+    });
+    shell.toggle_git();
+    let desenhado = shell.paint(size);
+    assert!(
+        desenhado.iter().any(|comando| {
+            matches!(comando, PaintCommand::DrawText(t) if t.text.contains("Merge em curso"))
+        }),
+        "a faixa diz qual operação está no meio do caminho"
+    );
+    assert!(
+        desenhado
+            .iter()
+            .any(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == "Abortar")),
+        "e por onde sair"
+    );
+
+    // Abortar é o botão da direita.
+    let superficie = std::mem::take(&mut shell.git);
+    let faixa = superficie.faixa_do_conflito_para_teste(&shell.host);
+    shell.git = superficie;
+    let Some(faixa) = faixa else {
+        panic!("a faixa do conflito precisa existir");
+    };
+    shell.commands.retain(|_| false);
+    shell.pointer_down(
+        Point::new(
+            faixa.origin.x + faixa.size.width - 46.0,
+            faixa.origin.y + 12.0,
+        ),
+        size,
+    );
+    assert!(
+        shell
+            .commands
+            .iter()
+            .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::AbortOperation))),
+        "o clique aborta"
+    );
+
+    // Sem operação em curso, a faixa não existe: ela não é decoração fixa.
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        ..GitView::default()
+    });
+    let _ = shell.paint(size);
+    let superficie = std::mem::take(&mut shell.git);
+    let faixa = superficie.faixa_do_conflito_para_teste(&shell.host);
+    shell.git = superficie;
+    assert!(faixa.is_none());
 }

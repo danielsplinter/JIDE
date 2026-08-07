@@ -250,6 +250,55 @@ impl FileDiff {
     }
 }
 
+/// Que operação está no meio do caminho.
+///
+/// As três param entre commits e precisam de continuar, abortar ou pular. A
+/// fase 3 só produz a primeira, e as outras duas existem aqui porque **quem
+/// rodou `rebase` no terminal integrado deixou o repositório assim** — e a IDE
+/// precisa dizer isso em vez de mostrar uma tela que não corresponde ao disco.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingOperation {
+    Merge,
+    Rebase,
+    CherryPick,
+}
+
+impl PendingOperation {
+    /// Como ela se chama na tela.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "Merge",
+            Self::Rebase => "Rebase",
+            Self::CherryPick => "Cherry-pick",
+        }
+    }
+}
+
+/// O que uma fusão produziu.
+///
+/// **Conflito não é erro.** É o resultado esperado de fundir dois trabalhos que
+/// tocaram a mesma linha, e tratá-lo como falha faria a IDE dizer que algo deu
+/// errado quando o que houve foi trabalho a fazer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MergeOutcome {
+    /// Fundiu, e já commitou.
+    Merged,
+    /// Já estava contido: não havia o que trazer.
+    AlreadyUpToDate,
+    /// Parou com conflitos, e estes são os arquivos.
+    Conflicted { paths: Vec<PathBuf> },
+}
+
+/// Um item guardado no `stash`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StashEntry {
+    /// A posição na pilha: zero é o mais recente.
+    pub index: usize,
+    /// A descrição que o `git` dá a ele.
+    pub message: String,
+}
+
 /// Um commit, como a tabela do histórico o mostra.
 ///
 /// **A data vem pronta, e não como número.** Formatá-la exigiria fuso e

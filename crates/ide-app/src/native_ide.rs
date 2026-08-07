@@ -1595,6 +1595,13 @@ impl NativeIde {
             GitRequest::ShowDiff { path, staged } => self.pedir_diferenca(path, staged, true),
             GitRequest::Commit { message, amend } => self.commitar(message, amend),
             GitRequest::LoadHistory { ja_carregados } => self.pedir_historico(ja_carregados),
+            GitRequest::SwitchBranch(nome) => self.mexer_na_branch("switch", nome),
+            GitRequest::CreateBranch(nome) => self.mexer_na_branch("create", nome),
+            GitRequest::Merge(nome) => self.mexer_na_branch("merge", nome),
+            GitRequest::ContinueOperation => self.mexer_na_branch("continue", String::new()),
+            GitRequest::AbortOperation => self.mexer_na_branch("abort", String::new()),
+            GitRequest::Stash => self.mexer_na_branch("stash", String::new()),
+            GitRequest::StashPop(indice) => self.mexer_na_branch("pop", indice.to_string()),
             GitRequest::Stage(path) => self.escrever_no_git("stage", path),
             GitRequest::Unstage(path) => self.escrever_no_git("unstage", path),
             GitRequest::Discard(path) => self.escrever_no_git("discard", path),
@@ -1691,13 +1698,50 @@ impl NativeIde {
         true
     }
 
+    /// O que mexe em branch, fusão ou `stash`, fora da thread da interface.
+    ///
+    /// As seis coisas passam pela mesma porta porque têm a mesma forma — um
+    /// nome, uma escrita, uma resposta curta — e porque **todas mudam o que
+    /// está no disco debaixo do editor**. É por isso que a coleta delas
+    /// recarrega o workspace.
+    fn mexer_na_branch(&mut self, acao: &'static str, alvo: String) {
+        let Some(raiz) = self
+            .ui
+            .shell
+            .as_ref()
+            .map(|shell| shell.workspace_root().to_path_buf())
+        else {
+            return;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _cancel = self.languages.git_write.start(receiver);
+        if let Some(shell) = self.ui.shell.as_mut() {
+            shell.set_status_message(format!("Git: {acao}…"));
+        }
+        self.runtime.git_mexeu_no_disco = true;
+        std::thread::spawn(move || {
+            let _ = sender.send(mexer_no_repositorio(&raiz, acao, &alvo));
+        });
+    }
+
     /// Conta o que a escrita respondeu, se ela já respondeu.
+    ///
+    /// **E recarrega o que o disco mudou.** É o critério da fase 3: trocar de
+    /// branch pela IDE atualiza o editor, o Explorer e o índice de símbolos. Um
+    /// `checkout` reescreve milhares de arquivos, e uma IDE que continuasse
+    /// mostrando o texto de antes estaria mentindo sobre o que está gravado.
     fn collect_git_write(&mut self) -> bool {
         let Some(mensagem) = self.languages.git_write.collect() else {
             return false;
         };
         if let Some(shell) = self.ui.shell.as_mut() {
             shell.set_status_message(mensagem);
+        }
+        if std::mem::take(&mut self.runtime.git_mexeu_no_disco) {
+            self.reload_workspace();
+            // O índice de símbolos vem junto: sem isto, a completação
+            // continuaria oferecendo as classes da branch anterior.
+            self.sync_languages();
         }
         true
     }
@@ -3710,8 +3754,40 @@ fn retrato_do_repositorio(raiz: &std::path::Path, cancel: &CancellationToken) ->
             view.staged = status.count(ide_git::FileState::Staged);
             view.modified = status.count(ide_git::FileState::Modified);
             view.untracked = status.count(ide_git::FileState::Untracked);
+            view.entries = status
+                .entries
+                .iter()
+                .map(|entrada| ide_ui::GitEntry {
+                    label: entrada
+                        .path
+                        .strip_prefix(raiz)
+                        .unwrap_or(&entrada.path)
+                        .display()
+                        .to_string()
+                        .replace('\\', "/"),
+                    path: entrada.path.clone(),
+                    state: match entrada.state {
+                        ide_git::FileState::Staged => ide_ui::GitFileState::Staged,
+                        ide_git::FileState::Modified => ide_ui::GitFileState::Modified,
+                        ide_git::FileState::Untracked => ide_ui::GitFileState::Untracked,
+                        ide_git::FileState::Conflicted => ide_ui::GitFileState::Conflicted,
+                    },
+                })
+                .collect();
         }
         Err(erro) => view.message = Some(erro.to_string()),
+    }
+    if let Ok(operacao) = runtime.block_on(repositorio.integration().pending(cancel)) {
+        view.pending = operacao.map(|operacao| operacao.label().to_owned());
+    }
+    if let Ok(tags) = runtime.block_on(repositorio.tags().list(cancel)) {
+        view.tags = tags;
+    }
+    if let Ok(guardados) = runtime.block_on(repositorio.working_tree().stash_list(cancel)) {
+        view.stashes = guardados
+            .into_iter()
+            .map(|item| item.message)
+            .collect();
     }
     if let Ok(branches) = runtime.block_on(repositorio.branches().local(cancel)) {
         view.branches = branches
@@ -3769,6 +3845,72 @@ fn commitar_no_repositorio(raiz: &std::path::Path, mensagem: &str, amend: bool) 
     );
     match resultado {
         Ok(id) => format!("Commit {} gravado", id.short()),
+        Err(erro) => format!("Git falhou: {erro}"),
+    }
+}
+
+/// Troca de branch, funde, sai de uma operação ou mexe no `stash`.
+///
+/// Está aqui pelo mesmo motivo das outras: é a raiz de composição, o único lugar
+/// que pode nomear o `ide-git`.
+fn mexer_no_repositorio(raiz: &std::path::Path, acao: &str, alvo: &str) -> String {
+    let resultado = ide_git::open(raiz)
+        .map_err(|erro| erro.to_string())
+        .and_then(|repositorio| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|erro| erro.to_string())?;
+            let branch = ide_git::BranchName(alvo.to_owned());
+            let branches = repositorio.branches();
+            let integracao = repositorio.integration();
+            let arvore = repositorio.working_tree();
+            match acao {
+                "switch" => runtime
+                    .block_on(branches.switch(&branch))
+                    .map(|()| format!("Agora em {alvo}"))
+                    .map_err(|erro| erro.to_string()),
+                "create" => runtime
+                    .block_on(branches.create(&branch))
+                    .map(|()| format!("Branch {alvo} criada"))
+                    .map_err(|erro| erro.to_string()),
+                "merge" => runtime
+                    .block_on(integracao.merge(&branch))
+                    .map(|resultado| match resultado {
+                        ide_git::MergeOutcome::Merged => format!("{alvo} fundida"),
+                        ide_git::MergeOutcome::AlreadyUpToDate => {
+                            format!("{alvo} já estava aqui")
+                        }
+                        // Conflito não é falha: é trabalho a fazer, e a tela
+                        // mostra quais arquivos.
+                        ide_git::MergeOutcome::Conflicted { paths } => {
+                            format!("{} arquivo(s) em conflito", paths.len())
+                        }
+                    })
+                    .map_err(|erro| erro.to_string()),
+                "continue" => runtime
+                    .block_on(integracao.continue_operation())
+                    .map(|()| "Operação concluída".to_owned())
+                    .map_err(|erro| erro.to_string()),
+                "abort" => runtime
+                    .block_on(integracao.abort())
+                    .map(|()| "Operação abortada".to_owned())
+                    .map_err(|erro| erro.to_string()),
+                "stash" => runtime
+                    .block_on(arvore.stash_push(""))
+                    .map(|()| "Trabalho guardado".to_owned())
+                    .map_err(|erro| erro.to_string()),
+                _ => {
+                    let indice = alvo.parse::<usize>().unwrap_or_default();
+                    runtime
+                        .block_on(arvore.stash_pop(indice))
+                        .map(|()| "Trabalho devolvido".to_owned())
+                        .map_err(|erro| erro.to_string())
+                }
+            }
+        });
+    match resultado {
+        Ok(mensagem) => mensagem,
         Err(erro) => format!("Git falhou: {erro}"),
     }
 }

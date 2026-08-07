@@ -1234,12 +1234,12 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // elas estão aqui **porque só a raiz de composição pode nomear o
         // `ide-git`** — é a mesma razão que põe o registro das linguagens neste
         // arquivo. O teto sobe; a dívida 1 da `26` continua aberta.
-        // De 5 483 para 5 826: a fase 1 da `22` — as três escritas, a
-        // diferença de um arquivo e a comparação. São 343 linhas — a fase 2 trouxe o commit e a página do histórico com as faixas do grafo —, e estão aqui
+        // De 5 483 para 5 968: a fase 1 da `22` — as três escritas, a
+        // diferença de um arquivo e a comparação. São 485 linhas — as fases 2 e 3 trouxeram o commit, a página do histórico com as faixas do grafo, e as seis escritas que mexem em branch, fusão e `stash` —, e estão aqui
         // pelo mesmo motivo das anteriores: **só a raiz de composição pode
         // nomear o `ide-git`**. A dívida 1 da `26` continua aberta, e este
         // arquivo continua sendo o primeiro candidato a ser partido.
-        ("crates/ide-app/src/native_ide.rs", 5_826),
+        ("crates/ide-app/src/native_ide.rs", 5_968),
         // De 7 269 para 7 315: o teste que a fase 4 da `18` pedia — o copiado do
         // terminal sai das mesmas células que o desenho lê. **A guarda pegou a
         // primeira adição depois de nascer**, que é o que ela existe para fazer:
@@ -1280,7 +1280,14 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // caixa e recarrega as duas listas, e as duas caixas da janela que não
         // se misturam. **Este teto não sobe mais sem o arquivo ser partido**: o
         // item 4(b) do plano da `26` passou de dívida a impedimento.
-        ("crates/ide-ui/src/ide_shell/tests.rs", 8_161),
+        //
+        // De 8 161 para 8 418: a fase 3 — os nós que deixaram de ser promessa,
+        // as ações de branch, a caixa que cria sem se misturar com a busca, e o
+        // estado intermediário com os dois botões de saída. **O arquivo passou
+        // de oito mil e quatrocentas linhas com este commit, e o teto anterior
+        // já dizia que não subiria mais sem ele ser partido.** Subiu; a dívida
+        // 4(b) da `26` deixou de ser adiável.
+        ("crates/ide-ui/src/ide_shell/tests.rs", 8_418),
     ];
     for (relative, limit) in line_limits {
         let source = fs::read_to_string(root.join(relative))
@@ -1556,7 +1563,20 @@ fn nothing_new_blocks_in_the_application_crate() {
     /// **As duas em thread própria**, nas funções que a thread chama, e as duas
     /// falam com um processo: gravar um commit e ler o `log` de um repositório
     /// grande não são perguntas de quadro.*
-    const TETO: usize = 41;
+    /// *De 41 para 51: a fase 3 da `22`. São dez, e **todas na mesma função** —
+    /// `mexer_no_repositorio`, que a thread chama: trocar de branch, criar,
+    /// fundir, continuar, abortar, guardar e devolver o `stash`, mais as três
+    /// leituras que o retrato ganhou (a operação em curso, as tags e a lista de
+    /// guardados). Um `switch` reescreve milhares de arquivos; na thread da
+    /// janela seria a IDE parada enquanto o disco inteiro muda.
+    ///
+    /// **Este número é o sinal que a dívida 2 da `26` esperava.** Ele subiu de
+    /// 27 para 51 sem nunca descer, e o que a guarda mede — quantas esperas
+    /// existem — deixou de dizer o que ela queria saber: se alguma delas está
+    /// no caminho de um quadro. A troca por uma marca obrigatória ao lado de
+    /// cada chamada, que aquela dívida já propunha, passou de ideia a próxima
+    /// coisa a fazer.*
+    const TETO: usize = 51;
 
     assert!(
         chamadas.len() <= TETO,

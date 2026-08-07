@@ -6,7 +6,7 @@ use ide_domain::CancellationToken;
 use std::path::{Path, PathBuf};
 
 use crate::error::GitResult;
-use crate::model::{DiffSide, FileDiff, RepositoryStatus};
+use crate::model::{DiffSide, FileDiff, RepositoryStatus, StashEntry};
 
 /// O que a árvore de trabalho responde.
 ///
@@ -39,6 +39,19 @@ pub trait WorkingTreeService: Send + Sync {
 
     /// Tira os caminhos do índice, sem tocar no arquivo.
     async fn unstage(&self, paths: &[PathBuf]) -> GitResult<()>;
+
+    /// O que está guardado no `stash`, do mais recente para o mais antigo.
+    ///
+    /// O `stash` mora aqui, e não numa capacidade própria: ele é a árvore de
+    /// trabalho posta de lado, e é a `22` que decidiu assim antes de existir
+    /// código.
+    async fn stash_list(&self, cancel: &CancellationToken) -> GitResult<Vec<StashEntry>>;
+
+    /// Guarda o que está na árvore de trabalho e a deixa limpa.
+    async fn stash_push(&self, message: &str) -> GitResult<()>;
+
+    /// Devolve um item guardado para a árvore de trabalho, e o tira da pilha.
+    async fn stash_pop(&self, index: usize) -> GitResult<()>;
 
     /// Destrutivo: joga fora alteração não commitada, sem rede de recuperação.
     ///

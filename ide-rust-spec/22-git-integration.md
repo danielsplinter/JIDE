@@ -601,7 +601,7 @@ IDE**.
 | botão, janela, divisão, nó `branches`, busca ✅ | 0 | é leitura pura, e prova a tela com o menor código atrás |
 | aba `status`, os três painéis, as ações de linha ✅ | 1 | é o `working_tree` inteiro, que é o que a fase 1 entrega |
 | aba `history`, a tabela, o grafo ✅ | 2 | precisa do `history` e do `ComposedTable` |
-| nós `tags` e `stashes` | 3 | aparecem antes, vazios; a capacidade chega aqui |
+| nós `tags` e `stashes` ✅ | 3 | aparecem antes, vazios; a capacidade chega aqui |
 | nó `remotes`, à frente e atrás | 4 | é `fetch`, e sem ele não há o que contar |
 
 **Os nós aparecem desde o começo, mesmo sem ter o que mostrar.** Um nó que só
@@ -788,7 +788,7 @@ a ação de uma célula ao soltar o ponteiro, devolvendo `Handled` no lugar de
 `Action`. Hoje não quebra nada porque a ação também sai por `emit`, que é o
 caminho que o anfitrião lê. A tabela nova já nasce tratando isso.
 
-### Fase 3 — Branches e integração
+### Fase 3 — Branches e integração ✅
 
 `branches` e `integration` juntos, porque separá-los daria uma fase que só cria
 branch e não sabe fundir. Trocar, criar, fundir; e o estado intermediário: lista
@@ -802,6 +802,55 @@ conflito já está gravado no arquivo.
 **Critério:** trocar de branch pela IDE atualiza o editor, o Explorer e o índice
 de símbolos. Um merge com conflito mostra quais arquivos, e a IDE não fica presa
 num estado do qual não se sai.
+
+**Feita, e o recuo previsto foi tomado**: a fase entrega a detecção do conflito e
+a lista, e a resolução acontece como edição de texto normal. Os três blocos no
+editor continuam fora — eles são o item mais caro desta especificação, e ela já
+dizia que seriam os primeiros a cair.
+
+Cada linha de branch traz **Trocar** e **Fundir**; a caixa embaixo da árvore cria
+branch; os nós `tags` e `stashes` deixaram de ser promessa. E quando há operação
+no meio do caminho, uma faixa no alto da aba `status` diz **qual** e **quantos
+arquivos faltam**, com **Continuar** e **Abortar** ao lado.
+
+Sete decisões:
+
+- **conflito não é erro, e quem decide isso é o disco.** O `git` sai com código
+  diferente de zero e escreve o `CONFLICT` na saída padrão, e não na de erro;
+  classificar pelo texto acharia falha da ferramenta onde houve trabalho a
+  fazer. Quem responde é o `status`: se há arquivo em conflito, foi conflito.
+  Um teste com quatro commits pegou isso na primeira execução;
+- **a operação em curso é lida do disco**, e não da memória da IDE. Quem rodou
+  `git merge` no terminal integrado deixou o repositório assim, e uma IDE que só
+  soubesse das fusões que ela mesma começou mostraria uma tela que não
+  corresponde ao que está lá;
+- **`commit --no-edit` no lugar de `merge --continue`.** O segundo abre o editor
+  configurado quando não há `GIT_EDITOR`, e um editor externo aberto por dentro
+  da IDE é o processo pendurado que esta especificação já teme noutro lugar;
+- **a branch atual não oferece trocar nem fundir**, e a ausência é dupla: os
+  botões não são desenhados, **e** o clique no vazio à direita do nome não vira
+  ação. Sem a segunda metade, clicar ao lado da branch em que já se está pediria
+  para trocar para ela mesma;
+- **`switch` recusa quando há alteração que ele sobrescreveria**, e a recusa vem
+  como `DirtyWorkingTree` — que é o erro que vira o diálogo com *guardar* e
+  *descartar*. Forçar aqui perderia trabalho sem ninguém ter pedido;
+- **`stash push --include-untracked`.** Quem guarda o trabalho para trocar de
+  branch espera voltar e encontrar tudo; um arquivo novo que ficasse para trás
+  reapareceria como surpresa na outra branch;
+- **três caixas na janela, e o cursor decide qual recebe.** Procurar branch,
+  nomear branch e escrever a mensagem do commit são três coisas — e uma caixa
+  que fizesse duas delas criaria branch com o texto de um filtro.
+
+**O critério da recarga está atendido, e é o que custou mais fiação**: quando a
+resposta de uma escrita de branch chega, a aplicação recarrega o workspace e
+ressincroniza as linguagens. Um `checkout` reescreve milhares de arquivos, e sem
+isso o editor mostraria o texto de antes e a completação ofereceria as classes da
+branch anterior. A recarga acontece **quando a resposta chega**, e não quando o
+pedido sai: até lá o disco ainda é o de antes.
+
+**O que continua fora:** os três blocos de conflito no editor, e o diálogo de
+*guardar ou descartar* na troca recusada — hoje a recusa chega como mensagem na
+barra de estado, e quem quiser guardar usa o `stash`, que existe.
 
 ### Fase 4 — O observador vira infraestrutura, e o remoto entra
 
@@ -908,6 +957,6 @@ E número medido, como a `19`, a `20` e a `21` fizeram:
 |---|---|
 | 0 | tempo do `status` no projeto de referência, repositório limpo e sujo |
 | 1 | tempo do `diff` de um arquivo; tempo entre gravar e a margem mudar |
-| 3 | tempo do `checkout` de branch até editor, Explorer e índice em dia |
+| 3 | tempo do `checkout` de branch até editor, Explorer e índice em dia — **não medido**: falta o clone grande |
 | 2 | tempo até a primeira página do histórico aparecer, no de referência — **não medido**: falta um clone grande nesta máquina |
 | 4 | atraso entre `git` no terminal integrado e a IDE refletir |

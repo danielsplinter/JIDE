@@ -495,3 +495,211 @@ fn o_historico_vem_por_paginas() {
         "nenhuma linha aparece nas duas páginas"
     );
 }
+
+/// Criar e trocar de branch é o gesto que a fase 3 abre.
+///
+/// Criar **leva junto**: criar e ficar onde estava daria uma branch que existe e
+/// não se usa.
+#[test]
+fn criar_uma_branch_leva_o_trabalho_para_ela() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("branch-nova") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um\n");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let branches = repositorio.branches();
+    let cancel = CancellationToken::new();
+    let nova = ide_git::BranchName("feature/busca".to_owned());
+    assert!(esperar(branches.create(&nova)).is_ok());
+
+    let Ok(status) = esperar(repositorio.working_tree().status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(
+        status.head.as_ref().map(Head::label),
+        Some("feature/busca".to_owned()),
+        "criar leva junto"
+    );
+
+    // E voltar é trocar.
+    assert!(esperar(branches.switch(&ide_git::BranchName("main".to_owned()))).is_ok());
+    let Ok(status) = esperar(repositorio.working_tree().status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(status.head.as_ref().map(Head::label), Some("main".to_owned()));
+}
+
+/// Uma fusão que dá conflito não é erro: é trabalho a fazer, e a IDE diz quais
+/// arquivos.
+///
+/// **E dá para sair.** O critério da fase é este: a IDE não fica presa num
+/// estado do qual não se sai. Abortar volta ao que era, e o `pending` volta a
+/// dizer que não há operação nenhuma.
+#[test]
+fn um_merge_com_conflito_lista_os_arquivos_e_da_para_abortar() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("merge") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "comum\n");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+
+    // Duas branches mexendo na mesma linha.
+    assert!(repo.git(&["switch", "--create", "outra"]).is_some());
+    repo.escrever("a.txt", "da outra\n");
+    assert!(repo.git(&["commit", "-am", "na outra"]).is_some());
+    assert!(repo.git(&["switch", "main"]).is_some());
+    repo.escrever("a.txt", "da main\n");
+    assert!(repo.git(&["commit", "-am", "na main"]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let integracao = repositorio.integration();
+    let cancel = CancellationToken::new();
+    let Ok(resultado) = esperar(integracao.merge(&ide_git::BranchName("outra".to_owned()))) else {
+        panic!("a fusão nem respondeu");
+    };
+    let ide_git::MergeOutcome::Conflicted { paths } = resultado else {
+        panic!("a fusão devia ter conflito: {resultado:?}");
+    };
+    assert_eq!(paths.len(), 1, "{paths:?}");
+    assert!(paths[0].ends_with("a.txt"));
+
+    // O estado é lido do disco, e não da nossa memória.
+    assert_eq!(
+        esperar(integracao.pending(&cancel)).ok().flatten(),
+        Some(ide_git::PendingOperation::Merge)
+    );
+    // E o arquivo aparece no `status` como conflito, que é o que a tela mostra.
+    let Ok(status) = esperar(repositorio.working_tree().status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(status.count(ide_git::FileState::Conflicted), 1);
+
+    assert!(esperar(integracao.abort()).is_ok());
+    assert_eq!(
+        esperar(integracao.pending(&cancel)).ok().flatten(),
+        None,
+        "abortar tira o repositório do meio da operação"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.root().join("a.txt")).unwrap_or_default(),
+        "da main\n",
+        "e o arquivo volta ao que era"
+    );
+}
+
+/// Resolver o conflito e continuar fecha a fusão.
+///
+/// A resolução acontece como edição de texto normal — que é como o conflito já
+/// está gravado no arquivo —, e o que a IDE faz é preparar e continuar.
+#[test]
+fn resolver_e_continuar_fecha_a_fusao() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("continuar") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "comum\n");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+    assert!(repo.git(&["switch", "--create", "outra"]).is_some());
+    repo.escrever("a.txt", "da outra\n");
+    assert!(repo.git(&["commit", "-am", "na outra"]).is_some());
+    assert!(repo.git(&["switch", "main"]).is_some());
+    repo.escrever("a.txt", "da main\n");
+    assert!(repo.git(&["commit", "-am", "na main"]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let integracao = repositorio.integration();
+    let arvore = repositorio.working_tree();
+    let cancel = CancellationToken::new();
+    let _ = esperar(integracao.merge(&ide_git::BranchName("outra".to_owned())));
+
+    // Quem resolve é quem edita: aqui, o teste faz o papel do editor.
+    repo.escrever("a.txt", "resolvido\n");
+    assert!(esperar(arvore.stage(std::slice::from_ref(&repo.root().join("a.txt")))).is_ok());
+    assert!(esperar(integracao.continue_operation()).is_ok());
+
+    assert_eq!(esperar(integracao.pending(&cancel)).ok().flatten(), None);
+    let Ok(status) = esperar(arvore.status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(status.changed_files(), 0, "{:?}", status.entries);
+    let Ok(pagina) = esperar(repositorio.history().log(0, 5, &cancel)) else {
+        panic!("o histórico não respondeu");
+    };
+    assert_eq!(
+        pagina[0].parents.len(),
+        2,
+        "o commit de fusão tem dois pais: {:?}",
+        pagina[0]
+    );
+}
+
+/// O `stash` guarda o trabalho e o devolve, e as tags aparecem.
+///
+/// Os dois juntos porque os dois enchem um nó da árvore que estava vazio desde a
+/// fase 0 — e é isso que a fase 3 lhes devia.
+#[test]
+fn o_stash_guarda_e_devolve_e_as_tags_aparecem() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("stash") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um\n");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+    assert!(repo.git(&["tag", "v1.0"]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let arvore = repositorio.working_tree();
+    let cancel = CancellationToken::new();
+
+    assert_eq!(
+        esperar(repositorio.tags().list(&cancel)).unwrap_or_default(),
+        vec!["v1.0".to_owned()]
+    );
+
+    repo.escrever("a.txt", "mexido\n");
+    assert!(esperar(arvore.stash_push("no meio do caminho")).is_ok());
+    assert_eq!(
+        std::fs::read_to_string(repo.root().join("a.txt")).unwrap_or_default(),
+        "um\n",
+        "guardar deixa a árvore limpa"
+    );
+    let guardados = esperar(arvore.stash_list(&cancel)).unwrap_or_default();
+    assert_eq!(guardados.len(), 1);
+    assert!(
+        guardados[0].message.contains("no meio do caminho"),
+        "{:?}",
+        guardados[0]
+    );
+
+    assert!(esperar(arvore.stash_pop(0)).is_ok());
+    assert_eq!(
+        std::fs::read_to_string(repo.root().join("a.txt")).unwrap_or_default(),
+        "mexido\n",
+        "devolver traz o trabalho de volta"
+    );
+    assert!(esperar(arvore.stash_list(&cancel)).unwrap_or_default().is_empty());
+}

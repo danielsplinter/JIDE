@@ -29,7 +29,8 @@ use crate::branches::BranchService;
 use crate::error::{GitError, GitResult};
 use crate::model::{
     BranchName, BranchSummary, CommitId, CommitSummary, DiffLine, DiffLineKind, DiffSide, FileDiff,
-    FileState, Head, Hunk, RepositoryStatus, StatusEntry,
+    FileState, Head, Hunk, MergeOutcome, PendingOperation, RepositoryStatus, StashEntry,
+    StatusEntry,
 };
 use crate::working_tree::WorkingTreeService;
 
@@ -145,8 +146,12 @@ fn classificar(stderr: &str) -> GitError {
     }
 }
 
-#[async_trait]
-impl WorkingTreeService for CliGit {
+impl CliGit {
+    /// O mesmo `status` do contrato, chamável de dentro da crate.
+    ///
+    /// A fusão precisa dele para listar o que ficou em conflito, e chamar o
+    /// trait de dentro do próprio tipo pediria o `use` do contrato aqui — o que
+    /// faria o adapter depender da forma como ele é consumido.
     async fn status(&self, cancel: &CancellationToken) -> GitResult<RepositoryStatus> {
         let saida = self
             .run(
@@ -162,6 +167,13 @@ impl WorkingTreeService for CliGit {
             )
             .await?;
         Ok(ler_status(&String::from_utf8_lossy(&saida), &self.root))
+    }
+}
+
+#[async_trait]
+impl WorkingTreeService for CliGit {
+    async fn status(&self, cancel: &CancellationToken) -> GitResult<RepositoryStatus> {
+        Self::status(self, cancel).await
     }
 
     async fn diff(
@@ -217,6 +229,54 @@ impl WorkingTreeService for CliGit {
     async fn discard(&self, paths: &[PathBuf]) -> GitResult<()> {
         self.escrever(&["restore", "--"], paths).await
     }
+
+    async fn stash_list(&self, cancel: &CancellationToken) -> GitResult<Vec<StashEntry>> {
+        let saida = self
+            .run(
+                &[
+                    "--no-optional-locks",
+                    "stash",
+                    "list",
+                    "--format=%gd%x1f%gs",
+                ],
+                cancel,
+            )
+            .await?;
+        Ok(String::from_utf8_lossy(&saida)
+            .lines()
+            .filter(|linha| !linha.trim().is_empty())
+            .enumerate()
+            .map(|(indice, linha)| {
+                let mensagem = linha.split('\u{1f}').nth(1).unwrap_or(linha);
+                StashEntry {
+                    // A posição na pilha é a ordem da lista: o `stash@{0}` que o
+                    // `git` escreve é a mesma coisa, e lê-la de volta seria
+                    // decorar um formato para redescobrir o que já se sabe.
+                    index: indice,
+                    message: mensagem.trim().to_owned(),
+                }
+            })
+            .collect())
+    }
+
+    async fn stash_push(&self, message: &str) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        // `--include-untracked` de propósito: quem guarda o trabalho para trocar
+        // de branch espera voltar e encontrar tudo, e um arquivo novo que ficou
+        // para trás reaparece como surpresa na outra branch.
+        let mut args = vec!["stash", "push", "--include-untracked"];
+        if !message.trim().is_empty() {
+            args.push("--message");
+            args.push(message);
+        }
+        self.run(&args, &vazio).await.map(|_| ())
+    }
+
+    async fn stash_pop(&self, index: usize) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        let alvo = format!("stash@{{{index}}}");
+        self.run(&["stash", "pop", &alvo], &vazio).await.map(|_| ())
+    }
 }
 
 #[async_trait]
@@ -237,6 +297,115 @@ impl BranchService for CliGit {
             )
             .await?;
         Ok(ler_branches(&String::from_utf8_lossy(&saida)))
+    }
+
+    async fn switch(&self, branch: &BranchName) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        self.run(&["switch", branch.as_str()], &vazio)
+            .await
+            .map(|_| ())
+    }
+
+    async fn create(&self, name: &BranchName) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        self.run(&["switch", "--create", name.as_str()], &vazio)
+            .await
+            .map(|_| ())
+    }
+}
+
+#[async_trait]
+impl crate::tags::TagService for CliGit {
+    async fn list(&self, cancel: &CancellationToken) -> GitResult<Vec<String>> {
+        let saida = self
+            .run(
+                &[
+                    "for-each-ref",
+                    "--sort=refname",
+                    "--format=%(refname:short)",
+                    "refs/tags/",
+                ],
+                cancel,
+            )
+            .await?;
+        Ok(String::from_utf8_lossy(&saida)
+            .lines()
+            .map(str::trim)
+            .filter(|linha| !linha.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+}
+
+#[async_trait]
+impl crate::integration::IntegrationService for CliGit {
+    async fn merge(&self, branch: &BranchName) -> GitResult<MergeOutcome> {
+        let vazio = CancellationToken::new();
+        match self.run(&["merge", "--no-edit", branch.as_str()], &vazio).await {
+            Ok(saida) => {
+                let texto = String::from_utf8_lossy(&saida);
+                Ok(if texto.contains("Already up to date") {
+                    MergeOutcome::AlreadyUpToDate
+                } else {
+                    MergeOutcome::Merged
+                })
+            }
+            // **Conflito não é erro, e quem decide isso é o disco.** O `git`
+            // sai com código diferente de zero e escreve o "CONFLICT" na saída
+            // padrão, e não na de erro — classificar pelo texto acharia falha
+            // da ferramenta onde houve trabalho a fazer. O que responde é o
+            // `status`: se há arquivo em conflito, foi conflito.
+            Err(erro) => {
+                let status = self.status(&vazio).await?;
+                let paths: Vec<PathBuf> = status
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.state == FileState::Conflicted)
+                    .map(|entry| entry.path.clone())
+                    .collect();
+                if paths.is_empty() {
+                    return Err(erro);
+                }
+                Ok(MergeOutcome::Conflicted { paths })
+            }
+        }
+    }
+
+    async fn pending(&self, cancel: &CancellationToken) -> GitResult<Option<PendingOperation>> {
+        // Lido do disco, e não de memória nossa: quem rodou `git merge` no
+        // terminal integrado deixou o repositório assim, e uma IDE que só
+        // soubesse das fusões que ela começou mostraria uma tela que não
+        // corresponde ao que está lá.
+        let saida = self
+            .run(&["--no-optional-locks", "rev-parse", "--git-dir"], cancel)
+            .await?;
+        let git_dir = self
+            .root
+            .join(String::from_utf8_lossy(&saida).trim());
+        for (marca, operacao) in [
+            ("MERGE_HEAD", PendingOperation::Merge),
+            ("rebase-merge", PendingOperation::Rebase),
+            ("rebase-apply", PendingOperation::Rebase),
+            ("CHERRY_PICK_HEAD", PendingOperation::CherryPick),
+        ] {
+            if git_dir.join(marca).exists() {
+                return Ok(Some(operacao));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn continue_operation(&self) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        // `commit --no-edit` e não `merge --continue`: o segundo abre o editor
+        // configurado quando não há `GIT_EDITOR`, e um editor externo aberto por
+        // dentro da IDE é o processo pendurado que a `22` já teme noutro lugar.
+        self.run(&["commit", "--no-edit"], &vazio).await.map(|_| ())
+    }
+
+    async fn abort(&self) -> GitResult<()> {
+        let vazio = CancellationToken::new();
+        self.run(&["merge", "--abort"], &vazio).await.map(|_| ())
     }
 }
 
