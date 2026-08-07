@@ -184,7 +184,6 @@ impl IdeShell {
         for (linha, mudanca) in self.git_line_marks(path) {
             let mark = match mudanca {
                 GitLineChange::Added => GutterMark::LineAdded,
-                GitLineChange::Modified => GutterMark::LineModified,
                 GitLineChange::Removed => GutterMark::LineRemoved,
             };
             if decorations

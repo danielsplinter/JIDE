@@ -262,12 +262,16 @@ pub(super) struct LanguageController {
     /// Controlador próprio pelo mesmo motivo do `diff`: são perguntas com tempos
     /// diferentes, e um controlador só faria a página cancelar o retrato.
     pub(super) git_history: SearchController<Vec<ide_ui::CommitRow>>,
-    /// A comparação pedida: o texto de então e o que mudou.
+    /// As diferenças pedidas que ainda não chegaram.
     ///
-    /// Separada do retrato porque são duas perguntas com tempos diferentes —
-    /// uma responde a cada ação, a outra a cada clique num arquivo — e um
-    /// controlador só faria a segunda cancelar a primeira.
-    pub(super) git_diff: SearchController<GitDiffOutcome>,
+    /// **Uma fila, e não um controlador que cancela.** As outras perguntas do
+    /// Git têm uma resposta que interessa — a última —, e por isso cancelam a
+    /// anterior. Esta não: cada resposta é a margem de **um arquivo**, e
+    /// cancelar a de A ao abrir B deixava A sem marca nenhuma até alguém gravar.
+    ///
+    /// O tamanho é o número de arquivos abertos de uma vez, e cada pedido é um
+    /// `git diff` de um arquivo — barato, e que termina sozinho.
+    pub(super) git_diff: Vec<std::sync::mpsc::Receiver<GitDiffOutcome>>,
     /// A navegação em curso. Ver `navigate_to_definition`.
     pub(super) navigation: SearchController<NavigationOutcome>,
     /// Os usos de um nome, procurados fora da thread da interface.
@@ -795,6 +799,11 @@ pub(super) struct GitDiffOutcome {
     pub(super) committed: String,
     /// As linhas mudadas, para a margem do editor.
     pub(super) marks: Vec<(usize, ide_ui::GitLineChange)>,
+    /// As linhas que saíram, contadas no arquivo de então.
+    pub(super) removed: Vec<usize>,
+    /// Os trechos que mudaram dentro das linhas, de cada lado.
+    pub(super) added_spans: Vec<ide_ui::GitSpan>,
+    pub(super) removed_spans: Vec<ide_ui::GitSpan>,
     /// Se é para abrir a comparação lado a lado, ou só marcar a margem.
     ///
     /// A margem é pedida sozinha quando um arquivo é aberto: quem abre um
@@ -823,6 +832,11 @@ pub(super) struct RuntimeState {
     /// em branco todo esse tempo. Depois do primeiro quadro, o usuário vê a IDE
     /// montada e o realce chega em seguida.
     pub(super) languages_pending: bool,
+    /// Os arquivos cuja margem já foi pedida.
+    ///
+    /// Sem isto, o quadro seguinte perguntaria de novo pelo mesmo arquivo — a
+    /// resposta ainda não chegou, e a tela continua sem saber o que mudou nele.
+    pub(super) margens_pedidas: std::collections::HashSet<PathBuf>,
     /// O observador de arquivos do projeto aberto.
     ///
     /// **Um só, e da aplicação**: ele nasceu dentro do índice de Java, e a fase

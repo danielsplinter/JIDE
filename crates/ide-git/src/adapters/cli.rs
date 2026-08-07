@@ -919,11 +919,77 @@ mod tests {
         );
     }
 
-    /// Trocar uma linha por outra é **uma** marca, e não duas.
+    /// O lado esquerdo tem números próprios: a linha que saiu está lá.
     ///
-    /// É o caso mais comum de todos — editar uma linha —, e contá-lo como uma
-    /// remoção mais um acréscimo encheria a margem de sinais onde houve uma
-    /// alteração só.
+    /// Ela não existe no arquivo de agora, e sem um número no lado de então não
+    /// haveria onde marcá-la — que é o que a comparação precisa mostrar.
+    #[test]
+    fn as_linhas_removidas_sao_contadas_no_arquivo_de_entao() {
+        let saida = concat!(
+            "@@ -1,4 +1,2 @@
+",
+            " class Pedido {
+",
+            "-    int total;
+",
+            "-    int desconto;
+",
+            " }
+"
+        );
+        let diff = ler_diff(saida);
+        assert_eq!(
+            diff.removed_lines(),
+            vec![1, 2],
+            "a segunda e a terceira linha do arquivo de então"
+        );
+    }
+
+    /// Esvaziar uma linha é perda, e a marca é vermelha.
+    ///
+    /// No diff, apagar o conteúdo de uma linha é a antiga removida e uma vazia
+    /// acrescentada — e contá-la como acréscimo pintava de verde uma linha onde
+    /// só se perdeu. Verde ali diz "há algo novo para reler" sobre um vazio.
+    #[test]
+    fn a_linha_que_ficou_em_branco_e_perda() {
+        let saida = concat!(
+            "@@ -1,3 +1,3 @@
+",
+            " class Pedido {
+",
+            "-    int total;
+",
+            "+
+",
+            " }
+"
+        );
+        let diff = ler_diff(saida);
+        assert_eq!(diff.changed_lines(), vec![(1, LineChange::Removed)]);
+    }
+
+    /// Uma linha em branco acrescentada, sem nada no lugar, é linha nova.
+    #[test]
+    fn a_linha_em_branco_acrescentada_e_nova() {
+        let saida = concat!(
+            "@@ -1,2 +1,3 @@
+",
+            " class Pedido {
+",
+            "+
+",
+            " }
+"
+        );
+        let diff = ler_diff(saida);
+        assert_eq!(diff.changed_lines(), vec![(1, LineChange::Added)]);
+    }
+
+    /// Trocar uma linha por outra é **uma** marca, e ela é a de quem recebeu.
+    ///
+    /// Editar uma linha é o caso mais comum de todos: contá-lo como uma remoção
+    /// mais um acréscimo encheria a margem de sinais onde houve uma alteração
+    /// só, e marcá-lo de vermelho esconderia que há código novo para reler.
     #[test]
     fn linha_trocada_e_uma_marca_so() {
         let saida = concat!(
@@ -934,7 +1000,7 @@ mod tests {
             " tres\n"
         );
         let diff = ler_diff(saida);
-        assert_eq!(diff.changed_lines(), vec![(1, LineChange::Modified)]);
+        assert_eq!(diff.changed_lines(), vec![(1, LineChange::Added)]);
     }
 
     /// A contagem sai do `upstream:track` nas quatro formas dele.

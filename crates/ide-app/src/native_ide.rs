@@ -537,12 +537,21 @@ impl NativeIde {
             // completação sem esperar a próxima ativação. Ver a fase 4 da `19`.
             let _ = pollster::block_on(language_host.file_changed(&request.path));
         }
-        let Some(shell) = self.ui.shell.as_mut() else {
-            return;
-        };
-        match result {
-            Ok(()) => shell.document_saved(request.document_id, request.revision, &request.path),
-            Err(error) => shell.set_status_message(error.to_string()),
+        let gravou = result.is_ok();
+        if let Some(shell) = self.ui.shell.as_mut() {
+            match result {
+                Ok(()) => {
+                    shell.document_saved(request.document_id, request.revision, &request.path);
+                }
+                Err(error) => shell.set_status_message(error.to_string()),
+            }
+        }
+        if gravou {
+            // **A margem acompanha a gravação.** O observador do disco vê o
+            // arquivo mudar 300 ms depois, e esperar por ele deixaria a marca do
+            // que se acabou de escrever chegando tarde — para quem gravou, ela
+            // simplesmente não apareceu.
+            self.pedir_diferenca(request.path, false, false);
         }
     }
 
@@ -795,6 +804,9 @@ impl NativeIde {
         self.runtime.project_pending = Some(folder.to_path_buf());
         self.runtime.languages_pending = true;
         self.observar_o_disco(folder);
+        // As margens pedidas eram do projeto anterior: um caminho que se repete
+        // entre dois projetos diferentes é outro arquivo.
+        self.runtime.margens_pedidas.clear();
         // O branch e a contagem entram na barra de estado assim que houver
         // resposta. É a única pergunta ao Git que a IDE faz sozinha: as outras
         // saem de quem abre o gerenciador.
@@ -852,6 +864,18 @@ impl NativeIde {
         }
         if repositorio {
             self.refresh_git();
+        }
+        // A margem do arquivo aberto acompanha o que mudou no disco: trocar de
+        // branch reescreve o arquivo debaixo do editor, e a marca de antes
+        // passaria a falar de um texto que não está mais lá.
+        if let Some(aberto) = self
+            .ui
+            .shell
+            .as_ref()
+            .and_then(IdeShell::active_document_path)
+            && fontes.contains(&aberto)
+        {
+            self.pedir_diferenca(aberto, false, false);
         }
         if !fontes.is_empty()
             && let Some(host) = self.languages.host.as_ref().map(Arc::clone)
@@ -1824,17 +1848,64 @@ impl NativeIde {
             return;
         };
         let (sender, receiver) = std::sync::mpsc::channel();
-        let cancel = self.languages.git_diff.start(receiver);
+        self.languages.git_diff.push(receiver);
+        // Token novo a cada pedido, e nunca cancelado: o que ele evita é a
+        // resposta que já não interessa, e aqui **toda** resposta interessa —
+        // cada uma é a margem de um arquivo diferente.
+        let cancel = CancellationToken::new();
         std::thread::spawn(move || {
             let _ = sender.send(diferenca_do_arquivo(&raiz, path, staged, comparar, &cancel));
         });
     }
 
-    /// Instala a comparação e as marcas, se já chegaram.
-    fn collect_git_diff(&mut self) -> bool {
-        let Some(resultado) = self.languages.git_diff.collect() else {
-            return false;
+    /// Pede a margem do arquivo que está na frente, se ela ainda não foi pedida.
+    ///
+    /// Roda a cada quadro e custa uma consulta a um mapa. É o que faz a marca
+    /// aparecer **em qualquer forma de chegar a um arquivo** — abrir, trocar de
+    /// aba, voltar de uma navegação —, sem que cada uma delas precise lembrar de
+    /// pedir.
+    fn ask_missing_git_marks(&mut self) {
+        let Some(caminho) = self
+            .ui
+            .shell
+            .as_ref()
+            .and_then(IdeShell::git_marks_missing)
+        else {
+            return;
         };
+        if !self.runtime.margens_pedidas.insert(caminho.clone()) {
+            return;
+        }
+        self.pedir_diferenca(caminho, false, false);
+    }
+
+    /// Instala as comparações e as marcas que já chegaram.
+    ///
+    /// Todas as que chegaram, e não a primeira: são respostas de arquivos
+    /// diferentes, e guardar uma para o quadro seguinte faria a margem de um
+    /// arquivo esperar pela de outro.
+    fn collect_git_diff(&mut self) -> bool {
+        let mut chegaram = Vec::new();
+        self.languages.git_diff.retain(|receptor| match receptor.try_recv() {
+            Ok(resultado) => {
+                chegaram.push(resultado);
+                false
+            }
+            // Vazio quer dizer que o `git` ainda está respondendo.
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        if chegaram.is_empty() {
+            return false;
+        }
+        for resultado in chegaram {
+            self.instalar_diferenca(resultado);
+        }
+        true
+    }
+
+    /// Instala uma comparação que chegou.
+    fn instalar_diferenca(&mut self, resultado: GitDiffOutcome) -> bool {
         let Some(shell) = self.ui.shell.as_mut() else {
             return false;
         };
@@ -1842,10 +1913,23 @@ impl NativeIde {
             shell.set_status_message(erro);
             return true;
         }
-        shell.set_git_line_marks(resultado.path.clone(), resultado.marks);
+        shell.set_git_line_marks(resultado.path.clone(), resultado.marks.clone());
         if resultado.comparar {
             let atual = std::fs::read_to_string(&resultado.path).unwrap_or_default();
-            if !shell.abrir_comparacao(&resultado.path, atual, resultado.committed) {
+            // As marcas vão junto: elas tingem o lado direito da comparação, e
+            // são as mesmas que a margem do editor usa — calculá-las duas vezes
+            // daria duas respostas para a mesma pergunta.
+            let comparacao = ide_ui::GitDiff {
+                // O rótulo é do shell, que sabe onde o projeto começa.
+                label: String::new(),
+                committed: resultado.committed,
+                current: atual,
+                marks: resultado.marks,
+                removed: resultado.removed,
+                added_spans: resultado.added_spans,
+                removed_spans: resultado.removed_spans,
+            };
+            if !shell.abrir_comparacao(&resultado.path, comparacao) {
                 shell.set_status_message("Não foi possível abrir a comparação".to_owned());
             }
         }
@@ -4094,6 +4178,9 @@ fn diferenca_do_arquivo(
         path: path.clone(),
         committed: String::new(),
         marks: Vec::new(),
+        removed: Vec::new(),
+        added_spans: Vec::new(),
+        removed_spans: Vec::new(),
         comparar,
         error: None,
     };
@@ -4118,13 +4205,20 @@ fn diferenca_do_arquivo(
     };
     match runtime.block_on(arvore.diff(&path, lado, cancel)) {
         Ok(diff) => {
+            saida.removed = diff.removed_lines();
+            let trecho = |span: &ide_git::LineSpan| ide_ui::GitSpan {
+                line: span.line,
+                start: span.start,
+                end: span.end,
+            };
+            saida.added_spans = diff.added_spans().iter().map(trecho).collect();
+            saida.removed_spans = diff.removed_spans().iter().map(trecho).collect();
             saida.marks = diff
                 .changed_lines()
                 .into_iter()
                 .map(|(linha, mudanca)| {
                     let mudanca = match mudanca {
                         ide_git::LineChange::Added => ide_ui::GitLineChange::Added,
-                        ide_git::LineChange::Modified => ide_ui::GitLineChange::Modified,
                         ide_git::LineChange::Removed => ide_ui::GitLineChange::Removed,
                     };
                     (linha, mudanca)
@@ -4159,6 +4253,7 @@ impl ApplicationHandler for NativeIde {
         changed |= self.collect_references();
         changed |= self.collect_git();
         changed |= self.collect_git_diff();
+        self.ask_missing_git_marks();
         changed |= self.collect_git_write();
         changed |= self.collect_git_history();
         changed |= self.collect_disk_changes();
@@ -5014,6 +5109,52 @@ mod tests {
     use ide_workspace::WorkspaceService;
 
     use super::*;
+
+    /// Duas margens pedidas em sequência chegam as duas.
+    ///
+    /// Elas passavam por um controlador que **cancela a anterior** — o mesmo das
+    /// buscas, onde só a última resposta interessa. Aqui cada resposta é a
+    /// margem de um arquivo: cancelar a de A ao abrir B deixava A sem marca
+    /// nenhuma até alguém gravar. Agora é uma fila, e o teste guarda isso.
+    #[test]
+    fn as_margens_pedidas_em_sequencia_chegam_as_duas() {
+        let mut fila: Vec<std::sync::mpsc::Receiver<GitDiffOutcome>> = Vec::new();
+        let mut mandar = |caminho: &str| {
+            let (envio, recepcao) = std::sync::mpsc::channel();
+            fila.push(recepcao);
+            let _ = envio.send(GitDiffOutcome {
+                path: PathBuf::from(caminho),
+                committed: String::new(),
+                marks: vec![(0, ide_ui::GitLineChange::Added)],
+                removed: Vec::new(),
+                added_spans: Vec::new(),
+                removed_spans: Vec::new(),
+                comparar: false,
+                error: None,
+            });
+        };
+        mandar("Um.java");
+        mandar("Dois.java");
+
+        // A coleta leva **todas** as que chegaram, e não a primeira: guardar uma
+        // para o quadro seguinte faria a margem de um arquivo esperar pela de
+        // outro.
+        let mut chegaram = Vec::new();
+        fila.retain(|receptor| match receptor.try_recv() {
+            Ok(resultado) => {
+                chegaram.push(resultado.path);
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        assert_eq!(
+            chegaram,
+            vec![PathBuf::from("Um.java"), PathBuf::from("Dois.java")],
+            "as duas respostas, na ordem em que foram pedidas"
+        );
+        assert!(fila.is_empty(), "e a fila esvazia");
+    }
 
     fn test_shell(root: &Path) -> IdeShell {
         let service = WorkspaceService::native();

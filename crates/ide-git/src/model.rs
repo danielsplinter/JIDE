@@ -152,15 +152,21 @@ pub enum DiffLineKind {
 /// Não é o mesmo que [`DiffLineKind`], e a diferença é o motivo de os dois
 /// existirem: o diff fala de linhas de um lado e do outro, e a margem fala do
 /// arquivo que está na tela. Trocar uma linha por outra são duas linhas no
-/// diff — uma removida e uma acrescentada — e **uma** marca na margem, porque
-/// na tela é uma linha só, e ela mudou.
+/// diff — uma removida e uma acrescentada — e **uma** marca na margem, porque na
+/// tela é uma linha só.
+///
+/// # Por que são duas, e não três
+///
+/// Havia uma terceira, `Modified`, para a linha trocada. Ela dizia menos do que
+/// as outras duas: quem olha a margem quer saber **onde há código novo para
+/// reler**, e uma linha trocada tem código novo. Onde entrou código a marca é
+/// verde, mesmo que algo tenha saído dali junto; a vermelha fica para o que só
+/// perdeu.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LineChange {
-    /// Não existia antes.
+    /// Recebeu código — tendo perdido algum ou não.
     Added,
-    /// Existia e foi trocada.
-    Modified,
-    /// Algo saiu daqui: a linha marcada é a que ficou no lugar.
+    /// Só perdeu: a linha marcada é a que ficou no lugar do que saiu.
     Removed,
 }
 
@@ -193,19 +199,48 @@ pub struct FileDiff {
 }
 
 impl FileDiff {
+    /// As linhas do arquivo **de então** que saíram.
+    ///
+    /// Contadas no lado esquerdo da comparação, e não no direito: uma linha
+    /// removida não existe no arquivo de agora, e é justamente por isso que ela
+    /// precisa de um número próprio — sem ele, não há onde marcá-la.
+    #[must_use]
+    pub fn removed_lines(&self) -> Vec<usize> {
+        let mut linhas = Vec::new();
+        for hunk in &self.hunks {
+            let mut antiga = hunk.old_start;
+            for linha in &hunk.lines {
+                match linha.kind {
+                    DiffLineKind::Removed => {
+                        linhas.push(antiga);
+                        antiga += 1;
+                    }
+                    // Contexto existe dos dois lados e anda no dois; acrescentada
+                    // só existe no de agora, e não anda aqui.
+                    DiffLineKind::Context => antiga += 1,
+                    DiffLineKind::Added => {}
+                }
+            }
+        }
+        linhas
+    }
+
     /// As linhas do arquivo de agora que mudaram, e como a margem as mostra.
     ///
     /// # As três regras, e o defeito que cada uma evita
     ///
-    /// - **remoção seguida de acréscimo é uma linha trocada.** É o caso mais
-    ///   comum de todos — editar uma linha —, e contá-lo como duas marcas
-    ///   encheria a margem de sinais onde houve uma alteração só;
+    /// - **onde entrou código, a marca é verde** — tendo saído algo dali junto
+    ///   ou não. Editar uma linha é o caso mais comum de todos, e ali o que
+    ///   interessa é que há código novo para reler. Mas **linha que ficou em
+    ///   branco não recebeu código**: apagar o conteúdo de uma linha é, no diff,
+    ///   a antiga removida e uma vazia acrescentada, e verde ali diria "há algo
+    ///   novo" sobre um vazio;
     /// - **remoção sem acréscimo marca a linha que ficou no lugar.** Ela não tem
     ///   linha própria no arquivo de agora: o que sobrou é a fronteira entre
     ///   duas linhas. Sem marcar nada, apagar um bloco não deixaria sinal, e
     ///   quem olha o arquivo não saberia que algo saiu dali;
-    /// - **acréscimo sem remoção é linha nova**, e é a única das três que tem
-    ///   linha própria dos dois lados da conta.
+    /// - **uma linha, uma marca.** Contar a remoção e o acréscimo de uma troca
+    ///   como dois sinais encheria a margem onde houve uma alteração só.
     #[must_use]
     pub fn changed_lines(&self) -> Vec<(usize, LineChange)> {
         let mut marcas: Vec<(usize, LineChange)> = Vec::new();
@@ -227,12 +262,26 @@ impl FileDiff {
                     DiffLineKind::Added => {
                         let numero = linha.new_line.unwrap_or(proxima);
                         proxima = numero + 1;
-                        if removidas > 0 {
-                            removidas -= 1;
-                            marcas.push((numero, LineChange::Modified));
-                        } else {
-                            marcas.push((numero, LineChange::Added));
-                        }
+                        // **Linha que ficou em branco não recebeu código.**
+                        // Apagar o conteúdo de uma linha é, no diff, a linha
+                        // antiga removida e uma vazia acrescentada; contá-la
+                        // como acréscimo pintava de verde uma linha onde só se
+                        // perdeu — e verde ali diz "há algo novo para reler"
+                        // sobre um vazio.
+                        let vazia = linha.text.trim().is_empty();
+                        let substitui = removidas > 0;
+                        removidas = removidas.saturating_sub(1);
+                        // Vazia **e** substituindo alguma coisa é perda. Vazia
+                        // sem substituir nada é uma linha em branco que alguém
+                        // acrescentou, e essa é nova como qualquer outra.
+                        marcas.push((
+                            numero,
+                            if vazia && substitui {
+                                LineChange::Removed
+                            } else {
+                                LineChange::Added
+                            },
+                        ));
                     }
                     DiffLineKind::Context => {
                         let numero = linha.new_line.unwrap_or(proxima);
@@ -422,6 +471,138 @@ pub fn graph_rows(commits: &[CommitSummary]) -> Vec<GraphRow> {
     linhas
 }
 
+
+/// Um trecho de uma linha, em caracteres.
+///
+/// Contado em **caracteres**, e não em bytes: quem vai desenhar mede texto, e
+/// medir meio caractere de um acento não devolve posição nenhuma.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LineSpan {
+    /// A linha, contada a partir de zero, no arquivo a que este trecho pertence.
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+impl FileDiff {
+    /// Os trechos **acrescentados**, no arquivo de agora.
+    #[must_use]
+    pub fn added_spans(&self) -> Vec<LineSpan> {
+        self.trechos(true)
+    }
+
+    /// Os trechos **removidos**, no arquivo de então.
+    #[must_use]
+    pub fn removed_spans(&self) -> Vec<LineSpan> {
+        self.trechos(false)
+    }
+
+    /// Os trechos que mudaram dentro das linhas.
+    ///
+    /// # Por que isto não é a linha inteira
+    ///
+    /// Trocar uma palavra numa linha de oitenta colunas pinta as oitenta se o
+    /// destaque for da linha — e quem olha tem de procurar o que mudou dentro do
+    /// que foi marcado como mudado. O que se quer ver é a palavra.
+    ///
+    /// # Como as duas listas se emparelham
+    ///
+    /// Um trecho de remoções seguido de um de acréscimos é uma **troca**, e as
+    /// linhas se emparelham pela ordem: a primeira removida com a primeira
+    /// acrescentada. De cada par sai o que sobra depois de tirar o começo e o
+    /// fim iguais.
+    ///
+    /// Sem par — mais removidas do que acrescentadas, ou o contrário — a linha
+    /// inteira é o trecho: ela não foi trocada, ela entrou ou saiu.
+    fn trechos(&self, acrescentados: bool) -> Vec<LineSpan> {
+        let mut trechos = Vec::new();
+        for hunk in &self.hunks {
+            let mut antiga = hunk.old_start;
+            // Cada corrida guarda (linha, texto) dos dois lados.
+            let mut removidas: Vec<(usize, &str)> = Vec::new();
+            let mut adicionadas: Vec<(usize, &str)> = Vec::new();
+            let fechar = |removidas: &mut Vec<(usize, &str)>,
+                              adicionadas: &mut Vec<(usize, &str)>,
+                              trechos: &mut Vec<LineSpan>| {
+                emparelhar(removidas, adicionadas, acrescentados, trechos);
+                removidas.clear();
+                adicionadas.clear();
+            };
+            for linha in &hunk.lines {
+                match linha.kind {
+                    DiffLineKind::Removed => {
+                        removidas.push((antiga, linha.text.as_str()));
+                        antiga += 1;
+                    }
+                    DiffLineKind::Added => {
+                        adicionadas.push((linha.new_line.unwrap_or_default(), linha.text.as_str()));
+                    }
+                    DiffLineKind::Context => {
+                        fechar(&mut removidas, &mut adicionadas, &mut trechos);
+                        antiga += 1;
+                    }
+                }
+            }
+            fechar(&mut removidas, &mut adicionadas, &mut trechos);
+        }
+        trechos
+    }
+}
+
+/// Empareja as linhas de uma troca e devolve o que difere em cada uma.
+fn emparelhar(
+    removidas: &[(usize, &str)],
+    adicionadas: &[(usize, &str)],
+    acrescentados: bool,
+    trechos: &mut Vec<LineSpan>,
+) {
+    let meu = if acrescentados { adicionadas } else { removidas };
+    let outro = if acrescentados { removidas } else { adicionadas };
+    for (indice, (linha, texto)) in meu.iter().enumerate() {
+        let comprimento = texto.chars().count();
+        let Some((_, par)) = outro.get(indice) else {
+            // Sem par: a linha inteira entrou ou saiu.
+            if comprimento > 0 {
+                trechos.push(LineSpan {
+                    line: *linha,
+                    start: 0,
+                    end: comprimento,
+                });
+            }
+            continue;
+        };
+        let (inicio, fim) = diferenca(texto, par);
+        if fim > inicio {
+            trechos.push(LineSpan {
+                line: *linha,
+                start: inicio,
+                end: fim,
+            });
+        }
+    }
+}
+
+/// Onde dois textos passam a diferir, e onde voltam a coincidir.
+///
+/// O começo igual e o fim igual saem fora; o que sobra é o que mudou. As duas
+/// pontas são contadas em caracteres do **primeiro** texto, que é o que vai ser
+/// marcado.
+fn diferenca(meu: &str, outro: &str) -> (usize, usize) {
+    let meus: Vec<char> = meu.chars().collect();
+    let outros: Vec<char> = outro.chars().collect();
+    let mut inicio = 0;
+    while inicio < meus.len() && inicio < outros.len() && meus[inicio] == outros[inicio] {
+        inicio += 1;
+    }
+    let mut fim_meu = meus.len();
+    let mut fim_outro = outros.len();
+    while fim_meu > inicio && fim_outro > inicio && meus[fim_meu - 1] == outros[fim_outro - 1] {
+        fim_meu -= 1;
+        fim_outro -= 1;
+    }
+    (inicio, fim_meu)
+}
+
 /// Uma branch, como o painel da esquerda a mostra.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchSummary {
@@ -452,6 +633,88 @@ mod tests {
             date: "2026-08-06 19:14".to_owned(),
             parents: pais.iter().map(|pai| CommitId((*pai).to_owned())).collect(),
         }
+    }
+
+
+    /// Trocar uma palavra marca a palavra, e não a linha inteira.
+    ///
+    /// Numa linha de oitenta colunas, marcar tudo obriga quem olha a procurar o
+    /// que mudou dentro do que foi marcado como mudado.
+    #[test]
+    fn a_troca_de_uma_palavra_marca_so_a_palavra() {
+        let diff = FileDiff {
+            path: PathBuf::from("Pedido.java"),
+            hunks: vec![Hunk {
+                old_start: 0,
+                new_start: 0,
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Removed,
+                        text: "    int total = 10;".to_owned(),
+                        new_line: None,
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        text: "    int total = 42;".to_owned(),
+                        new_line: Some(0),
+                    },
+                ],
+            }],
+        };
+        assert_eq!(
+            diff.added_spans(),
+            vec![LineSpan {
+                line: 0,
+                start: 16,
+                end: 18
+            }],
+            "só o `42`"
+        );
+        assert_eq!(
+            diff.removed_spans(),
+            vec![LineSpan {
+                line: 0,
+                start: 16,
+                end: 18
+            }],
+            "e só o `10` do outro lado"
+        );
+    }
+
+    /// Linha que entrou ou saiu sem par é marcada inteira.
+    ///
+    /// Ela não foi trocada por nada: procurar um trecho ali seria comparar com
+    /// uma linha que não existe.
+    #[test]
+    fn a_linha_sem_par_e_marcada_inteira() {
+        let diff = FileDiff {
+            path: PathBuf::from("a.txt"),
+            hunks: vec![Hunk {
+                old_start: 0,
+                new_start: 0,
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Context,
+                        text: "um".to_owned(),
+                        new_line: Some(0),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        text: "dois".to_owned(),
+                        new_line: Some(1),
+                    },
+                ],
+            }],
+        };
+        assert_eq!(
+            diff.added_spans(),
+            vec![LineSpan {
+                line: 1,
+                start: 0,
+                end: 4
+            }]
+        );
+        assert!(diff.removed_spans().is_empty());
     }
 
     /// Uma linha reta ocupa uma faixa só, do começo ao fim.

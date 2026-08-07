@@ -21,8 +21,8 @@
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_components::{
     Button, ButtonAlign, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
-    ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, SplitOrientation, SplitPane,
-    TabItem, TableColumn, Tabs, TextInput, Toolbar,
+    ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, Panel, SplitOrientation,
+    SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar,
 };
 use ui_core::{Point, Rect, ScrollEvent, Size, UiEvent, WidgetId};
 use ui_host::UiHost;
@@ -56,6 +56,13 @@ const ENTRADA_BASE: WidgetId = WidgetId(10_800);
 /// A tabela do histórico, e as células de cada linha dela.
 const TABELA_ID: WidgetId = WidgetId(10_519);
 const COMMIT_BASE: WidgetId = WidgetId(11_000);
+/// As abas da janela inteira, e o painel da segunda.
+const JANELA_TABS_ID: WidgetId = WidgetId(10_531);
+const DIFF_ID: WidgetId = WidgetId(10_532);
+/// A divisa que reparte as duas colunas da comparação.
+const DIFF_SPLIT_ID: WidgetId = WidgetId(10_533);
+/// As linhas da comparação: uma célula por linha de texto.
+const DIFF_LINHA_BASE: WidgetId = WidgetId(12_000);
 /// O botão que fecha a janela, no canto de cima.
 const FECHAR_ID: WidgetId = WidgetId(11_930);
 /// A barra de ferramentas do alto, e os três botões dela.
@@ -79,7 +86,7 @@ const AMEND_ID: WidgetId = WidgetId(11_902);
 /// A largura é a da tabela do histórico, e não a da árvore: cinco colunas —
 /// grafo, descrição, data, autor e hash — com as quatro últimas de largura
 /// própria deixavam a descrição espremida em novecentos pontos.
-const PANEL_SIZE: Size = Size::new(1200.0, 560.0);
+const PANEL_SIZE: Size = Size::new(1350.0, 680.0);
 const ROW_HEIGHT: f32 = 24.0;
 /// A largura útil do painel: o que sobra depois das margens dos dois lados.
 const BODY_WIDTH: f32 = PANEL_SIZE.width - 32.0;
@@ -95,13 +102,16 @@ const RATIO_BAIXO: f32 = 0.5;
 const TITULO_ALTURA: f32 = 20.0;
 /// Largura de um botão de ação de linha.
 const ACAO_LARGURA: f32 = 92.0;
-/// Quanto a barra do alto se separa do que vem abaixo dela.
+/// Quanto a barra do alto se separa do que está em volta dela.
 ///
-/// Metade a mais do que o padrão da biblioteca, e o pedido é desta tela: o que
-/// vem logo abaixo é uma caixa de texto, e um campo encostado num botão parece
-/// parte dele. **Quem sabe fazer a distância é a `Toolbar`**; daqui sai só o
-/// quanto.
-const ESPACO_ABAIXO_DA_BARRA: f32 = Toolbar::SPACE_BELOW * 1.5;
+/// **A mesma medida em cima e embaixo**: uma faixa que respira de um lado só
+/// parece colada no outro, e é o que ela parecia quando só tinha o espaço de
+/// baixo. Metade a mais do que o padrão da biblioteca, e o pedido é desta tela —
+/// o que vem logo abaixo é uma caixa de texto, e um campo encostado num botão
+/// parece parte dele.
+///
+/// **Quem sabe fazer a distância é a `Toolbar`**; daqui sai só o quanto.
+const ESPACO_DA_BARRA: f32 = Toolbar::SPACE_BELOW * 1.5;
 /// A altura de um botão **dentro de uma linha de lista**.
 ///
 /// É a exceção que a biblioteca prevê, e a decisão é desta tela: um botão de
@@ -168,11 +178,53 @@ pub struct CommitRow {
     pub parents: Vec<usize>,
 }
 
+/// Um trecho de uma linha, em caracteres.
+///
+/// Tem nome porque uma tupla de três números não diz qual é qual — e porque a
+/// travessia entre o domínio e a tela é onde um número trocado passa calado.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GitSpan {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// A comparação de um arquivo, como a aba `Diff` a mostra.
+///
+/// Os dois textos inteiros, e não os trechos: quem olha uma diferença costuma
+/// querer ver o que está em volta dela, e recortar aqui obrigaria a pedir de
+/// novo a cada rolagem.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GitDiff {
+    /// O caminho relativo, que é o que se lê no título.
+    pub label: String,
+    /// O arquivo como está no último commit.
+    pub committed: String,
+    /// O arquivo como está agora.
+    pub current: String,
+    /// As linhas do arquivo de agora que mudaram, para realçar o lado direito.
+    pub marks: Vec<(usize, GitLineChange)>,
+    /// As linhas do arquivo de então que saíram, para realçar o lado esquerdo.
+    ///
+    /// Números do **outro** arquivo: uma linha removida não existe no de agora,
+    /// e é por isso que ela precisa de uma lista própria.
+    pub removed: Vec<usize>,
+    /// Os trechos acrescentados, dentro das linhas do arquivo de agora.
+    pub added_spans: Vec<GitSpan>,
+    /// Os trechos removidos, dentro das linhas do arquivo de então.
+    pub removed_spans: Vec<GitSpan>,
+}
+
 /// O que a margem do editor mostra numa linha.
+///
+/// **Duas, e não três.** Onde entrou código a marca é verde, tendo saído algo
+/// dali junto ou não: quem olha a margem quer saber onde há código novo para
+/// reler. A vermelha fica para a linha que só perdeu.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitLineChange {
+    /// Recebeu código — tendo perdido algum ou não.
     Added,
-    Modified,
+    /// Só perdeu: a marca fica na linha que ficou no lugar.
     Removed,
 }
 
@@ -252,6 +304,21 @@ enum Aba {
     History,
 }
 
+/// Qual aba **da janela** está na frente.
+///
+/// São duas coisas diferentes das outras abas: aquelas repartem o lado direito
+/// do trabalho, e estas repartem a janela inteira. `Geral` é tudo o que o
+/// gerenciador já fazia; `Diff` é o lugar da comparação, que ainda vai ser
+/// construída — e nasce vazio de propósito, como os nós da árvore nasceram: uma
+/// aba que só aparece quando a capacidade chega faz a janela mudar de forma a
+/// cada passo.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AbaDaJanela {
+    #[default]
+    Geral,
+    Diff,
+}
+
 /// A janela do gerenciador.
 #[derive(Default)]
 pub(super) struct GitSurface {
@@ -278,6 +345,13 @@ pub(super) struct GitSurface {
     nome_novo: String,
     /// Se o cursor está na caixa do nome da branch nova.
     nomeando: bool,
+    /// Qual aba da janela está na frente.
+    aba_da_janela: AbaDaJanela,
+    /// A comparação que a aba `Diff` mostra, quando alguém pediu uma.
+    diff: Option<GitDiff>,
+    /// As duas colunas da comparação, mantidas entre quadros: a rolagem é delas.
+    colunas_do_diff: Option<[ComposedList; 2]>,
+    split_do_diff: Option<SplitPane>,
     /// Se o cursor está na caixa da mensagem.
     ///
     /// Sem isso, digitar no gerenciador iria sempre para a busca das branches —
@@ -315,6 +389,18 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
             ..LayoutStyle::default()
         },
     );
+    // As abas da janela vêm antes de tudo: elas repartem o painel inteiro, e o
+    // que está embaixo delas é o conteúdo de uma delas.
+    // Sem folga própria embaixo: quem afasta a barra das abas é a **barra**, e
+    // duas folgas somadas dariam uma distância que ninguém escolheu.
+    let _ = host.declare(
+        MODAL_ID,
+        JANELA_TABS_ID,
+        LayoutStyle {
+            height: Some(28.0),
+            ..LayoutStyle::default()
+        },
+    );
     // A barra de ferramentas no alto, atravessando a janela inteira: o que
     // está nela vale para o **repositório**, e não para a linha em que alguém
     // clicou. Ver a `22`.
@@ -325,7 +411,7 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         MODAL_ID,
         TOOLBAR_ID,
         LayoutStyle {
-            height: Some(Button::HEIGHT + ESPACO_ABAIXO_DA_BARRA),
+            height: Some(Button::HEIGHT + ESPACO_DA_BARRA * 2.0),
             ..LayoutStyle::default()
         },
     );
@@ -335,6 +421,17 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         LayoutStyle {
             direction: LayoutDirection::Row,
             flex_grow: 1.0,
+            ..LayoutStyle::default()
+        },
+    );
+    // O painel da aba `Diff`: ele ocupa o mesmo lugar do conteúdo da `Geral`, e
+    // um dos dois está sempre escondido.
+    let _ = host.declare(
+        MODAL_ID,
+        DIFF_ID,
+        LayoutStyle {
+            flex_grow: 1.0,
+            hidden: true,
             ..LayoutStyle::default()
         },
     );
@@ -449,6 +546,127 @@ impl GitSurface {
         self.rebuild();
         self.rebuild_listas();
         self.rebuild_tabela();
+    }
+
+    /// Recebe a comparação e a põe na frente.
+    ///
+    /// **Ela abre a aba `Diff`, e não o editor.** A comparação é o assunto desta
+    /// janela; abri-la atrás dela obrigava a fechar a janela para ver o que se
+    /// tinha acabado de pedir — e quem tinha uma mensagem de commit escrita a
+    /// perdia no caminho.
+    pub(super) fn mostrar_diff(&mut self, diff: GitDiff) {
+        self.diff = Some(diff);
+        self.aba_da_janela = AbaDaJanela::Diff;
+        self.rebuild_diff();
+    }
+
+    /// Monta as duas colunas da comparação, uma linha por linha de texto.
+    ///
+    /// O lado direito é tingido pelo que mudou: é a mesma marcação da margem do
+    /// editor, e ela já vem calculada de quem leu o repositório.
+    fn rebuild_diff(&mut self) {
+        let Some(diff) = self.diff.as_ref() else {
+            self.colunas_do_diff = None;
+            return;
+        };
+        let marcas: std::collections::HashMap<usize, GitLineChange> =
+            diff.marks.iter().copied().collect();
+        let removidas: std::collections::HashSet<usize> = diff.removed.iter().copied().collect();
+        // **A linha que mudou é azul dos dois lados; o que mudou dentro dela tem
+        // cor própria.** São duas informações diferentes: uma diz onde olhar, e
+        // a outra diz o que olhar. Pintar a linha inteira de verde ou vermelho
+        // faria procurar o que mudou dentro do que foi marcado como mudado.
+        let trechos = |lista: &[GitSpan]| {
+            let mut mapa: std::collections::HashMap<usize, (usize, usize)> =
+                std::collections::HashMap::new();
+            for trecho in lista {
+                mapa.insert(trecho.line, (trecho.start, trecho.end));
+            }
+            mapa
+        };
+        let trechos_de_agora = trechos(&diff.added_spans);
+        let trechos_de_entao = trechos(&diff.removed_spans);
+        let coluna = |texto: &str, base: u64, de_agora: bool| {
+            let linhas = texto
+                .lines()
+                .enumerate()
+                .map(|(numero, linha)| {
+                    // A mesma cor nos dois lados: o azul só diz que esta linha
+                    // entrou na comparação.
+                    let mudou = if de_agora {
+                        matches!(marcas.get(&numero), Some(GitLineChange::Added))
+                    } else {
+                        removidas.contains(&numero)
+                    };
+                    let realce = mudou.then_some(IconTint::Accent);
+                    // E o trecho, com a cor do que aconteceu com ele.
+                    let trecho = if de_agora {
+                        trechos_de_agora
+                            .get(&numero)
+                            .map(|(inicio, fim)| (*inicio, *fim, IconTint::Success))
+                    } else {
+                        trechos_de_entao
+                            .get(&numero)
+                            .map(|(inicio, fim)| (*inicio, *fim, IconTint::Danger))
+                    };
+                    let celulas = vec![
+                        // O número da linha antes do texto, como no editor: sem
+                        // ele, duas colunas lado a lado não se conferem.
+                        ComposedCell::new(
+                            Box::new(
+                                Label::new(
+                                    WidgetId(base + numero as u64 * 2),
+                                    format!("{:>4}", numero + 1),
+                                )
+                                .with_tone(IconTint::Muted),
+                            ),
+                            CellWidth::Fixed(40.0),
+                        ),
+                        ComposedCell::new(
+                            Box::new({
+                                let rotulo =
+                                    Label::new(WidgetId(base + numero as u64 * 2 + 1), linha);
+                                match trecho {
+                                    Some((inicio, fim, tint)) => {
+                                        rotulo.with_marked_range(inicio, fim, tint)
+                                    }
+                                    None => rotulo,
+                                }
+                            }),
+                            // `Natural`: a linha vale a largura que o texto pede,
+                            // e é isso que dá o que rolar para a barra de baixo.
+                            CellWidth::Natural,
+                        ),
+                    ];
+                    let linha = ComposedRow::new(celulas);
+                    match realce {
+                        Some(tint) => linha.with_highlight(tint),
+                        None => linha,
+                    }
+                })
+                .collect();
+            ComposedList::new(WidgetId(base), linhas).with_row_height(ROW_HEIGHT)
+        };
+        self.colunas_do_diff = Some([
+            coluna(&diff.committed, DIFF_LINHA_BASE.0, false),
+            coluna(&diff.current, DIFF_LINHA_BASE.0 + 100_000, true),
+        ]);
+    }
+
+    /// As duas colunas da comparação, repartidas pela divisa.
+    fn colunas_da_comparacao(&mut self, area_do_diff: Rect, context: &LayoutContext) -> [Rect; 2] {
+        let split = self.split_do_diff.get_or_insert_with(|| {
+            SplitPane::new(DIFF_SPLIT_ID, SplitOrientation::Horizontal, 0.5)
+        });
+        // O título fica acima das duas colunas, e a divisa reparte o que sobra.
+        let corpo = Rect::new(
+            area_do_diff.origin.x,
+            area_do_diff.origin.y + TITULO_ALTURA,
+            area_do_diff.size.width,
+            (area_do_diff.size.height - TITULO_ALTURA).max(0.0),
+        );
+        split.layout(context, corpo);
+        [split.first(), split.second()]
     }
 
     /// Monta a tabela do histórico: cinco colunas, uma linha por commit.
@@ -696,6 +914,34 @@ impl GitSurface {
     /// arrasto da divisa aparecia um quadro atrasado — a coluna ficava com a
     /// largura da proporção anterior, e o ponteiro já estava noutro lugar.
     pub(super) fn sync_declaration(&mut self, host: &mut UiHost) {
+        // Uma aba de cada vez: o que não está na frente sai do arranjo, e não
+        // fica desenhado por baixo do que está.
+        let geral = self.aba_da_janela == AbaDaJanela::Geral;
+        host.set_style(
+            TOOLBAR_ID,
+            LayoutStyle {
+                height: Some(Button::HEIGHT + ESPACO_DA_BARRA * 2.0),
+                hidden: !geral,
+                ..LayoutStyle::default()
+            },
+        );
+        host.set_style(
+            BODY_ID,
+            LayoutStyle {
+                direction: LayoutDirection::Row,
+                flex_grow: 1.0,
+                hidden: !geral,
+                ..LayoutStyle::default()
+            },
+        );
+        host.set_style(
+            DIFF_ID,
+            LayoutStyle {
+                flex_grow: 1.0,
+                hidden: geral,
+                ..LayoutStyle::default()
+            },
+        );
         // A largura sai do **tamanho declarado do painel**, e não da área
         // medida: `place_overlay` limpa o arranjo antes de declarar, e ler a
         // moldura ali devolveria zero. O painel tem tamanho fixo, dito aqui em
@@ -770,6 +1016,62 @@ impl GitSurface {
         )
     }
 
+    /// A comparação, quando há uma pedida.
+    ///
+    /// Sem nenhuma, o painel fica vazio com uma linha dizendo por onde se pede
+    /// uma — um painel vazio sem explicação parece defeito.
+    fn paint_diff(&mut self, area_do_diff: Rect, layout: &LayoutContext, paint: &mut PaintContext) {
+        let Some(titulo) = self.diff.as_ref().map(|diff| diff.label.clone()) else {
+            let mut vazio = Label::new(
+                WidgetId(SUMMARY_BASE.0 + 7),
+                "Escolha um arquivo na aba Geral para ver a diferença".to_owned(),
+            )
+            .with_tone(IconTint::Muted);
+            vazio.layout(layout, area_do_diff);
+            vazio.paint(paint);
+            return;
+        };
+        let mut cabecalho = Label::new(WidgetId(SUMMARY_BASE.0 + 6), titulo);
+        cabecalho.layout(
+            layout,
+            Rect::new(
+                area_do_diff.origin.x,
+                area_do_diff.origin.y,
+                area_do_diff.size.width,
+                TITULO_ALTURA,
+            ),
+        );
+        cabecalho.paint(paint);
+
+        let colunas = self.colunas_da_comparacao(area_do_diff, layout);
+        if let Some(listas) = self.colunas_do_diff.as_mut() {
+            for (lista, coluna) in listas.iter_mut().zip(colunas) {
+                lista.layout(layout, coluna);
+                lista.paint(paint);
+            }
+        }
+        // A divisa por último: ela fica **sobre** a borda entre as duas colunas.
+        if let Some(split) = self.split_do_diff.as_ref() {
+            split.paint(paint);
+        }
+    }
+
+    /// O botão de fechar, no canto de cima.
+    ///
+    /// Fora do `if` da aba porque ele é da **janela**, e não do que está dentro
+    /// dela: uma aba que escondesse o botão de fechar deixaria quem a abriu sem
+    /// saída a não ser o `Esc`.
+    ///
+    /// Só ícone, e por isso quadrado na altura de botão — o nome acessível é
+    /// obrigatório, porque um ícone não é legível por tecnologia assistiva.
+    fn paint_fechar(&self, host: &UiHost, layout: &LayoutContext, paint: &mut PaintContext) {
+        let mut fechar = Button::icon(FECHAR_ID, Icon::Close, "Fechar")
+            .with_align(ButtonAlign::Center)
+            .with_tint(IconTint::Muted);
+        fechar.layout(layout, Self::botao_de_fechar(area(host, MODAL_ID)));
+        fechar.paint(paint);
+    }
+
     /// A barra do alto, com as três ações do repositório.
     ///
     /// **Quem separa os botões e a barra do resto é a `Toolbar`**, e não esta
@@ -796,7 +1098,8 @@ impl GitSurface {
                 botao(PUSH_ID, "Push"),
             ],
         )
-        .with_space_below(ESPACO_ABAIXO_DA_BARRA)
+        .with_space_above(ESPACO_DA_BARRA)
+        .with_space_below(ESPACO_DA_BARRA)
     }
 
     /// Onde ficam a caixa da mensagem e os dois botões.
@@ -1008,6 +1311,46 @@ impl GitSurface {
             self.close();
             return None;
         }
+        let abas_da_janela = area(host, JANELA_TABS_ID);
+        if abas_da_janela.contains(point) {
+            // Duas abas de larguras iguais, como as do lado direito: qual delas
+            // é sai da coluna, e é a mesma conta que a faixa desenhada usa.
+            let metade = abas_da_janela.origin.x + abas_da_janela.size.width / 2.0;
+            self.aba_da_janela = if point.x < metade {
+                AbaDaJanela::Geral
+            } else {
+                AbaDaJanela::Diff
+            };
+            return None;
+        }
+        if self.aba_da_janela == AbaDaJanela::Diff {
+            let area_do_diff = area(host, DIFF_ID);
+            if self.diff.is_some() && area_do_diff.contains(point) {
+                let colunas = self.colunas_da_comparacao(area_do_diff, context);
+                if let Some(split) = self.split_do_diff.as_mut()
+                    && split.divider().contains(point)
+                {
+                    split.event(
+                        &mut EventContext::default(),
+                        &UiEvent::PointerDown(primary_pointer(point)),
+                    );
+                    return None;
+                }
+                if let Some(listas) = self.colunas_do_diff.as_mut() {
+                    for (lista, coluna) in listas.iter_mut().zip(colunas) {
+                        if coluna.contains(point) {
+                            lista.layout(context, coluna);
+                            lista.event(
+                                &mut EventContext::default(),
+                                &UiEvent::PointerDown(primary_pointer(point)),
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            return None;
+        }
         let faixa = area(host, TOOLBAR_ID);
         if faixa.contains(point) {
             // Quem diz qual botão está sob o ponto é a própria barra: refazer a
@@ -1142,22 +1485,70 @@ impl GitSurface {
     }
 
     /// Movimento e soltura: são da divisa, que é o que se arrasta aqui.
+    /// O movimento e a soltura do ponteiro, para tudo o que está na janela.
+    ///
+    /// # Por que isto vai para todo mundo, e não para quem está sob o ponteiro
+    ///
+    /// **Um arrasto começa dentro de um componente e continua fora dele.** Quem
+    /// agarra a alça de uma barra de rolagem e arrasta sai da trilha nos
+    /// primeiros pixels; se o movimento fosse entregue só a quem está debaixo do
+    /// ponteiro, a alça ficaria onde foi agarrada enquanto o ponteiro seguisse
+    /// sozinho. Foi o que aconteceu aqui: o clique chegava, o movimento não, e
+    /// nenhuma barra desta janela rolava.
+    ///
+    /// Cada componente sabe se o gesto é dele — todos guardam se estão em
+    /// arrasto —, e para quem não está, um movimento é hover: barato e certo.
     pub(super) fn pointer_event(&mut self, host: &UiHost, context: &LayoutContext, event: &UiEvent) {
         let corpo = area(host, BODY_ID);
         if let Some(split) = self.split.as_mut() {
             split.layout(context, corpo);
             split.event(&mut EventContext::default(), event);
         }
+        let conteudo = area(host, CONTENT_ID);
+        if self.aba_da_janela == AbaDaJanela::Diff {
+            let area_do_diff = area(host, DIFF_ID);
+            let colunas = self.colunas_da_comparacao(area_do_diff, context);
+            if let Some(split) = self.split_do_diff.as_mut() {
+                split.event(&mut EventContext::default(), event);
+            }
+            if let Some(listas) = self.colunas_do_diff.as_mut() {
+                for (lista, coluna) in listas.iter_mut().zip(colunas) {
+                    lista.layout(context, coluna);
+                    lista.event(&mut EventContext::default(), event);
+                }
+            }
+            return;
+        }
+        // A árvore da esquerda: ela tem barra vertical própria.
+        let arvore = area(host, TREE_ID);
+        if let Some(tree) = self.tree.as_mut() {
+            tree.layout(context, arvore);
+            tree.event(&mut EventContext::default(), event);
+        }
+        if self.aba == Aba::History {
+            if let Some(tabela) = self.tabela.as_mut() {
+                tabela.layout(context, conteudo);
+                tabela.event(&mut EventContext::default(), event);
+            }
+            return;
+        }
+        if conteudo.size.height <= 0.0 {
+            return;
+        }
         // As duas divisas dos painéis empilhados recebem o mesmo gesto: elas
         // também se arrastam, e também precisam do movimento para se anunciar.
-        let conteudo = area(host, CONTENT_ID);
-        if self.aba == Aba::Status && conteudo.size.height > 0.0 {
-            let _ = self.faixas(conteudo, context);
-            for split in [self.split_alto.as_mut(), self.split_baixo.as_mut()]
-                .into_iter()
-                .flatten()
-            {
-                split.event(&mut EventContext::default(), event);
+        let faixas = self.faixas(conteudo, context);
+        for split in [self.split_alto.as_mut(), self.split_baixo.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            split.event(&mut EventContext::default(), event);
+        }
+        for (indice, faixa) in faixas.into_iter().enumerate() {
+            let area_da_lista = Self::area_da_lista(faixa);
+            if let Some(lista) = self.listas.as_mut().and_then(|listas| listas.get_mut(indice)) {
+                lista.layout(context, area_da_lista);
+                lista.event(&mut EventContext::default(), event);
             }
         }
     }
@@ -1195,6 +1586,20 @@ impl GitSurface {
             delta_x: 0.0,
             delta_y: linhas * ROW_HEIGHT,
         });
+        if self.aba_da_janela == AbaDaJanela::Diff {
+            // As duas colunas rolam juntas: comparar dois textos exige que a
+            // linha 40 de um fique ao lado da linha 40 do outro, e duas rolagens
+            // independentes desfazem a comparação a cada gesto.
+            let area_do_diff = area(host, DIFF_ID);
+            let colunas = self.colunas_da_comparacao(area_do_diff, context);
+            if let Some(listas) = self.colunas_do_diff.as_mut() {
+                for (lista, coluna) in listas.iter_mut().zip(colunas) {
+                    lista.layout(context, coluna);
+                    lista.event(&mut EventContext::default(), &evento);
+                }
+            }
+            return None;
+        }
         let arvore = area(host, TREE_ID);
         if arvore.contains(point) {
             if let Some(tree) = self.tree.as_mut() {
@@ -1251,14 +1656,26 @@ impl GitSurface {
             copia.paint(paint);
         }
 
-        // O botão de fechar, no canto de cima. Só ícone, e por isso quadrado na
-        // altura de botão — o nome acessível é obrigatório, porque um ícone não
-        // é legível por tecnologia assistiva.
-        let mut fechar = Button::icon(FECHAR_ID, Icon::Close, "Fechar")
-            .with_align(ButtonAlign::Center)
-            .with_tint(IconTint::Muted);
-        fechar.layout(layout, Self::botao_de_fechar(area(host, MODAL_ID)));
-        fechar.paint(paint);
+        // As abas da janela, antes de tudo o que elas repartem.
+        let mut abas_da_janela = Tabs::new(
+            JANELA_TABS_ID,
+            vec![TabItem::new(1, "Geral"), TabItem::new(2, "Diff")],
+        );
+        abas_da_janela.set_active(usize::from(self.aba_da_janela == AbaDaJanela::Diff));
+        abas_da_janela.layout(layout, area(host, JANELA_TABS_ID));
+        abas_da_janela.paint(paint);
+
+        if self.aba_da_janela == AbaDaJanela::Diff {
+            let area_do_diff = area(host, DIFF_ID);
+            let mut painel = Panel::new(DIFF_ID, SurfaceTone::Surface).with_border();
+            painel.layout(layout, area_do_diff);
+            painel.paint(paint);
+            self.paint_diff(area_do_diff, layout, paint);
+            self.paint_fechar(host, layout, paint);
+            return true;
+        }
+
+        self.paint_fechar(host, layout, paint);
 
         // A barra do alto: as três ações do repositório.
         let mut barra = self.barra_do_alto();
@@ -1520,6 +1937,20 @@ impl GitSurface {
             .unwrap_or_default()
     }
 
+    /// Quanto a árvore já rolou, para o teste ver o arrasto agir.
+    #[cfg(test)]
+    pub(super) fn rolagem_da_arvore(&self) -> f32 {
+        self.tree
+            .as_ref()
+            .map_or(0.0, |tree| tree.scroll_offset().y)
+    }
+
+    /// As abas da janela, para o teste apontar nelas.
+    #[cfg(test)]
+    pub(super) fn abas_da_janela_para_teste(&self, host: &UiHost) -> Rect {
+        area(host, JANELA_TABS_ID)
+    }
+
     /// A barra do alto, para o teste apontar nos botões dela.
     #[cfg(test)]
     pub(super) fn barra_para_teste(&self, host: &UiHost) -> Rect {
@@ -1669,19 +2100,28 @@ impl super::IdeShell {
 
     /// Guarda o que mudou num arquivo, para a margem do editor mostrar.
     ///
-    /// Lista vazia **apaga** as marcas daquele arquivo, e é assim de propósito:
-    /// commitar deixa o arquivo igual ao commit, e uma margem que continuasse
-    /// riscada estaria contando o trabalho de antes.
+    /// **Lista vazia é resposta, e não ausência de resposta.** Ela fica
+    /// guardada: "perguntei, e este arquivo está igual ao commit" é diferente de
+    /// "ainda não perguntei", e é essa diferença que impede a IDE de perguntar
+    /// de novo a cada quadro por um arquivo que não mudou.
     pub fn set_git_line_marks(
         &mut self,
         path: std::path::PathBuf,
         marks: Vec<(usize, GitLineChange)>,
     ) {
-        if marks.is_empty() {
-            self.git.marcas.remove(&path);
-            return;
-        }
         self.git.marcas.insert(path, marks);
+    }
+
+    /// O arquivo na frente, quando ainda não se sabe o que mudou nele.
+    ///
+    /// Quem pergunta ao repositório é a aplicação, e ela pergunta isto a cada
+    /// quadro: é uma consulta a um mapa, e cobre **todas** as formas de trocar
+    /// de aba — o clique, o `Ctrl+Tab`, a divisão, a navegação — sem que cada
+    /// uma delas precise lembrar de pedir.
+    #[must_use]
+    pub fn git_marks_missing(&self) -> Option<std::path::PathBuf> {
+        let caminho = self.active_document_path()?;
+        (!self.git.marcas.contains_key(&caminho)).then_some(caminho)
     }
 
     /// As linhas mudadas de um arquivo, para quem desenha a margem.
@@ -1704,28 +2144,20 @@ impl super::IdeShell {
     /// pergunta que a `22` deixou registrada: a diferença abre **no editor**, e
     /// o editor está atrás do véu. Quem escolheu ver a diferença quer ver a
     /// diferença.
-    pub fn abrir_comparacao(
-        &mut self,
-        path: &std::path::Path,
-        conteudo_de_agora: String,
-        texto: String,
-    ) -> bool {
-        // O arquivo de agora entra pelo mesmo caminho de sempre — quem lê disco
-        // é a aplicação, e ela já leu para chegar aqui.
-        let atual = self.show_document(path, conteudo_de_agora);
-        let nome = path
-            .file_name()
-            .map(|nome| nome.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let antigo = self
-            .editor_area
-            .session
-            .open_memory(std::path::PathBuf::from(format!("{nome} @ HEAD")), texto);
-        // O de agora fica onde já estava, e o de então vai para o lado: a
-        // divisão é a mesma que a aba do editor oferece, e não uma segunda.
-        self.dividir_a_direita(antigo);
-        let _ = self.editor_area.session.activate(atual);
-        self.git.close();
+    pub fn abrir_comparacao(&mut self, path: &std::path::Path, diff: GitDiff) -> bool {
+        // **Uma comparação é um valor só**, e chega assim: eram sete parâmetros,
+        // e sete parâmetros na mesma ordem são um erro de posição esperando
+        // acontecer — dois `Vec` de números trocados entre si compilam.
+        //
+        // O rótulo é o único que não vem de fora: a raiz do projeto é do shell,
+        // e quem leu o repositório tem o caminho inteiro e não onde ele começa.
+        let label = path
+            .strip_prefix(self.workspace_root())
+            .unwrap_or(path)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        self.git.mostrar_diff(GitDiff { label, ..diff });
         true
     }
 

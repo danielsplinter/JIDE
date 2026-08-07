@@ -261,8 +261,8 @@ tres
     };
     assert_eq!(
         diff.changed_lines(),
-        vec![(1, ide_git::LineChange::Modified)],
-        "a segunda linha trocada, contada de zero: {:?}",
+        vec![(1, ide_git::LineChange::Added)],
+        "a segunda linha, trocada, contada de zero: {:?}",
         diff.hunks
     );
 
