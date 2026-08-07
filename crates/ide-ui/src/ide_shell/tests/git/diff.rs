@@ -1,7 +1,5 @@
 //! A aba `Diff`: a comparação, os realces e a margem do editor.
 
-use ide_application::RestoreTarget;
-
 use super::*;
 
 /// Clicar no nome do arquivo abre a comparação, e não uma ação.
@@ -475,8 +473,8 @@ fn as_setas_da_esquerda_ficam_em_todas_as_linhas_marcadas() {
     assert!(
         shell.commands.iter().any(|comando| matches!(
             comando,
-            ApplicationCommand::Git(GitRequest::RestoreLine { path, from: 1, target })
-                if path == &arquivo && *target == RestoreTarget::Replace(1)
+            ApplicationCommand::Git(GitRequest::RestoreRange { path, from, to })
+                if path == &arquivo && *from == (1, 2) && *to == (1, 2)
         )),
         "a linha existe dos dois lados, e a devolução é uma troca: {:?}",
         shell.commands.iter().collect::<Vec<_>>()
@@ -555,10 +553,10 @@ c
     assert!(
         shell.commands.iter().any(|comando| matches!(
             comando,
-            ApplicationCommand::Git(GitRequest::RestoreLine { path, from: 1, target })
-                if path == &arquivo && *target == RestoreTarget::Insert(1)
+            ApplicationCommand::Git(GitRequest::RestoreRange { path, from, to })
+                if path == &arquivo && *from == (1, 2) && *to == (1, 1)
         )),
-        "acrescentar na posição 1, e não trocar a linha 1 — que é o `c`: {:?}",
+        "a faixa de agora é vazia: o `b` **entra**, e o `c` não é tocado: {:?}",
         shell.commands.iter().collect::<Vec<_>>()
     );
 }

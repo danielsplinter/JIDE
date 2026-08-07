@@ -7,21 +7,6 @@ use thiserror::Error;
 
 use crate::TaskId;
 
-/// Onde uma linha devolvida entra no arquivo de agora.
-///
-/// **Substituir e inserir são coisas diferentes, e confundi-las apaga código.**
-/// Quando a linha existe dos dois lados, devolvê-la é trocar o conteúdo. Quando
-/// ela só existe no arquivo de então — foi removida —, devolvê-la é *acrescentar*
-/// uma linha: trocar a que está naquela posição destruiria uma linha que ninguém
-/// mandou tocar.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RestoreTarget {
-    /// Troca o conteúdo desta linha do arquivo de agora.
-    Replace(usize),
-    /// Entra como linha nova nesta posição do arquivo de agora.
-    Insert(usize),
-}
-
 /// O que a IDE pede ao Git.
 ///
 /// A tela não fala com o Git: ela pede, e quem responde é a aplicação, fora da
@@ -63,31 +48,32 @@ pub enum GitRequest {
     Pull,
     /// Manda o que está aqui.
     Push,
-    /// Leva uma linha do arquivo de então para o de agora.
+    /// Põe uma faixa do arquivo de agora de volta como estava no último commit.
     ///
-    /// É desfazer o que se fez naquela linha, e nada mais: o `restore` do Git é
-    /// por arquivo, e quem só quer uma linha de volta não deveria ter de
-    /// escolher entre perder o resto e não ter jeito.
+    /// É desfazer o que se fez ali, e nada mais: o `restore` do Git é por
+    /// arquivo, e quem só quer um trecho de volta não deveria ter de escolher
+    /// entre perder o resto e não ter jeito.
     ///
-    /// `from` é a linha no arquivo **de então**, e `target` diz o que fazer com
-    /// ela do lado de agora. Os dois números são necessários e são diferentes:
-    /// uma inserção acima desloca tudo o que vem abaixo, e usar o mesmo número
-    /// dos dois lados escrevia por cima de uma linha alheia.
-    RestoreLine {
+    /// # Uma operação, e não três
+    ///
+    /// **Trocar, acrescentar e apagar são a mesma coisa vista de fora**: a faixa
+    /// de então entra no lugar da faixa de agora. Eram três comandos, e quem
+    /// chamava tinha de decidir qual — decidir errado apaga código.
+    ///
+    /// As duas faixas são meio-abertas, e cada uma pode ser vazia:
+    ///
+    /// - as duas cheias: **troca**;
+    /// - `from` vazia: o trecho só existe no arquivo de agora — foi
+    ///   acrescentado, e devolvê-lo é **apagá-lo**. É o que faltava, e o que a
+    ///   comparação do IntelliJ oferece na mesma seta;
+    /// - `to` vazia: o trecho só existe no de então — foi removido, e devolvê-lo
+    ///   é **acrescentá-lo** naquela posição.
+    RestoreRange {
         path: std::path::PathBuf,
-        from: usize,
-        target: RestoreTarget,
-    },
-    /// Leva um trecho inteiro do arquivo de então para o de agora.
-    ///
-    /// **Uma alteração de sete linhas eram sete cliques**, e sete gravações, e
-    /// sete comparações refeitas — com os números andando entre uma e outra.
-    /// `from` é a faixa de linhas do arquivo de então, do começo ao fim
-    /// inclusive.
-    RestoreBlock {
-        path: std::path::PathBuf,
+        /// Linhas do arquivo de então que entram.
         from: (usize, usize),
-        target: RestoreTarget,
+        /// Linhas do arquivo de agora que saem. Vazia diz **onde**, não o quê.
+        to: (usize, usize),
     },
     /// Guarda o que está na árvore de trabalho.
     Stash,

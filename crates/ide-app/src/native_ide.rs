@@ -15,7 +15,7 @@ use crate::controllers::{
     ImportedProject, LanguageController, NavigationOutcome, NativeWindowState, ProjectController,
     RuntimeState, TaskController as AppTaskController, TypeSearchOutcome, WorkspaceController,
 };
-use ide_application::{GitRequest, RestoreTarget};
+use ide_application::GitRequest;
 use crate::ui_bridge::{UiAction, UiBridge};
 use crate::watching::{ConsumidorDeFontes, ConsumidorDeGit, MudancaNoDisco};
 use crate::{
@@ -1690,11 +1690,8 @@ impl NativeIde {
             GitRequest::Fetch => self.mexer_na_branch("fetch", String::new()),
             GitRequest::Pull => self.mexer_na_branch("pull", String::new()),
             GitRequest::Push => self.mexer_na_branch("push", String::new()),
-            GitRequest::RestoreLine { path, from, target } => {
-                self.devolver_a_linha(&path, from, target);
-            }
-            GitRequest::RestoreBlock { path, from, target } => {
-                self.devolver_o_trecho(&path, from, target);
+            GitRequest::RestoreRange { path, from, to } => {
+                self.devolver_a_faixa(&path, from, to);
             }
             GitRequest::Stash => self.mexer_na_branch("stash", String::new()),
             GitRequest::StashPop(indice) => self.mexer_na_branch("pop", indice.to_string()),
@@ -1874,50 +1871,12 @@ impl NativeIde {
     /// A linha que não existe mais no arquivo de agora é **acrescentada no fim**
     /// em vez de recusada em silêncio: quem pediu a linha 40 de um arquivo que
     /// hoje tem 30 quer aquela linha de volta.
-    /// Leva um trecho inteiro do arquivo de então para o de agora.
-    ///
-    /// **Uma gravação só, e não uma por linha.** Devolver sete linhas com sete
-    /// pedidos gravaria sete vezes, e cada gravação move as linhas de baixo: do
-    /// segundo pedido em diante os números já não seriam os que a tela mostrou.
-    fn devolver_o_trecho(&mut self, path: &Path, from: (usize, usize), target: RestoreTarget) {
-        let Some(shell) = self.ui.shell.as_ref() else {
-            return;
-        };
-        let linhas: Vec<String> = (from.0..=from.1)
-            .filter_map(|linha| shell.git_diff_line(linha))
-            .collect();
-        if linhas.is_empty() {
-            return;
-        }
-        let atual = std::fs::read_to_string(path).unwrap_or_default();
-        let quantas = linhas.len();
-        let novo = match target {
-            // Trocar o que ocupa o lugar e acrescentar o que sobra: o trecho de
-            // então pode ser mais comprido que o de agora, e o que não coube em
-            // troca entra como linha nova logo abaixo.
-            RestoreTarget::Replace(inicio) => {
-                let mut texto = ide_workspace::rewrite_line(&atual, inicio, linhas[0].clone());
-                for (passo, linha) in linhas.iter().enumerate().skip(1) {
-                    texto = ide_workspace::insert_line(&texto, inicio + passo, linha.clone());
-                }
-                texto
-            }
-            RestoreTarget::Insert(inicio) => {
-                let mut texto = atual.clone();
-                for (passo, linha) in linhas.iter().enumerate() {
-                    texto = ide_workspace::insert_line(&texto, inicio + passo, linha.clone());
-                }
-                texto
-            }
-        };
-        self.gravar_a_devolucao(path, &novo, format!("{quantas} linhas devolvidas"));
-    }
-
     /// Grava o que a devolução produziu, e refaz tudo o que depende do arquivo.
     ///
-    /// Um lugar só para a linha e para o trecho: eram três passos fáceis de
-    /// esquecer pela metade — o documento aberto, o realce e a comparação —, e
-    /// esquecer qualquer um deles deixa a tela contando o que já não é verdade.
+    /// São quatro passos, e são fáceis de esquecer pela metade: gravar, refrescar
+    /// o documento aberto, pedir realce novo — a revisão subiu, e o realce
+    /// guardado é o da revisão anterior — e pedir a comparação de novo. Esquecer
+    /// qualquer um deixa a tela contando o que já não é verdade.
     fn gravar_a_devolucao(&mut self, path: &Path, novo: &str, aviso: String) {
         if std::fs::write(path, novo).is_err() {
             if let Some(shell) = self.ui.shell.as_mut() {
@@ -1935,30 +1894,35 @@ impl NativeIde {
         if refrescado {
             self.sync_languages();
         }
+        // O observador de disco também veria, 300 ms depois; quem clicou não
+        // pode esperar por ele para ver o que acabou de fazer.
         self.pedir_diferenca(path.to_path_buf(), false, true);
     }
 
-    fn devolver_a_linha(&mut self, path: &Path, from: usize, target: RestoreTarget) {
-        let Some(texto) = self
-            .ui
-            .shell
-            .as_ref()
-            .and_then(|shell| shell.git_diff_line(from))
-        else {
+    /// Põe uma faixa do arquivo de volta como estava no último commit.
+    ///
+    /// **Uma gravação, e um gesto.** Trocar, acrescentar e apagar são a mesma
+    /// coisa vista daqui: as linhas de então entram no lugar das de agora. Eram
+    /// três caminhos, e devolver sete linhas eram sete gravações — com os
+    /// números andando entre uma e outra, porque cada gravação move as de baixo.
+    ///
+    /// Faixa vazia dos dois lados não existe: a tela só oferece a seta onde há
+    /// alteração.
+    fn devolver_a_faixa(&mut self, path: &Path, from: (usize, usize), to: (usize, usize)) {
+        let Some(shell) = self.ui.shell.as_ref() else {
             return;
         };
+        let linhas: Vec<String> = (from.0..from.1)
+            .filter_map(|linha| shell.git_diff_line(linha))
+            .collect();
         let atual = std::fs::read_to_string(path).unwrap_or_default();
-        // **Trocar e inserir são coisas diferentes.** A linha que existe dos
-        // dois lados é trocada; a que só existe no arquivo de então foi
-        // *removida*, e devolvê-la é acrescentar uma linha — trocar a que está
-        // naquela posição apagaria uma linha que ninguém mandou tocar.
-        let novo = match target {
-            RestoreTarget::Replace(linha) => ide_workspace::rewrite_line(&atual, linha, texto),
-            RestoreTarget::Insert(linha) => ide_workspace::insert_line(&atual, linha, texto),
+        let novo = ide_workspace::replace_lines(&atual, to.0..to.1, &linhas);
+        let aviso = match (linhas.len(), to.1 - to.0) {
+            // Nada entra: o trecho tinha sido acrescentado, e volta a não existir.
+            (0, quantas) => format!("{quantas} linha(s) desfeita(s)"),
+            (quantas, _) => format!("{quantas} linha(s) devolvida(s)"),
         };
-        // O editor principal, o realce e a comparação vêm atrás da gravação, e
-        // os três estão num lugar só — ver `gravar_a_devolucao`.
-        self.gravar_a_devolucao(path, &novo, format!("Linha {} devolvida", from + 1));
+        self.gravar_a_devolucao(path, &novo, aviso);
     }
 
     /// Pede a margem do arquivo que está na frente, se ela ainda não foi pedida.

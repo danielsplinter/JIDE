@@ -721,7 +721,7 @@ fn devolver_uma_linha_nao_deixa_o_arquivo_sem_cor() {
             },
         ));
     }
-    ide.devolver_a_linha(&file, 0, RestoreTarget::Replace(0));
+    ide.devolver_a_faixa(&file, (0, 1), (0, 1));
     ide.settle_syntax();
 
     assert_eq!(

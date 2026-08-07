@@ -652,29 +652,39 @@ cada uma. Só aparecem as que estão na vista — uma seta presa na borda faland
 uma linha que já saiu da tela mentiria, e desenhar as de fora custaria uma por
 linha do arquivo.
 
-O clique emite `RestoreLine { path, from, target }`. **Os dois números são
-diferentes, e confundi-los apaga código**: `from` é a linha no arquivo de então, e
-`target` diz o que fazer do lado de agora — `Replace(n)` quando a linha existe dos
-dois lados, `Insert(n)` quando ela só existe do lado de então. Devolver uma linha
-*removida* é acrescentar, e não trocar: trocar destruiria a linha que ocupa aquela
-posição hoje, que ninguém mandou tocar.
+O clique emite `RestoreRange { path, from, to }`, com as duas faixas
+meio-abertas, e **cada uma pode ser vazia**:
 
-A aplicação grava a linha no arquivo — pela `rewrite_line`, que guarda o fim de linha que o arquivo já usava,
-porque escrever `\n` num arquivo com `\r\n` marcaria *todas* as linhas como
-alteradas — e faz três coisas em seguida:
+- as duas cheias — o trecho mudou, e a devolução é uma **troca**;
+- `from` vazia — o trecho só existe no arquivo de agora: foi *acrescentado*, e
+  devolvê-lo é **apagá-lo**;
+- `to` vazia — o trecho só existe no de então: foi *removido*, e devolvê-lo é
+  **acrescentá-lo** naquela posição. A faixa vazia diz *onde*, e não *o quê*.
+
+*Uma operação, e não três.* Trocar, acrescentar e apagar são a mesma coisa vista
+de fora: a faixa de então entra no lugar da faixa de agora. Eram três comandos, e
+quem chamava tinha de decidir qual — decidir errado apaga código. Do outro lado é
+uma função só, `replace_lines`, que guarda o fim de linha do arquivo.
+
+**A seta existe em toda alteração**, e não só onde saiu código. Faltava
+exatamente o contrário do que se poderia supor: uma linha *acrescentada* não tem
+par do lado de então, e a comparação a mostrava sem oferecer nada — quando
+desfazer o que se acabou de escrever é o gesto mais comum de todos. É o que o `»`
+do IntelliJ faz na mesma seta, e é por isso que a seta mora na coluna da
+esquerda mesmo quando ali não há linha nenhuma: ela fala da *fileira*, e a
+fileira existe dos dois lados.
+
+A aplicação grava a linha no arquivo — pela `replace_lines` — e faz três coisas em
+seguida:
 
 1. **refresca o documento aberto**, se ele estiver aberto, sem abrir, sem ativar e
    sem tirar o foco: a janela do Git não fechou, e quem clicou continua nela. Sem
    isto o editor principal ficaria com o texto de antes até alguém reabrir o
    arquivo — a resposta velha parecida com a certa;
-2. **pede realce novo**. A troca sobe a revisão do documento, e o realce
-   guardado é o da revisão anterior — a tela o descarta de propósito, senão
-   coloriria as palavras erradas. Quem não pedir aqui deixa o arquivo *sem cor
-   nenhuma*: o realce do clique é pedido **durante** o clique, e esta troca
-   acontece depois dele, no laço de comandos;
-3. pede a comparação de novo, para as duas colunas e as setas refletirem o que
-   ficou;
-4. pede a margem de novo, pelo mesmo caminho.
+2. **pede realce novo**. A troca sobe a revisão do documento, e o realce guardado
+   é o da revisão anterior — a tela o descarta de propósito, senão coloriria as
+   palavras erradas;
+3. pede a comparação de novo, para as colunas e as setas refletirem o que ficou.
 
 O observador de disco também veria a gravação, 300 ms depois. Quem clicou não
 pode esperar por ele para ver o que acabou de fazer.
@@ -697,12 +707,14 @@ No alto da aba, à direita do nome do arquivo:
 coisa que aconteceu; contá-las como três faria a contagem dizer doze onde quem
 olha vê quatro, e obrigaria a apertar a tecla três vezes para sair de um lugar só.
 
-E é por isso que um bloco de mais de uma linha ganha uma **segunda seta**, `⇒`, ao
-lado da seta da linha: devolver uma alteração de sete linhas eram sete cliques, e
-sete gravações — com os números andando entre uma e outra, porque cada gravação
-move as linhas de baixo. A devolução do trecho é uma gravação só. Num bloco de uma
-linha a seta não aparece: faria exatamente o que a da linha já faz, e duas iguais
-lado a lado só fazem parar para descobrir qual é qual.
+E é por isso que um bloco de mais de uma fileira ganha uma **segunda seta**, `⇒`,
+ao lado da seta da linha: devolver uma alteração de sete linhas eram sete cliques,
+e sete gravações — com os números andando entre uma e outra, porque cada gravação
+move as linhas de baixo. A devolução do trecho é uma gravação só, e vale tanto
+para o bloco que saiu quanto para o **bloco de linhas novas**, que volta a não
+existir de uma vez. Num bloco de uma fileira a seta não aparece: faria exatamente
+o que a da linha já faz, e duas iguais lado a lado só fazem parar para descobrir
+qual é qual.
 
 **Escolher uma linha de um lado escolhe a mesma fileira do outro.** A fileira já
 emparelha as duas versões; escolher à esquerda e a direita continuar noutra linha

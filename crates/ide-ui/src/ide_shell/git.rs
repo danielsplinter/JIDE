@@ -28,7 +28,7 @@ use ui_core::{Modifiers, Point, Rect, ScrollEvent, Size, TokenKind, UiEvent, Wid
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle};
 
-use ide_application::{ApplicationCommand, GitRequest, RestoreTarget};
+use ide_application::{ApplicationCommand, GitRequest};
 use ide_domain::DocumentId;
 use std::path::PathBuf;
 
@@ -120,11 +120,18 @@ const DIFF_ANTERIOR_ID: WidgetId = WidgetId(11_950);
 const DIFF_SEGUINTE_ID: WidgetId = WidgetId(11_951);
 const DIFF_LADO_ID: WidgetId = WidgetId(11_952);
 const DIFF_CONTAGEM_ID: WidgetId = WidgetId(11_953);
-/// Largura e altura do botão que flutua sobre o texto.
+/// Largura e altura das setas que flutuam sobre o texto.
 ///
-/// Menor que a altura padrão de propósito: ele mora **dentro** de uma linha de
-/// texto, e um botão de quarenta pontos cobriria as duas vizinhas.
-const APLICAR_LADO: f32 = 22.0;
+/// Menor que a altura padrão de propósito: elas moram **dentro** de uma linha de
+/// texto, e um botão de quarenta pontos cobriria as duas vizinhas. Não menor do
+/// que isto: um alvo de clique tem de ser alvo.
+const APLICAR_LADO: f32 = 26.0;
+/// O tamanho do glifo das setas.
+///
+/// Maior que o padrão dos botões, e por isso pedido: o padrão encolhe para
+/// caber, o que é certo para rótulo — palavras se leem mesmo pequenas — e errado
+/// para um glifo solto, que pequeno vira um risco na tela.
+const APLICAR_GLIFO: f32 = 20.0;
 /// As linhas da comparação: uma célula por linha de texto.
 const DIFF_LINHA_BASE: WidgetId = WidgetId(12_000);
 /// O botão que fecha a janela, no canto de cima.
@@ -262,16 +269,17 @@ pub struct GitSpan {
     pub end: usize,
 }
 
-/// O que uma seta devolve, e para onde.
+/// O que uma seta devolve, e no lugar de quê.
 ///
 /// Os três juntos porque separados não dizem nada: a fileira é onde a seta é
-/// desenhada, `from` é a linha que sai do arquivo de então, e `target` é o que
-/// fazer com ela do lado de agora — trocar, ou entrar como linha nova.
+/// desenhada, `from` é a faixa que entra do arquivo de então e `to` a que sai do
+/// de agora. Faixas meio-abertas, e cada uma pode ser vazia — é o que faz esta
+/// mesma estrutura servir para trocar, acrescentar **e apagar**.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Devolucao {
     pub(super) fileira: usize,
-    pub(super) from: usize,
-    pub(super) target: RestoreTarget,
+    pub(super) from: (usize, usize),
+    pub(super) to: (usize, usize),
 }
 
 impl GitDiff {
@@ -716,6 +724,14 @@ impl GitSurface {
     /// tinha acabado de pedir — e quem tinha uma mensagem de commit escrita a
     /// perdia no caminho.
     pub(super) fn mostrar_diff(&mut self, diff: GitDiff) {
+        // **Arquivo diferente começa do topo; o mesmo arquivo fica onde estava.**
+        // Devolver uma linha refaz a comparação, e as colunas são remontadas —
+        // jogar a rolagem para o topo a cada devolução fazia quem clicou perder
+        // o lugar em que estava lendo, que é o lugar onde acabou de mexer.
+        if self.diff.as_ref().map(|atual| &atual.path) != Some(&diff.path) {
+            self.colunas_do_diff = None;
+            self.bloco_atual = None;
+        }
         self.diff = Some(diff);
         self.aba_da_janela = AbaDaJanela::Diff;
         // O realce é do arquivo anterior: mantê-lo pintaria as palavras deste
@@ -925,10 +941,35 @@ impl GitSurface {
                 .collect();
             ComposedList::new(WidgetId(base), linhas).with_row_height(ROW_HEIGHT)
         };
-        self.colunas_do_diff = Some([
+        // Onde as colunas estavam, para as novas continuarem ali. Elas são
+        // construídas do zero a cada resposta que chega — o realce chega depois
+        // da comparação, e é outra remontagem —, e uma lista nova nasce no topo.
+        let onde = self.colunas_do_diff.as_ref().map(|listas| {
+            [
+                (
+                    listas[0].scroll_offset(),
+                    listas[0].scroll_x(),
+                    listas[0].selected(),
+                ),
+                (
+                    listas[1].scroll_offset(),
+                    listas[1].scroll_x(),
+                    listas[1].selected(),
+                ),
+            ]
+        });
+        let mut novas = [
             coluna(&diff.committed, DIFF_LINHA_BASE.0, false),
             coluna(&diff.current, DIFF_LINHA_BASE.0 + 100_000, true),
-        ]);
+        ];
+        if let Some(onde) = onde {
+            for (lista, (y, x, escolhida)) in novas.iter_mut().zip(onde) {
+                lista.set_scroll_offset(y);
+                lista.set_scroll_x(x);
+                lista.set_selected(escolhida);
+            }
+        }
+        self.colunas_do_diff = Some(novas);
     }
 
     /// A fileira do lado que não tem nada a mostrar.
@@ -1349,7 +1390,7 @@ impl GitSurface {
                 Some((
                     *seta,
                     Rect::new(
-                        coluna.origin.x + coluna.size.width - APLICAR_LADO - 6.0,
+                        coluna.origin.x + coluna.size.width - APLICAR_LADO - self.margem_das_setas(),
                         topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
                         APLICAR_LADO,
                         APLICAR_LADO,
@@ -1498,7 +1539,7 @@ impl GitSurface {
                     *seta,
                     *fim,
                     Rect::new(
-                        coluna.origin.x + coluna.size.width - APLICAR_LADO * 2.0 - 10.0,
+                        coluna.origin.x + coluna.size.width - APLICAR_LADO * 2.0 - self.margem_das_setas() - 4.0,
                         topo + (ROW_HEIGHT - APLICAR_LADO) / 2.0,
                         APLICAR_LADO,
                         APLICAR_LADO,
@@ -1550,35 +1591,44 @@ impl GitSurface {
 
         let mut blocos: Vec<(usize, usize)> = Vec::new();
         let mut setas: Vec<Devolucao> = Vec::new();
-        // Quantas linhas do arquivo de agora vieram antes desta fileira: é onde
-        // uma linha que só existe do lado de então entra, se for devolvida.
-        let mut adiante = 0usize;
+        // Onde estava cada lado ao chegar nesta fileira. Serve para a faixa
+        // vazia dizer **onde**: uma linha que só existe de um lado não tem
+        // número do outro, e sem isso não haveria posição a que se referir.
+        let mut proxima_antiga = 0usize;
+        let mut proxima_nova = 0usize;
         for (fileira, par) in self.fileiras_do_diff.iter().enumerate() {
+            let antiga = par.old.unwrap_or(proxima_antiga);
+            let nova = par.new.unwrap_or(proxima_nova);
             if mudou(par) {
                 match blocos.last_mut() {
                     // Encostada na anterior: é a mesma alteração continuando.
                     Some(ultimo) if ultimo.1 + 1 == fileira => ultimo.1 = fileira,
                     _ => blocos.push((fileira, fileira)),
                 }
-            }
-            if let Some(antiga) = par.old
-                && removidas.contains(&antiga)
-            {
+                // **A seta existe em toda alteração, e não só onde saiu código.**
+                // Faltava justamente o contrário: uma linha acrescentada não tem
+                // par do lado de então, e devolvê-la é *apagá-la* — que é o
+                // gesto mais comum de todos, o de desfazer o que se acabou de
+                // escrever. Sem ela, a comparação mostrava a linha nova e não
+                // oferecia nada.
+                let entra = par.old.map_or((antiga, antiga), |linha| (linha, linha + 1));
+                let sai = par.new.map_or((nova, nova), |linha| (linha, linha + 1));
                 setas.push(Devolucao {
                     fileira,
-                    from: antiga,
-                    target: par
-                        .new
-                        .map_or(RestoreTarget::Insert(adiante), RestoreTarget::Replace),
+                    from: entra,
+                    to: sai,
                 });
             }
-            if let Some(nova) = par.new {
-                adiante = nova + 1;
+            if let Some(linha) = par.old {
+                proxima_antiga = linha + 1;
+            }
+            if let Some(linha) = par.new {
+                proxima_nova = linha + 1;
             }
         }
 
-        // As setas de trecho saem dos blocos: a primeira e a última linha de
-        // então que cada um leva, e onde ele entra do lado de agora.
+        // As setas de trecho saem dos blocos: a faixa inteira que entra e a
+        // inteira que sai, de uma vez.
         let mut trechos = Vec::new();
         for (comeco, fim) in &blocos {
             let no_bloco: Vec<&Devolucao> = setas
@@ -1588,19 +1638,19 @@ impl GitSurface {
             let (Some(primeira), Some(ultima)) = (no_bloco.first(), no_bloco.last()) else {
                 continue;
             };
-            // Bloco de uma linha só não ganha seta de trecho: ela faria o que a
-            // seta da linha já faz, e duas iguais lado a lado só fazem parar
+            // Bloco de uma fileira só não ganha seta de trecho: ela faria o que
+            // a seta da linha já faz, e duas iguais lado a lado só fazem parar
             // para descobrir qual é qual.
-            if primeira.from == ultima.from {
+            if no_bloco.len() < 2 {
                 continue;
             }
             trechos.push((
                 Devolucao {
                     fileira: *comeco,
-                    from: primeira.from,
-                    target: primeira.target,
+                    from: (primeira.from.0, ultima.from.1),
+                    to: (primeira.to.0, ultima.to.1),
                 },
-                ultima.from,
+                *fim,
             ));
         }
 
@@ -1623,6 +1673,20 @@ impl GitSurface {
         let primeira = (rolagem / ROW_HEIGHT).floor().max(0.0) as usize;
         let quantas = (coluna.size.height / ROW_HEIGHT).ceil() as usize + 1;
         (primeira, primeira + quantas)
+    }
+
+    /// A que distância da borda direita as setas ficam.
+    ///
+    /// Fora da trilha da barra de rolagem, quando há uma: encostadas nela, as
+    /// setas cobriam quatro dos dez pontos da trilha, e ali o clique passava a
+    /// ser delas — a barra deixava de se arrastar naquele trecho. Quanto a barra
+    /// ocupa é a lista quem diz.
+    fn margem_das_setas(&self) -> f32 {
+        self.colunas_do_diff
+            .as_ref()
+            .and_then(|colunas| colunas.first())
+            .map_or(0.0, ComposedList::gutter)
+            + 6.0
     }
 
     /// Onde uma fileira aparece na coluna, se aparecer inteira.
@@ -1743,16 +1807,23 @@ impl GitSurface {
         }
         // E as setas depois dela: elas flutuam sobre o texto, e o que flutua é
         // desenhado por cima do que está embaixo.
-        for (devolucao, _, area_do_botao) in self.botoes_de_trecho(colunas[0]) {
-            let mut trecho = Button::new(
-                WidgetId(APLICAR_BASE.0 + 500_000 + devolucao.fileira as u64),
-                "⇒",
-            )
-            .with_fill(ButtonFill::Transparent)
-            .with_height(APLICAR_LADO);
-            trecho.layout(layout, area_do_botao);
-            trecho.paint(paint);
-        }
+        for (devolucao, _, area_do_botao) in self.botoes_de_trecho(colunas[0]) {
+            let mut trecho = Button::new(
+                WidgetId(APLICAR_BASE.0 + 500_000 + devolucao.fileira as u64),
+                "⇒",
+            )
+            .with_fill(ButtonFill::Transparent)
+            // **Preto, e não a cor de texto nem a de acento.** A seta flutua
+            // sobre código: com a cor de texto ficava igual ao código de baixo,
+            // e com a de acento some dentro da própria faixa realçada — que é
+            // pintada em acento. Um controle que se confunde com o conteúdo é
+            // um controle que ninguém vê.
+            .with_tone(IconTint::Ink)
+            .with_font_size(APLICAR_GLIFO)
+            .with_height(APLICAR_LADO);
+            trecho.layout(layout, area_do_botao);
+            trecho.paint(paint);
+        }
         for (devolucao, area_do_botao) in self.botoes_de_aplicar(colunas[0]) {
             // Um identificador por fileira: dois botões com o mesmo id seriam o
             // mesmo botão para a moldura, e o estado de um cairia no outro.
@@ -1765,6 +1836,8 @@ impl GitSurface {
                 // justamente isso. A borda continua, e é ela que diz que ali se
                 // clica.
                 .with_fill(ButtonFill::Transparent)
+                .with_tone(IconTint::Ink)
+                .with_font_size(APLICAR_GLIFO)
                 .with_height(APLICAR_LADO);
             aplicar.layout(layout, area_do_botao);
             aplicar.paint(paint);
@@ -2066,16 +2139,16 @@ impl GitSurface {
                 // As setas antes das colunas: elas flutuam sobre a de então, e
                 // um clique nelas cairia na linha de baixo se a pergunta viesse
                 // depois.
-                if let Some((devolucao, ultima, _)) = self
+                if let Some((devolucao, _, _)) = self
                     .botoes_de_trecho(colunas[0])
                     .into_iter()
                     .find(|(_, _, area)| area.contains(point))
                     && let Some(caminho) = self.caminho_do_diff()
                 {
-                    return Some(GitRequest::RestoreBlock {
+                    return Some(GitRequest::RestoreRange {
                         path: caminho,
-                        from: (devolucao.from, ultima),
-                        target: devolucao.target,
+                        from: devolucao.from,
+                        to: devolucao.to,
                     });
                 }
                 if let Some((devolucao, _)) = self
@@ -2084,10 +2157,10 @@ impl GitSurface {
                     .find(|(_, area)| area.contains(point))
                     && let Some(caminho) = self.caminho_do_diff()
                 {
-                    return Some(GitRequest::RestoreLine {
+                    return Some(GitRequest::RestoreRange {
                         path: caminho,
                         from: devolucao.from,
-                        target: devolucao.target,
+                        to: devolucao.to,
                     });
                 }
                 if let Some(split) = self.split_do_diff.as_mut()

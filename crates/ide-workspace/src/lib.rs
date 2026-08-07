@@ -14,7 +14,7 @@ use std::{
 use ide_application::{SearchScope, WorkspacePort, WorkspacePortError};
 use thiserror::Error;
 
-pub use document::{BufferError, EditorSession, OpenDocument, TextBuffer, insert_line, rewrite_line, rewrite_occurrences};
+pub use document::{BufferError, EditorSession, OpenDocument, TextBuffer, replace_lines, rewrite_occurrences};
 pub use filesystem::NativeWorkspaceFileSystem;
 pub use search::SearchMatch;
 pub use tree::FileNode;

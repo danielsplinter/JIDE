@@ -1,7 +1,6 @@
 //! Os comandos da comparação: andar entre as alterações, trocar de lado,
 //! devolver um trecho inteiro, e o que a tela recusa comparar.
 
-use ide_application::RestoreTarget;
 use ui_core::Modifiers;
 
 use super::*;
@@ -205,8 +204,8 @@ fn um_bloco_de_varias_linhas_ganha_a_seta_do_trecho() {
     assert!(
         shell.commands.iter().any(|comando| matches!(
             comando,
-            ApplicationCommand::Git(GitRequest::RestoreBlock { path, from, target })
-                if path == &arquivo && *from == (1, 2) && *target == RestoreTarget::Replace(1)
+            ApplicationCommand::Git(GitRequest::RestoreRange { path, from, to })
+                if path == &arquivo && *from == (1, 3) && *to == (1, 3)
         )),
         "a seta do trecho devolve as duas de uma vez: {:?}",
         shell.commands.iter().collect::<Vec<_>>()
@@ -286,4 +285,316 @@ fn arquivo_binario_ganha_um_aviso_no_lugar_das_colunas() {
     let setas = superficie.botoes_de_aplicar_para_teste(&shell.host);
     shell.git = superficie;
     assert!(setas.is_empty(), "e não há seta nenhuma a oferecer");
+}
+
+/// A seta também aparece onde só **entrou** código, e desfaz a adição.
+///
+/// Faltava exatamente isto: a seta só existia onde algo tinha saído. Uma linha
+/// acrescentada não tem par do lado de então, e a comparação a mostrava sem
+/// oferecer nada — quando desfazer o que se acabou de escrever é o gesto mais
+/// comum de todos, e é o que o `»` do IntelliJ faz na mesma seta.
+#[test]
+fn a_seta_desfaz_uma_linha_acrescentada() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    let arquivo = raiz.join("alterado.java");
+
+    // Uma linha nova entre a primeira e a segunda: só existe do lado de agora.
+    assert!(shell.abrir_comparacao(
+        &arquivo,
+        GitDiff {
+            committed: "a\nb\n".to_owned(),
+            current: "a\nnova\nb\n".to_owned(),
+            marks: vec![(1, GitLineChange::Added)],
+            pairs: vec![
+                GitLinePair {
+                    old: Some(0),
+                    new: Some(0),
+                },
+                GitLinePair {
+                    old: None,
+                    new: Some(1),
+                },
+                GitLinePair {
+                    old: Some(1),
+                    new: Some(2),
+                },
+            ],
+            ..GitDiff::default()
+        },
+    ));
+    let _ = shell.paint(size);
+
+    let mut superficie = std::mem::take(&mut shell.git);
+    let setas = superficie.botoes_de_aplicar_para_teste(&shell.host);
+    shell.git = superficie;
+    assert_eq!(
+        setas.len(),
+        1,
+        "a linha acrescentada tem seta, e nada mais tem"
+    );
+
+    shell.commands.retain(|_| false);
+    let botao = setas[0].1;
+    shell.pointer_down(
+        Point::new(
+            botao.origin.x + botao.size.width / 2.0,
+            botao.origin.y + botao.size.height / 2.0,
+        ),
+        size,
+    );
+    assert!(
+        shell.commands.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::RestoreRange { path, from, to })
+                if path == &arquivo && *from == (1, 1) && *to == (1, 2)
+        )),
+        "nada entra e a linha 1 sai: é apagar a linha nova: {:?}",
+        shell.commands.iter().collect::<Vec<_>>()
+    );
+}
+
+/// E um bloco inteiro de linhas novas volta de uma vez só.
+///
+/// É a outra metade do que faltava: o IntelliJ agrupa, e clicar uma vez desfaz o
+/// bloco. Sem isso, um bloco de sete linhas coladas eram sete cliques.
+#[test]
+fn a_seta_do_trecho_desfaz_um_bloco_inteiro_de_linhas_novas() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    let arquivo = raiz.join("alterado.java");
+
+    // Três linhas novas seguidas, e nada removido.
+    assert!(shell.abrir_comparacao(
+        &arquivo,
+        GitDiff {
+            committed: "a\nb\n".to_owned(),
+            current: "a\numa\noutra\nmais\nb\n".to_owned(),
+            marks: vec![
+                (1, GitLineChange::Added),
+                (2, GitLineChange::Added),
+                (3, GitLineChange::Added),
+            ],
+            pairs: vec![
+                GitLinePair {
+                    old: Some(0),
+                    new: Some(0),
+                },
+                GitLinePair {
+                    old: None,
+                    new: Some(1),
+                },
+                GitLinePair {
+                    old: None,
+                    new: Some(2),
+                },
+                GitLinePair {
+                    old: None,
+                    new: Some(3),
+                },
+                GitLinePair {
+                    old: Some(1),
+                    new: Some(4),
+                },
+            ],
+            ..GitDiff::default()
+        },
+    ));
+    let _ = shell.paint(size);
+
+    let mut superficie = std::mem::take(&mut shell.git);
+    let trechos = superficie.botoes_de_trecho_para_teste(&shell.host);
+    shell.git = superficie;
+    assert_eq!(trechos.len(), 1, "as três seguidas são um bloco só");
+
+    shell.commands.retain(|_| false);
+    let botao = trechos[0].2;
+    shell.pointer_down(
+        Point::new(
+            botao.origin.x + botao.size.width / 2.0,
+            botao.origin.y + botao.size.height / 2.0,
+        ),
+        size,
+    );
+    assert!(
+        shell.commands.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::RestoreRange { path, from, to })
+                if path == &arquivo && *from == (1, 1) && *to == (1, 4)
+        )),
+        "as três saem de uma vez, e nada entra: {:?}",
+        shell.commands.iter().collect::<Vec<_>>()
+    );
+}
+
+/// As setas saem em preto, e não na cor do código que está por baixo.
+///
+/// Elas flutuam sobre o texto: na cor de texto ficavam iguais ao código de
+/// baixo, e um controle que se confunde com o conteúdo é um controle que
+/// ninguém vê.
+#[test]
+fn as_setas_saem_em_preto_e_maiores_que_o_texto() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+    assert!(shell.abrir_comparacao(
+        &raiz.join("alterado.java"),
+        GitDiff {
+            committed: "a\nb\nc\nd\n".to_owned(),
+            current: "a\nB\nC\nd\n".to_owned(),
+            marks: vec![(1, GitLineChange::Added), (2, GitLineChange::Added)],
+            removed: vec![1, 2],
+            ..GitDiff::default()
+        },
+    ));
+    let desenhado = shell.paint(size);
+
+    let preto = ui_core::Theme::default().colors.ink;
+    let setas: Vec<(String, f32)> = desenhado
+        .iter()
+        .filter_map(|comando| match comando {
+            PaintCommand::DrawText(texto)
+                if texto.text == "\u{2192}" || texto.text == "\u{21d2}" =>
+            {
+                assert_eq!(texto.color, preto, "a seta {} sai em preto", texto.text);
+                Some((texto.text.clone(), texto.size))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!setas.is_empty(), "há setas a conferir");
+
+    // E maiores que o texto das linhas, que é o que elas precisam vencer.
+    let texto_da_linha = desenhado
+        .iter()
+        .find_map(|comando| match comando {
+            PaintCommand::DrawText(texto) if texto.text.trim() == "a" => Some(texto.size),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        setas.iter().all(|(_, tamanho)| *tamanho > texto_da_linha),
+        "as setas são maiores que o código: {setas:?} contra {texto_da_linha}"
+    );
+}
+
+/// Clicar numa seta não joga a comparação de volta ao topo.
+///
+/// Devolver uma linha refaz a comparação, e as colunas são remontadas — listas
+/// novas nascem no topo. Quem clicou perdia o lugar em que estava lendo, que é
+/// justamente onde acabou de mexer. Vale para toda remontagem: o realce também
+/// chega depois e refaz as colunas.
+#[test]
+fn refazer_a_comparacao_do_mesmo_arquivo_guarda_o_lugar() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let texto = |marca: &str| {
+        (0..200)
+            .map(|numero| format!("linha {numero} {marca}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let comparacao = |marca: &str| GitDiff {
+        committed: texto("entao"),
+        current: texto(marca),
+        marks: vec![(150, GitLineChange::Added)],
+        removed: vec![150],
+        ..GitDiff::default()
+    };
+    let arquivo = raiz.join("alterado.java");
+    assert!(shell.abrir_comparacao(&arquivo, comparacao("agora")));
+    let _ = shell.paint(size);
+
+    // Descer até a alteração, e conferir que se desceu mesmo.
+    shell.key_down("F7");
+    let _ = shell.paint(size);
+    let onde = shell.git_surface().rolagem_do_diff();
+    assert!(onde[0] > 0.0, "a comparação rolou até a alteração: {onde:?}");
+
+    // A mesma comparação de novo — é o que chega depois de devolver uma linha.
+    assert!(shell.abrir_comparacao(&arquivo, comparacao("depois")));
+    let _ = shell.paint(size);
+    assert_eq!(
+        shell.git_surface().rolagem_do_diff(),
+        onde,
+        "o mesmo arquivo continua onde estava"
+    );
+
+    // Arquivo diferente, porém, começa do topo: é outro assunto.
+    assert!(shell.abrir_comparacao(&raiz.join("outro.java"), comparacao("outro")));
+    let _ = shell.paint(size);
+    assert_eq!(
+        shell.git_surface().rolagem_do_diff(),
+        [0.0, 0.0],
+        "outro arquivo começa do começo"
+    );
+}
+
+/// As setas ficam fora da trilha da barra de rolagem.
+///
+/// Encostadas nela, cobriam quatro dos dez pontos da trilha, e ali o clique
+/// passava a ser da seta: a barra deixava de se arrastar naquele trecho.
+#[test]
+fn as_setas_nao_cobrem_a_trilha_da_barra() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    // Comprido o bastante para haver barra.
+    let texto = |marca: &str| {
+        (0..200)
+            .map(|numero| format!("linha {numero} {marca}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(shell.abrir_comparacao(
+        &raiz.join("alterado.java"),
+        GitDiff {
+            committed: texto("entao"),
+            current: texto("agora"),
+            marks: vec![(0, GitLineChange::Added)],
+            removed: vec![0],
+            ..GitDiff::default()
+        },
+    ));
+    let _ = shell.paint(size);
+
+    let mut superficie = std::mem::take(&mut shell.git);
+    let colunas = superficie.colunas_do_diff_para_teste(&shell.host);
+    let setas = superficie.botoes_de_aplicar_para_teste(&shell.host);
+    shell.git = superficie;
+    assert!(!setas.is_empty(), "há seta a conferir");
+
+    let borda = colunas[0].origin.x + colunas[0].size.width;
+    for (_, area) in &setas {
+        let direita = area.origin.x + area.size.width;
+        assert!(
+            direita <= borda - 10.0,
+            "a seta acaba antes da trilha: {direita} contra {borda}"
+        );
+    }
 }

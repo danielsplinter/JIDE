@@ -57,51 +57,35 @@ impl TextBuffer {
     }
 }
 
-/// Troca o conteúdo de uma linha, respeitando o fim de linha do arquivo.
+/// Troca uma faixa de linhas por outras, respeitando o fim de linha do arquivo.
 ///
-/// **O fim de linha é o do arquivo, e não o da máquina.** Reescrever com `\n` um
-/// arquivo que usa `\r\n` marcaria *todas* as linhas como alteradas: devolver
-/// uma linha viraria um diff inteiro, e quem pediu a devolução de uma linha veria
-/// o arquivo inteiro ficar verde.
+/// **Uma operação só, porque na tela é um gesto só.** Devolver uma linha ao
+/// estado do último commit pode ser trocar, acrescentar ou apagar, e as três são
+/// a mesma coisa vista de fora: *a faixa de então entra no lugar da faixa de
+/// agora*. Separá-las em três funções fazia quem chama decidir qual usar, e
+/// decidir errado apaga código.
 ///
-/// Uma linha além do fim é acrescentada: é o caso de devolver a última linha de
-/// um arquivo que encolheu.
+/// A faixa é meio-aberta. Vazia — `start == end` — quer dizer **onde**, e não *o
+/// quê*: nada sai daquela posição, e as linhas novas entram ali.
 ///
-/// Vive aqui, e não na aplicação, porque é manipulação de texto e tem o mesmo
-/// dono que [`rewrite_occurrences`] — e porque assim se testa sem gravar nada.
+/// # O fim de linha é o do arquivo
+///
+/// Reescrever com `\n` um arquivo que usa `\r\n` marcaria *todas* as linhas como
+/// alteradas: devolver uma linha viraria um diff inteiro, e quem pediu uma linha
+/// veria o arquivo inteiro ficar verde.
 #[must_use]
-pub fn rewrite_line(text: &str, line: usize, replacement: String) -> String {
+pub fn replace_lines(text: &str, range: std::ops::Range<usize>, novas: &[String]) -> String {
     let quebra = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let terminava_com_quebra = text.ends_with('\n');
-    let mut linhas: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
-    if line < linhas.len() {
-        linhas[line] = replacement;
-    } else {
-        linhas.push(replacement);
-    }
-    let mut novo = linhas.join(quebra);
-    if terminava_com_quebra {
-        novo.push_str(quebra);
-    }
-    novo
-}
-
-/// Acrescenta uma linha numa posição, respeitando o fim de linha do arquivo.
-///
-/// **Irmã de [`rewrite_line`], e diferente dela no que importa.** Devolver ao
-/// arquivo uma linha que *saiu* dele não é trocar a linha que está naquela
-/// posição — essa é outra linha, que ninguém mandou tocar. É acrescentar, e
-/// empurrar o resto para baixo.
-///
-/// Posição além do fim entra no fim, que é onde ela cabe.
-#[must_use]
-pub fn insert_line(text: &str, at: usize, novo: String) -> String {
-    let quebra = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    // Arquivo vazio não tem quebra para copiar, e a linha acrescentada precisa
-    // terminar: sem isto, a seguinte grudaria nela.
+    // Arquivo vazio não tem quebra para copiar, e o que entra nele precisa
+    // terminar: sem isso, a linha seguinte grudaria na última.
     let terminava_com_quebra = text.is_empty() || text.ends_with('\n');
     let mut linhas: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
-    linhas.insert(at.min(linhas.len()), novo);
+    let start = range.start.min(linhas.len());
+    let end = range.end.clamp(start, linhas.len());
+    linhas.splice(start..end, novas.iter().cloned());
+    if linhas.is_empty() {
+        return String::new();
+    }
     let mut resultado = linhas.join(quebra);
     if terminava_com_quebra {
         resultado.push_str(quebra);
@@ -306,72 +290,53 @@ pub enum BufferError {
 mod tests {
     use super::*;
 
-    /// A troca de uma linha guarda o fim de linha que o arquivo já usava.
+    /// Trocar, acrescentar e apagar são a mesma faixa, e o arquivo continua seu.
     ///
-    /// É o que separa "uma linha mudou" de "o arquivo inteiro mudou": num
-    /// arquivo com CRLF, escrever LF marca todas as linhas como alteradas.
+    /// O fim de linha é o que separa "uma linha mudou" de "o arquivo inteiro
+    /// mudou": num arquivo com CRLF, escrever LF marca todas as linhas.
     #[test]
-    fn trocar_uma_linha_guarda_o_fim_de_linha_do_arquivo() {
-        let unix = "um\ndois\ntres\n";
+    fn trocar_uma_faixa_cobre_os_tres_gestos_e_guarda_o_fim_de_linha() {
+        let linha = |texto: &str| vec![texto.to_owned()];
+
+        // Trocar: a faixa de agora sai, a de então entra.
         assert_eq!(
-            rewrite_line(unix, 1, "DOIS".to_owned()),
+            replace_lines("um\ndois\ntres\n", 1..2, &linha("DOIS")),
             "um\nDOIS\ntres\n"
         );
-
-        let windows = "um\r\ndois\r\ntres\r\n";
         assert_eq!(
-            rewrite_line(windows, 1, "DOIS".to_owned()),
+            replace_lines("um\r\ndois\r\ntres\r\n", 1..2, &linha("DOIS")),
             "um\r\nDOIS\r\ntres\r\n",
             "o arquivo usava CRLF, e continua usando"
         );
 
-        // Sem quebra no fim, continua sem: acrescentar uma seria uma alteração
-        // que ninguém pediu, na última linha.
-        assert_eq!(rewrite_line("um\ndois", 0, "UM".to_owned()), "UM\ndois");
-
-        // Linha além do fim: o arquivo encolheu, e a linha volta no fim dele.
+        // Acrescentar: faixa vazia diz **onde**, e o resto desce.
         assert_eq!(
-            rewrite_line("um\n", 5, "novo".to_owned()),
-            "um\nnovo\n",
-            "devolver uma linha que já não existe a acrescenta"
-        );
-    }
-
-    #[test]
-    fn unicode_edits_require_valid_boundaries() {
-        let mut buffer = TextBuffer::new("ação");
-        assert!(buffer.replace(0..2, "A").is_err());
-        assert!(buffer.replace(0..3, "A").is_ok());
-        assert_eq!(buffer.text(), "Aão");
-        assert!(buffer.is_dirty());
-    }
-
-    /// Acrescentar não é trocar: a linha de baixo continua onde estava.
-    ///
-    /// É o caso da linha que foi *removida* e volta pela seta da comparação.
-    /// Trocá-la pela que está naquela posição apagaria conteúdo que ninguém
-    /// mandou tocar.
-    #[test]
-    fn acrescentar_uma_linha_empurra_o_resto_para_baixo() {
-        assert_eq!(
-            insert_line("a\nc\n", 1, "b".to_owned()),
+            replace_lines("a\nc\n", 1..1, &linha("b")),
             "a\nb\nc\n",
             "o `c` continua no arquivo"
         );
+
+        // Apagar: nada entra, e é assim que se desfaz uma linha acrescentada.
         assert_eq!(
-            insert_line("a\r\nc\r\n", 1, "b".to_owned()),
-            "a\r\nb\r\nc\r\n",
-            "e o fim de linha do arquivo é respeitado"
+            replace_lines("a\nnova\nb\n", 1..2, &[]),
+            "a\nb\n",
+            "a linha some, e só ela"
         );
         assert_eq!(
-            insert_line("", 0, "primeira".to_owned()),
-            "primeira\n",
-            "arquivo vazio ganha a linha, terminada"
+            replace_lines("a\numa\noutra\nb\n", 1..3, &[]),
+            "a\nb\n",
+            "um bloco inteiro de uma vez"
         );
+
+        // Casos de borda: sem quebra no fim continua sem, arquivo vazio ganha
+        // a linha terminada, e faixa além do fim entra no fim.
+        assert_eq!(replace_lines("um\ndois", 0..1, &linha("UM")), "UM\ndois");
+        assert_eq!(replace_lines("", 0..0, &linha("primeira")), "primeira\n");
+        assert_eq!(replace_lines("a\n", 9..9, &linha("fim")), "a\nfim\n");
         assert_eq!(
-            insert_line("a\n", 9, "fim".to_owned()),
-            "a\nfim\n",
-            "posição além do fim entra no fim"
+            replace_lines("so\n", 0..1, &[]),
+            "",
+            "apagar tudo devolve o vazio, e não uma quebra solta"
         );
     }
 
