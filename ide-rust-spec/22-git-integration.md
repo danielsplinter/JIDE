@@ -541,6 +541,40 @@ mostra tudo; texto não vazio esconde o que não casa, e esconde o nó que ficou
 filho — um `tags` aberto e vazio depois de digitar diz que não há tag nenhuma, o
 que é mentira.
 
+### Criar uma branch: um diálogo, e a base escolhida
+
+O botão fica **na barra do alto, ao lado do `Push`**: criar uma branch é uma
+ação do repositório como as outras três. Ele morava no rodapé da árvore, com um
+campo permanente ao lado — um campo que passa o dia inteiro vazio esperando ser
+usado uma vez por semana.
+
+O clique abre um diálogo pequeno: um campo e um `OK`. `Enter` confirma, `Esc`
+fecha, e clicar fora fecha também — ele tem uma pergunta só, e desistir dela não
+perde trabalho. O que se digitou vai junto quando ele fecha: um nome esquecido de
+ontem seria criado por engano amanhã.
+
+Dentro dele, de cima para baixo: o **nome**, um **filtro com o botão `Buscar`** ao
+lado, e a **combo das bases**.
+
+**A combo abre na branch em que se está** — é de lá que quase toda branch nova
+sai, e obrigar a escolher o óbvio a cada vez é cobrar um gesto por nada. Ela
+oferece as locais **e as remotas**: `git switch --create nova origin/main` é tão
+válido quanto a partir de uma local, e quem acabou de buscar do remoto quer
+justamente essa.
+
+*O filtro existe porque a lista é a do repositório inteiro.* Num projeto com
+sessenta branches, achar a certa rolando é pior do que escrever três letras. E
+filtrar é **procurar, não escolher**: a base escolhida continua escolhida se ela
+sobreviver ao filtro.
+
+`Tab` anda entre o nome e o filtro. `Enter` faz o que o campo em foco pede — no
+filtro, busca; no nome, cria.
+
+*Escolher a base é diferente de trocar antes e criar depois.* O segundo caminho
+passa pela árvore de trabalho da base e **recusa** quando há alteração que o
+`checkout` sobrescreveria — que é justamente a hora em que mais se cria branch.
+Nascer direto de uma referência não mexe no que está aberto.
+
 ### O lado direito: duas abas
 
 `Tabs` da biblioteca, com `status` e `history`.

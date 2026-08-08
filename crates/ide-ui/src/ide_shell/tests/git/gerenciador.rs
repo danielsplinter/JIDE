@@ -389,15 +389,17 @@ fn a_caixa_do_nome_cria_a_branch_sem_mexer_na_busca() {
     shell.text_input("feat");
     assert_eq!(shell.git_surface().query(), "feat");
 
-    // Depois a caixa do nome, embaixo da árvore.
-    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
-    let faixa_do_nome = Point::new(
-        arvore.origin.x + 20.0,
-        arvore.origin.y + arvore.size.height + 12.0,
+    // Depois o diálogo, aberto pelo botão da barra do alto.
+    let branch = shell.git_surface().botao_de_branch_para_teste(&shell.host);
+    shell.pointer_down(
+        Point::new(
+            branch.origin.x + branch.size.width / 2.0,
+            branch.origin.y + branch.size.height / 2.0,
+        ),
+        size,
     );
-    shell.pointer_down(faixa_do_nome, size);
     shell.text_input("feature/git");
-    assert_eq!(shell.git_surface().nome_novo(), "feature/git");
+    assert_eq!(shell.git_surface().nome_novo(), Some("feature/git"));
     assert_eq!(
         shell.git_surface().query(),
         "feat",
@@ -406,25 +408,29 @@ fn a_caixa_do_nome_cria_a_branch_sem_mexer_na_busca() {
     let _ = shell.paint(size);
     shell.commands.retain(|_| false);
 
-    // E o botão cria.
-    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
+    // E o `OK` cria, a partir da branch escolhida na árvore.
+    let contexto = shell.layout_context();
+    let ok = shell
+        .git_surface()
+        .areas_do_dialogo_para_teste(&shell.host, contexto.theme())[5];
     shell.pointer_down(
         Point::new(
-            arvore.origin.x + arvore.size.width - 40.0,
-            arvore.origin.y + arvore.size.height + 12.0,
+            ok.origin.x + ok.size.width / 2.0,
+            ok.origin.y + ok.size.height / 2.0,
         ),
         size,
     );
     assert!(
         shell.commands.iter().any(|comando| matches!(
             comando,
-            ApplicationCommand::Git(GitRequest::CreateBranch(nome)) if nome == "feature/git"
+            ApplicationCommand::Git(GitRequest::CreateBranch { name, .. }) if name == "feature/git"
         )),
-        "o botão cria a branch com o nome digitado"
+        "o `OK` cria a branch com o nome digitado: {:?}",
+        shell.commands.iter().collect::<Vec<_>>()
     );
     assert!(
-        shell.git_surface().nome_novo().is_empty(),
-        "e a caixa esvazia, porque o nome já foi usado"
+        shell.git_surface().nome_novo().is_none(),
+        "e o diálogo fecha, porque o nome já foi usado"
     );
 }
 /// As três ações do repositório moram na barra do alto.
@@ -602,5 +608,285 @@ fn as_barras_do_gerenciador_rolam_no_arrasto() {
         shell.git_surface().rolagem_da_arvore(),
         depois,
         "solto, o ponteiro não arrasta mais"
+    );
+}
+
+/// `Enter` cria, e a base é a da combo — que abre na branch em que se está.
+///
+/// **O padrão é onde o usuário fez checkout**: é de lá que quase toda branch
+/// nova sai, e obrigar a escolher o óbvio a cada vez é cobrar um gesto por nada.
+#[test]
+fn o_enter_cria_a_partir_da_branch_em_que_se_esta() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(GitView {
+        head: Some("release/1.0".to_owned()),
+        branches: vec![
+            BranchItem {
+                name: "main".to_owned(),
+                ..BranchItem::default()
+            },
+            BranchItem {
+                name: "release/1.0".to_owned(),
+                current: true,
+                ..BranchItem::default()
+            },
+        ],
+        ..GitView::default()
+    });
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let branch = shell.git_surface().botao_de_branch_para_teste(&shell.host);
+    shell.pointer_down(
+        Point::new(
+            branch.origin.x + branch.size.width / 2.0,
+            branch.origin.y + branch.size.height / 2.0,
+        ),
+        size,
+    );
+    shell.text_input("feature/nova");
+    shell.commands.retain(|_| false);
+    shell.key_down("Enter");
+
+    assert!(
+        shell.commands.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::CreateBranch { name, base })
+                if name == "feature/nova" && base.as_deref() == Some("release/1.0")
+        )),
+        "a base é a branch em que se está: {:?}",
+        shell.commands.iter().collect::<Vec<_>>()
+    );
+}
+
+/// O `Buscar` filtra as bases da combo, e a escolhida sobrevive ao filtro.
+///
+/// A lista de bases é a do repositório inteiro; num projeto com sessenta
+/// branches, achar a certa rolando é pior do que escrever três letras. E
+/// filtrar é procurar, não escolher: quem digitou para conferir não quer voltar
+/// com outra base selecionada.
+#[test]
+fn o_buscar_filtra_as_bases_sem_trocar_a_escolhida() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        branches: vec![
+            BranchItem {
+                name: "main".to_owned(),
+                current: true,
+                ..BranchItem::default()
+            },
+            BranchItem {
+                name: "release/1.0".to_owned(),
+                ..BranchItem::default()
+            },
+            BranchItem {
+                name: "release/2.0".to_owned(),
+                ..BranchItem::default()
+            },
+        ],
+        remotes: vec!["origin/main".to_owned()],
+        ..GitView::default()
+    });
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let branch = shell.git_surface().botao_de_branch_para_teste(&shell.host);
+    shell.pointer_down(
+        Point::new(
+            branch.origin.x + branch.size.width / 2.0,
+            branch.origin.y + branch.size.height / 2.0,
+        ),
+        size,
+    );
+    assert_eq!(
+        shell.git_surface().bases_do_dialogo_para_teste(),
+        vec![
+            "main".to_owned(),
+            "release/1.0".to_owned(),
+            "release/2.0".to_owned(),
+            "origin/main".to_owned(),
+        ],
+        "as locais e as remotas, que são bases tão válidas quanto"
+    );
+
+    // Escrever no filtro e buscar.
+    let contexto = shell.layout_context();
+    let areas = shell
+        .git_surface()
+        .areas_do_dialogo_para_teste(&shell.host, contexto.theme());
+    let (campo_da_busca, botao_de_buscar) = (areas[2], areas[3]);
+    shell.pointer_down(
+        Point::new(
+            campo_da_busca.origin.x + 10.0,
+            campo_da_busca.origin.y + campo_da_busca.size.height / 2.0,
+        ),
+        size,
+    );
+    shell.text_input("release");
+    shell.pointer_down(
+        Point::new(
+            botao_de_buscar.origin.x + botao_de_buscar.size.width / 2.0,
+            botao_de_buscar.origin.y + botao_de_buscar.size.height / 2.0,
+        ),
+        size,
+    );
+    assert_eq!(
+        shell.git_surface().bases_do_dialogo_para_teste(),
+        vec!["release/1.0".to_owned(), "release/2.0".to_owned()],
+        "só o que casa com o filtro"
+    );
+
+    // O nome digitado antes do filtro continua lá: os dois campos são dois.
+    assert_eq!(shell.git_surface().nome_novo(), Some(""));
+}
+
+/// `Esc` fecha o diálogo sem criar nada, e sem fechar a janela.
+#[test]
+fn o_escape_fecha_o_dialogo_e_nao_a_janela() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let branch = shell.git_surface().botao_de_branch_para_teste(&shell.host);
+    shell.pointer_down(
+        Point::new(
+            branch.origin.x + branch.size.width / 2.0,
+            branch.origin.y + branch.size.height / 2.0,
+        ),
+        size,
+    );
+    shell.text_input("descartada");
+    assert_eq!(shell.git_surface().nome_novo(), Some("descartada"));
+
+    shell.commands.retain(|_| false);
+    shell.key_down("Escape");
+    assert!(shell.git_surface().nome_novo().is_none(), "o diálogo fechou");
+    assert!(shell.git_surface().is_open(), "e a janela continua aberta");
+    assert!(
+        !shell.commands.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::CreateBranch { .. })
+        )),
+        "e nada foi criado"
+    );
+
+    // E o nome não volta: abrir de novo começa vazio.
+    shell.pointer_down(
+        Point::new(
+            branch.origin.x + branch.size.width / 2.0,
+            branch.origin.y + branch.size.height / 2.0,
+        ),
+        size,
+    );
+    assert_eq!(shell.git_surface().nome_novo(), Some(""));
+}
+
+/// O diálogo é desenhado por cima da janela, e não atrás dela.
+///
+/// Ele nasceu atrás dos painéis: a chamada que o pintava estava três linhas
+/// acima de onde precisava estar. Quem flutua diz que flutua, e a camada de
+/// cima da biblioteca resolve a ordem — esta tela não depende mais de ser a
+/// última a falar.
+#[test]
+fn o_dialogo_de_branch_fica_por_cima_da_janela() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    let raiz = shell.workspace_root().to_path_buf();
+    shell.set_git_view(retrato_com_alteracoes(&raiz));
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let branch = shell.git_surface().botao_de_branch_para_teste(&shell.host);
+    shell.pointer_down(
+        Point::new(
+            branch.origin.x + branch.size.width / 2.0,
+            branch.origin.y + branch.size.height / 2.0,
+        ),
+        size,
+    );
+    let desenhado = shell.paint(size);
+
+    let posicao = |procurado: &str| {
+        desenhado
+            .iter()
+            .position(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == procurado))
+    };
+    let (Some(dialogo), Some(atras)) = (posicao("Nova branch"), posicao("alterado.java")) else {
+        panic!("o diálogo e o painel precisam estar na tela");
+    };
+    assert!(
+        dialogo > atras,
+        "o diálogo é desenhado depois do que ele cobre: {dialogo} contra {atras}"
+    );
+
+}
+
+/// A lista aberta da combo fica acima do `OK`, que é pintado depois dela.
+///
+/// Relatado duas vezes. A combo já punha a lista numa camada; a camada protege
+/// do que **já** foi pintado, e o `OK` vem depois. Camadas empilham: o que
+/// flutua dentro do diálogo sobe mais uma altura que o diálogo inteiro.
+#[test]
+fn a_lista_da_combo_fica_acima_do_ok() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(GitView {
+        head: Some("main".to_owned()),
+        branches: vec![BranchItem {
+            name: "main".to_owned(),
+            current: true,
+            ..BranchItem::default()
+        }],
+        remotes: vec!["origin/main".to_owned()],
+        ..GitView::default()
+    });
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    // Abrir o diálogo e depois a combo.
+    let branch = shell.git_surface().botao_de_branch_para_teste(&shell.host);
+    shell.pointer_down(
+        Point::new(
+            branch.origin.x + branch.size.width / 2.0,
+            branch.origin.y + branch.size.height / 2.0,
+        ),
+        size,
+    );
+    let contexto = shell.layout_context();
+    let combo = shell
+        .git_surface()
+        .areas_do_dialogo_para_teste(&shell.host, contexto.theme())[4];
+    shell.pointer_down(
+        Point::new(
+            combo.origin.x + combo.size.width / 2.0,
+            combo.origin.y + combo.size.height / 2.0,
+        ),
+        size,
+    );
+    let desenhado = shell.paint(size);
+
+    // `origin/main` só aparece na lista aberta; `OK` é o botão do diálogo.
+    let posicao = |procurado: &str| {
+        desenhado
+            .iter()
+            .position(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == procurado))
+    };
+    let (Some(lista), Some(ok)) = (posicao("origin/main"), posicao("OK")) else {
+        panic!("a lista aberta e o `OK` precisam estar na tela");
+    };
+    assert!(
+        lista > ok,
+        "a lista é desenhada depois do botão que ela cobre: {lista} contra {ok}"
     );
 }

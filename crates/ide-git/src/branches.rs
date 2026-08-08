@@ -27,5 +27,15 @@ pub trait BranchService: Send + Sync {
     /// Criar sem ir para lá é o caso raro, e ele se resolve trocando de volta;
     /// criar e ficar onde estava é o que quase ninguém quer, e daria uma branch
     /// que existe e não se usa.
-    async fn create(&self, name: &BranchName) -> GitResult<()>;
+    ///
+    /// # De onde a branch nasce
+    ///
+    /// `base` é a branch de onde ela sai. `None` é "de onde se está", que é o
+    /// que o `git` faz sozinho — e é o certo quando ninguém escolheu outra.
+    ///
+    /// **Escolher a base é diferente de trocar antes e criar depois**: o segundo
+    /// caminho passa pela árvore de trabalho da base, e recusa quando há
+    /// alteração que o `checkout` sobrescreveria. Nascer direto de uma
+    /// referência não mexe no que está aberto.
+    async fn create(&self, name: &BranchName, base: Option<&BranchName>) -> GitResult<()>;
 }

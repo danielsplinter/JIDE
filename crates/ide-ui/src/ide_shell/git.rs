@@ -20,8 +20,9 @@
 
 use super::{JANELA_TITULO};
 use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
+use ui_core::EventResult;
 use ui_components::{
-    Button, ButtonAlign, ButtonFill, CellWidth, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
+    Button, ButtonAlign, ButtonFill, CellWidth, ComboBox, ComboBoxItem, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
     ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, Panel, SplitOrientation,
     SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar, ToolbarAlign,
 };
@@ -150,9 +151,20 @@ const TOOLBAR_ID: WidgetId = WidgetId(10_530);
 const FETCH_ID: WidgetId = WidgetId(11_920);
 const PULL_ID: WidgetId = WidgetId(11_921);
 const PUSH_ID: WidgetId = WidgetId(11_922);
-/// A caixa do nome da branch nova, e o botão que a cria.
-const NOVA_ID: WidgetId = WidgetId(11_910);
-const CRIAR_ID: WidgetId = WidgetId(11_911);
+/// O botão da barra que abre o diálogo de criar branch.
+const NOVA_BRANCH_ID: WidgetId = WidgetId(11_912);
+/// O diálogo em si: a moldura, o campo e o `OK`.
+const DIALOGO_ID: WidgetId = WidgetId(11_913);
+const DIALOGO_CAMPO_ID: WidgetId = WidgetId(11_914);
+const DIALOGO_OK_ID: WidgetId = WidgetId(11_915);
+const DIALOGO_BUSCA_ID: WidgetId = WidgetId(11_916);
+const DIALOGO_BUSCAR_ID: WidgetId = WidgetId(11_917);
+const DIALOGO_COMBO_ID: WidgetId = WidgetId(11_918);
+/// O tamanho do diálogo de criar branch.
+///
+/// Pequeno de propósito: ele tem uma pergunta só, e uma janela grande para uma
+/// pergunta só faz procurar o que mais ela quer.
+const DIALOGO_TAMANHO: Size = Size::new(400.0, 260.0);
 /// Os dois botões do estado intermediário: continuar e abortar.
 const CONTINUAR_ID: WidgetId = WidgetId(11_912);
 const ABORTAR_ID: WidgetId = WidgetId(11_913);
@@ -278,6 +290,34 @@ pub struct GitSpan {
     pub line: usize,
     pub start: usize,
     pub end: usize,
+}
+
+/// O que o diálogo de criar branch tem dentro.
+///
+/// **Um nome, um filtro e uma base.** O filtro existe porque a lista de bases é
+/// a do repositório inteiro: num projeto com sessenta branches, achar a certa
+/// numa lista rolando é pior do que escrever três letras.
+pub(super) struct NovaBranch {
+    /// O nome da branch a criar.
+    nome: String,
+    /// O que se digitou para filtrar a lista de bases.
+    busca: String,
+    /// Onde o texto digitado entra.
+    foco: FocoDoDialogo,
+    /// As bases, já filtradas, e qual delas está escolhida.
+    ///
+    /// É um componente, e não uma lista de nomes: a abertura, a escolha e o
+    /// teclado são dele, e refazer isso aqui seria escrever uma combo à mão.
+    combo: ComboBox,
+}
+
+/// Qual campo do diálogo recebe o que se digita.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum FocoDoDialogo {
+    /// O nome, que é onde o cursor nasce: é a pergunta do diálogo.
+    #[default]
+    Nome,
+    Busca,
 }
 
 /// O que uma seta devolve, e no lugar de quê.
@@ -491,9 +531,21 @@ pub(super) struct GitSurface {
     ///
     /// Caixa própria, e não a da busca: procurar e nomear são duas coisas, e uma
     /// caixa que fizesse as duas criaria branch com o texto de um filtro.
-    nome_novo: String,
+
     /// Se o cursor está na caixa do nome da branch nova.
-    nomeando: bool,
+    /// O que o teclado pediu e ainda não foi entregue.
+    ///
+    /// O clique devolve um `GitRequest` de volta a quem o chamou; a tecla, não —
+    /// ela responde só `true` ou `false`. `Enter` no diálogo precisa das duas
+    /// coisas, e esta é a passagem: a janela guarda o pedido e a tela o recolhe
+    /// no mesmo gesto.
+    pendente: Option<GitRequest>,
+    /// O diálogo de criar branch, quando ele está aberto.
+    ///
+    /// `None` é fechado. O estado inteiro vive aqui dentro, e não em campos
+    /// soltos: fechar joga fora o que não foi usado — um nome esquecido de
+    /// ontem seria criado por engano amanhã.
+    criando: Option<NovaBranch>,
     /// Qual aba da janela está na frente.
     aba_da_janela: AbaDaJanela,
     /// A comparação que a aba `Diff` mostra, quando alguém pediu uma.
@@ -637,16 +689,6 @@ pub(super) fn attach(host: &mut UiHost, layer: WidgetId) {
         TREE_ID,
         LayoutStyle {
             flex_grow: 1.0,
-            ..LayoutStyle::default()
-        },
-    );
-    // A faixa de criar branch fica **embaixo** da árvore: criar é o que se faz
-    // depois de olhar o que já existe, e no alto ela disputaria com a busca.
-    let _ = host.declare(
-        SIDE_ID,
-        NOVA_ID,
-        LayoutStyle {
-            height: Some(Button::HEIGHT),
             ..LayoutStyle::default()
         },
     );
@@ -1149,8 +1191,11 @@ impl GitSurface {
             self.mensagem.push_str(texto);
             return;
         }
-        if self.nomeando {
-            self.nome_novo.push_str(texto);
+        if let Some(dialogo) = self.criando.as_mut() {
+            match dialogo.foco {
+                FocoDoDialogo::Nome => dialogo.nome.push_str(texto),
+                FocoDoDialogo::Busca => dialogo.busca.push_str(texto),
+            }
             return;
         }
         self.busca.push_str(texto);
@@ -1182,11 +1227,46 @@ impl GitSurface {
                 _ => return false,
             }
         }
-        if self.nomeando {
-            if key != "Backspace" {
-                return false;
+        // O diálogo de criar branch fica **na frente de tudo**: enquanto ele
+        // está aberto, a janela inteira espera por ele.
+        if self.criando.is_some() {
+            match key {
+                "Backspace" => {
+                    if let Some(dialogo) = self.criando.as_mut() {
+                        match dialogo.foco {
+                            FocoDoDialogo::Nome => dialogo.nome.pop(),
+                            FocoDoDialogo::Busca => dialogo.busca.pop(),
+                        };
+                    }
+                }
+                // `Tab` anda entre os dois campos, como em qualquer formulário.
+                "Tab" => {
+                    if let Some(dialogo) = self.criando.as_mut() {
+                        dialogo.foco = match dialogo.foco {
+                            FocoDoDialogo::Nome => FocoDoDialogo::Busca,
+                            FocoDoDialogo::Busca => FocoDoDialogo::Nome,
+                        };
+                    }
+                }
+                // `Enter` faz o que o campo em foco pede: no filtro, busca;
+                // no nome, cria — como o `OK`. Um diálogo se confirma no
+                // teclado sem tirar a mão dele.
+                "Enter" => {
+                    let filtrando = self
+                        .criando
+                        .as_ref()
+                        .is_some_and(|dialogo| dialogo.foco == FocoDoDialogo::Busca);
+                    if filtrando {
+                        self.filtrar_bases();
+                    } else if let Some(pedido) = self.criar_branch() {
+                        self.pendente = Some(pedido);
+                    }
+                }
+                // `Esc` fecha sem criar: é a saída de todo diálogo, e o que
+                // se digitou vai junto — ver o campo `criando`.
+                "Escape" => self.criando = None,
+                _ => return false,
             }
-            self.nome_novo.pop();
             return true;
         }
         if key != "Backspace" {
@@ -1480,6 +1560,260 @@ impl GitSurface {
     /// O painel que emoldura a comparação.
     fn painel_do_diff() -> Panel {
         Panel::new(DIFF_ID, SurfaceTone::Surface).with_border()
+    }
+
+    /// Onde o diálogo de criar branch fica, e as áreas de dentro dele.
+    ///
+    /// **No meio da janela**, que é onde se procura o que interrompe. Devolve a
+    /// moldura, o nome, o filtro, o `Buscar`, a combo e o `OK`, nessa ordem —
+    /// uma conta só, para o desenho e o clique não divergirem.
+    fn areas_do_dialogo(painel: Rect, theme: &Theme) -> [Rect; 6] {
+        let moldura = Rect::new(
+            painel.origin.x + (painel.size.width - DIALOGO_TAMANHO.width) / 2.0,
+            painel.origin.y + (painel.size.height - DIALOGO_TAMANHO.height) / 2.0,
+            DIALOGO_TAMANHO.width,
+            DIALOGO_TAMANHO.height,
+        );
+        let dentro = Rect::new(
+            moldura.origin.x + theme.spacing.lg,
+            moldura.origin.y + theme.spacing.lg,
+            moldura.size.width - theme.spacing.lg * 2.0,
+            moldura.size.height - theme.spacing.lg * 2.0,
+        );
+        let linha = |ordem: f32| {
+            dentro.origin.y
+                + TITULO_ALTURA
+                + theme.spacing.sm
+                + ordem * (Button::HEIGHT + theme.spacing.sm)
+        };
+        let campo = Rect::new(dentro.origin.x, linha(0.0), dentro.size.width, Button::HEIGHT);
+        // O botão de buscar fica ao lado do filtro, e o filtro fica com o resto.
+        let buscar = Rect::new(
+            dentro.origin.x + dentro.size.width - ACAO_LARGURA,
+            linha(1.0),
+            ACAO_LARGURA,
+            Button::HEIGHT,
+        );
+        let busca = Rect::new(
+            dentro.origin.x,
+            linha(1.0),
+            (dentro.size.width - ACAO_LARGURA - theme.spacing.sm).max(0.0),
+            Button::HEIGHT,
+        );
+        let combo = Rect::new(dentro.origin.x, linha(2.0), dentro.size.width, Button::HEIGHT);
+        let ok = Rect::new(
+            dentro.origin.x + dentro.size.width - ACAO_LARGURA,
+            dentro.origin.y + dentro.size.height - Button::HEIGHT,
+            ACAO_LARGURA,
+            Button::HEIGHT,
+        );
+        [moldura, campo, busca, buscar, combo, ok]
+    }
+
+    /// As bases que a combo oferece, filtradas pelo que se escreveu.
+    ///
+    /// **As locais e as remotas**: `git switch --create nova origin/main` é tão
+    /// válido quanto a partir de uma local, e quem acabou de buscar do remoto
+    /// quer justamente essa.
+    fn bases_para(&self, filtro: &str) -> Vec<ComboBoxItem> {
+        let filtro = filtro.trim().to_lowercase();
+        self.view
+            .branches
+            .iter()
+            .map(|branch| branch.name.clone())
+            .chain(self.view.remotes.iter().cloned())
+            .filter(|nome| filtro.is_empty() || nome.to_lowercase().contains(&filtro))
+            .map(|nome| ComboBoxItem::new(nome.clone(), nome))
+            .collect()
+    }
+
+    /// A branch de onde a nova vai nascer: a escolhida na combo.
+    ///
+    /// `None` quando não há nenhuma — e aí o `git` cria de onde se está, que é o
+    /// que ele faz sozinho. Nomear a base no diálogo é o que evita a pergunta
+    /// "de onde essa branch saiu?" depois de criada.
+    fn base_escolhida(&self) -> Option<String> {
+        self.criando
+            .as_ref()?
+            .combo
+            .selected_item()
+            .map(|item| item.value.clone())
+    }
+
+    /// Abre o diálogo, com a combo já na branch em que se está.
+    ///
+    /// **O padrão é onde o usuário fez checkout**: é de lá que quase toda branch
+    /// nova sai, e obrigar a escolher o óbvio a cada vez é cobrar um gesto por
+    /// nada.
+    fn abrir_dialogo_de_branch(&mut self) {
+        let itens = self.bases_para("");
+        let atual = self
+            .view
+            .branches
+            .iter()
+            .position(|branch| branch.current)
+            .unwrap_or(0);
+        let mut combo = ComboBox::new(DIALOGO_COMBO_ID, itens);
+        combo.set_selected(atual);
+        self.criando = Some(NovaBranch {
+            nome: String::new(),
+            busca: String::new(),
+            foco: FocoDoDialogo::default(),
+            combo,
+        });
+    }
+
+    /// Desenha o diálogo de criar branch, se ele está aberto.
+    fn paint_dialogo(&self, painel: Rect, layout: &LayoutContext, paint: &mut PaintContext) {
+        let Some(dialogo) = self.criando.as_ref() else {
+            return;
+        };
+        let [moldura, campo, busca, buscar, combo, ok] =
+            Self::areas_do_dialogo(painel, layout.theme());
+        let mut fundo = Panel::new(DIALOGO_ID, SurfaceTone::Elevated).with_border();
+        fundo.layout(layout, moldura);
+        fundo.paint(paint);
+
+        let mut titulo = Label::new(WidgetId(DIALOGO_ID.0 + 100), "Nova branch".to_owned());
+        titulo.layout(
+            layout,
+            Rect::new(
+                campo.origin.x,
+                moldura.origin.y + layout.theme().spacing.lg,
+                campo.size.width,
+                TITULO_ALTURA,
+            ),
+        );
+        titulo.paint(paint);
+
+        let mut entrada =
+            TextInput::new(DIALOGO_CAMPO_ID, &dialogo.nome).with_placeholder("nome-da-branch");
+        // O cursor fica no campo que tem o foco: dois campos piscando ao mesmo
+        // tempo não dizem para onde o texto vai.
+        if dialogo.foco == FocoDoDialogo::Nome {
+            entrada.event(&mut EventContext::default(), &UiEvent::FocusGained);
+        }
+        entrada.layout(layout, campo);
+        entrada.paint(paint);
+
+        let mut filtro =
+            TextInput::new(DIALOGO_BUSCA_ID, &dialogo.busca).with_placeholder("filtrar branches");
+        if dialogo.foco == FocoDoDialogo::Busca {
+            filtro.event(&mut EventContext::default(), &UiEvent::FocusGained);
+        }
+        filtro.layout(layout, busca);
+        filtro.paint(paint);
+
+        let mut botao_de_busca = Button::new(DIALOGO_BUSCAR_ID, "Buscar");
+        botao_de_busca.layout(layout, buscar);
+        botao_de_busca.paint(paint);
+
+        let mut lista = dialogo.combo.clone();
+        lista.layout(layout, combo);
+        lista.paint(paint);
+
+        let mut confirmar = Button::new(DIALOGO_OK_ID, "OK");
+        confirmar.set_disabled(dialogo.nome.trim().is_empty());
+        confirmar.layout(layout, ok);
+        confirmar.paint(paint);
+    }
+
+    /// O que o diálogo faz com um clique, quando ele está aberto.
+    ///
+    /// Devolve `Some` quando o clique era dele — e enquanto ele está aberto,
+    /// **todo** clique é dele: é o que faz um diálogo ser um diálogo.
+    fn clique_no_dialogo(
+        &mut self,
+        painel: Rect,
+        context: &LayoutContext,
+        point: Point,
+    ) -> Option<Option<GitRequest>> {
+        self.criando.as_ref()?;
+        let [moldura, campo, busca, buscar, area_da_combo, ok] =
+            Self::areas_do_dialogo(painel, context.theme());
+        // A combo primeiro: aberta, a lista dela desce **sobre** o que está
+        // abaixo, e o clique ali é dela.
+        let aberta = self
+            .criando
+            .as_ref()
+            .is_some_and(|dialogo| dialogo.combo.is_open());
+        if aberta || area_da_combo.contains(point) {
+            if let Some(dialogo) = self.criando.as_mut() {
+                dialogo.combo.layout(context, area_da_combo);
+                let resultado = dialogo.combo.event(
+                    &mut EventContext::default(),
+                    &UiEvent::PointerDown(primary_pointer(point)),
+                );
+                // Fora da combo e fora da lista dela: o clique não era dela, e
+                // segue para quem estiver embaixo.
+                if !matches!(resultado, EventResult::Ignored) {
+                    return Some(None);
+                }
+            }
+        }
+        if ok.contains(point) {
+            return Some(self.criar_branch());
+        }
+        if buscar.contains(point) {
+            self.filtrar_bases();
+            return Some(None);
+        }
+        if let Some(dialogo) = self.criando.as_mut() {
+            if campo.contains(point) {
+                dialogo.foco = FocoDoDialogo::Nome;
+                return Some(None);
+            }
+            if busca.contains(point) {
+                dialogo.foco = FocoDoDialogo::Busca;
+                return Some(None);
+            }
+        }
+        // Clique fora fecha, como em todo diálogo pequeno: ele tem uma pergunta
+        // só, e desistir dela não perde trabalho nenhum.
+        if !moldura.contains(point) {
+            self.criando = None;
+        }
+        Some(None)
+    }
+
+    /// Refaz a lista de bases com o filtro digitado, guardando a escolha.
+    ///
+    /// **A escolhida continua escolhida se ela sobreviver ao filtro.** Filtrar
+    /// é procurar, e não escolher: quem digitou três letras para conferir uma
+    /// lista não quer voltar com outra base selecionada.
+    fn filtrar_bases(&mut self) {
+        let Some(busca) = self.criando.as_ref().map(|dialogo| dialogo.busca.clone()) else {
+            return;
+        };
+        let escolhida = self.base_escolhida();
+        let itens = self.bases_para(&busca);
+        let Some(dialogo) = self.criando.as_mut() else {
+            return;
+        };
+        let indice = escolhida
+            .and_then(|nome| itens.iter().position(|item| item.value == nome))
+            .unwrap_or(0);
+        dialogo.combo.set_items(itens);
+        dialogo.combo.set_selected(indice);
+    }
+
+    /// O pedido que o teclado deixou, se deixou algum.
+    ///
+    /// Sai daqui uma vez só: quem o leva é quem o entrega ao repositório.
+    pub(super) fn pedido_pendente(&mut self) -> Option<GitRequest> {
+        self.pendente.take()
+    }
+
+    /// Cria a branch com o que está escrito, se há o que criar.
+    fn criar_branch(&mut self) -> Option<GitRequest> {
+        // A base sai antes do diálogo fechar: é dele que ela vem.
+        let base = self.base_escolhida();
+        let dialogo = self.criando.take()?;
+        let nome = dialogo.nome.trim().to_owned();
+        if nome.is_empty() {
+            return None;
+        }
+        Some(GitRequest::CreateBranch { name: nome, base })
     }
 
     /// A barra de comandos do cabeçalho: o lado da comparação e os dois passos.
@@ -1931,6 +2265,10 @@ impl GitSurface {
                 botao(FETCH_ID, "Fetch"),
                 botao(PULL_ID, "Pull"),
                 botao(PUSH_ID, "Push"),
+                // Ao lado do `Push`, e não no rodapé da árvore: criar uma
+                // branch é uma ação do repositório, como as outras três, e o
+                // rodapé é onde ela ficava por falta de lugar.
+                botao(NOVA_BRANCH_ID, "Branch"),
             ],
         )
         .with_space_above(ESPACO_DA_BARRA)
@@ -2152,6 +2490,11 @@ impl GitSurface {
         context: &LayoutContext,
         point: Point,
     ) -> Option<GitRequest> {
+        // O diálogo antes de tudo: enquanto ele está aberto, todo clique é
+        // dele — é o que faz um diálogo ser um diálogo.
+        if let Some(resposta) = self.clique_no_dialogo(area(host, MODAL_ID), context, point) {
+            return resposta;
+        }
         let divisa = self.divisa(host, context);
         if divisa.contains(point) {
             if let Some(split) = self.split.as_mut() {
@@ -2279,14 +2622,20 @@ impl GitSurface {
             // diferente.
             let mut barra = self.barra_do_alto();
             barra.layout(context, faixa);
-            return barra.hit(point).map(|id| {
-                if id == FETCH_ID {
-                    GitRequest::Fetch
-                } else if id == PULL_ID {
-                    GitRequest::Pull
-                } else {
-                    GitRequest::Push
-                }
+            let id = barra.hit(point)?;
+            // O da branch não pede nada ao repositório: ele abre a pergunta, e
+            // quem pede é o `OK`.
+            if id == NOVA_BRANCH_ID {
+                self.abrir_dialogo_de_branch();
+                self.escrevendo = false;
+                return None;
+            }
+            return Some(if id == FETCH_ID {
+                GitRequest::Fetch
+            } else if id == PULL_ID {
+                GitRequest::Pull
+            } else {
+                GitRequest::Push
             });
         }
         let abas = area(host, TABS_ID);
@@ -2306,26 +2655,8 @@ impl GitSurface {
             }
             return None;
         }
-        let nova = area(host, NOVA_ID);
-        if nova.contains(point) {
-            // Os últimos pontos da faixa são o botão; o resto é a caixa.
-            let botao = nova.origin.x + nova.size.width - ACAO_LARGURA;
-            if point.x >= botao {
-                let nome = self.nome_novo.trim().to_owned();
-                self.nomeando = false;
-                if nome.is_empty() {
-                    return None;
-                }
-                self.nome_novo.clear();
-                return Some(GitRequest::CreateBranch(nome));
-            }
-            self.nomeando = true;
-            self.escrevendo = false;
-            return None;
-        }
         let arvore = area(host, TREE_ID);
         if arvore.contains(point) {
-            self.nomeando = false;
             return self.clique_na_arvore(arvore, context, point);
         }
         let conteudo = area(host, CONTENT_ID);
@@ -2602,6 +2933,12 @@ impl GitSurface {
         }
 
         self.paint_fechar(host, layout, paint);
+        // O diálogo **flutua**, e é ele quem diz isso: a camada de cima da
+        // biblioteca o põe depois de tudo, e esta tela deixa de depender de ser
+        // a última a falar. Ele nasceu atrás dos painéis justamente por isso —
+        // a chamada estava três linhas acima de onde precisava estar.
+        let painel = area(host, MODAL_ID);
+        paint.overlay(|paint| self.paint_dialogo(painel, layout, paint));
 
         // A barra do alto: as três ações do repositório.
         let mut barra = self.barra_do_alto();
@@ -2619,34 +2956,7 @@ impl GitSurface {
             tree.paint(paint);
         }
 
-        // A faixa de criar branch, embaixo da árvore.
-        let nova = area(host, NOVA_ID);
-        let mut nome = TextInput::new(NOVA_ID, &self.nome_novo).with_placeholder("Nova branch");
-        if self.nomeando {
-            nome.event(&mut EventContext::default(), &UiEvent::FocusGained);
-        }
-        nome.layout(
-            layout,
-            Rect::new(
-                nova.origin.x,
-                nova.origin.y,
-                (nova.size.width - ACAO_LARGURA - Spacing::XS).max(0.0),
-                nova.size.height,
-            ),
-        );
-        nome.paint(paint);
-        let mut criar = Button::new(CRIAR_ID, "Criar");
-        criar.set_disabled(self.nome_novo.trim().is_empty());
-        criar.layout(
-            layout,
-            Rect::new(
-                nova.origin.x + nova.size.width - ACAO_LARGURA,
-                nova.origin.y,
-                ACAO_LARGURA,
-                nova.size.height,
-            ),
-        );
-        criar.paint(paint);
+
 
         let _ = self.divisa(host, layout);
         if let Some(split) = self.split.as_ref() {
@@ -2951,10 +3261,40 @@ impl GitSurface {
         self.faixa_do_conflito(area(host, CONTENT_ID))
     }
 
-    /// O nome que se está escrevendo para a branch nova.
+    /// Onde fica o botão que abre o diálogo de criar branch, para o teste.
     #[cfg(test)]
-    pub(super) fn nome_novo(&self) -> &str {
-        &self.nome_novo
+    pub(super) fn botao_de_branch_para_teste(&self, host: &UiHost) -> Rect {
+        let mut barra = self.barra_do_alto();
+        barra.layout(&LayoutContext::default(), area(host, TOOLBAR_ID));
+        barra
+            .item_bounds()
+            .into_iter()
+            .find(|(id, _)| *id == NOVA_BRANCH_ID)
+            .map(|(_, area)| area)
+            .unwrap_or_default()
+    }
+
+    /// As áreas do diálogo, para o teste apontar nelas.
+    #[cfg(test)]
+    pub(super) fn areas_do_dialogo_para_teste(&self, host: &UiHost, theme: &Theme) -> [Rect; 6] {
+        Self::areas_do_dialogo(area(host, MODAL_ID), theme)
+    }
+
+    /// As bases que a combo do diálogo está oferecendo, para o teste conferir.
+    #[cfg(test)]
+    pub(super) fn bases_do_dialogo_para_teste(&self) -> Vec<String> {
+        self.criando.as_ref().map_or_else(Vec::new, |dialogo| {
+            (0..dialogo.combo.item_count())
+                .filter_map(|indice| dialogo.combo.item(indice))
+                .map(|item| item.value.clone())
+                .collect()
+        })
+    }
+
+    /// O nome que se está escrevendo no diálogo, se ele está aberto.
+    #[cfg(test)]
+    pub(super) fn nome_novo(&self) -> Option<&str> {
+        self.criando.as_ref().map(|dialogo| dialogo.nome.as_str())
     }
 
     /// Onde ficam a caixa da mensagem e os botões, para o teste apontar neles.
@@ -3037,7 +3377,7 @@ impl super::IdeShell {
                 | GitRequest::Discard(_)
                 | GitRequest::Commit { .. }
                 | GitRequest::SwitchBranch(_)
-                | GitRequest::CreateBranch(_)
+                | GitRequest::CreateBranch { .. }
                 | GitRequest::Merge(_)
                 | GitRequest::ContinueOperation
                 | GitRequest::AbortOperation
@@ -3053,7 +3393,7 @@ impl super::IdeShell {
         let mexeu_no_historico = matches!(
             pedido,
             GitRequest::SwitchBranch(_)
-                | GitRequest::CreateBranch(_)
+                | GitRequest::CreateBranch { .. }
                 | GitRequest::Merge(_)
                 | GitRequest::ContinueOperation
                 | GitRequest::AbortOperation

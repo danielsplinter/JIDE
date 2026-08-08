@@ -518,7 +518,7 @@ fn criar_uma_branch_leva_o_trabalho_para_ela() {
     let branches = repositorio.branches();
     let cancel = CancellationToken::new();
     let nova = ide_git::BranchName("feature/busca".to_owned());
-    assert!(esperar(branches.create(&nova)).is_ok());
+    assert!(esperar(branches.create(&nova, None)).is_ok());
 
     let Ok(status) = esperar(repositorio.working_tree().status(&cancel)) else {
         panic!("o status não respondeu");
@@ -974,4 +974,51 @@ fn preparar_e_perguntar_em_seguida_mostra_o_arquivo_preparado() {
         voltou.entries
     );
     assert_eq!(voltou.count(FileState::Staged), 0);
+}
+
+/// A branch nova nasce da base escolhida, e não de onde se está.
+///
+/// Sem a base, criar a partir de outra branch obrigaria a trocar antes — e a
+/// troca recusa quando há alteração aberta, que é justamente a hora em que mais
+/// se cria branch. Nascer de uma referência não mexe na árvore de trabalho.
+#[test]
+fn a_branch_nova_nasce_da_base_escolhida() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("branch-com-base") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um
+");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+
+    // Uma base com um commit que a `main` não tem.
+    assert!(repo.git(&["switch", "--create", "base"]).is_some());
+    repo.escrever("b.txt", "dois
+");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "só na base"]).is_some());
+    assert!(repo.git(&["switch", "main"]).is_some());
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let branches = repositorio.branches();
+    assert!(
+        esperar(branches.create(
+            &ide_git::BranchName("nova".to_owned()),
+            Some(&ide_git::BranchName("base".to_owned())),
+        ))
+        .is_ok(),
+        "a branch nasce da base"
+    );
+
+    // O arquivo que só existe na base está aqui: a nova saiu dela, e não da
+    // `main`, que era onde se estava.
+    assert!(
+        repo.root().join("b.txt").exists(),
+        "a nova tem o commit da base"
+    );
 }

@@ -35,7 +35,10 @@ pub enum GitRequest {
     /// Passa a trabalhar noutra branch.
     SwitchBranch(String),
     /// Cria uma branch e vai para ela.
-    CreateBranch(String),
+    /// Cria uma branch, opcionalmente a partir de outra.
+    ///
+    /// `base` é a branch escolhida na árvore. `None` é "de onde se está".
+    CreateBranch { name: String, base: Option<String> },
     /// Traz para a branch atual o que está na outra.
     Merge(String),
     /// Conclui a operação em curso com o que está preparado.

@@ -1683,7 +1683,9 @@ impl NativeIde {
             GitRequest::Commit { message, amend } => self.commitar(message, amend),
             GitRequest::LoadHistory { ja_carregados } => self.pedir_historico(ja_carregados),
             GitRequest::SwitchBranch(nome) => self.mexer_na_branch("switch", nome),
-            GitRequest::CreateBranch(nome) => self.mexer_na_branch("create", nome),
+            GitRequest::CreateBranch { name, base } => {
+                self.criar_branch(name, base);
+            }
             GitRequest::Merge(nome) => self.mexer_na_branch("merge", nome),
             GitRequest::ContinueOperation => self.mexer_na_branch("continue", String::new()),
             GitRequest::AbortOperation => self.mexer_na_branch("abort", String::new()),
@@ -1805,6 +1807,20 @@ impl NativeIde {
     /// nome, uma escrita, uma resposta curta — e porque **todas mudam o que
     /// está no disco debaixo do editor**. É por isso que a coleta delas
     /// recarrega o workspace.
+    /// Cria uma branch, a partir da escolhida na árvore ou de onde se está.
+    ///
+    /// A base vai junto do nome porque é uma pergunta só para o `git`: criar a
+    /// partir de uma referência não passa pela árvore de trabalho dela, e por
+    /// isso não recusa quando há alteração aberta — trocar antes e criar depois
+    /// recusaria.
+    fn criar_branch(&mut self, nome: String, base: Option<String>) {
+        let alvo = match base {
+            Some(base) => format!("{nome}{SEPARADOR}{base}"),
+            None => nome,
+        };
+        self.mexer_na_branch("create", alvo);
+    }
+
     fn mexer_na_branch(&mut self, acao: &'static str, alvo: String) {
         let Some(raiz) = self
             .ui
@@ -4118,6 +4134,13 @@ fn commitar_no_repositorio(raiz: &std::path::Path, mensagem: &str, amend: bool) 
 ///
 /// Está aqui pelo mesmo motivo das outras: é a raiz de composição, o único lugar
 /// que pode nomear o `ide-git`.
+/// O que separa o nome da base quando os dois viajam num campo só.
+///
+/// É o separador de unidade do ASCII, o mesmo que o `git` usa na saída legível
+/// por máquina. Um nome de branch não pode contê-lo — o `git` recusa —, e por
+/// isso ele não confunde um campo com o outro.
+const SEPARADOR: char = '\u{1f}';
+
 fn mexer_no_repositorio(raiz: &std::path::Path, acao: &str, alvo: &str) -> String {
     let resultado = ide_git::open(raiz)
         .map_err(|erro| erro.to_string())
@@ -4135,10 +4158,21 @@ fn mexer_no_repositorio(raiz: &std::path::Path, acao: &str, alvo: &str) -> Strin
                     .block_on(branches.switch(&branch))
                     .map(|()| format!("Agora em {alvo}"))
                     .map_err(|erro| erro.to_string()),
-                "create" => runtime
-                    .block_on(branches.create(&branch))
-                    .map(|()| format!("Branch {alvo} criada"))
-                    .map_err(|erro| erro.to_string()),
+                "create" => {
+                    // O nome e a base vêm num campo só, separados pelo caractere
+                    // que o próprio `git` usa para separar campos na saída
+                    // legível por máquina: um nome de branch não pode contê-lo,
+                    // então não há como confundir um com o outro.
+                    let (nome, base) = alvo.split_once(SEPARADOR).map_or((alvo, None), |par| {
+                        (par.0, Some(ide_git::BranchName(par.1.to_owned())))
+                    });
+                    runtime
+                        .block_on(
+                            branches.create(&ide_git::BranchName(nome.to_owned()), base.as_ref()),
+                        )
+                        .map(|()| format!("Branch {nome} criada"))
+                        .map_err(|erro| erro.to_string())
+                }
                 "merge" => runtime
                     .block_on(integracao.merge(&branch))
                     .map(|resultado| match resultado {

@@ -1145,7 +1145,16 @@ impl IdeShell {
     fn surface_key(&mut self, kind: SurfaceKind, key: &str, modifiers: Modifiers) -> bool {
         match kind {
             SurfaceKind::Rename => self.rename_key(key, modifiers),
-            SurfaceKind::Git => self.git.key(key, modifiers),
+            SurfaceKind::Git => {
+                let daqui = self.git.key(key, modifiers);
+                // O `Enter` do diálogo de branch nasce no teclado e precisa
+                // chegar ao repositório: a tecla só responde `true` ou `false`,
+                // e o pedido fica guardado até alguém o levar. Este é o alguém.
+                if let Some(pedido) = self.git.pedido_pendente() {
+                    self.pedir_ao_git(pedido);
+                }
+                daqui
+            }
             SurfaceKind::Generate => false,
             SurfaceKind::TypeSearch => self.type_search_key(key),
             SurfaceKind::Inspection => self.inspection_key(key, modifiers),

@@ -362,11 +362,15 @@ impl BranchService for CliGit {
             .map(|_| ())
     }
 
-    async fn create(&self, name: &BranchName) -> GitResult<()> {
+    async fn create(&self, name: &BranchName, base: Option<&BranchName>) -> GitResult<()> {
         let vazio = CancellationToken::new();
-        self.run(&["switch", "--create", name.as_str()], &vazio)
-            .await
-            .map(|_| ())
+        let mut args = vec!["switch", "--create", name.as_str()];
+        // O `git` aceita a base como último argumento, e sem ela cria de onde
+        // se está — que é o mesmo padrão do comando na linha.
+        if let Some(base) = base {
+            args.push(base.as_str());
+        }
+        self.run(&args, &vazio).await.map(|_| ())
     }
 }
 

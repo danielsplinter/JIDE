@@ -1301,7 +1301,11 @@ fn phase_eight_preserves_the_final_architecture_metrics() {
         // comparação são refeitos. Esse lugar único **tirou** repetição: a linha
         // e o trecho faziam os mesmos quatro passos, e eram fáceis de esquecer
         // pela metade.
-        ("crates/ide-app/src/native_ide.rs", 5_240),
+        //
+        // E de 5 240 para 5 275: a branch nova nasce da escolhida na árvore. O
+        // nome e a base viajam num campo só até a thread, e é aqui que os dois
+        // se separam de novo — só a raiz de composição pode nomear o `ide-git`.
+        ("crates/ide-app/src/native_ide.rs", 5_275),
         // Os testes da raiz, no arquivo de onde saíram. O teto é o mesmo tipo de
         // acordo: 1 400, igual ao dos testes do shell, e pelo mesmo motivo —
         // acima disso ninguém acha o teste certo, e edita o errado.
