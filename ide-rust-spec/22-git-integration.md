@@ -626,12 +626,16 @@ da tela.
 Cada painel é uma **lista composta**: a linha tem o estado, o caminho e as ações
 daquele lugar — `Stage`, `Unstage`, `Discard` —, e ação em linha é célula.
 
-**Os nomes do índice são os do Git, e em inglês**: `Staged`, `Stage`, `Unstage`,
-`Working tree`. Não é anglicismo por preguiça — é que "preparar" e "despreparar"
+**Os nomes das ações do Git são os dele, e em inglês**: `Staged`, `Stage`,
+`Unstage`, `Working tree`, `Checkout`, `Merge`. Não é anglicismo por preguiça — é que "preparar" e "despreparar"
 são invenção desta tela, e quem lê a documentação do Git, o `git status` ou o
 próprio histórico de outro cliente não encontra esses verbos em lugar nenhum. Um
 nome que só existe aqui obriga a traduzir de volta a cada consulta. O que tem
 tradução firme continua traduzido: alterado, não rastreado.
+
+*`Checkout` é o nome do gesto, e não do comando que a IDE roda.* Por baixo vai
+`git switch`, que é o verbo moderno para trocar de branch; `checkout` é como
+quase todo mundo continua chamando a ação, inclusive quem escreveu esta linha.
 
 **Clicar no nome de um arquivo mostra a diferença dele** — no nome, e não em
 qualquer ponto da linha. O nome ocupa o começo; o que vem depois, até os botões,

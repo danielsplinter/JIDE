@@ -3749,7 +3749,7 @@ fn linha(indice: usize, branch: &BranchItem) -> ComposedRow {
     let acoes: &[(u64, &str, &str)] = if atual {
         &[]
     } else {
-        &[(2, "Trocar", "git.switch"), (3, "Fundir", "git.merge")]
+        &[(2, "Checkout", "git.switch"), (3, "Merge", "git.merge")]
     };
     for (deslocamento, rotulo, comando) in acoes {
         celulas.push(ComposedCell::new(

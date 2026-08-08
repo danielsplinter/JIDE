@@ -312,8 +312,8 @@ fn a_branch_atual_nao_oferece_trocar_nem_fundir() {
             .filter(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
             .count()
     };
-    assert_eq!(quantos("Trocar"), 1, "só a branch que não é a atual oferece");
-    assert_eq!(quantos("Fundir"), 1);
+    assert_eq!(quantos("Checkout"), 1, "só a branch que não é a atual oferece");
+    assert_eq!(quantos("Merge"), 1);
 }
 /// Trocar de branch pede a troca, o retrato e o histórico do começo.
 ///
@@ -338,7 +338,7 @@ fn trocar_de_branch_pede_a_troca_e_recarrega_o_que_mudou() {
     shell.commands.retain(|_| false);
 
     // A terceira linha é a outra branch — a primeira é o nó, a segunda é a
-    // branch atual —, e o botão "Trocar" é o penúltimo dela.
+    // branch atual —, e o botão "Checkout" é o penúltimo dela.
     let direita = arvore.origin.x + arvore.size.width;
     shell.pointer_down(
         Point::new(direita - 64.0 - 32.0, arvore.origin.y + 12.0 + 48.0),
@@ -533,8 +533,8 @@ fn a_branch_atual_nao_oferece_acao_na_linha() {
             .filter(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
             .count()
     };
-    assert_eq!(quantos("Trocar"), 1, "só a branch que não é a atual oferece");
-    assert_eq!(quantos("Fundir"), 1);
+    assert_eq!(quantos("Checkout"), 1, "só a branch que não é a atual oferece");
+    assert_eq!(quantos("Merge"), 1);
     // A contagem contra o que já foi buscado continua na linha da atual.
     assert_eq!(quantos("↑2 ↓3"), 1);
 
