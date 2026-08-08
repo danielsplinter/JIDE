@@ -577,6 +577,11 @@ fn celula_da_grade(cell: &GridCell) -> TerminalCell {
 /// a ordem não depender do uso.
 fn layer_style(open: bool) -> LayoutStyle {
     LayoutStyle {
+        // **A moldura diz que é uma janela, e a lib cuida do resto**: gesto
+        // nenhum atravessa para o que está atrás, com botão nenhum. Fechada ela
+        // é `hidden`, e o que está fora do arranjo não bloqueia coisa alguma —
+        // por isso este `true` é constante, e não `open`.
+        modal: true,
         hidden: !open,
         main_align: MainAlign::Center,
         cross_align: CrossAlign::Center,
@@ -1018,6 +1023,17 @@ impl IdeShell {
         target.and_then(posicao) > posicao(COMPLETION_POPUP_ID)
     }
 
+    /// De qual janela é a moldura que o anfitrião apontou.
+    ///
+    /// O caminho de volta de [`surface_layer_id`]: quem pergunta à lib se o
+    /// gesto atravessa recebe uma moldura, e o que a IDE tem a dizer sobre ela
+    /// — que menu oferecer, por exemplo — está guardado por tipo de janela.
+    fn surface_of_layer(id: WidgetId) -> Option<SurfaceKind> {
+        SURFACES
+            .into_iter()
+            .find(|kind| surface_layer_id(*kind) == id)
+    }
+
     fn surface_is_open(&self, kind: SurfaceKind) -> bool {
         match kind {
             SurfaceKind::Rename => self.rename.is_open(),
@@ -1063,6 +1079,33 @@ impl IdeShell {
             SurfaceKind::TabSwitcher => self.tab_switcher_pointer_down(point, size),
             SurfaceKind::Settings => self.settings_dialog_pointer_down(point, size),
         }
+    }
+
+    /// O clique secundário dentro de uma janela aberta.
+    ///
+    /// **A janela cobre o que está atrás, e o menu de contexto tem de cobrir
+    /// junto.** Antes daqui o clique atravessava para o Explorer: dentro do
+    /// gerenciador do Git, sobre uma branch, o menu que abria era o da árvore
+    /// do projeto — e oferecia criar pacote sobre uma branch.
+    ///
+    /// Quem não tem menu próprio não abre nenhum: um menu vazio prometeria
+    /// ações que não existem.
+    fn surface_secondary_pointer_down(&mut self, kind: SurfaceKind, point: Point, size: Size) {
+        if kind != SurfaceKind::Git {
+            return;
+        }
+        let context = self.layout_context();
+        let Some((branch, entradas)) = self.git.menu_da_arvore(&mut self.host, &context, point)
+        else {
+            return;
+        };
+        self.context_menu.menu.set_entries(entradas);
+        self.context_menu.menu.layout(
+            &self.layout_context(),
+            Rect::new(0.0, 0.0, size.width, size.height),
+        );
+        self.context_menu.menu.open_at(point);
+        self.context_menu.alvo = Some(AlvoDoMenu::Branch(branch));
     }
 
     /// Movimento do ponteiro. `None` é "não é meu, siga adiante".
@@ -1260,6 +1303,9 @@ impl IdeShell {
     }
 
     fn route_pointer_down(&mut self, point: Point, size: Size, control: bool, shift: bool) {
+        // A pilha é declarada antes de ser consultada: é dela que sai a resposta
+        // sobre de quem é o gesto.
+        self.place_overlay(size);
         // O menu aberto tem a primeira palavra: escolher uma ação ou dispensá-lo
         // é o que este clique significa, e não o que está embaixo dele.
         if self.context_menu_event(&UiEvent::PointerDown(primary_pointer(point)), size) {
@@ -1271,8 +1317,14 @@ impl IdeShell {
         if self.completion_pointer_down(point, size) {
             return;
         }
-        if let Some(surface) = self.open_surface() {
-            self.surface_pointer_down(surface, point, size);
+        // **Quem diz que o gesto não atravessa é a lib**: cada janela declara a
+        // moldura dela como janela, e o anfitrião responde qual está por cima.
+        // Uma janela nova nasce bloqueando o que está atrás sem que ninguém
+        // precise lembrar de ensiná-la a bloquear.
+        if let Some(moldura) = self.host.modal() {
+            if let Some(surface) = Self::surface_of_layer(moldura) {
+                self.surface_pointer_down(surface, point, size);
+            }
             return;
         }
         // A barra de busca está sobre o código: sem perguntar ao anfitrião, o

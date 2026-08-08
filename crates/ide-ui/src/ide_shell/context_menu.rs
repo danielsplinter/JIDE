@@ -40,6 +40,10 @@ pub(super) enum AlvoDoMenu {
     /// O texto do editor: as ações daqui falam do cursor e da seleção, e por
     /// isso não carregam alvo nenhum.
     Editor,
+    /// Uma branch na árvore do gerenciador do Git.
+    ///
+    /// O nome basta: `Checkout` e `Merge` falam dele, e não de caminho nenhum.
+    Branch(String),
 }
 
 /// O menu de contexto e o alvo de que ele fala.
@@ -81,6 +85,14 @@ impl ContextMenuSurface {
     pub(super) fn arquivo(&self) -> Option<&PathBuf> {
         match &self.alvo {
             Some(AlvoDoMenu::Explorer { arquivo, .. }) => arquivo.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// A branch de que o menu fala, quando o menu é o da árvore do Git.
+    pub(super) fn branch(&self) -> Option<&str> {
+        match &self.alvo {
+            Some(AlvoDoMenu::Branch(nome)) => Some(nome),
             _ => None,
         }
     }

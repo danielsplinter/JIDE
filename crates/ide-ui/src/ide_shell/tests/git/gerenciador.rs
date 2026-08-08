@@ -286,12 +286,14 @@ fn as_tags_e_os_stashes_enchem_os_nos_que_estavam_vazios() {
     assert!(escrito("Tags (1)") && escrito("Stashes (1)"));
     assert!(escrito("Remotes (0)"), "sem remoto configurado, o nó diz zero");
 }
-/// A linha de uma branch oferece trocar e fundir — menos a branch atual.
+/// A linha de uma branch não tem botão nenhum: as ações estão no menu.
 ///
-/// Trocar para onde já se está não faz nada, e fundir uma branch nela mesma é um
-/// comando que o `git` recusa: oferecer os dois seria oferecer erro.
+/// **Dois botões fixos numa coluna estreita comem o nome da branch**, que é o
+/// que se lê ali — e apareciam em toda linha para um gesto que quase nunca é o
+/// que se quer daquela linha. O menu do botão direito não ocupa lugar nenhum
+/// enquanto ninguém o pede.
 #[test]
-fn a_branch_atual_nao_oferece_trocar_nem_fundir() {
+fn a_linha_da_branch_nao_tem_botao() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let _ = shell.paint(size);
@@ -312,9 +314,66 @@ fn a_branch_atual_nao_oferece_trocar_nem_fundir() {
             .filter(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
             .count()
     };
-    assert_eq!(quantos("Checkout"), 1, "só a branch que não é a atual oferece");
-    assert_eq!(quantos("Merge"), 1);
+    assert_eq!(quantos("Checkout"), 0, "a ação está no menu, e não na linha");
+    assert_eq!(quantos("Merge"), 0);
+    assert_eq!(quantos("feature/busca"), 1, "o nome, esse sim, aparece");
 }
+/// O botão direito sobre uma branch oferece as ações dela, e não as do Explorer.
+///
+/// **A janela cobre o que está atrás, e o menu tem de cobrir junto.** O clique
+/// secundário atravessava a janela do Git e chegava ao Explorer, que respondia
+/// com o menu da árvore do projeto: sobre uma branch, a IDE oferecia "Novo
+/// pacote". As opções aqui são as mesmas dos botões da linha, e vêm da mesma
+/// lista.
+#[test]
+fn o_botao_direito_sobre_uma_branch_oferece_checkout_e_merge() {
+    let mut shell = test_shell();
+    let size = Size::new(1280.0, 800.0);
+    let _ = shell.paint(size);
+    shell.set_git_view(retrato_com_branches());
+    shell.toggle_git();
+    let _ = shell.paint(size);
+
+    let (_, _, arvore, _) = git::GitSurface::areas(&shell.host);
+    shell.pointer_down(
+        Point::new(arvore.origin.x + 10.0, arvore.origin.y + 12.0),
+        size,
+    );
+    let _ = shell.paint(size);
+
+    // A terceira linha é a outra branch: a primeira é o nó, a segunda é a atual.
+    let outra = Point::new(arvore.origin.x + 40.0, arvore.origin.y + 12.0 + 48.0);
+    shell.secondary_pointer_down(outra, size);
+    assert_eq!(
+        entry_labels(shell.context_menu.menu.entries()),
+        vec!["Checkout", "Merge"],
+        "as opções da branch, e não as do Explorer"
+    );
+
+    shell.commands.retain(|_| false);
+    shell.run_context_command("git.switch");
+    let pedidos: Vec<ApplicationCommand> = shell.commands.iter().cloned().collect();
+    assert!(
+        pedidos.iter().any(|comando| matches!(
+            comando,
+            ApplicationCommand::Git(GitRequest::SwitchBranch(nome)) if nome == "feature/busca"
+        )),
+        "escolher no menu pede o mesmo que o botão da linha: {pedidos:?}"
+    );
+
+    // **A branch atual não oferece nada**, e nada é menu nenhum: trocar para
+    // onde já se está não faz nada, e fundir uma branch nela mesma o `git`
+    // recusa. Um menu vazio prometeria ações que não existem.
+    shell.secondary_pointer_down(
+        Point::new(arvore.origin.x + 40.0, arvore.origin.y + 12.0 + 24.0),
+        size,
+    );
+    assert!(
+        !shell.context_menu_open(),
+        "a branch atual não tem o que oferecer"
+    );
+}
+
 /// Trocar de branch pede a troca, o retrato e o histórico do começo.
 ///
 /// **Os três juntos.** A troca reescreve os arquivos, muda o que está alterado e
@@ -338,12 +397,12 @@ fn trocar_de_branch_pede_a_troca_e_recarrega_o_que_mudou() {
     shell.commands.retain(|_| false);
 
     // A terceira linha é a outra branch — a primeira é o nó, a segunda é a
-    // branch atual —, e o botão "Checkout" é o penúltimo dela.
-    let direita = arvore.origin.x + arvore.size.width;
-    shell.pointer_down(
-        Point::new(direita - 64.0 - 32.0, arvore.origin.y + 12.0 + 48.0),
+    // branch atual —, e a troca vem do menu do botão direito.
+    shell.secondary_pointer_down(
+        Point::new(arvore.origin.x + 40.0, arvore.origin.y + 12.0 + 48.0),
         size,
     );
+    shell.run_context_command("git.switch");
 
     let pedidos: Vec<ApplicationCommand> = shell.commands.iter().cloned().collect();
     assert!(
@@ -351,7 +410,7 @@ fn trocar_de_branch_pede_a_troca_e_recarrega_o_que_mudou() {
             comando,
             ApplicationCommand::Git(GitRequest::SwitchBranch(nome)) if nome == "feature/busca"
         )),
-        "o clique pede a troca: {pedidos:?}"
+        "escolher no menu pede a troca: {pedidos:?}"
     );
     // **E não pede o retrato junto.** Os dois iam para threads diferentes, e o
     // retrato costumava voltar antes de a escrita terminar: a lista mostrava o
@@ -492,12 +551,14 @@ fn a_barra_do_alto_tem_as_tres_acoes_do_repositorio() {
         );
     }
 }
-/// A branch atual não oferece ação nenhuma na linha dela.
+/// A contagem contra o remoto fica na linha, e clicar nela não pede nada.
 ///
-/// Trocar para onde já se está não faz nada, e fundir uma branch nela mesma é
-/// comando que o `git` recusa. O que ela tinha subiu para a barra.
+/// `↑2 ↓3` é leitura, e não ação: é o que a branch tem a mais e a menos do que o
+/// que já foi buscado. O que era ação na linha subiu para a barra do alto —
+/// `Fetch`, `Pull` e `Push` falam do repositório — ou desceu para o menu do
+/// botão direito.
 #[test]
-fn a_branch_atual_nao_oferece_acao_na_linha() {
+fn a_contagem_fica_na_linha_e_clicar_nela_nao_pede_nada() {
     let mut shell = test_shell();
     let size = Size::new(1280.0, 800.0);
     let _ = shell.paint(size);
@@ -533,12 +594,12 @@ fn a_branch_atual_nao_oferece_acao_na_linha() {
             .filter(|comando| matches!(comando, PaintCommand::DrawText(t) if t.text == texto))
             .count()
     };
-    assert_eq!(quantos("Checkout"), 1, "só a branch que não é a atual oferece");
-    assert_eq!(quantos("Merge"), 1);
+    assert_eq!(quantos("Checkout"), 0, "nenhuma linha tem botão");
+    assert_eq!(quantos("Merge"), 0);
     // A contagem contra o que já foi buscado continua na linha da atual.
     assert_eq!(quantos("↑2 ↓3"), 1);
 
-    // E o clique no vazio à direita da atual não pede nada.
+    // E o clique no vazio à direita não pede nada.
     shell.commands.retain(|_| false);
     shell.pointer_down(
         Point::new(

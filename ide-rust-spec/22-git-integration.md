@@ -633,6 +633,23 @@ próprio histórico de outro cliente não encontra esses verbos em lugar nenhum.
 nome que só existe aqui obriga a traduzir de volta a cada consulta. O que tem
 tradução firme continua traduzido: alterado, não rastreado.
 
+**A linha de uma branch não tem botão**: `Checkout` e `Merge` estão no menu do
+botão direito. Dois botões fixos numa coluna estreita comem o nome da branch, que
+é o que se lê ali, e apareciam em toda linha para um gesto que quase nunca é o
+que se quer daquela linha; o menu não ocupa lugar nenhum enquanto ninguém o pede.
+Sobre a branch atual não abre menu, porque ela não tem o que oferecer — trocar
+para onde já se está não faz nada, e fundir uma branch nela mesma o `git` recusa
+—, e um menu vazio promete ação que não existe.
+
+O clique numa linha da árvore, então, só escolhe.
+
+*A janela cobre o que está atrás, e o menu cobre junto.* O clique secundário
+atravessava a janela do Git e chegava ao Explorer, que respondia com o menu da
+árvore do projeto: sobre uma branch, a IDE oferecia "Novo pacote". **Quem impede
+isso é a lib**: a moldura de cada janela se declara janela, e o anfitrião deixa de
+devolver o que está atrás dela. A IDE não mantém a lista de quem bloqueia o quê —
+uma janela nova nasce bloqueando.
+
 *`Checkout` é o nome do gesto, e não do comando que a IDE roda.* Por baixo vai
 `git switch`, que é o verbo moderno para trocar de branch; `checkout` é como
 quase todo mundo continua chamando a ação, inclusive quem escreveu esta linha.

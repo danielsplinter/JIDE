@@ -23,12 +23,13 @@ use ui_api::{EventContext, LayoutContext, PaintContext, Widget};
 use ui_core::EventResult;
 use ui_components::{
     Button, ButtonAlign, ButtonFill, CellWidth, ComboBox, ComboBoxItem, ComposedCell, ComposedList, ComposedRow, ComposedTable, ComposedTreeItem,
-    ComposedTreeView, GraphCell, Icon, IconTint, Label, ModalHost, Panel, SplitOrientation,
-    SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar, ToolbarAlign,
+    ComposedTreeView, GraphCell, Icon, IconTint, Label, MenuEntry, MenuItem, ModalHost, Panel,
+    SplitOrientation, SplitPane, SurfaceTone, TabItem, TableColumn, Tabs, TextInput, Toolbar,
+    ToolbarAlign,
 };
 use ui_core::{
-    Constraints, Modifiers, Point, Rect, ScrollEvent, Size, Spacing, Theme, TokenKind, UiEvent,
-    WidgetId,
+    CommandId, Constraints, Modifiers, Point, Rect, ScrollEvent, Size, Spacing, Theme, TokenKind,
+    UiEvent, WidgetId,
 };
 use ui_host::UiHost;
 use ui_layout_api::{EdgeInsets, LayoutDirection, LayoutStyle};
@@ -228,11 +229,6 @@ const ALTURA_NA_LINHA: f32 = ROW_HEIGHT - 2.0;
 const COMMIT_ALTURA: f32 = 28.0 + 8.0 + Button::HEIGHT;
 /// Altura da faixa do conflito, no alto da aba `status`.
 const CONFLITO_ALTURA: f32 = Button::HEIGHT + 6.0;
-/// Largura de um botão de linha da árvore.
-///
-/// Menor que o das ações de arquivo: a coluna da esquerda é estreita, e dois
-/// botões do tamanho dos outros não deixariam nome de branch nenhum aparecer.
-const ACAO_DA_ARVORE: f32 = 64.0;
 /// Quantos commits cabem numa página do histórico.
 ///
 /// Uma página é o que se pede de cada vez, e não o que se mostra: a tabela é
@@ -2338,32 +2334,9 @@ impl GitSurface {
             &UiEvent::PointerDown(primary_pointer(point)),
         );
         let escolhido = tree.selected()?;
-        // A borda do conteúdo, e não a da área: com barra de rolagem, as ações
-        // da linha andam para a esquerda com ela. Mesmo defeito, mesma correção
-        // e mesma fonte do número — a árvore é quem sabe quanto a barra ocupa.
-        let direita = arvore.origin.x + arvore.size.width - tree.gutter();
-        let na_faixa = |posicao: usize| {
-            let fim = direita - posicao as f32 * ACAO_DA_ARVORE;
-            point.x >= fim - ACAO_DA_ARVORE && point.x < fim
-        };
-        // As branches filtradas, na mesma ordem em que a árvore as montou.
+        // **O clique numa branch só a escolhe.** As ações dela estão no menu do
+        // botão direito, e uma linha sem botão não tem coluna que decida nada.
         if (100..1_000).contains(&escolhido) {
-            let indice = (escolhido - 100) as usize;
-            let branch = self.branches_filtradas().get(indice).copied()?;
-            let nome = branch.name.clone();
-            // **A branch atual não tem botão nenhum**, e por isso a coluna não
-            // decide nada nela: sem esta linha, clicar no vazio à direita do
-            // nome pediria uma ação que a linha nem oferece.
-            if branch.current {
-                return None;
-            }
-            // Da direita para a esquerda: o último declarado é o mais à direita.
-            if na_faixa(0) {
-                return Some(GitRequest::Merge(nome));
-            }
-            if na_faixa(1) {
-                return Some(GitRequest::SwitchBranch(nome));
-            }
             return None;
         }
         // Um item guardado: clicar nele o devolve para a árvore de trabalho.
@@ -2371,6 +2344,67 @@ impl GitSurface {
             return Some(GitRequest::StashPop((escolhido - 3_000) as usize));
         }
         None
+    }
+
+    /// O menu do clique com o botão direito sobre a árvore: a branch e as opções.
+    ///
+    /// **As opções são as mesmas dos botões da linha**, e vêm da mesma lista:
+    /// um menu que oferece outra coisa é uma segunda verdade sobre o que uma
+    /// branch aceita. Sem branch sob o ponteiro não há menu — abrir um vazio
+    /// prometeria ações que não existem, e abrir o do Explorer aqui dentro
+    /// ofereceria criar pacote sobre uma branch.
+    pub(super) fn menu_da_arvore(
+        &mut self,
+        host: &mut UiHost,
+        context: &LayoutContext,
+        point: Point,
+    ) -> Option<(String, Vec<MenuEntry>)> {
+        let arvore = area(host, TREE_ID);
+        if !arvore.contains(point) {
+            return None;
+        }
+        let tree = self.tree.as_mut()?;
+        tree.layout(context, arvore);
+        // Apontar com o botão direito também escolhe a linha: o menu fala de
+        // uma branch, e qual é precisa estar visível enquanto ele está aberto.
+        tree.event(
+            &mut EventContext::default(),
+            &UiEvent::PointerDown(primary_pointer(point)),
+        );
+        let escolhido = tree.selected()?;
+        if !(100..1_000).contains(&escolhido) {
+            return None;
+        }
+        let branch = self
+            .branches_filtradas()
+            .get((escolhido - 100) as usize)
+            .copied()?;
+        // A branch atual não oferece nada, pelo mesmo motivo dos botões: trocar
+        // para onde já se está não faz nada, e fundir uma branch nela mesma o
+        // `git` recusa.
+        if branch.current {
+            return None;
+        }
+        let entradas = ACOES_DA_BRANCH
+            .iter()
+            .map(|(rotulo, comando)| {
+                MenuEntry::Item(MenuItem::new(*rotulo, CommandId((*comando).to_owned())))
+            })
+            .collect();
+        Some((branch.name.clone(), entradas))
+    }
+
+    /// O pedido de um comando do menu da árvore, para a branch de que ele fala.
+    ///
+    /// **O vocabulário do Git mora todo aqui**: quem trata o menu não precisa
+    /// saber que `git.switch` é trocar de branch, do mesmo jeito que não precisa
+    /// saber o que o botão da linha faz.
+    pub(super) fn pedido_da_branch(command: &str, nome: String) -> Option<GitRequest> {
+        match command {
+            "git.switch" => Some(GitRequest::SwitchBranch(nome)),
+            "git.merge" => Some(GitRequest::Merge(nome)),
+            _ => None,
+        }
     }
 
     /// As branches que a busca deixou passar, na ordem da árvore.
@@ -3739,30 +3773,19 @@ fn linha(indice: usize, branch: &BranchItem) -> ComposedRow {
             CellWidth::Fixed(56.0),
         ));
     }
-    // **A branch atual não oferece trocar nem fundir.** Trocar para onde já se
-    // está não faz nada, e fundir uma branch nela mesma é um comando que o
-    // `git` recusa — oferecer os dois seria oferecer erro.
-    // **A branch atual não oferece nada**: trocar para onde já se está não faz
-    // nada, e fundir uma branch nela mesma é comando que o `git` recusa. O que
-    // ela tinha — puxar e empurrar — subiu para a barra do alto, porque é ação
-    // do repositório e não da linha.
-    let acoes: &[(u64, &str, &str)] = if atual {
-        &[]
-    } else {
-        &[(2, "Checkout", "git.switch"), (3, "Merge", "git.merge")]
-    };
-    for (deslocamento, rotulo, comando) in acoes {
-        celulas.push(ComposedCell::new(
-            Box::new(
-                Button::new(WidgetId(base + deslocamento), *rotulo)
-                    .with_command(*comando)
-                    .with_height(ALTURA_NA_LINHA),
-            ),
-            CellWidth::Fixed(ACAO_DA_ARVORE),
-        ));
-    }
+    // **Nenhum botão na linha.** `Checkout` e `Merge` moram no menu do botão
+    // direito: dois botões fixos numa coluna estreita comem o nome da branch,
+    // que é o que se lê ali, e aparecem em toda linha para um gesto que quase
+    // nunca é o que se quer daquela linha.
     ComposedRow::new(celulas)
 }
+
+/// As ações de uma branch que não é a atual: o rótulo e o comando.
+///
+/// Elas moram no menu do botão direito, e não na linha: dois botões fixos numa
+/// coluna estreita comem o nome da branch, que é o que se lê ali.
+const ACOES_DA_BRANCH: &[(&str, &str)] =
+    &[("Checkout", "git.switch"), ("Merge", "git.merge")];
 
 /// A linha da raiz dos remotos: só o nome.
 ///

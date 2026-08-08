@@ -518,10 +518,22 @@ impl IdeShell {
     /// houver menu para as outras áreas, abrir um vazio prometeria ações que
     /// não existem.
     pub fn secondary_pointer_down(&mut self, point: Point, size: Size) {
+        // A pilha é declarada antes de ser consultada, como no `Esc` e na roda:
+        // a resposta sobre de quem é o gesto sai dela, e lê-la antes de refazê-la
+        // daria o quadro anterior — uma janela recém-aberta ainda não estaria lá.
+        self.place_overlay(size);
         self.context_menu.close();
         // O clique secundário nunca escolhe da lista, então ele só a dispensa.
         self.clear_completions();
-        if self.settings.is_open() {
+        // **Quem diz que o gesto não atravessa é a lib**, e não uma lista de
+        // janelas mantida aqui: a moldura de cada uma se declara janela, e o
+        // anfitrião responde qual está por cima. À IDE resta dizer o que aquela
+        // janela oferece — quem tem menu próprio devolve o dele, quem não tem
+        // não abre nenhum.
+        if let Some(moldura) = self.host.modal() {
+            if let Some(janela) = Self::surface_of_layer(moldura) {
+                self.surface_secondary_pointer_down(janela, point, size);
+            }
             return;
         }
         let geometry = self.geometry();
@@ -653,6 +665,14 @@ impl IdeShell {
     /// e `editor.split.right`: quem procurava onde o Copiar era tratado não
     /// olhava no Explorer. O menu é de três áreas, e o nome agora diz isso.
     pub(super) fn run_context_command(&mut self, command: &str) {
+        // A branch de que o menu da árvore do Git fala. Os comandos são os
+        // mesmos dos botões da linha, e por isso o pedido também é.
+        if let Some(nome) = self.context_menu.branch().map(ToOwned::to_owned) {
+            if let Some(pedido) = GitSurface::pedido_da_branch(command, nome) {
+                self.pedir_ao_git(pedido);
+            }
+            return;
+        }
         match command {
             "editor.split.right" => {
                 if let Some(documento) = self.context_menu.take_aba() {
