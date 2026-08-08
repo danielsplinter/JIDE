@@ -580,7 +580,7 @@ que é como três painéis se empilham com o que a biblioteca tem.
 
 Os três, e o que separa um do outro:
 
-1. **preparados** — o que está no índice e entra no próximo commit;
+1. **`Staged`** — o que está no índice e entra no próximo commit;
 2. **alterados** — o que mudou na árvore de trabalho e não está preparado;
 3. **não rastreados** — o que o Git ainda não conhece.
 
@@ -590,9 +590,21 @@ exatamente a distinção que `--porcelain=v2` devolve, e é a que decide o que
 da tela.
 
 Cada painel é uma **lista composta**: a linha tem o estado, o caminho e as ações
-daquele lugar — preparar, despreparar, descartar —, e ação em linha é célula.
+daquele lugar — `Stage`, `Unstage`, `Discard` —, e ação em linha é célula.
 
-Clicar num arquivo mostra a diferença dele. Onde, é a pergunta da janela que
+**Os nomes do índice são os do Git, e em inglês**: `Staged`, `Stage`, `Unstage`,
+`Working tree`. Não é anglicismo por preguiça — é que "preparar" e "despreparar"
+são invenção desta tela, e quem lê a documentação do Git, o `git status` ou o
+próprio histórico de outro cliente não encontra esses verbos em lugar nenhum. Um
+nome que só existe aqui obriga a traduzir de volta a cada consulta. O que tem
+tradução firme continua traduzido: alterado, não rastreado.
+
+**Clicar no nome de um arquivo mostra a diferença dele** — no nome, e não em
+qualquer ponto da linha. O nome ocupa o começo; o que vem depois, até os botões,
+é espaço vazio, e clicar no vazio abria a comparação de um arquivo que quem
+clicou talvez nem quisesse ver — e ela toma a aba inteira. Quem mede o nome é o
+próprio rótulo, com a régua que vai desenhá-lo: uma conta escrita na tela erraria
+por fonte. Onde, é a pergunta da janela que
 ficou registrada acima.
 
 #### A aba `diff`: duas colunas que se conferem
@@ -693,7 +705,7 @@ pode esperar por ele para ver o que acabou de fazer.
 
 No alto da aba, à direita do nome do arquivo:
 
-- **de que lado é a comparação** — o que está preparado, ou a árvore de trabalho.
+- **de que lado é a comparação** — `Staged` ou `Working tree`.
   São duas diferenças distintas sobre o mesmo arquivo, e quem preparou parte do
   trabalho e vê só uma delas conclui que o resto se perdeu. O botão diz qual está
   na tela e o clique pede a outra;
@@ -741,6 +753,32 @@ binária sobre uma lista ordenada por fileira.
 Há um teto num teste — 300 ms para montar, 30 ms por quadro — pelo mesmo motivo de
 todos os tetos desta base: não perseguir milissegundos, e sim avisar quando alguém
 troca isto por algo de outra ordem.
+
+#### O retrato vem **depois** da escrita, e não ao lado dela
+
+A regra da fase 1 continua: a lista não fica velha depois de nenhuma ação. O que
+mudou é quem pede e quando.
+
+A tela empilhava a escrita e o `Refresh` juntos, e a aplicação mandava os dois
+para **threads diferentes**. Nada ordenava as duas: o `git status` costumava
+responder antes de o `git add` terminar, e o retrato que chegava era o de *antes*
+da escrita. Quem clicava em `Stage` via o arquivo continuar em "Alterados", e
+quem clicava em `Unstage` via ele continuar em "Staged" — até que outra coisa
+qualquer pedisse o retrato de novo: o observador de disco, 300 ms depois, ou o
+clique seguinte.
+
+Agora **quem pede o retrato de uma escrita é a aplicação, ao recolher a resposta
+dela**. Naquele ponto a escrita terminou — é a resposta dela que está sendo
+recolhida —, e a ordem é por construção, sem espera nem tentativa.
+
+A tela continua empilhando o `Refresh` para o que **não** é escrita: abrir a
+janela, por exemplo. E continua sem falar com o Git.
+
+*E a escrita de um arquivo leva a margem dele junto.* `Discard` reescreve o
+arquivo com o texto do commit: o editor volta ao que está no disco, e a margem é
+perguntada de novo — sem isso ela continuaria marcando de verde e vermelho uma
+alteração que já não existe. Sem recarregar o workspace, que é o preço de uma
+troca de branch e não de um gesto de linha.
 
 ### O que o gerenciador não faz
 

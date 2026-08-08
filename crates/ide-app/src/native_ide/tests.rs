@@ -1284,3 +1284,107 @@ fn default_goals_compile_main_sources_in_each_build_system() {
     };
     assert_eq!(default_goals(&gradle), vec!["classes".to_owned()]);
 }
+
+/// Recolher uma escrita do Git pede o retrato — e é aí que ele é pedido.
+///
+/// Relatado: clicar em `Stage` e o arquivo não sair de "Alterados". A tela
+/// pedia a escrita e o retrato ao mesmo tempo, e eram duas threads: o
+/// `git status` costumava responder antes de o `git add` terminar, e a lista
+/// mostrava o estado de **antes** da escrita. Só um refresh posterior — o
+/// observador de disco, ou outra ação qualquer — corrigia a tela.
+///
+/// Agora a ordem é por construção: quando a resposta da escrita é recolhida, a
+/// escrita terminou, e é então que se pergunta como o repositório ficou.
+#[test]
+fn recolher_uma_escrita_do_git_pede_o_retrato() {
+    let mut ide = NativeIde::default();
+    let raiz = std::env::temp_dir().join(format!("er-ide-escrita-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&raiz);
+    assert!(std::fs::create_dir_all(&raiz).is_ok());
+    ide.ui.shell = Some(test_shell(&raiz));
+
+    // A resposta da escrita, já pronta: é ela que o laço recolhe.
+    let (envio, receptor) = std::sync::mpsc::channel();
+    let _ = envio.send("Git: stage".to_owned());
+    let _ = ide.languages.git_write.start(receptor);
+    assert!(
+        ide.languages.git.pending.is_none(),
+        "nada foi perguntado ainda"
+    );
+
+    assert!(ide.collect_git_write(), "a resposta da escrita foi recolhida");
+    assert!(
+        ide.languages.git.pending.is_some(),
+        "e o retrato foi pedido depois dela, e não ao lado"
+    );
+
+    let _ = std::fs::remove_dir_all(&raiz);
+}
+
+/// Descartar apaga as marcas da margem e devolve o texto ao editor.
+///
+/// Descartar reescreve o arquivo com o que está no commit. Se a margem ficasse
+/// como estava, ela marcaria de verde e vermelho uma alteração que já não
+/// existe — e o editor continuaria mostrando o texto desfeito.
+#[test]
+fn descartar_apaga_as_marcas_e_devolve_o_texto() {
+    let mut ide = NativeIde::default();
+    let raiz = std::env::temp_dir().join(format!("er-ide-descarte-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&raiz);
+    assert!(std::fs::create_dir_all(&raiz).is_ok());
+    let arquivo = raiz.join("Pedido.java");
+    assert!(std::fs::write(&arquivo, "class Pedido {}
+").is_ok());
+    ide.ui.shell = Some(test_shell(&raiz));
+
+    // O arquivo aberto com o texto alterado, e a margem marcando a alteração.
+    if let Some(shell) = ide.ui.shell.as_mut() {
+        shell.show_document(&arquivo, "class Pedido { int novo; }
+");
+        shell.set_git_line_marks(arquivo.clone(), vec![(0, ide_ui::GitLineChange::Added)]);
+        assert!(shell.git_marks_missing().is_none(), "a marca está lá");
+    }
+
+    // A escrita do descarte respondendo: o disco já voltou ao do commit.
+    let (envio, receptor) = std::sync::mpsc::channel();
+    let _ = envio.send("Pedido.java descartado".to_owned());
+    let _ = ide.languages.git_write.start(receptor);
+    ide.runtime.git_escreveu_em = Some(arquivo.clone());
+    assert!(ide.collect_git_write());
+
+    // O editor volta ao texto do disco…
+    assert_eq!(
+        ide.ui.shell.as_ref().and_then(ide_ui::IdeShell::active_text),
+        Some("class Pedido {}
+"),
+        "o editor mostra o que ficou no disco"
+    );
+    // …e a margem foi perguntada de novo.
+    assert!(
+        !ide.languages.git_diff.is_empty(),
+        "a margem daquele arquivo foi perguntada de novo"
+    );
+
+    // Quando a resposta chega — sem alteração nenhuma —, as marcas somem.
+    let mut voltas = 0;
+    while !ide.collect_git_diff() && voltas < 200 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        voltas += 1;
+    }
+    // A margem é perguntada pela tela, e a tela só pergunta o que não sabe:
+    // resposta vazia é resposta, e fica guardada como "este arquivo está igual
+    // ao commit".
+    assert!(
+        ide.ui
+            .shell
+            .as_ref()
+            .is_some_and(|shell| shell.git_marks_missing().is_none()),
+        "a resposta chegou e ficou guardada"
+    );
+    assert!(
+        ide.languages.git_diff.is_empty(),
+        "e a fila esvaziou: não há pergunta pendente"
+    );
+
+    let _ = std::fs::remove_dir_all(&raiz);
+}

@@ -54,7 +54,7 @@ fn andar_entre_as_alteracoes_leva_a_cada_bloco_e_da_a_volta() {
             .paint(size)
             .iter()
             .find_map(|comando| match comando {
-                // A contagem, e não o botão do lado: "Árvore de trabalho"
+                // A contagem, e não o botão do lado: "Working tree"
                 // também tem um " de " no meio.
                 PaintCommand::DrawText(texto)
                     if texto.text.ends_with("alterações")
@@ -134,7 +134,7 @@ fn o_cabecalho_troca_entre_o_preparado_e_a_arvore_de_trabalho() {
     assert!(
         desenhado.iter().any(|comando| matches!(
             comando,
-            PaintCommand::DrawText(texto) if texto.text == "Árvore de trabalho"
+            PaintCommand::DrawText(texto) if texto.text == "Working tree"
         )),
         "o cabeçalho diz de que lado é a comparação"
     );
@@ -612,7 +612,7 @@ fn as_setas_nao_cobrem_a_trilha_da_barra() {
 
 /// Nada no cabeçalho da comparação passa por cima de nada.
 ///
-/// Era o que acontecia: "Árvore de trabalho" saía por cima de "sem alterações",
+/// Era o que acontecia: "Working tree" saía por cima de "sem alterações",
 /// porque as três larguras estavam escritas à mão e o texto não cabia nelas.
 /// Agora cada um mede o que tem e ocupa o que sobrou do anterior — e o caminho
 /// do arquivo, que é o mais comprido, é encurtado com reticências em vez de

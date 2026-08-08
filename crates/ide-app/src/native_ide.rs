@@ -1719,6 +1719,14 @@ impl NativeIde {
         // que vai para o painel, e isto é uma linha da barra de estado. Dividir
         // o canal faria uma escrita do Git aparecer como saída de compilação.
         let _cancel = self.languages.git_write.start(receiver);
+        // De que arquivo é a escrita, para perguntar a margem dele quando ela
+        // terminar. Descartar reescreve o arquivo, e a margem antiga passaria a
+        // marcar uma alteração que já não existe.
+        self.runtime.git_escreveu_em = Some(path.clone());
+        // **Sem recarregar o workspace.** Descartar reescreve um arquivo, e não
+        // a árvore: o que precisa voltar é o texto dele e a margem dele, logo
+        // abaixo. Varrer o projeto inteiro por causa de um arquivo seria o
+        // preço de uma troca de branch cobrado por um gesto de linha.
         if let Some(shell) = self.ui.shell.as_mut() {
             shell.set_status_message(format!("Git: {acao}…"));
         }
@@ -1836,6 +1844,32 @@ impl NativeIde {
             // continuaria oferecendo as classes da branch anterior.
             self.sync_languages();
         }
+        // A margem do arquivo que a escrita tocou. Descartar devolve o texto
+        // do commit, e a margem tem de deixar de marcar o que já não mudou; o
+        // arquivo aberto também volta ao que está no disco.
+        if let Some(caminho) = self.runtime.git_escreveu_em.take() {
+            let texto = std::fs::read_to_string(&caminho).unwrap_or_default();
+            let refrescado = self
+                .ui
+                .shell
+                .as_mut()
+                .is_some_and(|shell| shell.refresh_document(&caminho, &texto));
+            if refrescado {
+                self.sync_languages();
+            }
+            self.pedir_diferenca(caminho, false, false);
+        }
+        // **O retrato vem agora, e não junto do pedido.**
+        //
+        // A tela pedia a escrita e o retrato ao mesmo tempo, e eram duas
+        // threads: o `git status` costumava chegar antes de o `git add`
+        // terminar, e a lista mostrava o estado de **antes** da escrita. Quem
+        // clicava em `Stage` via o arquivo continuar em "Alterados" até que
+        // outra coisa qualquer pedisse o retrato de novo.
+        //
+        // Aqui a ordem é por construção: a escrita terminou — é a resposta dela
+        // que está sendo recolhida —, e só então se pergunta como ficou.
+        self.refresh_git();
         true
     }
 

@@ -138,11 +138,16 @@ fn commitar_manda_a_mensagem_e_limpa_a_caixa() {
         )),
         "o botão manda a mensagem: {pedidos:?}"
     );
+    // **E não pede o retrato junto.** Os dois iam para threads diferentes, e o
+    // retrato costumava voltar antes de a escrita terminar: a lista mostrava o
+    // estado de antes, e quem preparava um arquivo via ele ficar onde estava.
+    // Quem pede o retrato de uma escrita é a aplicação, quando ela recolhe a
+    // resposta — aí a ordem é certa por construção.
     assert!(
-        pedidos
+        !pedidos
             .iter()
             .any(|comando| matches!(comando, ApplicationCommand::Git(GitRequest::Refresh))),
-        "e o retrato de novo"
+        "o retrato vem depois da escrita, e não ao lado dela: {pedidos:?}"
     );
     assert!(
         pedidos.iter().any(|comando| matches!(

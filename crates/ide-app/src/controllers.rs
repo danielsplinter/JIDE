@@ -862,6 +862,14 @@ pub(super) struct RuntimeState {
     /// aberto veria o texto de antes. A recarga acontece **quando a resposta
     /// chega**, e não quando o pedido sai: até lá o disco ainda é o de antes.
     pub(super) git_mexeu_no_disco: bool,
+    /// O arquivo da escrita que está em curso, quando ela é de um arquivo só.
+    ///
+    /// **É dele que a margem do editor fala.** Descartar reescreve o arquivo no
+    /// disco: o texto volta ao do commit, e as marcas verdes e vermelhas que
+    /// estavam na margem passam a contar uma alteração que já não existe. Sem
+    /// guardar de que arquivo era a escrita, não há a quem perguntar a margem
+    /// nova quando ela termina.
+    pub(super) git_escreveu_em: Option<PathBuf>,
     /// Projeto recém-aberto cuja ferramenta e importação ainda não rodaram.
     ///
     /// Pelo mesmo motivo de `languages_pending`, e com um custo maior: detectar

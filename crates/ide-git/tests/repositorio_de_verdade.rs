@@ -916,3 +916,62 @@ dois
         "sem `HEAD`, a pergunta é a de sempre, e não um erro"
     );
 }
+
+/// Preparar e perguntar o estado **na ordem** devolve o arquivo preparado.
+///
+/// Relatado: clicar em `Stage` e o arquivo não sair de "Alterados". A tela
+/// pedia a escrita e o retrato ao mesmo tempo, em duas threads: o `status`
+/// costumava chegar antes de o `add` terminar, e o retrato era o de antes. Este
+/// teste fixa a ordem que a tela precisa — escreve, e **então** pergunta.
+#[test]
+fn preparar_e_perguntar_em_seguida_mostra_o_arquivo_preparado() {
+    if !ha_git() {
+        return;
+    }
+    let Some(repo) = RepoDeTeste::novo("stage-em-ordem") else {
+        panic!("não foi possível criar o repositório de teste");
+    };
+    repo.escrever("a.txt", "um\n");
+    assert!(repo.git(&["add", "."]).is_some());
+    assert!(repo.git(&["commit", "-m", "primeiro"]).is_some());
+    repo.escrever("a.txt", "um\ndois\n");
+
+    let Ok(repositorio) = ide_git::open(repo.root()) else {
+        panic!("o repositório não abriu");
+    };
+    let arvore = repositorio.working_tree();
+    let cancel = CancellationToken::new();
+    let arquivo = repo.root().join("a.txt");
+
+    // Antes: alterado, não preparado.
+    let Ok(antes) = esperar(arvore.status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(antes.count(FileState::Modified), 1);
+    assert_eq!(antes.count(FileState::Staged), 0);
+
+    assert!(esperar(arvore.stage(std::slice::from_ref(&arquivo))).is_ok());
+
+    // Depois da escrita — e só depois — o retrato mostra o arquivo preparado.
+    let Ok(depois) = esperar(arvore.status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(
+        depois.count(FileState::Staged),
+        1,
+        "preparado logo após a escrita: {:?}",
+        depois.entries
+    );
+
+    assert!(esperar(arvore.unstage(&[arquivo])).is_ok());
+    let Ok(voltou) = esperar(arvore.status(&cancel)) else {
+        panic!("o status não respondeu");
+    };
+    assert_eq!(
+        voltou.count(FileState::Modified),
+        1,
+        "e volta para alterados: {:?}",
+        voltou.entries
+    );
+    assert_eq!(voltou.count(FileState::Staged), 0);
+}

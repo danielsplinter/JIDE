@@ -1500,9 +1500,9 @@ impl GitSurface {
                 Button::new(
                     DIFF_LADO_ID,
                     if staged {
-                        "Preparado"
+                        "Staged"
                     } else {
-                        "Árvore de trabalho"
+                        "Working tree"
                     },
                 )
                 .with_height(alto)
@@ -2000,7 +2000,10 @@ impl GitSurface {
             &UiEvent::PointerDown(primary_pointer(point)),
         );
         let escolhido = tree.selected()?;
-        let direita = arvore.origin.x + arvore.size.width;
+        // A borda do conteúdo, e não a da área: com barra de rolagem, as ações
+        // da linha andam para a esquerda com ela. Mesmo defeito, mesma correção
+        // e mesma fonte do número — a árvore é quem sabe quanto a barra ocupa.
+        let direita = arvore.origin.x + arvore.size.width - tree.gutter();
         let na_faixa = |posicao: usize| {
             let fim = direita - posicao as f32 * ACAO_DA_ARVORE;
             point.x >= fim - ACAO_DA_ARVORE && point.x < fim
@@ -2101,8 +2104,19 @@ impl GitSurface {
             &UiEvent::PointerDown(primary_pointer(point)),
         );
         let escolhida = lista.selected()?;
+        // **A borda do conteúdo, e não a da área.** Com barra de rolagem, a
+        // lista estreita o que desenha pela trilha, e os botões da linha vão
+        // junto — mas esta conta media da borda da área e ficava dez pontos à
+        // direita deles. O clique na borda esquerda do `Stage` caía fora da
+        // faixa dele e abria a comparação, que é o que a linha faz quando não é
+        // botão nenhum. Quanto a barra ocupa é a lista quem diz.
+        let direita = area.origin.x + area.size.width - lista.gutter();
+        // Onde o nome foi desenhado, perguntado a quem o desenhou. A conta de
+        // antes deduzia isto por fora — o começo da linha, a rolagem lateral e a
+        // largura do texto — e três deduções são três chances de o clique cair
+        // num lugar e o desenho aparecer noutro.
+        let nome_desenhado = lista.cell_content(escolhida, 0, context);
         let caminho = self.entradas(estado).get(escolhida)?.path.clone();
-        let direita = area.origin.x + area.size.width;
         let acoes = acoes_de(estado);
         // Da direita para a esquerda, uma faixa por ação: a última declarada é
         // a que fica mais à direita, e é a mesma ordem em que a linha as põe.
@@ -2116,10 +2130,16 @@ impl GitSurface {
                 });
             }
         }
-        Some(GitRequest::ShowDiff {
-            path: caminho,
-            staged: estado == GitFileState::Staged,
-        })
+        // **A comparação é do nome, e não da linha inteira.** O nome ocupa o
+        // começo da linha; o resto até os botões é espaço vazio, e clicar no
+        // vazio abria a comparação de um arquivo que quem clicou talvez nem
+        // quisesse ver — e ela toma a aba inteira.
+        nome_desenhado?
+            .contains(point)
+            .then_some(GitRequest::ShowDiff {
+                path: caminho,
+                staged: estado == GitFileState::Staged,
+            })
     }
 
     /// O clique na janela. Devolve o que ele pede ao repositório, se pedir.
@@ -3003,9 +3023,29 @@ impl super::IdeShell {
     /// desfazer o que acabou de fazer. É o critério da fase 1: a lista não fica
     /// velha depois de cada ação.
     pub(super) fn pedir_ao_git(&mut self, pedido: GitRequest) {
+        // **Escrita não leva `Refresh` junto.** Os dois iam para threads
+        // diferentes, e o retrato costumava voltar antes de a escrita terminar:
+        // a lista mostrava o estado de antes, e quem preparava um arquivo via
+        // ele ficar onde estava. Quem pede o retrato de uma escrita é a
+        // aplicação, quando ela recolhe a resposta — aí a ordem é certa.
         let precisa_de_retrato = !matches!(
             pedido,
-            GitRequest::ShowDiff { .. } | GitRequest::LoadHistory { .. }
+            GitRequest::ShowDiff { .. }
+                | GitRequest::LoadHistory { .. }
+                | GitRequest::Stage(_)
+                | GitRequest::Unstage(_)
+                | GitRequest::Discard(_)
+                | GitRequest::Commit { .. }
+                | GitRequest::SwitchBranch(_)
+                | GitRequest::CreateBranch(_)
+                | GitRequest::Merge(_)
+                | GitRequest::ContinueOperation
+                | GitRequest::AbortOperation
+                | GitRequest::Fetch
+                | GitRequest::Pull
+                | GitRequest::Push
+                | GitRequest::Stash
+                | GitRequest::StashPop(_)
         );
         // Trocar de branch, fundir e sair de uma operação mudam **o histórico
         // que está na tela**, e não só a lista de arquivos: a linha de cima
@@ -3201,9 +3241,9 @@ enum Acao {
 impl Acao {
     const fn rotulo(self) -> &'static str {
         match self {
-            Self::Preparar => "Preparar",
-            Self::Despreparar => "Despreparar",
-            Self::Descartar => "Descartar",
+            Self::Preparar => "Stage",
+            Self::Despreparar => "Unstage",
+            Self::Descartar => "Discard",
         }
     }
 
@@ -3232,7 +3272,7 @@ const fn acoes_de(estado: GitFileState) -> &'static [Acao] {
 
 const fn nome_do_estado(estado: GitFileState) -> &'static str {
     match estado {
-        GitFileState::Staged => "Preparados",
+        GitFileState::Staged => "Staged",
         GitFileState::Modified => "Alterados",
         GitFileState::Untracked => "Não rastreados",
         GitFileState::Conflicted => "Em conflito",
